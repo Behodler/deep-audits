@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repository generates security audit reports for Code4rena (C4) competitions. The target audience is C4 wardens who need to identify vulnerabilities in Solidity projects and submit findings that conform to C4 standards.
 
+## Terminology
+
+- **Source repo** - A repository containing the Solidity project to be audited. Source repos are added as git submodules in `lib/`.
+
+## Critical Rules
+
+**Source repos are strictly read-only.** Never modify files in source repos. Never commit to source repos. They must remain exactly as cloned from the original C4 competition repository.
+
 ## Architecture
 
 ### Directory Structure
