@@ -1,0 +1,96 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Purpose
+
+This repository generates security audit reports for Code4rena (C4) competitions. The target audience is C4 wardens who need to identify vulnerabilities in Solidity projects and submit findings that conform to C4 standards.
+
+## Architecture
+
+### Directory Structure
+- `lib/` - Git submodules containing auditable Solidity projects (Foundry convention)
+- `reports/<project-name>/` - Generated audit reports with datetime-stamped filenames
+- `documentation/` - C4 official documentation for reference
+
+### Multi-Agent Workflow
+Custom Claude Code commands orchestrate specialized agents:
+1. **Analysis agents** - Scan for vulnerabilities in target contracts
+2. **Deduplication agents** - Filter common/obvious issues found by tools like Mythril
+3. **Sanitation agents** - Remove issues already documented in project's known issues
+4. **POC agents** - Generate runnable Foundry unit tests proving vulnerabilities
+5. **Report agents** - Compile findings in C4-compliant format
+
+## Build Commands
+
+```bash
+# Install Foundry (if not installed)
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+
+# Build project
+forge build
+
+# Run tests
+forge test
+
+# Run single test
+forge test --match-test testFunctionName
+
+# Run tests with verbosity
+forge test -vvvv
+
+# Add auditable project as submodule
+git submodule add <repo-url> lib/<project-name>
+```
+
+## C4 Severity Classifications
+
+**High (3)**: Assets can be stolen/lost/compromised directly or via valid attack path without hypotheticals.
+
+**Medium (2)**: Assets not at direct risk, but protocol function/availability impacted, or value leak with stated assumptions and external requirements.
+
+**QA/Low**: State handling issues, spec deviations, centralization risks. Non-critical issues are discouraged.
+
+### Plausibility Sub-Categories for High Severity
+- **Plausible High** - Realistic attack scenarios
+- **Implausible High** - Requires extraordinary circumstances (validator collusion, economic black swans)
+
+## Report Requirements
+
+### Submission Format
+- High/Medium findings submitted individually
+- Low/Governance findings bundled in single QA report
+- Use labels: `H-01`, `M-01`, `L-01`, `C-01` (centralization)
+- Include code location links
+- Professional audit tone - credibility depends on accuracy and clarity
+
+### Proof of Concept Requirements
+- Coded, runnable PoC required for all High/Medium findings
+- Must use the target project's test suite
+- PoC must demonstrate the exact revert error, not just revert
+- Provide as diff that can be applied to existing test files
+
+### Known Invalid Findings
+- Non-standard/weird ERC-20 tokens (except USDT)
+- Fee-on-transfer tokens (unless explicitly in scope)
+- CryptoPunks support
+- Approve race condition / safeApprove front-running
+- User input mistakes / phishing
+- Reckless admin mistakes
+- Unused view functions (QA at best)
+- Speculation on future code without demonstrated root cause
+
+### Out of Scope
+- Issues in parent/forked contracts where root cause is OOS
+- Issues already in project's known issues section
+- Common findings from automated tools without demonstrated HM exploit path
+
+## Quality Standards
+
+Reports must match professional audit quality. C4 explicitly discourages:
+- LLM-generated nonsense or low-effort reports
+- Overstating severity to angle for higher payouts
+- Submissions without sufficient proof (judge should not need additional research)
+
+Duplicate findings dilute earnings - prioritize unique, high-urgency issues over obvious vulnerabilities any tool would find.
