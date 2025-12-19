@@ -76,9 +76,28 @@ Present to user:
 - Number of known issues found
 - Next steps: suggest `/analyze <friendly-name>`
 
-# Agent Delegation
-This command orchestrates project setup without implementing file operations directly:
-- **project-manager**: All submodule and registration operations
+# Agent Delegation (MANDATORY)
+
+**CRITICAL: This command MUST delegate to agents. Direct tool usage is FORBIDDEN.**
+
+The orchestrating agent's ONLY permitted actions are:
+1. Parse arguments from the command input
+2. Invoke the project-manager agent with specific tasks
+3. Report results to the user
+
+All file operations, git operations, and data extraction MUST be performed by the project-manager agent, not the orchestrating agent.
+
+**If you find yourself using Bash, Read, Write, Glob, or Grep directly in this command, STOP. You are violating the architecture.**
+
+## Required Delegations
+| Task | Agent | Prompt Pattern |
+|------|-------|----------------|
+| Check conflicts | project-manager | "Check if friendly name '{name}' or URL '{url}' already registered" |
+| Add submodule | project-manager | "Add submodule {url} to lib/{dirname} without --recursive flag" |
+| Register project | project-manager | "Register project '{name}' with submodule '{dirname}' and URL '{url}'" |
+| Discover scope | project-manager | "Discover contracts and scope for project in lib/{dirname}" |
+| Extract known issues | project-manager | "Extract known issues from documentation in lib/{dirname}" |
+| Create directories | project-manager | "Create reports directory structure for '{name}'" |
 
 # Error Handling
 - **Invalid URL**: Report and ask for correction

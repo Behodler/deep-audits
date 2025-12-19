@@ -31,6 +31,23 @@ Custom Claude Code commands orchestrate specialized agents:
 4. **POC agents** - Generate runnable Foundry unit tests proving vulnerabilities
 5. **Report agents** - Compile findings in C4-compliant format
 
+### Agent Delegation Policy (MANDATORY)
+
+**Commands that specify agent delegation MUST use agents. Direct tool execution by the orchestrating agent is forbidden.**
+
+When a command file specifies "Invoke **agent-name**" or lists agents under "Agent Delegation", the top-level agent:
+- MUST delegate to the specified agent using the Task tool
+- MUST NOT perform the work directly using Bash, Read, Write, Glob, Grep, or other tools
+- Acts only as an orchestrator: parse input, delegate to agents, report results
+
+**Why this matters:**
+- Agents encapsulate domain-specific logic and validation
+- Agent invocations create auditable execution traces
+- The architecture assumes separation between orchestration and execution
+- "Simple enough to do directly" is not a valid reason to skip delegation
+
+**If a command says to invoke an agent, invoke the agent. No exceptions.**
+
 ## Build Commands
 
 ```bash
