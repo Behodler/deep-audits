@@ -68,6 +68,8 @@ PoC files are stored in `reports/<project>/pocs/`, NEVER in `lib/<project>/test/
   "contract": "src/PrizePool.sol",
   "function": "claimPrize",
   "line": 245,
+  "lineStart": 240,
+  "lineEnd": 252,
   "description": "The claimPrize function makes an external call before updating state...",
   "impact": "An attacker can drain the entire prize pool",
   "attackPath": [
@@ -90,6 +92,16 @@ PoC files are stored in `reports/<project>/pocs/`, NEVER in `lib/<project>/test/
   }
 }
 ```
+
+### Location Fields
+- **contract**: Relative path to the vulnerable contract (from submodule root)
+- **function**: Name of the vulnerable function
+- **line**: Primary line number of the vulnerability (for backward compatibility)
+- **lineStart**: Start line of the vulnerable code block (for GitHub URL range)
+- **lineEnd**: End line of the vulnerable code block (optional, omit for single-line issues)
+
+These fields are used by report-writer to generate GitHub links like:
+`https://github.com/code-423n4/project/blob/main/src/PrizePool.sol#L240-L252`
 
 ### Label Assignment Rules
 - Labels assigned sequentially within severity

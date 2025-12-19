@@ -50,8 +50,29 @@ mkdir -p reports/<project>/submissions
 ### Formatting Standards
 - **Labels**: H-01, M-01, L-01, C-01 format
 - **Sections**: Title, Severity, Description, Impact, PoC, Recommendation
-- **Links**: GitHub-style code location links
+- **Links**: GitHub-style code location links with line ranges
 - **Markdown**: Clean, readable formatting
+
+### GitHub URL Construction
+For High/Medium findings, generate clickable GitHub links to the vulnerable code location.
+
+**URL Pattern**:
+```
+{repoUrl}/blob/{defaultBranch}/{contract}#L{lineStart}-L{lineEnd}
+```
+
+**Data Sources**:
+1. Get `repoUrl` and `defaultBranch` from `registered-projects.json` via project-manager
+2. Get `contract`, `lineStart`, `lineEnd` from the finding record
+
+**Examples**:
+- Line range: `https://github.com/code-423n4/pooltogether/blob/main/src/PrizePool.sol#L240-L252`
+- Single line (when lineEnd absent): `https://github.com/code-423n4/pooltogether/blob/main/src/PrizePool.sol#L245`
+
+**Markdown Format**:
+```markdown
+[src/PrizePool.sol#L240-L252](https://github.com/code-423n4/pooltogether/blob/main/src/PrizePool.sol#L240-L252)
+```
 
 ## OPERATIONAL GUIDELINES
 
@@ -63,7 +84,7 @@ mkdir -p reports/<project>/submissions
 High
 
 ## Location
-[PrizePool.sol#L245](https://github.com/code-423n4/project/blob/main/src/PrizePool.sol#L245)
+[src/PrizePool.sol#L240-L252](https://github.com/code-423n4/pooltogether/blob/main/src/PrizePool.sol#L240-L252)
 
 ## Summary
 The `claimPrize` function in PrizePool.sol makes an external call to transfer ETH to the winner before updating the `claimedPrizes` mapping, allowing a malicious contract to reenter and claim multiple times.
@@ -216,8 +237,13 @@ Compile Low/Centralization findings into QA report
 ### format_poc_as_diff(poc_code)
 Convert PoC to diff format for inclusion
 
-### generate_code_links(contract, line, project)
-Create GitHub-style code location links
+### generate_code_links(finding, project)
+Create GitHub-style code location links with line ranges
+1. Fetch project metadata from project-manager: `repoUrl`, `defaultBranch`
+2. Extract location from finding: `contract`, `lineStart`, `lineEnd`
+3. Construct URL: `{repoUrl}/blob/{defaultBranch}/{contract}#L{lineStart}-L{lineEnd}`
+4. Return markdown link: `[{contract}#L{lineStart}-L{lineEnd}](url)`
+5. If `lineEnd` is absent, use single line format: `#L{lineStart}`
 
 ## ERROR HANDLING
 - **Missing PoC**: Warn and proceed (allowed for high signal wardens)
@@ -227,6 +253,7 @@ Create GitHub-style code location links
 
 ## COORDINATION
 Work with other agents:
+- **project-manager**: Get `repoUrl` and `defaultBranch` for GitHub links
 - **finding-manager**: Get finding details and PoC
 - **report-validator**: Pass report for quality check
 - **qa-bundler**: Provide Low findings for bundling

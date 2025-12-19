@@ -49,6 +49,8 @@ You are the vuln-scanner agent responsible for identifying potential security vu
       "contract": "src/PrizePool.sol",
       "function": "claimPrize",
       "line": 245,
+      "lineStart": 240,
+      "lineEnd": 252,
       "description": "External call to winner address before state update",
       "codeSnippet": "winner.call{value: amount}(\"\");\nclaimedPrizes[winner] = true;",
       "attackVector": "Attacker contract could reenter claimPrize before claimedPrizes is set",
@@ -57,6 +59,13 @@ You are the vuln-scanner agent responsible for identifying potential security vu
   ]
 }
 ```
+
+### Location Fields
+- **line**: Primary line number (typically where the vulnerability manifests)
+- **lineStart**: First line of the vulnerable code block
+- **lineEnd**: Last line of the vulnerable code block (omit if single-line)
+
+When scanning, identify the full extent of vulnerable code to enable GitHub line range links (e.g., `#L240-L252`). Include the function signature and closing brace when the entire function is affected.
 
 ### Vulnerability Categories
 

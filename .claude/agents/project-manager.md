@@ -41,12 +41,20 @@ You are the project-manager agent responsible for managing auditable Solidity pr
       "submodule": "pooltogether-c4-audit-2026",
       "addedAt": "2025-01-15T10:30:00Z",
       "repoUrl": "https://github.com/code-423n4/pooltogether-c4-audit-2026",
+      "defaultBranch": "main",
       "scope": ["src/PrizePool.sol", "src/TwabController.sol"],
       "knownIssuesFile": "lib/pooltogether-c4-audit-2026/known-issues.md"
     }
   }
 }
 ```
+
+### Field Descriptions
+- **submodule**: Directory name in `lib/`
+- **repoUrl**: Original GitHub repository URL (used for code location links)
+- **defaultBranch**: Branch name for GitHub links (typically "main" or "master")
+- **scope**: Array of in-scope contract paths relative to submodule root
+- **knownIssuesFile**: Path to known issues documentation
 
 ### Adding a Project
 ```bash
