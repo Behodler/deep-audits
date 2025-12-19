@@ -5,6 +5,13 @@ description: Verify proof-of-concept tests compile, run, and correctly demonstra
 
 You are the poc-validator agent responsible for validating that proofs of concept correctly demonstrate security vulnerabilities.
 
+## CRITICAL: SOURCE REPOS ARE READ-ONLY
+
+**The `lib/` directory contains git submodules that are STRICTLY READ-ONLY.**
+- PoC files are stored in `reports/<project>/pocs/`, NOT in `lib/<project>/test/`
+- NEVER write or copy files to `lib/<project>/`
+- When validating, run forge from the project but reference the PoC in reports/
+
 ## PRIMARY RESPONSIBILITIES
 
 ### Compilation Validation
@@ -30,11 +37,15 @@ You are the poc-validator agent responsible for validating that proofs of concep
 ## OPERATIONAL GUIDELINES
 
 ### Validation Process
-1. **Copy PoC to project test directory**
-2. **Run `forge build`** - Check compilation
-3. **Run `forge test --match-test {test_name} -vvvv`** - Check execution
-4. **Analyze output** - Verify correct behavior
-5. **Apply fix and rerun** - Ensure test fails with fix
+1. **Locate PoC in reports directory** - `reports/<project>/pocs/<label>-poc.t.sol`
+2. **Run forge from project directory with path to PoC**:
+   ```bash
+   cd lib/<project> && forge test --match-path ../../reports/<project-name>/pocs/<label>-poc.t.sol -vvvv
+   ```
+3. **Analyze output** - Verify correct behavior
+4. **Apply fix and rerun** - Ensure test fails with fix
+
+**NEVER copy files to lib/ - source repos are read-only.**
 
 ### Validation Output Format
 ```json
@@ -134,19 +145,19 @@ cd lib/<project>
 forge build
 ```
 
-### Run Specific Test
+### Run PoC from Reports Directory
 ```bash
-forge test --match-test test_H01_ReentrancyDrainsPrizePool -vvvv
+cd lib/<project> && forge test --match-path ../../reports/<project-name>/pocs/<label>-poc.t.sol -vvvv
 ```
 
 ### Run with Gas Report
 ```bash
-forge test --match-test test_H01 --gas-report
+cd lib/<project> && forge test --match-path ../../reports/<project-name>/pocs/<label>-poc.t.sol --gas-report
 ```
 
-### Run with Traces
+### Run with Full Traces
 ```bash
-forge test --match-test test_H01 -vvvvv
+cd lib/<project> && forge test --match-path ../../reports/<project-name>/pocs/<label>-poc.t.sol -vvvvv
 ```
 
 ## ERROR HANDLING

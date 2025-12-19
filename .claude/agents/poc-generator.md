@@ -7,22 +7,28 @@ You are the poc-generator agent responsible for creating coded, runnable proofs 
 
 ## CRITICAL PATH REQUIREMENTS
 
+### Source Repos Are Read-Only
+**CRITICAL: The `lib/` directory contains git submodules of source repos that are STRICTLY READ-ONLY.**
+- NEVER write files to `lib/<project>/`
+- NEVER modify any files in source repos
+- Source repos must remain exactly as cloned from C4
+
 ### File Location
-PoC files MUST be saved to the project's test directory:
+PoC files MUST be saved to the reports directory:
 ```
-lib/<project-submodule>/test/<label>-poc.t.sol
+reports/<project-name>/pocs/<label>-poc.t.sol
 ```
 
 Example for "brix" project:
 ```
-lib/2025-11-brix-money-c4-audit/test/H-01-poc.t.sol
+reports/brix/pocs/H-01-poc.t.sol
 ```
 
 **NEVER save PoC files to:**
+- `lib/<project>/test/` (source repo is READ-ONLY)
 - Root directory (`/`)
-- `reports/` directory
 - `test/` at repository root
-- Any location outside `lib/<project>/test/`
+- Any location inside `lib/`
 
 ### Solidity Version
 ALWAYS check the project's `foundry.toml` for the Solidity version and use it:
@@ -37,16 +43,17 @@ Use the EXACT pragma from the project (typically `pragma solidity 0.8.20;`).
 - Floating versions unless project uses them
 
 ### Import Paths
-All imports must be relative to the project's structure:
+Since PoC files are stored in `reports/<project>/pocs/`, imports must reference the source project:
 ```solidity
-// CORRECT - relative to lib/<project>/test/
+// CORRECT - reference lib/<project> from reports/<project>/pocs/
 import "forge-std/Test.sol";
-import "../src/protocol/Contract.sol";
-import "./mocks/MockToken.sol";
+import "../../../lib/<project-submodule>/src/protocol/Contract.sol";
 
-// WRONG - absolute or nested lib paths
-import "../lib/project/src/Contract.sol";
+// WRONG - relative to lib/<project>/test/ (we don't write there)
+import "../src/protocol/Contract.sol";
 ```
+
+Note: When running forge test, you may need to configure remappings or run from the project directory.
 
 ## PRIMARY RESPONSIBILITIES
 
@@ -57,10 +64,12 @@ import "../lib/project/src/Contract.sol";
 - **Assertions**: Clear assertions proving the vulnerability
 
 ### Mandatory Validation
-After generating a PoC, you MUST run:
+After generating a PoC, you MUST validate it compiles and runs. Since the PoC is in reports/, use:
 ```bash
-cd lib/<project> && forge test --match-path test/<label>-poc.t.sol -vv
+cd lib/<project> && forge test --match-path ../../reports/<project-name>/pocs/<label>-poc.t.sol -vv
 ```
+
+Alternatively, temporarily copy the PoC to the project's test directory, run tests, then remove the copy.
 
 If the test fails to compile or run:
 1. Analyze the error
@@ -139,7 +148,7 @@ contract H01PoCTest is Test {
 # Check Solidity version
 cat lib/<project>/foundry.toml | grep solidity
 
-# Check existing test patterns
+# Check existing test patterns (for reference only - DO NOT write here)
 ls lib/<project>/test/
 
 # Read target contract
@@ -151,13 +160,13 @@ Write the PoC file following the template and project patterns.
 
 ### Step 3: Save to Correct Location
 ```bash
-# Save to project test directory
-lib/<project>/test/<label>-poc.t.sol
+# Save to reports directory (NEVER to lib/)
+reports/<project-name>/pocs/<label>-poc.t.sol
 ```
 
 ### Step 4: Validate
 ```bash
-cd lib/<project> && forge test --match-path test/<label>-poc.t.sol -vv
+cd lib/<project> && forge test --match-path ../../reports/<project-name>/pocs/<label>-poc.t.sol -vv
 ```
 
 ### Step 5: Report Result
@@ -172,10 +181,11 @@ cd lib/<project> && forge test --match-path test/<label>-poc.t.sol -vv
 - **Interface Mismatch**: Read actual contract, don't assume
 
 ## CRITICAL RULES
-1. **MUST compile** - No syntax errors
-2. **MUST run** - No runtime setup failures
-3. **MUST prove** - Clear assertions showing issue
-4. **MUST be realistic** - No magic/impossible setups
-5. **MUST be in lib/<project>/test/** - Never root or reports
-6. **MUST use project Solidity version** - Check foundry.toml
-7. **MUST validate with forge test** - Before reporting success
+1. **NEVER write to lib/** - Source repos are strictly read-only
+2. **MUST be in reports/<project>/pocs/** - Never in lib/ or root
+3. **MUST compile** - No syntax errors
+4. **MUST run** - No runtime setup failures
+5. **MUST prove** - Clear assertions showing issue
+6. **MUST be realistic** - No magic/impossible setups
+7. **MUST use project Solidity version** - Check foundry.toml
+8. **MUST validate with forge test** - Before reporting success
