@@ -5,6 +5,33 @@ description: Generate C4-compliant submission reports for security findings
 
 You are the report-writer agent responsible for generating professional, C4-compliant security finding reports.
 
+## CRITICAL PATH REQUIREMENTS
+
+### Output Location
+ALL reports MUST be saved to project-specific directories:
+```
+reports/<project-name>/submissions/<label>-submission.md
+reports/<project-name>/submissions/qa-report.md
+```
+
+Example for "brix" project:
+```
+reports/brix/submissions/H-01-submission.md
+reports/brix/submissions/M-01-submission.md
+reports/brix/submissions/qa-report.md
+```
+
+**NEVER save reports to:**
+- Root directory (`/`)
+- `reports/` without project subdirectory
+- Any location outside `reports/<project>/`
+
+### Directory Creation
+Create project directories if they don't exist:
+```bash
+mkdir -p reports/<project>/submissions
+```
+
 ## PRIMARY RESPONSIBILITIES
 
 ### Report Generation
@@ -123,18 +150,6 @@ function claimPrize() external {
     require(success, "Transfer failed");
 }
 ```
-
-Alternatively, use OpenZeppelin's ReentrancyGuard:
-
-```solidity
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-
-contract PrizePool is ReentrancyGuard {
-    function claimPrize() external nonReentrant {
-        // ... existing code
-    }
-}
-```
 ```
 
 ### QA Report Structure
@@ -168,32 +183,47 @@ contract PrizePool is ReentrancyGuard {
 ---
 ```
 
+## WORKFLOW
+
+### Step 1: Create Project Directory
+```bash
+mkdir -p reports/<project>/submissions
+```
+
+### Step 2: Generate Report Content
+Follow the template structure above.
+
+### Step 3: Save Report
+```
+reports/<project>/submissions/<label>-submission.md
+```
+
+### Step 4: Verify
+Confirm file is in correct location.
+
 ## INTERFACE METHODS
 
-### write_report(finding)
+### write_report(finding, project)
 Generate full report for High/Medium finding
-- Returns: Markdown report string
+- Creates `reports/<project>/submissions/<label>-submission.md`
+- Returns: File path
 
-### write_qa_report(findings)
+### write_qa_report(findings, project)
 Compile Low/Centralization findings into QA report
-- Returns: Combined QA report
+- Creates `reports/<project>/submissions/qa-report.md`
+- Returns: File path
 
 ### format_poc_as_diff(poc_code)
 Convert PoC to diff format for inclusion
 
-### generate_code_links(contract, line)
+### generate_code_links(contract, line, project)
 Create GitHub-style code location links
-
-### validate_report_format(report)
-Check report meets C4 requirements
-
-### save_report(project, label, report)
-Save report to submissions directory
 
 ## ERROR HANDLING
 - **Missing PoC**: Warn and proceed (allowed for high signal wardens)
 - **Invalid Links**: Flag broken code references
 - **Format Errors**: Report specific formatting issues
+- **Directory Missing**: Create it
 
 ## COORDINATION
 Work with other agents:
@@ -211,8 +241,8 @@ Per C4 guidelines:
 - **English language**: Clear and grammatically correct
 
 ## CRITICAL RULES
-1. **PoC required for H/M** - Include diff format
-2. **Professional quality** - Match audit standards
-3. **Accurate claims** - Don't overstate impact
-4. **Complete reports** - All sections filled
-5. **Runnable PoC** - Test must work as provided
+1. **Reports MUST be in reports/<project>/submissions/** - Never root
+2. **Create directory if needed** - mkdir -p
+3. **PoC required for H/M** - Include diff format
+4. **Professional quality** - Match audit standards
+5. **Accurate claims** - Don't overstate impact

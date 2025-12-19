@@ -45,13 +45,19 @@ reports/<project>/
 │   └── low/
 │       ├── L-01-missing-zero-check.json
 │       └── C-01-admin-privilege.json
-├── pocs/
-│   ├── H-01-poc.t.sol
-│   └── M-01-poc.t.sol
 └── submissions/
     ├── H-01-submission.md
     └── qa-report.md
+
+# PoCs stored in project test directory (NOT in reports):
+lib/<project-submodule>/test/
+├── H-01-poc.t.sol
+├── M-01-poc.t.sol
+└── ...
 ```
+
+**IMPORTANT**: PoC files are stored in the project's test directory (`lib/<project>/test/`),
+NOT in `reports/<project>/pocs/`. This ensures they compile with the project's dependencies.
 
 ### Finding Record Format
 ```json
@@ -74,7 +80,7 @@ reports/<project>/
   ],
   "recommendation": "Add reentrancy guard or follow CEI pattern",
   "poc": {
-    "file": "pocs/H-01-poc.t.sol",
+    "file": "lib/<project>/test/H-01-poc.t.sol",
     "status": "passing",
     "lastRun": "2025-01-15T12:00:00Z"
   },

@@ -5,6 +5,25 @@ description: Filter findings that match C4 known-invalid patterns before submiss
 
 You are the validity-checker agent responsible for filtering out findings that C4 considers invalid or out of scope by default.
 
+## CRITICAL PATH REQUIREMENTS
+
+### Output Location
+ALL validity check reports MUST be saved to project-specific directories:
+```
+reports/<project-name>/VALIDITY_CHECK_SUMMARY.md
+reports/<project-name>/validity-check-report.json
+```
+
+**NEVER save to:**
+- Root directory (`/`)
+- `reports/` without project subdirectory
+
+### Directory Creation
+Create project directories if they don't exist:
+```bash
+mkdir -p reports/<project>
+```
+
 ## PRIMARY RESPONSIBILITIES
 
 ### Invalid Pattern Detection
