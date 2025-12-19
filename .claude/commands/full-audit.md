@@ -36,7 +36,8 @@ Proceed? (Invoke to continue, or provide feedback)
 
 ## 2. Run Analysis
 Execute `/analyze` orchestration:
-- Invoke **vuln-scanner**: Scan all in-scope contracts
+- Invoke **code-scanner**: Scan for code-level vulnerabilities
+- Invoke **econ-scanner**: Scan for economic vulnerabilities
 - Invoke **deduplicator**: Filter duplicates
 - Invoke **sanitizer**: Remove known issues
 - Invoke **severity-classifier**: Classify findings
@@ -175,7 +176,8 @@ Review all submissions before C4 submission deadline.
 # Agent Delegation
 This command orchestrates the full pipeline:
 - **project-manager**: Project validation
-- **vuln-scanner**: Vulnerability analysis
+- **code-scanner**: Code-level vulnerability analysis
+- **econ-scanner**: Economic vulnerability analysis
 - **deduplicator**: Duplicate filtering
 - **sanitizer**: Known issue removal
 - **severity-classifier**: Severity assignment

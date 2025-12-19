@@ -110,7 +110,8 @@ Rank findings by value for submission
 
 ## COORDINATION
 Work with other agents:
-- **vuln-scanner**: Receives raw scan findings
+- **code-scanner**: Receives raw code-level vulnerability findings
+- **econ-scanner**: Receives raw economic vulnerability findings
 - **sanitizer**: Passes deduplicated findings for known-issue filtering
 - **finding-manager**: Consolidated findings stored
 

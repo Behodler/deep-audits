@@ -21,34 +21,46 @@ Invoke **project-manager**: "Get scope and known issues for project"
 - Load known issues for later sanitization
 - If contract-path specified in $ARGUMENTS: Filter scope to that contract
 
-## 3. Vulnerability Scan
-Invoke **vuln-scanner**: "Scan contracts for vulnerabilities"
+## 3. Code Vulnerability Scan
+Invoke **code-scanner**: "Scan contracts for code-level vulnerabilities"
 - Pass: project path, scope list
 - Analyze each in-scope contract
-- Identify potential vulnerabilities by category:
+- Identify code-level vulnerabilities:
   - Reentrancy
   - Access control
-  - Oracle manipulation
-  - Flash loan risks
   - Integer issues
-  - Business logic flaws
+  - Storage/memory safety
+  - External call risks
 - Return raw findings list with confidence levels
 
-## 4. Deduplicate Findings
+## 4. Economic Vulnerability Scan
+Invoke **econ-scanner**: "Scan contracts for economic vulnerabilities"
+- Pass: project path, scope list, documentation
+- Analyze economic design and incentives:
+  - Intent verification (docs vs implementation)
+  - Pricing/fee calculation errors
+  - Oracle manipulation vectors
+  - Flash loan attack surfaces
+  - Incentive misalignments
+  - MEV extraction paths
+- Return raw findings list with economic impact
+
+## 5. Deduplicate Findings
 Invoke **deduplicator**: "Filter obvious and common issues from scan results"
+- Combine findings from both code-scanner and econ-scanner
 - Remove exact duplicates
 - Consolidate findings with same root cause
 - Filter low-value/common issues that add no insight
 - Track consolidation reasoning
 
-## 5. Sanitize Against Known Issues
+## 6. Sanitize Against Known Issues
 Invoke **sanitizer**: "Remove issues matching known issues list"
 - Compare findings against project's documented known issues
 - Filter findings that duplicate known issues
 - Flag partial matches for human review
 - Document all removals with reasoning
 
-## 6. Classify Severity
+## 7. Classify Severity
 Invoke **severity-classifier**: "Classify findings by C4 severity"
 - Apply C4 severity definitions:
   - High (3): Direct asset risk
@@ -57,19 +69,19 @@ Invoke **severity-classifier**: "Classify findings by C4 severity"
 - Document justification for each classification
 - Flag borderline cases
 
-## 7. Create Finding Records
+## 8. Create Finding Records
 Invoke **finding-manager**: "Create finding records for classified issues"
 - Generate finding files in `reports/<project>/findings/`
 - Assign labels (H-01, M-01, etc.)
 - Set status to "draft" or "needs-poc"
 - Store in appropriate severity subdirectory
 
-## 8. Save Analysis Report
+## 9. Save Analysis Report
 Save raw analysis to `reports/<project>/`:
 - `analysis-<timestamp>.json`: Full scan results
 - Include: scan metadata, findings count, filtering stats
 
-## 9. Present Summary
+## 10. Present Summary
 Display to user:
 ```
 Analysis Complete: pooltogether
@@ -93,7 +105,8 @@ Next Steps:
 # Agent Delegation
 This command orchestrates analysis without implementing scan logic:
 - **project-manager**: Resolve names, get scope/known issues
-- **vuln-scanner**: Perform vulnerability analysis
+- **code-scanner**: Identify code-level implementation bugs
+- **econ-scanner**: Identify economic/game-theoretic vulnerabilities
 - **deduplicator**: Filter duplicates and common issues
 - **sanitizer**: Remove known issues
 - **severity-classifier**: Apply C4 severity rules

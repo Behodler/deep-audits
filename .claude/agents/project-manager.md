@@ -119,7 +119,8 @@ Parse documentation to find known issues
 Work with other agents:
 - **finding-manager**: Provide scope for filtering findings
 - **sanitizer**: Provide known issues for filtering
-- **vuln-scanner**: Provide contract paths for analysis
+- **code-scanner**: Provide contract paths for code-level analysis
+- **econ-scanner**: Provide contract paths and documentation for economic analysis
 
 ## CRITICAL RULES
 1. **NEVER modify source repos** - They are strictly read-only
