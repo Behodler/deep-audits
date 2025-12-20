@@ -3,17 +3,20 @@ Add a new C4 audit project as a git submodule with friendly name mapping
 Orchestrate adding a new auditable project to the repository with a friendly name alias.
 
 # Arguments
-- `$ARGUMENTS` format: `<repo-url> [friendly-name]`
-- Example: `https://github.com/code-423n4/2025-01-pooltogether pooltogether`
+- `$ARGUMENTS` format: `<repo-url> [friendly-name] [bounty]`
+- Example: `https://github.com/code-423n4/2025-01-pooltogether pooltogether` (audit mode)
+- Example: `https://github.com/code-423n4/2025-01-pooltogether pooltogether bounty` (bounty mode)
 - If friendly-name omitted, derive from repo name
+- If "bounty" present, register project in bounty mode
 
 # Orchestration Flow
 
 ## 1. Parse Arguments
-Extract repo URL and friendly name from $ARGUMENTS:
+Extract repo URL, friendly name, and mode from $ARGUMENTS:
 - Validate URL format (must be valid git URL)
 - If no friendly name provided: derive from repo name (strip dates, "-c4", "-audit", etc.)
 - Validate friendly name is alphanumeric with hyphens only
+- If "bounty" keyword present: set mode to "bounty", otherwise "audit"
 
 ## 2. Check for Conflicts
 Invoke **project-manager**: "Check if friendly name already registered"
@@ -28,7 +31,7 @@ Invoke **project-manager**: "Add submodule without recursive flag"
 - Report any errors (repo not found, permission denied, etc.)
 
 ## 4. Register Project
-Invoke **project-manager**: "Register project with friendly name"
+Invoke **project-manager**: "Register project with friendly name and mode"
 - Update registered-projects.json:
   ```json
   {
@@ -36,7 +39,8 @@ Invoke **project-manager**: "Register project with friendly name"
       "<friendly-name>": {
         "submodule": "<repo-directory-name>",
         "repoUrl": "<repo-url>",
-        "addedAt": "<ISO-timestamp>"
+        "addedAt": "<ISO-timestamp>",
+        "mode": "audit" | "bounty"
       }
     }
   }
@@ -57,25 +61,34 @@ Invoke **project-manager**: "Extract known issues from project documentation"
 - Store known issues path in registration
 
 ## 7. Create Reports Directory
-Ensure reports structure exists:
+Ensure reports structure exists (both modes created regardless of initial mode):
 ```
 reports/<friendly-name>/
-├── findings/
-│   ├── high/
-│   ├── medium/
-│   └── low/
-├── pocs/
-└── submissions/
-    └── rejected/
+├── audit/
+│   ├── findings/
+│   │   ├── high/
+│   │   ├── medium/
+│   │   └── low/
+│   ├── pocs/
+│   └── submissions/
+│       └── rejected/
+└── bounty/
+    ├── findings/
+    │   ├── critical/
+    │   └── high/
+    ├── pocs/
+    └── submissions/
+        └── rejected/
 ```
 
 ## 8. Completion Report
 Present to user:
 - Friendly name registered
+- Mode (audit or bounty)
 - Submodule location
 - Number of contracts in scope
 - Number of known issues found
-- Next steps: suggest `/analyze <friendly-name>`
+- Next steps: suggest `/analyze <friendly-name>` (or `/analyze <friendly-name> bounty` if bounty mode)
 
 # Agent Delegation (MANDATORY)
 
@@ -109,10 +122,14 @@ All file operations, git operations, and data extraction MUST be performed by th
 # Examples
 ```
 /add-project https://github.com/code-423n4/2025-01-pooltogether pooltogether
-# Adds pooltogether-c4-audit as submodule, registers as "pooltogether"
+# Adds pooltogether-c4-audit as submodule, registers as "pooltogether" (audit mode)
 
 /add-project https://github.com/code-423n4/2025-02-aave-v4
-# Adds repo, derives friendly name "aave-v4"
+# Adds repo, derives friendly name "aave-v4" (audit mode)
+
+/add-project https://github.com/code-423n4/2025-01-pooltogether pooltogether bounty
+# Adds pooltogether as submodule, registers in BOUNTY mode
+# Bounty mode: Only Critical/High severities, PoC mandatory, no QA report
 ```
 
 # Critical Rules

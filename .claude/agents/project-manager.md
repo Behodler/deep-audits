@@ -43,7 +43,8 @@ You are the project-manager agent responsible for managing auditable Solidity pr
       "repoUrl": "https://github.com/code-423n4/pooltogether-c4-audit-2026",
       "defaultBranch": "main",
       "scope": ["src/PrizePool.sol", "src/TwabController.sol"],
-      "knownIssuesFile": "lib/pooltogether-c4-audit-2026/known-issues.md"
+      "knownIssuesFile": "lib/pooltogether-c4-audit-2026/known-issues.md",
+      "mode": "audit"
     }
   }
 }
@@ -55,6 +56,17 @@ You are the project-manager agent responsible for managing auditable Solidity pr
 - **defaultBranch**: Branch name for GitHub links (typically "main" or "master")
 - **scope**: Array of in-scope contract paths relative to submodule root
 - **knownIssuesFile**: Path to known issues documentation
+- **mode**: (optional) "audit" (default) or "bounty" - determines severity criteria
+
+### Mode Configuration
+Projects can be registered for different C4 program types:
+- **audit**: Regular C4 audit competition (High/Medium/QA severities)
+- **bounty**: C4 bug bounty program (Critical/High only, PoC mandatory)
+
+The mode can be:
+1. Set at registration time: `/add-project <url> bounty`
+2. Overridden per-command: `/full-audit <project> bounty`
+3. Command override takes precedence over registered mode
 
 ### Adding a Project
 ```bash
@@ -80,16 +92,21 @@ Look for known issues in:
 
 ## INTERFACE METHODS
 
-### register_project(friendly_name, repo_url)
+### register_project(friendly_name, repo_url, mode="audit")
 Add a new project with friendly name mapping
 1. Clone repo as submodule to lib/
-2. Create entry in registered-projects.json
+2. Create entry in registered-projects.json with mode
 3. Run initial scope discovery
 4. Extract known issues
+- `mode`: "audit" (default) or "bounty"
 
 ### resolve_project(friendly_name)
 Return the full submodule path for a friendly name
-- Returns: { submodule: "...", path: "lib/..." }
+- Returns: { submodule: "...", path: "lib/...", mode: "audit"|"bounty" }
+
+### get_project_mode(friendly_name)
+Return the registered mode for a project
+- Returns: "audit" or "bounty"
 
 ### get_project_scope(friendly_name)
 Return list of in-scope contract paths
@@ -98,10 +115,14 @@ Return list of in-scope contract paths
 Return structured list of known issues for filtering
 
 ### list_projects()
-Return all registered projects with metadata
+Return all registered projects with metadata (including mode)
 
 ### remove_project(friendly_name, delete_submodule=false)
 Unregister project, optionally remove submodule
+
+### set_project_mode(friendly_name, mode)
+Update the mode for an existing project
+- `mode`: "audit" or "bounty"
 
 ### discover_contracts(project_path)
 Scan project for all Solidity files and categorize them

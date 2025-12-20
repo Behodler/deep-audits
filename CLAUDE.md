@@ -71,7 +71,7 @@ forge test -vvvv
 git submodule add <repo-url> lib/<project-name>
 ```
 
-## C4 Severity Classifications
+## C4 Severity Classifications (Regular Audits)
 
 **High (3)**: Assets can be stolen/lost/compromised directly or via valid attack path without hypotheticals.
 
@@ -82,6 +82,43 @@ git submodule add <repo-url> lib/<project-name>
 ### Plausibility Sub-Categories for High Severity
 - **Plausible High** - Realistic attack scenarios
 - **Implausible High** - Requires extraordinary circumstances (validator collusion, economic black swans)
+
+## C4 Bounty Severity Classifications
+
+Bounties use different severity criteria. See `documentation/Bounties-*.md` for full details.
+
+**Critical**: High impact + high likelihood. Impact includes:
+- Direct theft of user funds (except unclaimed yield)
+- Permanent freezing of funds/NFTs
+- Protocol insolvency
+- Governance manipulation
+
+**High**: High impact, any likelihood. Impact includes:
+- Theft of unclaimed yield/royalties
+- Temporary freezing of funds/NFTs
+
+### Bounty Mode Differences
+- Only Critical and High severity accepted (no Medium, no QA/Low)
+- Coded runnable PoC is **mandatory** for all findings
+- $25 USDC deposit required per submission
+- No QA report generated
+- Use `/full-audit <project> bounty` or `/analyze <project> bounty`
+
+### High Likelihood Definition (Required for Critical)
+A vulnerability is "high likelihood" when:
+1. Attacker controls creating requisite circumstances; AND
+2. External circumstances can be reasonably expected and predicted using public info
+
+Note: Exploit complexity/sophistication is NOT a factor in likelihood.
+
+### Bounty Out of Scope
+- Attacks requiring leaked keys/credentials
+- Privileged address attacks (unless unintended privilege)
+- External stablecoin depegging not caused by code bug
+- Third-party oracle data issues
+- Economic/governance attacks (51% attack)
+- Centralization risks
+- Best practice recommendations
 
 ## Report Requirements
 

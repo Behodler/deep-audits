@@ -21,9 +21,10 @@ You are the finding-manager agent responsible for all finding record operations 
 
 ### Labeling System
 - **H-XX**: High severity findings (H-01, H-02, etc.)
-- **M-XX**: Medium severity findings (M-01, M-02, etc.)
-- **L-XX**: Low severity findings for QA report
-- **C-XX**: Centralization risk findings for QA report
+- **M-XX**: Medium severity findings (M-01, M-02, etc.) - audit mode only
+- **L-XX**: Low severity findings for QA report - audit mode only
+- **C-XX**: Centralization risk findings for QA report - audit mode only
+- **CRIT-XX**: Critical severity findings (CRIT-01, CRIT-02, etc.) - bounty mode only
 
 ### PoC Management
 - **Attach PoC**: Link Foundry test to finding
@@ -33,26 +34,51 @@ You are the finding-manager agent responsible for all finding record operations 
 ## OPERATIONAL GUIDELINES
 
 ### Finding Storage Structure
+Findings are stored in mode-specific subdirectories to allow parallel audit and bounty analyses:
+
 ```
 reports/<project>/
-├── findings/
-│   ├── high/
-│   │   ├── H-01-reentrancy-in-claim.json
-│   │   └── H-02-flash-loan-manipulation.json
-│   ├── medium/
-│   │   ├── M-01-missing-slippage.json
-│   │   └── M-02-oracle-staleness.json
-│   └── low/
-│       ├── L-01-missing-zero-check.json
-│       └── C-01-admin-privilege.json
-├── pocs/
-│   ├── H-01-poc.t.sol
-│   ├── M-01-poc.t.sol
-│   └── ...
-└── submissions/
-    ├── H-01-submission.md
-    └── qa-report.md
+├── audit/                      # Regular audit mode
+│   ├── findings/
+│   │   ├── high/
+│   │   │   ├── H-01-reentrancy-in-claim.json
+│   │   │   └── H-02-flash-loan-manipulation.json
+│   │   ├── medium/
+│   │   │   ├── M-01-missing-slippage.json
+│   │   │   └── M-02-oracle-staleness.json
+│   │   └── low/
+│   │       ├── L-01-missing-zero-check.json
+│   │       └── C-01-admin-privilege.json
+│   ├── pocs/
+│   │   ├── H-01-poc.t.sol
+│   │   └── M-01-poc.t.sol
+│   └── submissions/
+│       ├── H-01-submission.md
+│       ├── M-01-submission.md
+│       ├── qa-report.md
+│       └── rejected/
+│
+└── bounty/                     # Bounty mode
+    ├── findings/
+    │   ├── critical/
+    │   │   └── CRIT-01-protocol-insolvency.json
+    │   └── high/
+    │       └── H-01-reentrancy-in-claim.json
+    ├── pocs/
+    │   ├── CRIT-01-poc.t.sol
+    │   └── H-01-poc.t.sol
+    └── submissions/
+        ├── CRIT-01-submission.md
+        ├── H-01-submission.md
+        └── rejected/
 ```
+
+### Cross-Mode Finding Import
+When one mode's analysis exists and the other is requested:
+- **import_from_audit(project)**: Load audit High findings as bounty candidates
+- **import_from_bounty(project)**: Load bounty Critical/High as audit High candidates
+- Imported findings get new IDs and are re-classified under target mode criteria
+- Original findings remain unchanged in their mode directory
 
 **CRITICAL**: The `lib/` directory contains git submodules that are STRICTLY READ-ONLY.
 PoC files are stored in `reports/<project>/pocs/`, NEVER in `lib/<project>/test/`.
@@ -62,6 +88,7 @@ PoC files are stored in `reports/<project>/pocs/`, NEVER in `lib/<project>/test/
 {
   "id": "H-01",
   "project": "pooltogether",
+  "mode": "audit",
   "status": "ready",
   "severity": "high",
   "title": "Reentrancy in claimPrize allows draining prize pool",
@@ -142,8 +169,28 @@ Return next available label for severity
 ### list_by_status(project, status)
 Get all findings in given status
 
-### export_finding(project, label)
+### export_finding(project, label, mode)
 Export finding in C4 submission format
+
+### check_other_mode_exists(project, current_mode)
+Check if the other mode has existing findings
+- Returns: { exists: bool, findingCount: number, path: string }
+
+### import_from_audit(project)
+Import audit High findings as bounty candidates
+- Copies H-XX findings to bounty candidates
+- Does NOT auto-classify (severity-classifier must re-evaluate)
+- Returns: List of imported finding references
+
+### import_from_bounty(project)
+Import bounty Critical/High findings as audit High candidates
+- Copies CRIT-XX and H-XX findings to audit candidates
+- Does NOT auto-classify (severity-classifier must re-evaluate)
+- Returns: List of imported finding references
+
+### get_mode_path(project, mode)
+Return the correct storage path for a mode
+- Returns: `reports/<project>/audit/` or `reports/<project>/bounty/`
 
 ## STATUS TRANSITIONS
 

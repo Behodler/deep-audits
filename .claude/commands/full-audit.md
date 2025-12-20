@@ -3,8 +3,21 @@ Run complete audit pipeline from analysis to submission-ready reports
 Orchestrate the full audit workflow: analyze, generate PoCs, write reports, and compile QA.
 
 # Arguments
-- `$ARGUMENTS` format: `<project-name>`
-- Example: `pooltogether`
+- `$ARGUMENTS` format: `<project-name> [bounty]`
+- Example: `pooltogether` (regular audit)
+- Example: `pooltogether bounty` (bounty mode)
+
+# Mode Detection
+Parse `$ARGUMENTS` to detect mode:
+- If "bounty" present → **Bounty Mode**
+- Otherwise → **Regular Audit Mode**
+
+## Bounty Mode Differences
+Per C4 bounty guidelines (`documentation/Bounties-*.md`):
+- **Only Critical and High severity accepted** (no Medium, no QA/Low)
+- **Coded runnable PoCs are mandatory** for all findings
+- **No QA report** - Low/Centralization findings are discarded
+- **$25 USDC deposit required** per submission (inform user)
 
 # Orchestration Flow
 
@@ -23,6 +36,7 @@ Project: pooltogether
 Submodule: lib/2025-01-pooltogether
 Contracts in scope: 12
 Known issues: 5
+Mode: Regular Audit
 
 This will:
   1. Run full vulnerability analysis
@@ -34,16 +48,63 @@ This will:
 Proceed? (Invoke to continue, or provide feedback)
 ```
 
+**If Bounty Mode:**
+```
+Full Audit: pooltogether (BOUNTY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Project: pooltogether
+Submodule: lib/2025-01-pooltogether
+Contracts in scope: 12
+Known issues: 5
+Mode: BOUNTY
+
+⚠️  BOUNTY MODE ACTIVE:
+  • Only Critical/High severity findings accepted
+  • All findings require runnable PoC (mandatory)
+  • No QA report will be generated
+  • Each submission requires $25 USDC deposit
+
+This will:
+  1. Run full vulnerability analysis (Critical/High only)
+  2. Generate PoCs for ALL findings (mandatory)
+  3. Write submission reports
+  4. Review all findings before completion
+
+Proceed? (Invoke to continue, or provide feedback)
+```
+
+## 1.5. Check for Cross-Mode Optimization
+Invoke **finding-manager**: "Check if other mode has existing findings"
+
+**If cross-mode findings exist, display:**
+```
+Cross-Mode Optimization Available
+─────────────────────────────────
+Existing bounty analysis found with 3 findings.
+These will seed your audit analysis (still running full scan).
+
+Imported findings will be re-classified under audit criteria.
+```
+
+**Decision Tree:**
+- Running **bounty** + **audit** exists → Import audit High findings as candidates
+- Running **audit** + **bounty** exists → Import bounty Critical/High as candidates
+- Neither exists → Fresh analysis
+
+This optimization saves time by not re-discovering issues the other mode already found,
+while still running the full scan to catch mode-specific issues.
+
 ## 2. Run Analysis
 Execute `/analyze` orchestration:
 - Invoke **code-scanner**: Scan for code-level vulnerabilities
 - Invoke **econ-scanner**: Scan for economic vulnerabilities
 - Invoke **deduplicator**: Filter duplicates
 - Invoke **sanitizer**: Remove known issues
-- Invoke **severity-classifier**: Classify findings
+- Invoke **severity-classifier**: Classify findings (pass `mode: bounty` if bounty mode)
 - Invoke **finding-manager**: Store findings
 
-Report progress:
+Report progress (Regular Audit):
 ```
 Analysis Phase
 ──────────────
@@ -58,11 +119,43 @@ Classified:
   Low: 8
 ```
 
-## 3. Generate PoCs for High Findings
+Report progress (Bounty Mode):
+```
+Analysis Phase (BOUNTY)
+───────────────────────
+Scanning contracts... done
+Raw findings: 47
+After deduplication: 23
+After sanitization: 18
+
+Classified (Critical/High only):
+  Critical: 1
+  High: 2
+  ⚠️ Discarded: 15 (Medium/Low not accepted in bounties)
+```
+
+## 3. Generate PoCs for Critical Findings (Bounty Mode Only)
+**Skip this step in Regular Audit mode.**
+
+For each Critical finding (bounty mode):
+- Invoke **poc-generator**: Create PoC
+- Invoke **poc-validator**: Validate PoC
+- Invoke **finding-manager**: Update status
+- **CRITICAL**: PoC is mandatory - finding cannot be submitted without passing PoC
+
+Report progress:
+```
+PoC Generation: Critical Severity (MANDATORY)
+─────────────────────────────────────────────
+CRIT-01 Protocol insolvency via....... ✓ PASS
+```
+
+## 4. Generate PoCs for High Findings
 For each High finding:
 - Invoke **poc-generator**: Create PoC
 - Invoke **poc-validator**: Validate PoC
 - Invoke **finding-manager**: Update status
+- **BOUNTY MODE**: PoC is mandatory - finding cannot be submitted without passing PoC
 
 Report progress:
 ```
@@ -73,7 +166,9 @@ H-02 Flash loan manipulation............ ✓ PASS
 H-03 Access control bypass.............. ⚠ FAILED (needs manual review)
 ```
 
-## 4. Generate PoCs for Medium Findings
+## 5. Generate PoCs for Medium Findings (Regular Audit Only)
+**Skip this step in Bounty Mode** - Medium severity not accepted.
+
 For each Medium finding:
 - Invoke **poc-generator**: Create PoC
 - Invoke **poc-validator**: Validate PoC
@@ -92,13 +187,13 @@ M-06 Unsafe downcast................... ✓ PASS
 M-07 Missing access control............. ✓ PASS
 ```
 
-## 5. Write Reports for High/Medium
+## 6. Write Reports for Critical/High (Bounty) or High/Medium (Audit)
 For each finding with passing PoC:
 - Invoke **report-writer**: Generate report
 - Invoke **report-validator**: Validate quality
 - Invoke **finding-manager**: Update to submitted
 
-Report progress:
+Report progress (Regular Audit):
 ```
 Report Generation
 ─────────────────
@@ -112,7 +207,20 @@ M-06 Submission report.................. ✓ VALID
 M-07 Submission report.................. ✓ VALID
 ```
 
-## 6. Compile QA Report
+Report progress (Bounty Mode):
+```
+Report Generation (BOUNTY)
+──────────────────────────
+CRIT-01 Submission report............... ✓ VALID
+H-01 Submission report.................. ✓ VALID
+H-02 Submission report.................. ✓ VALID
+
+⚠️ Reminder: Each submission requires $25 USDC deposit
+```
+
+## 7. Compile QA Report (Regular Audit Only)
+**Skip this step in Bounty Mode** - QA/Low findings not accepted.
+
 Invoke **qa-bundler**: "Compile Low and Centralization findings"
 - Bundle all Low severity findings
 - Include all Centralization risks
@@ -124,13 +232,13 @@ QA Report Generation
 ────────────────────
 Low findings included: 5
 Centralization findings: 3
-QA report saved: reports/pooltogether/submissions/qa-report.md
+QA report saved: reports/pooltogether/audit/submissions/qa-report.md
 ```
 
-## 7. Review All Findings
+## 8. Review All Findings
 For each finding:
 - Invoke **validity-checker**: Check for invalid patterns
-- Invoke **severity-auditor**: Validate severity
+- Invoke **severity-auditor**: Validate severity (use bounty criteria if bounty mode)
 - Flag any concerns
 
 ```
@@ -143,8 +251,10 @@ M-02 ⚠ Severity questioned (might be Low)
 ...
 ```
 
-## 8. Final Summary
+## 9. Final Summary
 Present complete audit results:
+
+**Regular Audit:**
 ```
 Full Audit Complete: pooltogether
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -154,23 +264,52 @@ Submissions Ready:
   Medium: 6 reports (M-05 needs manual PoC)
   QA:     1 report (8 findings)
 
+Output Directory: reports/pooltogether/audit/
+
 Files:
-  reports/pooltogether/submissions/H-01-submission.md
-  reports/pooltogether/submissions/H-02-submission.md
-  reports/pooltogether/submissions/M-01-submission.md
-  reports/pooltogether/submissions/M-02-submission.md
-  reports/pooltogether/submissions/M-03-submission.md
-  reports/pooltogether/submissions/M-04-submission.md
-  reports/pooltogether/submissions/M-06-submission.md
-  reports/pooltogether/submissions/M-07-submission.md
-  reports/pooltogether/submissions/qa-report.md
+  reports/pooltogether/audit/submissions/H-01-submission.md
+  reports/pooltogether/audit/submissions/H-02-submission.md
+  reports/pooltogether/audit/submissions/M-01-submission.md
+  reports/pooltogether/audit/submissions/M-02-submission.md
+  reports/pooltogether/audit/submissions/M-03-submission.md
+  reports/pooltogether/audit/submissions/M-04-submission.md
+  reports/pooltogether/audit/submissions/M-06-submission.md
+  reports/pooltogether/audit/submissions/M-07-submission.md
+  reports/pooltogether/audit/submissions/qa-report.md
 
 Action Items:
-  ⚠ H-03: Manual PoC needed - check reports/pooltogether/findings/high/H-03.json
-  ⚠ M-05: Manual PoC needed - check reports/pooltogether/findings/medium/M-05.json
+  ⚠ H-03: Manual PoC needed - check reports/pooltogether/audit/findings/high/H-03.json
+  ⚠ M-05: Manual PoC needed - check reports/pooltogether/audit/findings/medium/M-05.json
   ⚠ M-02: Review severity classification
 
 Review all submissions before C4 submission deadline.
+```
+
+**Bounty Mode:**
+```
+Full Audit Complete: pooltogether (BOUNTY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Submissions Ready:
+  Critical: 1 report
+  High:     2 reports
+
+Output Directory: reports/pooltogether/bounty/
+
+⚠️ BOUNTY SUBMISSION REQUIREMENTS:
+  • $25 USDC deposit per finding to 0xB592d203fd9f55CC4746172A92E35baBA1046a14
+  • Submit via bounty form at code4rena.com/bounties
+  • Cannot edit after submission
+  • Results announced in #c4-bounties Discord channel
+
+Files:
+  reports/pooltogether/bounty/submissions/CRIT-01-submission.md
+  reports/pooltogether/bounty/submissions/H-01-submission.md
+  reports/pooltogether/bounty/submissions/H-02-submission.md
+
+Total deposit required: $75 USDC (3 findings × $25)
+
+Review all submissions before submitting - deposits are non-refundable if judged unsatisfactory.
 ```
 
 # Agent Delegation
