@@ -66,6 +66,7 @@ reports/<friendly-name>/
 │   └── low/
 ├── pocs/
 └── submissions/
+    └── rejected/
 ```
 
 ## 8. Completion Report
