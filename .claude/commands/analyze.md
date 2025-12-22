@@ -66,33 +66,72 @@ Full scan will still run to catch additional issues.
 
 **Important**: Cross-mode import seeds the classifier but does NOT skip scanning. The other mode's findings inform but don't replace the full analysis.
 
-## 3. Code Vulnerability Scan
-Invoke **code-scanner**: "Scan contracts for code-level vulnerabilities"
-- Pass: project path, scope list
-- Analyze each in-scope contract
-- Identify code-level vulnerabilities:
-  - Reentrancy
-  - Access control
-  - Integer issues
-  - Storage/memory safety
-  - External call risks
-- Return raw findings list with confidence levels
+## 2.6. Profile Contracts (Local Analysis)
+Invoke **contract-profiler** for each in-scope contract (parallel where possible):
+- Pass: contract path, project path, related contracts (imports/inheritance)
+- Produce per-contract:
+  - **Verified properties**: No unbounded loops, checked arithmetic, reentrancy guards, etc.
+  - **Local findings**: Issues exploitable without cross-contract interaction
+  - **Interface abstraction**: Entry points, state mutators, external calls, trust boundaries
+  - **Trust assumptions**: What the contract assumes about external dependencies
 
-## 4. Economic Vulnerability Scan
-Invoke **econ-scanner**: "Scan contracts for economic vulnerabilities"
-- Pass: project path, scope list, documentation
+**Output**: Array of contract profiles saved to `reports/<project>/<mode>/profiles/`
+
+**Why this step exists**: Downstream scanners receive interface abstractions instead of raw source. This:
+1. Prevents over-ingestion of scope
+2. Lets interaction analysis treat local properties as verified axioms
+3. Surfaces local issues early (unbounded loops, missing access control)
+4. Compresses context for agents with limited windows
+
+```
+Profiling Contracts
+───────────────────
+[✓] src/PrizePool.sol (450 LOC, 2 local findings)
+[✓] src/Vault.sol (320 LOC, 0 local findings)
+[✓] src/PrizeVault.sol (280 LOC, 1 local finding)
+...
+Profiles saved: reports/pooltogether/audit/profiles/
+```
+
+## 3. Code Vulnerability Scan (Interaction-Level)
+Invoke **code-scanner**: "Scan for cross-contract code vulnerabilities"
+- Pass: project path, scope list, **contract profiles from step 2.6**
+- **SCOPE RESTRICTION**: Scanner works from profiles, not raw source
+  - Trust verified properties (don't re-check unbounded loops if profile says none)
+  - Focus on interaction patterns between contracts
+  - Use interface abstractions for cross-contract reasoning
+- Identify interaction-level code vulnerabilities:
+  - Reentrancy across contract boundaries
+  - Access control gaps in call chains
+  - External call sequencing risks
+  - Callback vulnerabilities
+  - Cross-contract state corruption
+- Return raw findings list with confidence levels
+- **Local findings already captured in profiles - do not duplicate**
+
+## 4. Economic Vulnerability Scan (Interaction-Level)
+Invoke **econ-scanner**: "Scan for cross-contract economic vulnerabilities"
+- Pass: project path, scope list, documentation, **contract profiles from step 2.6**
+- **SCOPE RESTRICTION**: Scanner works from profiles for local context
+  - Use interface abstractions to understand value flow entry points
+  - Trust verified arithmetic properties from profiles
+  - Focus on protocol-wide economic interactions
 - Analyze economic design and incentives:
   - Intent verification (docs vs implementation)
-  - Pricing/fee calculation errors
-  - Oracle manipulation vectors
-  - Flash loan attack surfaces
-  - Incentive misalignments
-  - MEV extraction paths
+  - Pricing/fee calculation errors across contracts
+  - Oracle manipulation vectors (cross-contract)
+  - Flash loan attack surfaces (multi-contract flows)
+  - Incentive misalignments between protocol actors
+  - MEV extraction paths through contract interactions
 - Return raw findings list with economic impact
+- **Local arithmetic issues already captured in profiles - do not duplicate**
 
 ## 5. Deduplicate Findings
 Invoke **deduplicator**: "Filter obvious and common issues from scan results"
-- Combine findings from both code-scanner and econ-scanner
+- Combine findings from:
+  - **Local findings** from contract profiles (step 2.6)
+  - **Interaction findings** from code-scanner (step 3)
+  - **Economic findings** from econ-scanner (step 4)
 - Remove exact duplicates
 - Consolidate findings with same root cause
 - Filter low-value/common issues that add no insight
@@ -147,10 +186,20 @@ Display to user:
 ```
 Analysis Complete: pooltogether
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Contracts Scanned: 12
-Raw Findings: 47
-After Deduplication: 23
-After Sanitization: 18
+Contracts Profiled: 12
+
+Tier 1 (Local Analysis):
+  Verified clean: 9 contracts
+  Local findings: 5
+
+Tier 2 (Interaction Analysis):
+  Code findings: 28
+  Economic findings: 14
+
+Pipeline:
+  Raw Findings: 47 (5 local + 28 code + 14 econ)
+  After Deduplication: 23
+  After Sanitization: 18
 
 Classified Findings:
   High:   3
@@ -158,6 +207,7 @@ Classified Findings:
   Low:    8
 
 Output: reports/pooltogether/audit/
+Profiles: reports/pooltogether/audit/profiles/
 
 Next Steps:
   /list-findings pooltogether
@@ -170,10 +220,20 @@ Next Steps:
 Analysis Complete: pooltogether
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Cross-Mode: Imported 3 findings from bounty analysis
-Contracts Scanned: 12
-Raw Findings: 47 (+ 3 imported)
-After Deduplication: 25
-After Sanitization: 20
+Contracts Profiled: 12
+
+Tier 1 (Local Analysis):
+  Verified clean: 9 contracts
+  Local findings: 5
+
+Tier 2 (Interaction Analysis):
+  Code findings: 28
+  Economic findings: 14
+
+Pipeline:
+  Raw Findings: 50 (5 local + 28 code + 14 econ + 3 imported)
+  After Deduplication: 25
+  After Sanitization: 20
 
 Classified Findings:
   High:   4 (1 from bounty CRIT-01, 1 from bounty H-01)
@@ -181,6 +241,7 @@ Classified Findings:
   Low:    8
 
 Output: reports/pooltogether/audit/
+Profiles: reports/pooltogether/audit/profiles/
 
 Next Steps:
   /list-findings pooltogether
@@ -192,10 +253,20 @@ Next Steps:
 ```
 Analysis Complete: pooltogether (BOUNTY)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Contracts Scanned: 12
-Raw Findings: 47
-After Deduplication: 23
-After Sanitization: 18
+Contracts Profiled: 12
+
+Tier 1 (Local Analysis):
+  Verified clean: 9 contracts
+  Local findings: 5
+
+Tier 2 (Interaction Analysis):
+  Code findings: 28
+  Economic findings: 14
+
+Pipeline:
+  Raw Findings: 47 (5 local + 28 code + 14 econ)
+  After Deduplication: 23
+  After Sanitization: 18
 
 Classified Findings (Critical/High only):
   Critical: 1
@@ -203,6 +274,7 @@ Classified Findings (Critical/High only):
   ⚠️ Discarded: 15 (Medium/Low not accepted)
 
 Output: reports/pooltogether/bounty/
+Profiles: reports/pooltogether/bounty/profiles/
 
 ⚠️ BOUNTY REQUIREMENTS:
   • PoC mandatory for ALL findings
@@ -219,10 +291,20 @@ Next Steps:
 Analysis Complete: pooltogether (BOUNTY)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Cross-Mode: Imported 3 High findings from audit analysis
-Contracts Scanned: 12
-Raw Findings: 47 (+ 3 imported)
-After Deduplication: 24
-After Sanitization: 19
+Contracts Profiled: 12
+
+Tier 1 (Local Analysis):
+  Verified clean: 9 contracts
+  Local findings: 5
+
+Tier 2 (Interaction Analysis):
+  Code findings: 28
+  Economic findings: 14
+
+Pipeline:
+  Raw Findings: 50 (5 local + 28 code + 14 econ + 3 imported)
+  After Deduplication: 24
+  After Sanitization: 19
 
 Classified Findings (Critical/High only):
   Critical: 2 (1 promoted from audit H-01)
@@ -230,6 +312,7 @@ Classified Findings (Critical/High only):
   ⚠️ Discarded: 15 (Medium/Low not accepted)
 
 Output: reports/pooltogether/bounty/
+Profiles: reports/pooltogether/bounty/profiles/
 
 ⚠️ BOUNTY REQUIREMENTS:
   • PoC mandatory for ALL findings
@@ -244,12 +327,45 @@ Next Steps:
 # Agent Delegation
 This command orchestrates analysis without implementing scan logic:
 - **project-manager**: Resolve names, get scope/known issues
-- **code-scanner**: Identify code-level implementation bugs
-- **econ-scanner**: Identify economic/game-theoretic vulnerabilities
+- **contract-profiler**: Local analysis per contract (Tier 1) - produces verified properties and interface abstractions
+- **code-scanner**: Identify cross-contract code vulnerabilities (Tier 2) - consumes profiles
+- **econ-scanner**: Identify economic/game-theoretic vulnerabilities (Tier 2) - consumes profiles
 - **deduplicator**: Filter duplicates and common issues
 - **sanitizer**: Remove known issues
 - **severity-classifier**: Apply C4 severity rules
 - **finding-manager**: Store findings
+
+## Tiered Analysis Architecture
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    TIER 1: LOCAL ANALYSIS                   │
+│                    (contract-profiler)                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
+│  │Contract A│  │Contract B│  │Contract C│  │Contract D│    │
+│  │  Profile │  │  Profile │  │  Profile │  │  Profile │    │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘    │
+│       │             │             │             │           │
+│       └─────────────┴──────┬──────┴─────────────┘           │
+│                            │                                │
+│              ┌─────────────▼─────────────┐                  │
+│              │   Contract Profiles Array  │                  │
+│              │  (verified props, interfaces)                │
+│              └─────────────┬─────────────┘                  │
+└────────────────────────────┼────────────────────────────────┘
+                             │
+┌────────────────────────────▼────────────────────────────────┐
+│                 TIER 2: INTERACTION ANALYSIS                │
+│    ┌──────────────────┐       ┌──────────────────┐         │
+│    │   code-scanner   │       │   econ-scanner   │         │
+│    │ (cross-contract  │       │ (protocol-wide   │         │
+│    │  code issues)    │       │  economic issues)│         │
+│    └────────┬─────────┘       └────────┬─────────┘         │
+│             │                          │                    │
+│             └───────────┬──────────────┘                    │
+│                         ▼                                   │
+│              Combined Interaction Findings                  │
+└─────────────────────────────────────────────────────────────┘
+```
 
 # Error Handling
 - **Unknown project**: Suggest registration
