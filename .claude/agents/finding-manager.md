@@ -34,10 +34,10 @@ You are the finding-manager agent responsible for all finding record operations 
 ## OPERATIONAL GUIDELINES
 
 ### Finding Storage Structure
-Findings are stored in mode-specific subdirectories to allow parallel audit and bounty analyses:
+Findings are stored in versioned, mode-specific subdirectories. Each audit run creates a new versioned directory to isolate artifacts:
 
 ```
-reports/<project>/
+reports/<project>-XX/           # Versioned directory (e.g., pooltogether-01/)
 ├── audit/                      # Regular audit mode
 │   ├── findings/
 │   │   ├── high/
@@ -73,15 +73,23 @@ reports/<project>/
         └── rejected/
 ```
 
+### Versioned Directory Convention
+- First run creates `reports/<project>-01/`
+- Subsequent runs create `reports/<project>-02/`, `reports/<project>-03/`, etc.
+- Legacy unversioned directories (`reports/<project>/`) are treated as version 0
+- The versioned path is provided by the orchestrating command (analyze, full-audit)
+- **All operations receive the versioned report directory as a parameter**
+
 ### Cross-Mode Finding Import
-When one mode's analysis exists and the other is requested:
-- **import_from_audit(project)**: Load audit High findings as bounty candidates
-- **import_from_bounty(project)**: Load bounty Critical/High as audit High candidates
+When one mode's analysis exists and the other is requested **within the same versioned directory**:
+- **import_from_audit(report_dir)**: Load audit High findings as bounty candidates
+- **import_from_bounty(report_dir)**: Load bounty Critical/High as audit High candidates
 - Imported findings get new IDs and are re-classified under target mode criteria
 - Original findings remain unchanged in their mode directory
+- **Cross-mode import only works within the same versioned directory** - does not import from other versions
 
 **CRITICAL**: The `lib/` directory contains git submodules that are STRICTLY READ-ONLY.
-PoC files are stored in `reports/<project>/pocs/`, NEVER in `lib/<project>/test/`.
+PoC files are stored in `<versioned-report-dir>/pocs/`, NEVER in `lib/<project>/test/`.
 
 ### Finding Record Format
 ```json
@@ -138,59 +146,65 @@ These fields are used by report-writer to generate GitHub links like:
 
 ## INTERFACE METHODS
 
-### create_finding(project, finding_data)
+**Note**: All methods that interact with finding storage accept either:
+- `report_dir`: The versioned report directory path (e.g., `reports/pooltogether-01/`)
+- `project` + `report_dir`: Project name plus the versioned path
+
+The versioned report directory is provided by the orchestrating command.
+
+### create_finding(report_dir, mode, finding_data)
 Create new finding record
 - Auto-assigns next available label
 - Sets status to "draft"
-- Creates JSON file in appropriate severity folder
+- Creates JSON file in `<report_dir>/<mode>/findings/<severity>/`
 
-### get_finding(project, label)
+### get_finding(report_dir, mode, label)
 Retrieve finding by label (e.g., "H-01")
 
-### get_findings(project, filters)
+### get_findings(report_dir, mode, filters)
 List findings with optional filters
 - filters: { status, severity, contract, hasPoC }
 
-### update_finding(project, label, updates)
+### update_finding(report_dir, mode, label, updates)
 Modify finding content or metadata
 
-### update_status(project, label, new_status)
+### update_status(report_dir, mode, label, new_status)
 Change finding status with validation
 
-### attach_poc(project, label, poc_path, status)
+### attach_poc(report_dir, mode, label, poc_path, status)
 Link PoC file to finding
 
-### delete_finding(project, label)
+### delete_finding(report_dir, mode, label)
 Remove finding (use sparingly)
 
-### get_next_label(project, severity)
+### get_next_label(report_dir, mode, severity)
 Return next available label for severity
 
-### list_by_status(project, status)
+### list_by_status(report_dir, mode, status)
 Get all findings in given status
 
-### export_finding(project, label, mode)
+### export_finding(report_dir, mode, label)
 Export finding in C4 submission format
 
-### check_other_mode_exists(project, current_mode)
-Check if the other mode has existing findings
+### check_other_mode_exists(report_dir, current_mode)
+Check if the other mode has existing findings **in this versioned directory**
 - Returns: { exists: bool, findingCount: number, path: string }
 
-### import_from_audit(project)
-Import audit High findings as bounty candidates
-- Copies H-XX findings to bounty candidates
+### import_from_audit(report_dir)
+Import audit High findings as bounty candidates from **same versioned directory**
+- Copies H-XX findings from `<report_dir>/audit/` to bounty candidates
 - Does NOT auto-classify (severity-classifier must re-evaluate)
 - Returns: List of imported finding references
 
-### import_from_bounty(project)
-Import bounty Critical/High findings as audit High candidates
-- Copies CRIT-XX and H-XX findings to audit candidates
+### import_from_bounty(report_dir)
+Import bounty Critical/High findings as audit High candidates from **same versioned directory**
+- Copies CRIT-XX and H-XX findings from `<report_dir>/bounty/` to audit candidates
 - Does NOT auto-classify (severity-classifier must re-evaluate)
 - Returns: List of imported finding references
 
-### get_mode_path(project, mode)
-Return the correct storage path for a mode
-- Returns: `reports/<project>/audit/` or `reports/<project>/bounty/`
+### get_mode_path(report_dir, mode)
+Return the correct storage path for a mode within the versioned directory
+- Returns: `<report_dir>/audit/` or `<report_dir>/bounty/`
 
 ## STATUS TRANSITIONS
 
@@ -222,17 +236,17 @@ Work with other agents:
 
 ### Get all ready findings
 ```
-get_findings(project, { status: "ready" })
+get_findings(report_dir, mode, { status: "ready" })
 ```
 
 ### Get High findings needing PoC
 ```
-get_findings(project, { severity: "high", status: "needs-poc" })
+get_findings(report_dir, mode, { severity: "high", status: "needs-poc" })
 ```
 
 ### Get submitted count
 ```
-get_findings(project, { status: "submitted" }).length
+get_findings(report_dir, mode, { status: "submitted" }).length
 ```
 
 ## CRITICAL RULES

@@ -203,6 +203,42 @@ Update registered-projects.json with contracts info
 Retrieve the contracts metadata for a project
 - Returns: parsed metadata.json or null if not fetched
 
+### create_versioned_report_dir(friendly_name)
+Create a new versioned report directory for an audit run.
+- Scans `reports/` for existing directories matching `<project>` or `<project>-XX` pattern
+- If unversioned `reports/<project>/` exists, treat as index 0 (legacy)
+- Creates next sequential version: `reports/<project>-01/`, `reports/<project>-02/`, etc.
+- First run (no existing directories) creates `reports/<project>-01/`
+- Index is zero-padded to 2 digits (01-99)
+- Creates the directory and returns the path
+
+**Algorithm:**
+1. List directories in `reports/` matching `<project>` or `<project>-\d{2}`
+2. If unversioned `<project>` exists → highest index is 0
+3. Extract numeric suffixes, find max
+4. Create `<project>-{max+1:02d}/`
+5. Return: `{ path: "reports/<project>-XX/", version: XX, isFirst: bool }`
+
+**Example:**
+```
+# No existing dirs
+create_versioned_report_dir("foo") → reports/foo-01/
+
+# reports/foo/ exists (legacy)
+create_versioned_report_dir("foo") → reports/foo-01/
+
+# reports/foo-01/ exists
+create_versioned_report_dir("foo") → reports/foo-02/
+
+# reports/foo/, reports/foo-01/, reports/foo-02/ exist
+create_versioned_report_dir("foo") → reports/foo-03/
+```
+
+### get_latest_report_dir(friendly_name)
+Find the most recent versioned report directory for a project.
+- Useful for viewing previous results
+- Returns: `{ path: "reports/<project>-XX/", version: XX }` or null if none
+
 ## ERROR HANDLING
 - **Duplicate Name**: Reject if friendly name already exists
 - **Missing Submodule**: Report if lib/ directory doesn't contain expected project

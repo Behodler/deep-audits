@@ -27,6 +27,14 @@ Invoke **project-manager**: "Resolve and validate project"
 - Get scope and known issues
 - Confirm ready for full audit
 
+## 1.2. Create Versioned Report Directory
+Invoke **project-manager**: "Create versioned report directory for this audit run"
+- Creates `reports/<project>-XX/` where XX is the next sequential version
+- If unversioned `reports/<project>/` exists (legacy), treat as version 0
+- First run (no existing directories) creates `reports/<project>-01/`
+- Store the versioned path for use in all subsequent steps
+- **All findings, PoCs, and submissions go under this versioned directory**
+
 Present summary and confirm:
 ```
 Full Audit: pooltogether
@@ -34,6 +42,7 @@ Full Audit: pooltogether
 
 Project: pooltogether
 Submodule: lib/2025-01-pooltogether
+Report Directory: reports/pooltogether-01/
 Contracts in scope: 12
 Known issues: 5
 Mode: Regular Audit
@@ -55,6 +64,7 @@ Full Audit: pooltogether (BOUNTY)
 
 Project: pooltogether
 Submodule: lib/2025-01-pooltogether
+Report Directory: reports/pooltogether-01/
 Contracts in scope: 12
 Known issues: 5
 Mode: BOUNTY
@@ -75,22 +85,27 @@ Proceed? (Invoke to continue, or provide feedback)
 ```
 
 ## 1.5. Check for Cross-Mode Optimization
-Invoke **finding-manager**: "Check if other mode has existing findings"
+Invoke **finding-manager**: "Check if other mode has existing findings in this versioned directory"
 
-**If cross-mode findings exist, display:**
+**IMPORTANT**: Cross-mode import only looks **within the same versioned directory**.
+- If running in `reports/pooltogether-01/`, only checks for other mode in `reports/pooltogether-01/`
+- Does NOT import from previous versions (`reports/pooltogether/`, `reports/pooltogether-02/`, etc.)
+- This ensures each audit run is isolated
+
+**If cross-mode findings exist in same version:**
 ```
 Cross-Mode Optimization Available
 ─────────────────────────────────
-Existing bounty analysis found with 3 findings.
+Existing bounty analysis found in reports/pooltogether-01/bounty/ with 3 findings.
 These will seed your audit analysis (still running full scan).
 
 Imported findings will be re-classified under audit criteria.
 ```
 
 **Decision Tree:**
-- Running **bounty** + **audit** exists → Import audit High findings as candidates
-- Running **audit** + **bounty** exists → Import bounty Critical/High as candidates
-- Neither exists → Fresh analysis
+- Running **bounty** + **audit** exists in same version → Import audit High findings as candidates
+- Running **audit** + **bounty** exists in same version → Import bounty Critical/High as candidates
+- Neither exists in this version → Fresh analysis
 
 This optimization saves time by not re-discovering issues the other mode already found,
 while still running the full scan to catch mode-specific issues.
@@ -232,7 +247,7 @@ QA Report Generation
 ────────────────────
 Low findings included: 5
 Centralization findings: 3
-QA report saved: reports/pooltogether/audit/submissions/qa-report.md
+QA report saved: reports/pooltogether-01/audit/submissions/qa-report.md
 ```
 
 ## 8. Review All Findings
@@ -264,22 +279,22 @@ Submissions Ready:
   Medium: 6 reports (M-05 needs manual PoC)
   QA:     1 report (8 findings)
 
-Output Directory: reports/pooltogether/audit/
+Output Directory: reports/pooltogether-01/audit/
 
 Files:
-  reports/pooltogether/audit/submissions/H-01-submission.md
-  reports/pooltogether/audit/submissions/H-02-submission.md
-  reports/pooltogether/audit/submissions/M-01-submission.md
-  reports/pooltogether/audit/submissions/M-02-submission.md
-  reports/pooltogether/audit/submissions/M-03-submission.md
-  reports/pooltogether/audit/submissions/M-04-submission.md
-  reports/pooltogether/audit/submissions/M-06-submission.md
-  reports/pooltogether/audit/submissions/M-07-submission.md
-  reports/pooltogether/audit/submissions/qa-report.md
+  reports/pooltogether-01/audit/submissions/H-01-submission.md
+  reports/pooltogether-01/audit/submissions/H-02-submission.md
+  reports/pooltogether-01/audit/submissions/M-01-submission.md
+  reports/pooltogether-01/audit/submissions/M-02-submission.md
+  reports/pooltogether-01/audit/submissions/M-03-submission.md
+  reports/pooltogether-01/audit/submissions/M-04-submission.md
+  reports/pooltogether-01/audit/submissions/M-06-submission.md
+  reports/pooltogether-01/audit/submissions/M-07-submission.md
+  reports/pooltogether-01/audit/submissions/qa-report.md
 
 Action Items:
-  ⚠ H-03: Manual PoC needed - check reports/pooltogether/audit/findings/high/H-03.json
-  ⚠ M-05: Manual PoC needed - check reports/pooltogether/audit/findings/medium/M-05.json
+  ⚠ H-03: Manual PoC needed - check reports/pooltogether-01/audit/findings/high/H-03.json
+  ⚠ M-05: Manual PoC needed - check reports/pooltogether-01/audit/findings/medium/M-05.json
   ⚠ M-02: Review severity classification
 
 Review all submissions before C4 submission deadline.
@@ -294,7 +309,7 @@ Submissions Ready:
   Critical: 1 report
   High:     2 reports
 
-Output Directory: reports/pooltogether/bounty/
+Output Directory: reports/pooltogether-01/bounty/
 
 ⚠️ BOUNTY SUBMISSION REQUIREMENTS:
   • $25 USDC deposit per finding to 0xB592d203fd9f55CC4746172A92E35baBA1046a14
@@ -303,9 +318,9 @@ Output Directory: reports/pooltogether/bounty/
   • Results announced in #c4-bounties Discord channel
 
 Files:
-  reports/pooltogether/bounty/submissions/CRIT-01-submission.md
-  reports/pooltogether/bounty/submissions/H-01-submission.md
-  reports/pooltogether/bounty/submissions/H-02-submission.md
+  reports/pooltogether-01/bounty/submissions/CRIT-01-submission.md
+  reports/pooltogether-01/bounty/submissions/H-01-submission.md
+  reports/pooltogether-01/bounty/submissions/H-02-submission.md
 
 Total deposit required: $75 USDC (3 findings × $25)
 
