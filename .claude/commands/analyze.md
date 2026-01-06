@@ -20,6 +20,48 @@ Per C4 bounty guidelines (`documentation/Bounties-*.md`):
 - **Only Critical and High severity classified** (Medium/Low discarded)
 - Uses bounty-specific severity criteria (see severity-classifier)
 - Findings must meet "high likelihood" requirement for Critical
+- **Live config is MANDATORY** - PoCs must use real on-chain parameters
+- **Owner/privileged attacks are OUT OF SCOPE** - Must verify attacker is unprivileged
+
+## Bounty Mode: Live Config Requirement
+
+**CRITICAL: Bounty targets LIVE deployed contracts.** Before analysis:
+
+### 1. Verify Contract Config Exists
+Check for `contracts/<project>/metadata.json`:
+- Contains live addresses (owner, oracle, admin)
+- Contains real parameters (fees, caps, thresholds)
+- Contains chain info (RPC endpoints, chain IDs)
+
+### 2. If Config Missing
+```
+⚠️ BOUNTY MODE: Live Configuration Required
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+No contracts/moonwell/metadata.json found.
+
+Bounty PoCs require real on-chain parameters because:
+• Owner/privileged attacks are OUT OF SCOPE
+• Parameters determine attack profitability
+• Judges dismiss findings with fictional values
+
+Run: /fetch-contracts moonwell readme bounty
+
+This will:
+1. Extract contract addresses from README
+2. Fetch verified source from explorers
+3. Read live config via cast call
+4. Generate metadata.json with bountyConfig
+
+Continue analysis without config? (Not recommended for bounty)
+```
+
+### 3. Config Available - Pass to Finding Records
+When creating bounty findings (step 8), include config context:
+- Privileged addresses (to exclude from attacker role)
+- Financial parameters (for realistic PoC values)
+- Limits (for feasible attack vectors)
+
+The **poc-generator** will read this config when generating PoCs.
 
 # Orchestration Flow
 
@@ -375,7 +417,14 @@ Profiles: reports/pooltogether-01/bounty/profiles/
 
 ⚠️ BOUNTY REQUIREMENTS:
   • PoC mandatory for ALL findings
+  • PoCs MUST use live config from contracts/pooltogether/metadata.json
+  • Owner/privileged attacks are OUT OF SCOPE
   • $25 USDC deposit per submission
+
+Live Config Status:
+  ✓ contracts/pooltogether/metadata.json loaded
+  Privileged addresses: owner, guardian (excluded from attacker role)
+  Financial params: feeRate=0.3%, reserveFactor=20%
 
 Next Steps:
   /list-findings pooltogether bounty
@@ -414,7 +463,14 @@ Profiles: reports/pooltogether-01/bounty/profiles/
 
 ⚠️ BOUNTY REQUIREMENTS:
   • PoC mandatory for ALL findings
+  • PoCs MUST use live config from contracts/pooltogether/metadata.json
+  • Owner/privileged attacks are OUT OF SCOPE
   • $25 USDC deposit per submission
+
+Live Config Status:
+  ✓ contracts/pooltogether/metadata.json loaded
+  Privileged addresses: owner, guardian (excluded from attacker role)
+  Financial params: feeRate=0.3%, reserveFactor=20%
 
 Next Steps:
   /list-findings pooltogether bounty

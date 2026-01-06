@@ -19,6 +19,64 @@ Parse `$ARGUMENTS` for "bounty" keyword:
 - Otherwise: Store in audit context
 - Mode affects output directory structure
 
+## CRITICAL: Bounty Mode Config Extraction
+
+**For bounty mode, config extraction is MANDATORY, not optional.**
+
+Bounty submissions have strict requirements that make live config essential:
+1. **Owner/privileged attacks are OUT OF SCOPE** - Must know real privileged addresses to avoid invalid PoCs
+2. **Parameters determine exploitability** - Real fees, caps, thresholds affect whether attacks are profitable
+3. **No forking** - PoCs must be standalone, so config must be hardcoded from real values
+4. **Credibility** - Judges dismiss findings that only work with fictional parameters
+
+### Priority Config Functions for Bounty Mode
+The config-reader MUST attempt these functions on every contract:
+```
+# Access Control (to know who to EXCLUDE from attacker role)
+owner(), admin(), governance(), guardian(), pauseGuardian()
+
+# Financial Parameters (affects attack profitability)
+fee(), feeRate(), protocolFee(), performanceFee()
+reserveFactor(), liquidationIncentive(), closeFactor()
+
+# Limits (affects attack feasibility)
+minDeposit(), maxDeposit(), cap(), borrowCap(), supplyCap()
+collateralFactor(), liquidationThreshold()
+
+# External Dependencies (for realistic mocking)
+oracle(), priceOracle(), comptroller(), underlying()
+```
+
+### Bounty Config Output
+For bounty mode, the metadata.json MUST include a `bountyConfig` summary:
+```json
+{
+  "bountyConfig": {
+    "privilegedAddresses": {
+      "owner": "0x1234...",
+      "admin": "0x5678...",
+      "guardian": "0x9abc..."
+    },
+    "financialParams": {
+      "feeRate": "3000",
+      "feeRateDecoded": "0.3%",
+      "reserveFactor": "200000000000000000",
+      "reserveFactorDecoded": "20%"
+    },
+    "limits": {
+      "borrowCap": "1000000000000000000000000",
+      "borrowCapDecoded": "1,000,000 tokens"
+    },
+    "externalDeps": {
+      "oracle": "0xdef0...",
+      "underlying": "0x1111..."
+    }
+  }
+}
+```
+
+This structured format makes it easy for poc-generator to consume live values.
+
 # Orchestration Flow
 
 ## 1. Resolve Project
