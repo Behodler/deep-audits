@@ -239,6 +239,41 @@ Find the most recent versioned report directory for a project.
 - Useful for viewing previous results
 - Returns: `{ path: "reports/<project>-XX/", version: XX }` or null if none
 
+### create_workspace(friendly_name)
+Create a writable workspace for PoC development.
+- Clones from the same URL as the submodule (shallow clone for speed)
+- Removes remote to prevent accidental pushes
+- Creates `workspace/<project>/` directory
+- Returns: `{ path: "workspace/<project>/", created: true, clonedFrom: "<url>" }`
+
+**Why Workspace?**
+- Source repos in `lib/` are read-only for audit integrity
+- PoCs often need project test infrastructure (harnesses, mocks, fork config)
+- C4 expects PoCs that can be dropped into `test/` directory
+- Workspace allows full project-integrated PoC development
+
+**Algorithm:**
+1. Get submodule URL from `.gitmodules` for the project
+2. If `workspace/<project>/` already exists → return existing path
+3. Run: `git clone --depth 1 <url> workspace/<project>`
+4. Run: `cd workspace/<project> && git remote remove origin`
+5. Return workspace path
+
+**Example:**
+```bash
+# From .gitmodules: lib/2025-12-panoptic → https://github.com/code-423n4/2025-12-panoptic
+# Creates: workspace/panoptic/
+# PoCs go in: workspace/panoptic/test/poc-H-01.t.sol
+```
+
+### get_workspace(friendly_name)
+Check if workspace exists for a project.
+- Returns: `{ exists: true, path: "workspace/<project>/" }` or `{ exists: false }`
+
+### workspace_exists(friendly_name)
+Simple boolean check for workspace existence.
+- Returns: `true` if `workspace/<project>/` exists and is a git repo
+
 ## ERROR HANDLING
 - **Duplicate Name**: Reject if friendly name already exists
 - **Missing Submodule**: Report if lib/ directory doesn't contain expected project

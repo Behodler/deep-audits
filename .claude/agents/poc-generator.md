@@ -119,15 +119,43 @@ If `metadata.json` doesn't exist or lacks needed values:
 - NEVER modify any files in source repos
 - Source repos must remain exactly as cloned from C4
 
-### File Location
-PoC files MUST be saved to the reports directory:
+### File Location - Workspace (Preferred)
+If `workspace/<project>/` exists, write PoCs there:
+```
+workspace/<project>/test/poc-<label>.t.sol
+```
+
+Example for "panoptic" project with workspace:
+```
+workspace/panoptic/test/poc-H-01.t.sol
+```
+
+**Why workspace?**
+- PoCs can use full project infrastructure (harnesses, mocks, fork config)
+- Import paths match what C4 expects (e.g., `import "../src/Contract.sol"`)
+- PoCs are drop-in ready for evaluators
+
+### File Location - Standalone Fallback
+If workspace doesn't exist, use standalone PoCs in reports:
 ```
 reports/<project-name>/pocs/<label>-poc.t.sol
 ```
 
-Example for "brix" project:
+Example for "brix" project without workspace:
 ```
 reports/brix/pocs/H-01-poc.t.sol
+```
+
+### Decision Flow
+```
+Does workspace/<project>/ exist?
+├─ Yes → Write to workspace/<project>/test/poc-<label>.t.sol
+│        Use project imports (../src/*, ./helpers/*, etc.)
+│        Can use project harnesses and mocks
+│
+└─ No  → Write standalone to reports/<project>/pocs/<label>-poc.t.sol
+         Only import forge-std/Test.sol
+         Inline all dependencies
 ```
 
 **NEVER save PoC files to:**
@@ -327,7 +355,8 @@ Before writing any code:
 - Test contract: `{Label}PoCTest` (e.g., `H01PoCTest`)
 - Test function: `test_{Label}_{Description}` (e.g., `test_H01_ReentrancyDrains`)
 - Attacker contract: `{Label}Attacker` (e.g., `H01Attacker`)
-- File: `{label}-poc.t.sol` (e.g., `H-01-poc.t.sol`)
+- File (workspace): `poc-{label}.t.sol` (e.g., `poc-H-01.t.sol`)
+- File (standalone): `{label}-poc.t.sol` (e.g., `H-01-poc.t.sol`)
 
 ### PoC Quality Criteria
 1. **Compiles**: Must pass `forge build`
@@ -341,40 +370,73 @@ Before writing any code:
 
 ## WORKFLOW
 
+### Step 0: Check for Workspace
+```bash
+# Check if workspace exists
+ls workspace/<project>/ 2>/dev/null && echo "Workspace exists" || echo "No workspace"
+```
+
 ### Step 1: Analyze Vulnerability
 ```bash
-# Read target contract
+# Read target contract (from lib/ for reference)
 cat lib/<project>/src/<contract>.sol
 
 # Identify dependencies
 grep "import" lib/<project>/src/<contract>.sol
 ```
 
-### Step 2: Plan Inlining Strategy
+### Step 2: Choose PoC Strategy
+
+**If workspace exists:**
+- Use project imports directly
+- Can leverage test harnesses, mocks, fork infrastructure
+- Write to `workspace/<project>/test/poc-<label>.t.sol`
+
+**If no workspace:**
+- Plan inlining strategy
 - What's the minimal code to reproduce?
 - What can be mocked?
-- What math/helpers are needed?
+- Write standalone to `reports/<project>/pocs/<label>-poc.t.sol`
 
-### Step 3: Generate Standalone PoC
-Write the PoC following the standalone template.
+### Step 3: Generate PoC
+
+**Workspace PoC (preferred):**
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "forge-std/Test.sol";
+import "../src/VulnerableContract.sol";  // Direct project import
+import "./helpers/TestHarness.sol";       // Can use project harnesses
+
+contract H01PoCTest is Test {
+    // Uses real project contracts and infrastructure
+}
+```
+
+**Standalone PoC (fallback):**
+Follow the standalone template with inlined dependencies.
 
 ### Step 4: Save to Correct Location
 ```bash
-# Save to reports directory (NEVER to lib/)
+# If workspace exists:
+workspace/<project>/test/poc-<label>.t.sol
+
+# If no workspace:
 reports/<project-name>/pocs/<label>-poc.t.sol
 ```
 
 ### Step 5: Validate Locally
 ```bash
-# Option 1: Temp directory
+# Workspace PoC:
+cd workspace/<project>
+forge test --match-path test/poc-<label>.t.sol -vvv
+
+# Standalone PoC:
 mkdir -p /tmp/poc-test && cd /tmp/poc-test
 forge init --no-commit
 cp <poc-path> test/
 forge test -vvv
-
-# Option 2: From project directory
-cd lib/<project>
-forge test --match-path ../../reports/<project>/pocs/<label>-poc.t.sol -vv
 ```
 
 ### Step 6: Report Result
@@ -463,12 +525,13 @@ contract Attacker {
 ```
 
 ## CRITICAL RULES
-1. **STANDALONE ONLY** - Only import forge-std/Test.sol, inline everything else
-2. **NEVER write to lib/** - Source repos are strictly read-only
-3. **MUST be in reports/<project>/pocs/** - Never in lib/ or root
-4. **MUST compile** - No syntax errors
-5. **MUST run and PASS** - No runtime failures, tests must pass
-6. **MUST prove** - Clear assertions showing issue
-7. **MUST be realistic** - No magic/impossible setups
-8. **MUST validate locally** - Run forge test before reporting success
-9. **Copy-pasteable** - Evaluator pastes and runs, nothing else needed
+1. **WORKSPACE PREFERRED** - Use `workspace/<project>/test/poc-*.t.sol` if workspace exists
+2. **STANDALONE FALLBACK** - Only import forge-std/Test.sol if no workspace
+3. **NEVER write to lib/** - Source repos are strictly read-only
+4. **CORRECT LOCATION** - Workspace or reports/<project>/pocs/, never lib/ or root
+5. **MUST compile** - No syntax errors
+6. **MUST run and PASS** - No runtime failures, tests must pass
+7. **MUST prove** - Clear assertions showing issue
+8. **MUST be realistic** - No magic/impossible setups
+9. **MUST validate locally** - Run forge test before reporting success
+10. **Drop-in ready** - Evaluator can copy to project test/ and run immediately

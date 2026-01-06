@@ -35,6 +35,38 @@ Invoke **project-manager**: "Create versioned report directory for this audit ru
 - Store the versioned path for use in all subsequent steps
 - **All findings, PoCs, and submissions go under this versioned directory**
 
+## 1.3. Setup Workspace (If Not Exists)
+Invoke **project-manager**: "Check if workspace exists, create if needed"
+- Check if `workspace/<project>/` already exists
+- If not exists: Create workspace via shallow clone from submodule URL
+- Remove remote to prevent accidental pushes
+- **PoCs will be written to `workspace/<project>/test/poc-*.t.sol`**
+
+**Why Workspace?**
+- Source repos in `lib/` are strictly read-only
+- PoCs often need project test infrastructure (harnesses, mocks, fork config)
+- C4 expects PoCs that can be dropped into project's `test/` directory
+- Workspace enables full project-integrated PoC development
+
+```
+Workspace Setup
+───────────────
+Checking workspace... not found
+Cloning from https://github.com/code-423n4/2025-12-panoptic...
+Removing remote (safety measure)...
+Workspace ready: workspace/panoptic/
+
+PoCs will be written to: workspace/panoptic/test/poc-*.t.sol
+```
+
+**If workspace already exists:**
+```
+Workspace Setup
+───────────────
+Workspace exists: workspace/panoptic/
+PoCs will be written to: workspace/panoptic/test/poc-*.t.sol
+```
+
 Present summary and confirm:
 ```
 Full Audit: pooltogether
@@ -43,6 +75,7 @@ Full Audit: pooltogether
 Project: pooltogether
 Submodule: lib/2025-01-pooltogether
 Report Directory: reports/pooltogether-01/
+Workspace: workspace/pooltogether/
 Contracts in scope: 12
 Known issues: 5
 Mode: Regular Audit
@@ -65,6 +98,7 @@ Full Audit: pooltogether (BOUNTY)
 Project: pooltogether
 Submodule: lib/2025-01-pooltogether
 Report Directory: reports/pooltogether-01/
+Workspace: workspace/pooltogether/
 Contracts in scope: 12
 Known issues: 5
 Mode: BOUNTY
@@ -287,7 +321,8 @@ C4 Form Mapping:
 │   Title          → from metadata comment in submission.md                │
 │   Root Cause Link→ from metadata comment in submission.md                │
 │   Details        → paste submission.md content (without metadata)        │
-│   PoC            → paste poc.t.sol content (standalone, ready to run)    │
+│   PoC            → paste from workspace/*/test/poc-*.t.sol               │
+│                    (project-integrated, drop into test/ to run)          │
 └──────────────────────────────────────────────────────────────────────────┘
 
 Files:
@@ -298,10 +333,10 @@ Files:
     ...
     reports/pooltogether-01/audit/submissions/qa-report.md
 
-  PoCs (PoC field - standalone):
-    reports/pooltogether-01/audit/pocs/H-01-poc.t.sol
-    reports/pooltogether-01/audit/pocs/H-02-poc.t.sol
-    reports/pooltogether-01/audit/pocs/M-01-poc.t.sol
+  PoCs (in workspace - drop into project test/):
+    workspace/pooltogether/test/poc-H-01.t.sol
+    workspace/pooltogether/test/poc-H-02.t.sol
+    workspace/pooltogether/test/poc-M-01.t.sol
     ...
 
 Action Items:
@@ -329,7 +364,8 @@ C4 Form Mapping:
 │   Title          → from metadata comment in submission.md                │
 │   Root Cause Link→ from metadata comment in submission.md                │
 │   Details        → paste submission.md content (without metadata)        │
-│   PoC            → paste poc.t.sol content (standalone, ready to run)    │
+│   PoC            → paste from workspace/*/test/poc-*.t.sol               │
+│                    (project-integrated, drop into test/ to run)          │
 └──────────────────────────────────────────────────────────────────────────┘
 
 ⚠️ BOUNTY SUBMISSION REQUIREMENTS:
@@ -344,10 +380,10 @@ Files:
     reports/pooltogether-01/bounty/submissions/H-01-submission.md
     reports/pooltogether-01/bounty/submissions/H-02-submission.md
 
-  PoCs (PoC field - standalone, mandatory):
-    reports/pooltogether-01/bounty/pocs/CRIT-01-poc.t.sol
-    reports/pooltogether-01/bounty/pocs/H-01-poc.t.sol
-    reports/pooltogether-01/bounty/pocs/H-02-poc.t.sol
+  PoCs (in workspace - drop into project test/, mandatory):
+    workspace/pooltogether/test/poc-CRIT-01.t.sol
+    workspace/pooltogether/test/poc-H-01.t.sol
+    workspace/pooltogether/test/poc-H-02.t.sol
 
 Total deposit required: $75 USDC (3 findings × $25)
 
