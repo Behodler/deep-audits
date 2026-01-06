@@ -281,16 +281,28 @@ Submissions Ready:
 
 Output Directory: reports/pooltogether-01/audit/
 
+C4 Form Mapping:
+┌──────────────────────────────────────────────────────────────────────────┐
+│ For each H/M finding, copy content to C4 form fields:                    │
+│   Title          → from metadata comment in submission.md                │
+│   Root Cause Link→ from metadata comment in submission.md                │
+│   Details        → paste submission.md content (without metadata)        │
+│   PoC            → paste poc.t.sol content (standalone, ready to run)    │
+└──────────────────────────────────────────────────────────────────────────┘
+
 Files:
-  reports/pooltogether-01/audit/submissions/H-01-submission.md
-  reports/pooltogether-01/audit/submissions/H-02-submission.md
-  reports/pooltogether-01/audit/submissions/M-01-submission.md
-  reports/pooltogether-01/audit/submissions/M-02-submission.md
-  reports/pooltogether-01/audit/submissions/M-03-submission.md
-  reports/pooltogether-01/audit/submissions/M-04-submission.md
-  reports/pooltogether-01/audit/submissions/M-06-submission.md
-  reports/pooltogether-01/audit/submissions/M-07-submission.md
-  reports/pooltogether-01/audit/submissions/qa-report.md
+  Submissions (Details field):
+    reports/pooltogether-01/audit/submissions/H-01-submission.md
+    reports/pooltogether-01/audit/submissions/H-02-submission.md
+    reports/pooltogether-01/audit/submissions/M-01-submission.md
+    ...
+    reports/pooltogether-01/audit/submissions/qa-report.md
+
+  PoCs (PoC field - standalone):
+    reports/pooltogether-01/audit/pocs/H-01-poc.t.sol
+    reports/pooltogether-01/audit/pocs/H-02-poc.t.sol
+    reports/pooltogether-01/audit/pocs/M-01-poc.t.sol
+    ...
 
 Action Items:
   ⚠ H-03: Manual PoC needed - check reports/pooltogether-01/audit/findings/high/H-03.json
@@ -311,6 +323,15 @@ Submissions Ready:
 
 Output Directory: reports/pooltogether-01/bounty/
 
+C4 Form Mapping:
+┌──────────────────────────────────────────────────────────────────────────┐
+│ For each finding, copy content to C4 bounty form fields:                 │
+│   Title          → from metadata comment in submission.md                │
+│   Root Cause Link→ from metadata comment in submission.md                │
+│   Details        → paste submission.md content (without metadata)        │
+│   PoC            → paste poc.t.sol content (standalone, ready to run)    │
+└──────────────────────────────────────────────────────────────────────────┘
+
 ⚠️ BOUNTY SUBMISSION REQUIREMENTS:
   • $25 USDC deposit per finding to 0xB592d203fd9f55CC4746172A92E35baBA1046a14
   • Submit via bounty form at code4rena.com/bounties
@@ -318,9 +339,15 @@ Output Directory: reports/pooltogether-01/bounty/
   • Results announced in #c4-bounties Discord channel
 
 Files:
-  reports/pooltogether-01/bounty/submissions/CRIT-01-submission.md
-  reports/pooltogether-01/bounty/submissions/H-01-submission.md
-  reports/pooltogether-01/bounty/submissions/H-02-submission.md
+  Submissions (Details field):
+    reports/pooltogether-01/bounty/submissions/CRIT-01-submission.md
+    reports/pooltogether-01/bounty/submissions/H-01-submission.md
+    reports/pooltogether-01/bounty/submissions/H-02-submission.md
+
+  PoCs (PoC field - standalone, mandatory):
+    reports/pooltogether-01/bounty/pocs/CRIT-01-poc.t.sol
+    reports/pooltogether-01/bounty/pocs/H-01-poc.t.sol
+    reports/pooltogether-01/bounty/pocs/H-02-poc.t.sol
 
 Total deposit required: $75 USDC (3 findings × $25)
 

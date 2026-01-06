@@ -1,10 +1,20 @@
 Generate a C4-compliant submission report for a finding
 # Purpose
-Orchestrate creation of a professional, C4-compliant report ready for submission.
+Orchestrate creation of a professional, C4-compliant report ready for submission. The output maps directly to C4's submission form fields.
 
 # Arguments
 - `$ARGUMENTS` format: `<project-name> <finding-label>`
 - Example: `pooltogether H-01`
+
+# C4 Submission Form Fields
+The C4 form has these separate fields that we generate content for:
+
+| Form Field | Generated Content |
+|------------|-------------------|
+| **Title** | `[H-01] Clear vulnerability description` |
+| **Link to root cause** | GitHub URL to vulnerable code |
+| **Details** | Report body (see structure below) |
+| **PoC** | Standalone Foundry test code |
 
 # Orchestration Flow
 
@@ -14,39 +24,41 @@ Invoke **finding-manager**: "Get finding with PoC details"
 - Verify finding exists and has status "ready"
 - If status is "needs-poc": Suggest `/generate-poc` first
 - If status is "draft": Warn that PoC is required for H/M
-- Load full finding details including attached PoC
+- Load full finding details including attached PoC path
 
-## 2. Validate PoC Status
-Invoke **poc-validator**: "Verify PoC still passes"
-- Ensure PoC hasn't been broken by any changes
-- If PoC fails: Report issue and suggest regeneration
-- Get latest test output for report
+## 2. Validate PoC is Standalone
+Invoke **poc-validator**: "Verify PoC is standalone and passes"
+- **CRITICAL**: Check PoC only imports `forge-std/Test.sol`
+- Run isolation test in fresh forge environment
+- Ensure all tests pass
+- If PoC has external imports: FAIL and suggest regeneration with `/generate-poc`
+- If PoC fails tests: Report issue and suggest fix
 
-## 3. Generate Report
+## 3. Generate Report (Details Field)
 Invoke **report-writer**: "Generate C4-compliant report"
-- Create full report with sections:
-  - Title: `[H-01] Clear vulnerability description`
-  - Severity: High/Medium
-  - Location: File#Line with link
-  - Summary: 1-2 sentence overview
-  - Vulnerability Details: Technical explanation with code
-  - Impact: Concrete consequences
-  - Proof of Concept: PoC in diff format
-  - Recommended Mitigation: Practical fix
+- Create report body with EXACTLY TWO main sections:
+  - `## Finding description and impact`
+  - `## Recommended mitigation steps`
+- **NO** top-level `#` headings (title is separate form field)
+- **NO** inline PoC code (PoC is separate form field)
+- All subheadings must be `###` or lower
+- Include metadata comment at top with Title and Root Cause Link
 
-## 4. Validate Report
+## 4. Validate Report Format
 Invoke **report-validator**: "Check report meets C4 standards"
-- Verify all required sections present
+- Verify EXACTLY two `##` headings present
+- Check NO `#` headings in body
+- Verify NO inline PoC code blocks
 - Check professional quality (no LLM patterns)
 - Validate severity justification
-- Confirm PoC is included and formatted correctly
-- Flag any issues for correction
+- Confirm metadata comment present
 
 ## 5. Handle Validation Result
 **If validation passes**:
 - Save report to `reports/<project>/submissions/<label>-submission.md`
+- Verify PoC exists at `reports/<project>/pocs/<label>-poc.t.sol`
 - Invoke **finding-manager**: "Update finding status to submitted"
-- Present report for final review
+- Present summary for final review
 
 **If validation fails**:
 - Present specific issues found
@@ -59,47 +71,89 @@ Invoke **report-validator**: "Check report meets C4 standards"
 ```
 Report Generated: pooltogether H-01
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Status: VALIDATED
-File: reports/pooltogether/submissions/H-01-submission.md
+
+C4 Form Fields Ready:
+┌─────────────────────────────────────────────────────────────┐
+│ Title: [H-01] Reentrancy in claimPrize drains prize pool    │
+├─────────────────────────────────────────────────────────────┤
+│ Root Cause Link:                                            │
+│ https://github.com/code-423n4/.../PrizePool.sol#L240-L252   │
+├─────────────────────────────────────────────────────────────┤
+│ Details: reports/pooltogether/submissions/H-01-submission.md│
+├─────────────────────────────────────────────────────────────┤
+│ PoC: reports/pooltogether/pocs/H-01-poc.t.sol               │
+└─────────────────────────────────────────────────────────────┘
 
 Quality Checks:
-  ✓ All sections present
+  ✓ Details format correct (## headings only)
+  ✓ No inline PoC in details
+  ✓ PoC is standalone (only forge-std import)
+  ✓ PoC tests pass
   ✓ Professional quality
-  ✓ Severity justified
-  ✓ PoC included and runnable
 
 Finding status updated: ready → submitted
 
-Review the report and submit to C4 when ready.
+Copy content from each file into corresponding C4 form field.
 ```
 
 **On Validation Issues**:
 ```
 Report Validation Issues: pooltogether H-01
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 Issues Found:
+  ✗ PoC has external imports (not standalone)
+  ✗ Details contains inline PoC code
   ⚠ Impact section lacks specific quantities
-  ⚠ Mitigation could be more specific
 
-Suggestions:
+Required Actions:
+  - Run `/generate-poc pooltogether H-01` to create standalone PoC
+  - Remove PoC code block from details
   - Add ETH amounts to impact statement
-  - Provide code example for mitigation
 
-Report saved as draft. Fix issues and regenerate.
+Report NOT saved. Fix issues and regenerate.
+```
+
+# Details Field Structure (CRITICAL)
+The Details body MUST have exactly this structure:
+
+```markdown
+<!--
+C4 Submission Metadata
+Title: [H-01] Vulnerability title here
+Root Cause Link: https://github.com/code-423n4/.../Contract.sol#L100-L150
+PoC File: H-01-poc.t.sol
+-->
+
+## Finding description and impact
+
+### Summary
+Brief 1-2 sentence description.
+
+### Vulnerability details
+Technical explanation with code snippets showing the vulnerable pattern.
+
+### Impact
+Concrete consequences with quantified amounts where possible.
+
+## Recommended mitigation steps
+
+Practical fix with code example.
 ```
 
 # Agent Delegation
 This command orchestrates report creation without writing content directly:
 - **finding-manager**: Get finding details, update status
-- **poc-validator**: Verify PoC status
+- **poc-validator**: Verify PoC is standalone and passes
 - **report-writer**: Generate report content
 - **report-validator**: Quality assurance
 
 # Error Handling
 - **Finding not found**: List available findings
 - **No PoC**: Suggest `/generate-poc` first
-- **PoC broken**: Suggest regeneration
-- **Quality issues**: Report specific problems
+- **PoC not standalone**: Require regeneration with standalone template
+- **PoC tests fail**: Suggest fix and regeneration
+- **Format issues**: Report specific problems with fix suggestions
 
 # Examples
 ```
@@ -111,8 +165,10 @@ This command orchestrates report creation without writing content directly:
 ```
 
 # Critical Rules
-1. **PoC required** for High/Medium findings
-2. **Professional quality** - Match audit standards
-3. **Accurate claims** - Don't overstate impact
-4. **Complete sections** - All required sections filled
-5. **Runnable PoC** - Must work with project test suite
+1. **PoC must be standalone** - Only forge-std import allowed
+2. **PoC tests must pass** - No broken tests
+3. **Details has two sections only** - `## Finding description and impact` and `## Recommended mitigation steps`
+4. **No # headings** - Title goes in form field, not details
+5. **No inline PoC** - PoC is separate form field
+6. **Professional quality** - Match audit standards
+7. **Accurate claims** - Don't overstate impact
