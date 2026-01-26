@@ -20,7 +20,7 @@ The attack sequence proceeds as follows:
 1. Attacker monitors the mempool for pending `collectReward()` transactions from the yield accumulator
 2. Attacker front-runs with a `stake()` call, becoming a significant portion of `totalStaked`
 3. The `collectReward()` transaction executes, updating `rewardPerSecond` based on the new reward balance
-4. The new `rewardPerSecond` calculation now includes the attacker's stake in the denominator
+4. The attacker's stake is now included in `totalStaked`, entitling them to a proportional share of the reward rate
 5. Attacker waits a minimal period, then claims rewards and withdraws
 6. Attacker captures rewards disproportionate to their actual staking commitment
 
