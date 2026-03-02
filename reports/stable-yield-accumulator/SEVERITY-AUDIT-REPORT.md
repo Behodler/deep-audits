@@ -1,237 +1,285 @@
-# Severity Audit Report: stable-yield-accumulator
+# Severity Audit Report: stable-yield-accumulator (Iteration 7)
 
-**Audit Date:** 2025-01-29
-**Auditor Role:** Severity Auditor (Independent Assessment)
+**Audit Date:** 2026-02-17
+**Auditor Role:** Severity Auditor (Independent Second Opinion)
 **Project:** StableYieldAccumulator
+**Audit Type:** Regular C4 Audit (not bounty)
+**Prior Audits:** 6 iterations completed
 
 ---
 
 ## Executive Summary
 
-This report provides an independent severity assessment for three findings in the StableYieldAccumulator audit. The assessment follows strict C4 severity criteria to identify potential overstatement and ensure accuracy.
+This report provides an independent severity assessment for five findings from audit iteration 7 of the StableYieldAccumulator project. The assessment follows strict C4 severity criteria to detect overstatement and ensure accuracy.
 
 **Key Conclusions:**
-- **H-01**: DOWNGRADE to Medium - Requires admin misconfiguration, not a valid High attack path
-- **M-02**: DOWNGRADE to Low/QA - Reliance on external contract bug is out of scope
-- **M-03**: KEEP as Medium - Availability impact is correctly classified
+- **Finding 1 (sqrtPriceX96 overflow)**: DOWNGRADE from Medium to **Low/QA** -- overflow requires ~18.4 quintillion x price deviation from stablecoin parity; unreachable in practice
+- **Finding 2 (sUSDS_USDC_pool fallback)**: DOWNGRADE from Medium to **Low/QA** -- admin-mistake pattern already rejected in prior audit v04-M-03; precedent is binding
+- **Finding 3 (CEI violation in claim)**: DOWNGRADE from Medium to **Low/QA** -- nonReentrant guard prevents exploitation; external strategy behavior is OOS per known issue #7
+- **Finding 4 (reward token caching inconsistency)**: KEEP as **Low/QA** -- correctly classified; no security impact
+- **Finding 5 (misleading revert message)**: KEEP as **Low/QA** -- correctly classified; cosmetic issue only
+
+**Overstatement detected in 3 of 5 findings.** Findings 1, 2, and 3 are all claimed as Medium but do not meet C4 Medium criteria.
 
 ---
 
-## Finding 1: H-01 - Zero Exchange Rate Bypass Allows Unconfigured Token Exploitation
+## Finding 1: sqrtPriceX96 squared overflows uint256 before reaching FullMath.mulDiv
 
-### Claimed Severity: High
-
-### Independent Assessment: **MEDIUM**
-
-### Agreement: **DISAGREE - Recommend Downgrade**
+### Claimed Severity: Medium
+### Independent Assessment: **Low/QA**
+### Agreement: **DISAGREE -- Recommend Downgrade**
 
 ### Analysis
 
-**Attack Path Review:**
-The finding claims that if admin forgets to call `setTokenConfig()` after adding a strategy via `addYieldStrategy()`, an attacker can exploit the unconfigured token for near-zero cost.
-
-**Code Analysis:**
-From `_normalizeAmount()` (lines 500-524):
+**Code Under Review** (StableYieldAccumulator.sol lines 754-770):
 ```solidity
-function _normalizeAmount(uint256 amount, address token) internal view returns (uint256) {
-    uint8 decimals = tokenConfigs[token].decimals;
-    uint256 exchangeRate = tokenConfigs[token].normalizedExchangeRate;
+priceInSUSDS = FullMath.mulDiv(
+    uint256(sqrtPriceX96) * uint256(sqrtPriceX96),  // <-- checked arithmetic
+    1e18,
+    1 << 192
+);
+```
 
-    // If no config set, assume 18 decimals and 1:1 rate
-    if (decimals == 0 && exchangeRate == 0) {
-        return amount;
+**The Bug Is Real:** The finding correctly identifies that `uint256(sqrtPriceX96) * uint256(sqrtPriceX96)` uses Solidity 0.8 checked arithmetic, which will revert on overflow before `FullMath.mulDiv` (which handles 512-bit intermediates) is invoked. Since sqrtPriceX96 is uint160, values above 2^128 will produce a product exceeding 2^256, causing overflow.
+
+**The Conditions Are Unreachable:**
+
+The critical question is: can sqrtPriceX96 ever exceed 2^128 for a phUSD/sUSDS pool?
+
+Mathematical analysis:
+- At 1:1 stablecoin parity: sqrtPriceX96 = 2^96 (97 bits)
+- Overflow threshold: sqrtPriceX96 > 2^128
+- Required price deviation: (2^128 / 2^96)^2 = 2^64 = **18,446,744,073,709,551,616x**
+
+This means one stablecoin would need to be worth ~18.4 quintillion of the other. For context:
+- The total M2 money supply is ~$21 trillion
+- 2^64 exceeds the total value of all assets on Earth
+- Even a complete collapse of one stablecoin to near-zero would produce a finite price ratio (pool would be drained before reaching this level)
+- Uniswap V4 pools with finite liquidity would be fully drained long before this price level
+
+**Uniswap V4 Tick Space Argument Is Misleading:** The finding notes MAX_SQRT_PRICE is approximately 2^160, which is within the valid tick space. While technically true, this conflates "valid in the mathematical model" with "reachable in practice." A pool with any finite liquidity would be completely drained billions of times over before reaching such prices. No attacker can push the price to 2^64x deviation -- the liquidity simply does not exist.
+
+**C4 Medium Requirements Check:**
+
+| Requirement | Met? | Notes |
+|------------|------|-------|
+| Protocol function/availability impacted | Theoretical only | Cannot be reached in practice |
+| Value leak with stated assumptions | No | No value leak |
+| External requirements documented | Yes, but... | Requirements are impossible in practice |
+
+**C4 Severity Criteria Application:**
+- Medium requires "protocol function/availability impacted" -- the function is NOT impacted at any realistic price
+- The finding itself acknowledges this is "an astronomical deviation for stablecoins"
+- Findings that require conditions that are practically impossible are QA/informational at best
+- This is analogous to "gas griefing with 2^256 iterations" -- mathematically valid, practically meaningless
+
+### Severity Matrix Application
+- **Likelihood**: Effectively zero (requires price deviation exceeding global GDP)
+- **Impact**: DoS of claim() (if it could happen)
+- **Combined**: Low/QA
+
+### Confidence: **High**
+
+### Disagreement Reason
+The overflow condition requires a price deviation of approximately 18.4 quintillion x from stablecoin parity. This is not "unlikely" -- it is physically impossible given finite liquidity in any real Uniswap pool. Medium severity requires that protocol function or availability is actually impacted, not that a mathematical edge case exists in an unreachable region of the input space. This is a code quality observation, not a security vulnerability.
+
+### Submission Recommendation
+**Not worth submitting as Medium.** Could be included in a QA report as a code quality note: "sqrtPriceX96 squaring should use FullMath.mulDiv for defensive correctness, even though the overflow condition is unreachable for stablecoin pairs." The fix is trivially correct and good practice, but the severity does not reach Medium.
+
+---
+
+## Finding 2: Hardcoded sUSDS_USDC_pool fallback creates unsettled deltas when reward token is not USDC
+
+### Claimed Severity: Medium (with WARN -- borderline notation)
+### Independent Assessment: **Low/QA**
+### Agreement: **DISAGREE -- Recommend Downgrade**
+
+### Analysis
+
+**Code Under Review** (ClaimArbitrage.sol lines 258-282, 394-395, 422-423):
+The `sUSDS_USDC_pool` is used as a fallback in both Step 6 and `_settleResidualDelta()`. If the SYA reward token changes from USDC to something else, and the owner does not update `sUSDS_USDC_pool`, swapping through this pool produces a USDC delta rather than the new reward token's delta, causing unsettled deltas and PoolManager revert.
+
+**The Code Explicitly Documents This As Admin Responsibility:**
+
+Lines 366-370 of ClaimArbitrage.sol:
+```
+Note on sUSDS_USDC_pool: This pool is genuinely an sUSDS/USDC pool used for slippage
+coverage from the pump/unwind cycle. It is not renamed to reference the dynamic reward
+token because it handles a specific known pair (sUSDS<->USDC). If the reward token
+changes from USDC, the owner must update this pool accordingly.
+```
+
+**Prior Audit Precedent Is Dispositive:**
+
+The finding itself acknowledges that v04-M-03 was a structurally identical issue (admin forgets second configuration step after reward token change) and was **downgraded to Low/QA**. The reasoning: "requires two-step owner configuration where owner forgets second step = admin mistake category."
+
+This finding describes the exact same pattern:
+1. Admin changes reward token (step 1)
+2. Admin must also update sUSDS_USDC_pool (step 2)
+3. If admin forgets step 2, DoS occurs
+
+**C4 "Admin Mistake" Doctrine:**
+
+Per CLAUDE.md, "Reckless admin mistakes" are listed as known invalid findings. While there is nuance about whether a two-step configuration requirement constitutes "reckless," the prior audit already adjudicated this exact question and found it to be QA-level.
+
+**C4 Medium Requirements Check:**
+
+| Requirement | Met? | Notes |
+|------------|------|-------|
+| Protocol function/availability impacted | Only via admin error | Not an independent vulnerability |
+| Value leak with stated assumptions | No | No value leak -- pure DoS requiring admin mistake |
+| External requirements documented | Yes | Explicitly documented in code comments |
+
+**Key Distinction:** The code does not silently fail or produce incorrect results. It explicitly reverts (PoolManager enforces delta settlement), which is a safety mechanism working correctly. The owner is warned in documentation. This is an operational procedure, not a security vulnerability.
+
+### Severity Matrix Application
+- **Likelihood**: Low (requires admin to change reward token AND forget pool update; documented in code)
+- **Impact**: Medium (DoS of execute() until admin updates pool)
+- **Combined**: Low/QA
+
+### Confidence: **High**
+
+### Disagreement Reason
+This is a direct repeat of the pattern from v04-M-03, which was downgraded to QA. The same reasoning applies: two-step admin configuration where forgetting the second step causes revert is an admin-mistake finding, not a Medium. The code explicitly documents the requirement. Submitting this as Medium after v04-M-03 was downgraded would be inconsistent and risks credibility.
+
+### Submission Recommendation
+**Not worth submitting as Medium.** Include in QA report if desired. The fact that the initial classification already carried a "WARN -- borderline" notation suggests the classifier itself was uncertain, and the prior audit precedent resolves the ambiguity decisively toward QA.
+
+---
+
+## Finding 3: claim() distributes yield tokens to claimer before collecting payment (CEI violation)
+
+### Claimed Severity: Medium
+### Independent Assessment: **Low/QA**
+### Agreement: **DISAGREE -- Recommend Downgrade**
+
+### Analysis
+
+**Code Under Review** (StableYieldAccumulator.sol lines 583-614):
+```solidity
+function claim() external override whenNotPaused nonReentrant {
+    // ...
+    for (uint256 i = 0; i < yieldStrategies.length; i++) {
+        // ...
+        if (yield > 0) {
+            IYieldStrategy(strategy).withdrawFrom(token, minterAddress, yield, msg.sender);  // line 594 -- sends tokens
+            // ...
+        }
     }
     // ...
+    IERC20(rewardToken).safeTransferFrom(msg.sender, address(this), actualPayment);  // line 611 -- collects payment
 }
 ```
 
-The code has a **default fallback**: if no config is set (both decimals and exchangeRate are 0), it assumes 18 decimals and 1:1 rate. This is NOT a zero exchange rate - it is a reasonable default for 18-decimal tokens.
+**The CEI Violation Is Real But Unexploitable:**
 
-**Attack Path Validity:**
-1. The attack ONLY works if a **6-decimal token** (like USDC) is added without config
-2. In this case, 1,000,000 USDC (1 USDC) would be treated as 1,000,000 (1e18 USD)
-3. This is a decimal scaling bug, NOT a zero exchange rate bug
-4. The attack requires: Admin adds strategy + Admin forgets to configure token
+Three independent mitigations prevent exploitation:
 
-**C4 High Severity Requirements Check:**
-| Requirement | Met? | Notes |
-|------------|------|-------|
-| Assets can be stolen/lost/compromised | Partial | Only if admin makes specific mistake |
-| Direct attack path | No | Requires admin misconfiguration |
-| Valid indirect path | Partial | Depends on admin error |
-| No hypotheticals | **No** | "Admin forgets" is hypothetical |
-| Concrete, executable exploit | No | Cannot be executed without admin mistake |
+1. **nonReentrant modifier**: The `claim()` function has `nonReentrant` (confirmed at line 566). Any reentrant call during `withdrawFrom()` would revert. This completely blocks the classic reentrancy attack vector.
 
-**Critical Observation:**
-Per C4 criteria from CLAUDE.md: High severity requires attack path "without hypotheticals." The scenario "admin forgets to call setTokenConfig()" is a hypothetical that requires admin mistake.
+2. **State is pre-calculated**: The payment amount (`claimerPayment`) is calculated from `totalNormalizedYield`, which is computed from `_getYieldForStrategy()` calls that read `totalBalanceOf()` and `principalOf()`. These values are determined by the yield strategy's internal accounting, not by any state that the claimer can manipulate during the callback window.
 
-**Known Invalid Finding Pattern:**
-From CLAUDE.md: "Reckless admin mistakes" are listed as known invalid findings. While this is not "reckless," it still requires admin operational error.
+3. **External yield strategy behavior is OOS**: The finding acknowledges "External yield strategy behavior is OOS per known issue #7." If the yield strategy itself has malicious callbacks, that is the yield strategy's vulnerability, not StableYieldAccumulator's.
 
-**Correct Classification:**
-This is a **Medium** finding because:
-- Assets are not at direct risk
-- Protocol function could be impacted with stated assumptions (admin misconfiguration)
-- It is a value leak with external requirements (admin error)
+**Attack Path Validation:**
 
-### Severity Matrix Application
-- **Likelihood**: Low (requires admin to add strategy without configuring token)
-- **Impact**: High (if triggered, significant value extraction)
-- **Combined**: Medium
+For this finding to be exploitable:
+- The yield strategy's `withdrawFrom()` would need to make a callback to the attacker
+- The attacker would need to reenter `claim()` during that callback -- blocked by `nonReentrant`
+- OR the attacker would need to manipulate state that affects payment calculation during the callback window -- the state (yield balances) is already read and the payment already calculated
 
-### Confidence: **High**
-
-### Disagreement Reason
-The finding requires external conditions (admin misconfiguration) that disqualify it from High severity per C4 criteria. "Admin forgets" is a hypothetical scenario. Per C4: "High - Assets can be stolen/lost/compromised directly or via valid attack path **without hypotheticals**."
-
-### Recommendation
-**Downgrade to Medium.** The finding is valid but misclassified. It should be framed as:
-- "Missing token configuration validation in addYieldStrategy()"
-- Impact: If admin fails to configure token, wrong exchange rate may be applied
-- Mitigation: Add check in `claim()` to revert if token has no explicit config
-
----
-
-## Finding 2: M-02 - collectReward Call Does Not Verify Token Transfer
-
-### Claimed Severity: Medium
-
-### Independent Assessment: **Low/QA**
-
-### Agreement: **DISAGREE - Recommend Downgrade**
-
-### Analysis
-
-**Attack Path Review:**
-The finding claims that if Phlimbo's `collectReward()` doesn't properly pull tokens via `transferFrom()`, the tokens would get stuck in the accumulator.
-
-**Code Analysis:**
-From `claim()` (lines 456-457):
-```solidity
-IERC20(rewardToken).safeTransferFrom(msg.sender, address(this), actualPayment);
-IPhlimbo(phlimbo).collectReward(actualPayment);
-```
-
-The accumulator:
-1. Transfers tokens FROM claimer TO itself (verified with SafeERC20)
-2. Calls `phlimbo.collectReward(amount)` - expects Phlimbo to pull tokens
-
-**Critical Issue with Finding:**
-This finding assumes a **bug in the Phlimbo contract** (external dependency). Per the IPhlimbo interface:
-```solidity
-/**
- * @notice Collects rewards from yield-accumulator and updates EMA-smoothed rate
- * @dev Can only be called by the yield accumulator contract
- * @param amount Amount of reward tokens to collect
- */
-function collectReward(uint256 amount) external;
-```
-
-The interface clearly documents that Phlimbo should collect the rewards. If Phlimbo fails to implement this correctly, that is a **bug in Phlimbo, not in StableYieldAccumulator**.
-
-**C4 Scope Analysis:**
-Per CLAUDE.md: "Issues in parent/forked contracts where root cause is OOS" are out of scope. The root cause here would be Phlimbo's implementation, not the accumulator's code.
-
-**Alternative Assessment:**
-Even if we consider this an integration concern:
-- The `approvePhlimbo()` function exists for the owner to pre-approve Phlimbo
-- If approval is set, Phlimbo can successfully pull tokens
-- The issue is operational (owner must call `approvePhlimbo()` before claims work)
+The finding's own economic scanner noted: "Not practically exploitable given nonReentrant and the fact that payment is calculated from already-accumulated state."
 
 **C4 Medium Requirements Check:**
+
 | Requirement | Met? | Notes |
 |------------|------|-------|
-| Protocol function/availability impacted | No | Relies on external contract bug |
-| Value leak with stated assumptions | No | Requires bug in external contract |
-| External requirements documented | N/A | Not applicable - root cause is OOS |
+| Protocol function/availability impacted | No | Function works correctly |
+| Value leak with stated assumptions | No | No demonstrable value leak |
+| Assets at risk | No | nonReentrant prevents exploitation |
+
+**Classification:**
+This is a code quality / best practice observation. The CEI pattern should be followed as a matter of defensive programming, but the violation does not create an exploitable vulnerability given the existing protections. This is textbook QA -- a spec deviation with no security impact.
+
+### Severity Matrix Application
+- **Likelihood**: None (blocked by nonReentrant + pre-calculated state)
+- **Impact**: None (no demonstrated exploit)
+- **Combined**: Low/QA
 
 ### Confidence: **High**
 
 ### Disagreement Reason
-The finding's root cause is the assumption that Phlimbo may not properly implement `collectReward()`. This is:
-1. Speculation about an external contract's implementation
-2. Out of scope per C4 rules (root cause in external contract)
-3. Not a vulnerability in the audited contract itself
+A CEI violation that is fully mitigated by nonReentrant and pre-calculated state is a code quality finding, not a Medium. C4 Medium requires actual protocol impact or value leak, not theoretical cross-contract callback risk in a reentrancy-guarded function where the external contract's behavior is explicitly out of scope.
 
-### Recommendation
-**Downgrade to Low/QA** or mark as Out of Scope. If kept, reframe as:
-- "Recommendation: Add return value check or event verification for Phlimbo integration"
-- Classification: QA/Informational
+### Submission Recommendation
+**Not worth submitting as Medium.** Include in QA report as a best-practice recommendation to reorder operations for defense-in-depth. This is a valid code improvement suggestion but does not meet the C4 threshold for Medium severity.
 
 ---
 
-## Finding 3: M-03 - All-or-Nothing Claim Design Creates Griefing Vector
+## Finding 4: Inconsistent reward token caching between unlockCallback and _settleResidualDelta
 
-### Claimed Severity: Medium
-
-### Independent Assessment: **MEDIUM**
-
+### Claimed Severity: Low
+### Independent Assessment: **Low/QA**
 ### Agreement: **AGREE**
 
 ### Analysis
 
-**Attack Path Review:**
-The finding states that if a single token is paused (via `pauseToken()`), the entire `claim()` function reverts, blocking claims from all strategies including healthy ones.
+**Code Under Review:**
+- Line 141: `address rewardToken_ = sya.rewardToken();` (cached at start of unlockCallback)
+- Line 381: `address rewardToken_ = sya.rewardToken();` (separate call in _settleResidualDelta)
 
-**Code Analysis:**
-From `claim()` (lines 429-446):
-```solidity
-for (uint256 i = 0; i < yieldStrategies.length; i++) {
-    address strategy = yieldStrategies[i];
-    address token = strategyTokens[strategy];
-    if (token == address(0)) continue;
+**Assessment:**
+The finding correctly identifies an inconsistency. However:
+- `rewardToken` is only changeable by the SYA owner
+- Both calls occur within the same transaction (same block), so the value cannot change between them
+- Even if it could change (which it cannot within a single tx), the worst case is a failed swap, not a value leak
+- The extra STATICCALL is a minor gas inefficiency
 
-    if (tokenConfigs[token].paused) revert TokenIsPaused();  // <-- Reverts for ANY paused token
-
-    uint256 yield = _getYieldForStrategy(strategy, token);
-    if (yield > 0) {
-        // ... withdraw yield
-    }
-}
-```
-
-**Attack Path Validation:**
-1. Owner pauses Token A due to legitimate concern (e.g., USDC blacklist)
-2. Strategy B with healthy Token B has accumulated yield
-3. ANY claim attempt reverts because Token A is in the loop
-4. All yield accumulates but cannot be claimed
-
-This is NOT griefing by an attacker - it's a design flaw in pause mechanism.
-
-**C4 Medium Requirements Check:**
-| Requirement | Met? | Notes |
-|------------|------|-------|
-| Protocol function/availability impacted | **Yes** | Claim function becomes unavailable |
-| Value leak with stated assumptions | Partial | Yield accumulates but is locked |
-| Assets not at direct risk | **Yes** | Funds are not stolen, just temporarily inaccessible |
-
-**Key Distinction:**
-- This is NOT "admin mistake" - the owner may have legitimate reason to pause one token
-- The design flaw is that pausing ONE token blocks ALL claims
-- This is an architectural issue, not an operational error
-
-**Likelihood Assessment:**
-- Moderate: Token pausing is a documented feature for "black swan events"
-- Stablecoin depegs/issues happen periodically (UST, USDC temporary depeg, etc.)
-
-**Impact Assessment:**
-- Protocol availability impacted (claim function blocked)
-- No direct fund loss (yield still accumulates, can be claimed after unpause)
-- Temporary denial of service
+This is a code quality observation about consistency and gas efficiency. It does not meet any C4 severity threshold above Low/QA.
 
 ### Confidence: **High**
 
-### Agreement Reason
-This correctly fits Medium criteria:
-- Protocol function (claim) is impacted
-- Availability is affected
-- No direct asset theft
-- Real scenario (token pausing for depegs is expected use case)
+### Submission Recommendation
+**Include in QA report if submitting one.** Correctly classified as Low. The fix is trivial (pass the cached value as a parameter to `_settleResidualDelta`).
 
-### Notes
-The finding is correctly classified. The recommendation should include:
-- Skip paused tokens instead of reverting
-- Or provide selective claim function per strategy
+---
+
+## Finding 5: Step 4 reverts with misleading SwapAmountCannotBeZero if pump swap produces zero output
+
+### Claimed Severity: Low
+### Independent Assessment: **Low/QA**
+### Agreement: **AGREE**
+
+### Analysis
+
+**Code Under Review** (ClaimArbitrage.sol lines 192-202):
+```solidity
+uint256 phUSD_toSell = _absDelta(pumpDelta, token0IsPhUSD);
+
+poolManager.swap(
+    phUSD_sUSDS_pool,
+    SwapParams({
+        zeroForOne: !sellingToken0,
+        amountSpecified: -int256(phUSD_toSell),  // reverts with misleading error if phUSD_toSell == 0
+        sqrtPriceLimitX96: p.unwindPriceLimit
+    }),
+    ""
+);
+```
+
+**Assessment:**
+If the pump swap in Step 1 somehow produces zero phUSD output (which would indicate the pump parameters are miscalibrated or the pool has no liquidity), the unwind swap would attempt `amountSpecified: 0`, producing a confusing PoolManager error rather than a descriptive custom error.
+
+This is purely a developer/integrator experience issue:
+- No security impact
+- No value loss
+- MEV bots will debug via traces regardless of error messages
+- The scenario itself (zero pump output) means the arbitrage is non-viable anyway
+
+### Confidence: **High**
+
+### Submission Recommendation
+**Include in QA report if submitting one.** Correctly classified as Low. Minor improvement: add `if (phUSD_toSell == 0) revert PumpProducedZeroOutput();` before the unwind swap.
 
 ---
 
@@ -239,9 +287,27 @@ The finding is correctly classified. The recommendation should include:
 
 | Finding | Claimed | Assessed | Agreement | Confidence | Key Reason |
 |---------|---------|----------|-----------|------------|------------|
-| H-01 | High | **Medium** | DISAGREE | High | Requires admin misconfiguration - hypothetical attack path |
-| M-02 | Medium | **Low/QA** | DISAGREE | High | Root cause is external contract (Phlimbo) - OOS |
-| M-03 | Medium | Medium | AGREE | High | Availability impact correctly classified |
+| F-01 (sqrtPriceX96 overflow) | Medium | **Low/QA** | DISAGREE | High | Overflow requires ~2^64x price deviation; physically unreachable for stablecoins |
+| F-02 (sUSDS_USDC_pool fallback) | Medium | **Low/QA** | DISAGREE | High | Same admin-mistake pattern as v04-M-03 which was downgraded; precedent is binding |
+| F-03 (CEI violation in claim) | Medium | **Low/QA** | DISAGREE | High | nonReentrant prevents exploitation; pre-calculated state; external strategy OOS |
+| F-04 (reward token caching) | Low | Low/QA | AGREE | High | Correctly classified; no security impact |
+| F-05 (misleading revert) | Low | Low/QA | AGREE | High | Correctly classified; cosmetic issue |
+
+---
+
+## Overall Assessment
+
+**Overstatement Rate: 3 of 5 findings (60%)**
+
+All three Medium-claimed findings fail to meet C4 Medium criteria:
+
+1. **Finding 1** relies on conditions that are mathematically valid but physically impossible in any real Uniswap pool with finite liquidity. The finding acknowledges the deviation is "astronomical" but still claims Medium.
+
+2. **Finding 2** repeats a pattern explicitly downgraded in a prior audit iteration. The "WARN -- borderline" tag from the initial classifier was a correct signal that this does not meet Medium threshold.
+
+3. **Finding 3** identifies a real CEI violation but one that is fully mitigated by existing protections (nonReentrant + pre-calculated state). Per C4 criteria, a vulnerability that cannot be exploited due to existing mitigations is QA, not Medium.
+
+**Recommendation:** None of the five findings justify individual submission as High or Medium in a C4 regular audit. All five are appropriate for inclusion in a QA report. Given this is iteration 7 of the audit, the decreasing severity of remaining findings is expected and indicates thorough prior coverage.
 
 ---
 
@@ -250,11 +316,13 @@ The finding is correctly classified. The recommendation should include:
 **Severity Auditor Assessment Complete**
 
 This independent review identified:
-- 1 overstatement (H-01 should be Medium)
-- 1 out-of-scope/speculative finding (M-02 should be Low/QA)
-- 1 correctly classified finding (M-03)
+- 3 overstated findings (all claimed Medium, assessed as Low/QA)
+- 2 correctly classified findings (both Low/QA)
+- 0 understated findings
 
-The audit follows C4 severity criteria strictly, with particular attention to:
-- Attack path validity (no hypotheticals for High)
-- Scope boundaries (root cause must be in audited code)
-- Impact vs. likelihood matrix
+Assessment methodology:
+- Code verification against all five claimed locations
+- Mathematical validation of overflow thresholds (Finding 1)
+- Prior audit precedent review (Finding 2)
+- Mitigation effectiveness analysis (Finding 3)
+- Strict application of C4 severity criteria throughout

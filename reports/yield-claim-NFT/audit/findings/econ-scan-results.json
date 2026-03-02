@@ -1,0 +1,183 @@
+{
+  "project": "yield-claim-NFT",
+  "scanTimestamp": "2026-02-27T00:00:00Z",
+  "scanType": "economic",
+  "contractsScanned": 6,
+  "findings": [
+    {
+      "id": "ECON-001",
+      "title": "Dispatcher dispatch() has no access control -- anyone can drain tokens from NFTMinter",
+      "type": "missing-access-control",
+      "severity": "high",
+      "description": "The dispatch() function on all dispatcher contracts (ATokenDispatcher base, Burner, Gather, BalancerPooler) is external with no caller restriction. It only has a whenNotPaused modifier. The first parameter 'minter' is caller-supplied and used as the address to pull tokens from via transferFrom(). During registerDispatcher(), NFTMinter grants type(uint256).max approval to each dispatcher for the dispatcher's prime token. This means any external caller can invoke dispatch(nftMinterAddress, amount) on any registered dispatcher to force-pull tokens from the NFTMinter contract. This is especially damaging when an Accumulator dispatcher is used alongside a Burner or Gather dispatcher for the same prime token: tokens that are meant to accumulate in the NFTMinter (per the Accumulator's design intent of holding tokens for later consumption by BalancerPooler) can be force-burned via the Burner, or force-forwarded to the Gather recipient, by any external account at any time.",
+      "impact": "An attacker can drain all ERC20 token balances held by the NFTMinter contract. For tokens accumulated via the Accumulator dispatcher (designed to hold tokens for later BalancerPooler consumption), an attacker can: (1) call Burner.dispatch(nftMinterAddress, amount) to irreversibly burn accumulated tokens, (2) call Gather.dispatch(nftMinterAddress, amount) to redirect accumulated tokens to the Gather recipient, or (3) call BalancerPooler.dispatch(nftMinterAddress, amount) to force-donate accumulated tokens to the Balancer pool at potentially unfavorable timing. Even with a single dispatcher type, an attacker can front-run legitimate protocol operations by calling dispatch() before the protocol intends to use the accumulated tokens.",
+      "economicImpact": "Complete loss of all ERC20 tokens held by the NFTMinter contract. The Accumulator dispatcher is specifically documented as accumulating tokens for consumption by other dispatchers (e.g., BalancerPooler). An attacker can drain these accumulated tokens via any other registered dispatcher for the same prime token.",
+      "attackScenario": "1. Protocol registers Accumulator for sUSDS (tokens accumulate in NFTMinter)\n2. Protocol registers Burner for sUSDS (for a burn-based NFT flavor)\n3. Users mint NFTs via the Accumulator, sUSDS accumulates in NFTMinter\n4. Attacker calls Burner.dispatch(nftMinterAddress, accumulatedBalance)\n5. Burner pulls all sUSDS from NFTMinter and burns them\n6. Protocol's accumulated sUSDS is permanently destroyed\n\nAlternative: Even without multiple dispatchers for the same token, an attacker can call dispatch() on ANY dispatcher right after a user's mint transaction (within the same block or next block), potentially disrupting intended batching or timing of operations.",
+      "profitability": "The Gather dispatcher variant is directly profitable: attacker triggers Gather.dispatch() to redirect tokens to the Gather recipient, who may be the attacker or an ally. The Burner and BalancerPooler variants are griefing attacks (destroying or displacing protocol value).",
+      "affectedParties": ["Protocol treasury", "LPs (if BalancerPooler forced at bad timing)", "All users who paid for NFTs expecting token accumulation"],
+      "confidence": "high",
+      "location": {
+        "primary": "src/dispatchers/ATokenDispatcher.sol:44",
+        "related": [
+          "src/dispatchers/Burner.sol:32",
+          "src/dispatchers/Gather.sol:60",
+          "src/dispatchers/BalancerPooler.sol:63",
+          "src/NFTMinter.sol:106"
+        ]
+      },
+      "recommendation": "Add access control to dispatch(). Either restrict it to onlyMinter or add a dedicated caller check. The simplest fix is to add a require(msg.sender == _minter) check in the base ATokenDispatcher.dispatch() or in each concrete override.",
+      "root_cause_code_snippet": "// ATokenDispatcher.sol:44 - no access control on dispatch\nfunction dispatch(address minter, uint256 amount) external virtual whenNotPaused {}\n\n// NFTMinter.sol:106 - unlimited approval granted during registration\nIERC20(token).approve(dispatcher, type(uint256).max);\n\n// NFTMinter.sol:136 - only the mint function is supposed to call dispatch\nATokenDispatcher(config.dispatcher).dispatch(address(this), actualReceived);"
+    },
+    {
+      "id": "ECON-002",
+      "title": "BalancerPooler assumes 1:1 value parity between primeToken and phUSD -- mispricing when prime token is yield-bearing",
+      "type": "price-assumption-mismatch",
+      "severity": "medium",
+      "description": "BalancerPooler._normalizeToPhUSD() only performs decimal conversion between the prime token and phUSD. It mints phUSD at a strict 1:1 ratio (adjusted only for decimals) with the incoming prime token amount. The Accumulator's NatSpec specifically mentions 'tokens like sUSDS' as a prime token. sUSDS is a yield-bearing stablecoin whose value appreciates over time relative to 1 USD. If sUSDS is the prime token, the BalancerPooler will donate 1 sUSDS + 1 phUSD to the Balancer pool, but 1 sUSDS is worth more than 1 USD (and more than 1 phUSD, assuming phUSD targets a $1 peg). This creates an imbalanced donation that systematic arbitrageurs will extract from the pool, effectively leaking value from every NFT mint that goes through the BalancerPooler path.",
+      "impact": "Every donation to the Balancer pool via BalancerPooler is economically imbalanced when the prime token's value differs from phUSD's value. Arbitrageurs will extract the difference. For yield-bearing prime tokens like sUSDS, this leak grows over time as the token's exchange rate increases. The protocol systematically overpays on the prime token side of every donation.",
+      "economicImpact": "Value leakage proportional to the price deviation between primeToken and phUSD, multiplied by the total volume of donations. For sUSDS at a 5% premium over USD, approximately 2.5% of each donation's value is extractable by arbitrageurs (half the pool imbalance).",
+      "attackScenario": "1. sUSDS trades at 1.05 USD (5% yield accrued)\n2. User mints NFT, 100 sUSDS dispatched via BalancerPooler\n3. BalancerPooler mints 100 phUSD (worth 100 USD) and donates [100 sUSDS, 100 phUSD] to the pool\n4. Actual value donated: 105 USD (sUSDS) + 100 USD (phUSD) = 205 USD\n5. Arbitrageur swaps phUSD for sUSDS in the pool, extracting the ~2.5 USD imbalance\n6. This repeats on every mint, bleeding value from the protocol",
+      "profitability": "Profitable for arbitrageurs after every donation. Profit = (primeToken_price - phUSD_price) * amount / 2, minus gas and swap fees.",
+      "affectedParties": ["Existing Balancer pool LPs (value extracted from pool)", "Protocol (donating more value than intended)"],
+      "confidence": "medium",
+      "location": {
+        "primary": "src/dispatchers/BalancerPooler.sol:85-86",
+        "related": [
+          "src/dispatchers/BalancerPooler.sol:117-125",
+          "src/dispatchers/Accumulator.sol:9"
+        ]
+      },
+      "recommendation": "Use an oracle or exchange rate function to determine the correct phUSD mint amount relative to the prime token's current value. For sUSDS, this could be sUSDS.convertToAssets(primeAmount) to get the underlying USD value, then mint that amount of phUSD. Alternatively, document this as an intentional design choice if the protocol intends phUSD to track the prime token's value rather than USD.",
+      "root_cause_code_snippet": "// BalancerPooler.sol:84-86 - mints phUSD 1:1 with prime token (decimal-adjusted only)\nuint256 phUSDAmount = _normalizeToPhUSD(actualPrimeInVault);\nIMintable(_phUSD).mint(address(this), phUSDAmount);\n\n// BalancerPooler.sol:117-125 - only decimal normalization, no price adjustment\nfunction _normalizeToPhUSD(uint256 primeAmount) internal view returns (uint256) {\n    uint8 primeDecimals = IERC20Metadata(_primeToken).decimals();\n    uint8 phUSDDecimals = IERC20Metadata(_phUSD).decimals();\n    if (primeDecimals == phUSDDecimals) return primeAmount;\n    if (primeDecimals < phUSDDecimals) {\n        return primeAmount * 10 ** (phUSDDecimals - primeDecimals);\n    }\n    return primeAmount / 10 ** (primeDecimals - phUSDDecimals);\n}"
+    },
+    {
+      "id": "ECON-003",
+      "title": "Price growth stagnation due to integer rounding -- small prices combined with basis point growth round to zero permanently",
+      "type": "rounding-exploitation",
+      "severity": "medium",
+      "description": "The price growth formula in NFTMinter.mint() is: config.price = price + (price * config.growthBasisPoints) / 10000. When price * growthBasisPoints < 10000, the growth increment rounds to zero and the price never increases regardless of how many mints occur. For example, with price = 1 wei and growthBasisPoints = 9999 (99.99%), the increment is 1 * 9999 / 10000 = 0. Similarly, with price = 99 wei and growthBasisPoints = 100 (1%), the increment is 99 * 100 / 10000 = 0. Once the price stagnates, unlimited NFTs can be minted at the stagnated (potentially negligible) cost. This is especially problematic because: (1) the owner can set any initial price including very small values, (2) the price starts small and is designed to grow, and (3) there is no minimum price validation.",
+      "impact": "If the price stagnates at a very low value (possibly as low as 1 wei), users can mint unlimited claim NFTs at negligible cost. If the NFTs carry any economic rights (yield claims, governance weight, etc.), this allows unbounded economic extraction. Even without external economic rights, it allows unlimited inflation of the NFT supply, diluting existing holders.",
+      "economicImpact": "Depends on the economic utility of claim NFTs. If they entitle holders to yield distributions or governance rights, an attacker can accumulate unlimited NFTs at negligible cost and claim a disproportionate share of protocol value.",
+      "attackScenario": "1. Owner registers a dispatcher with initialPrice = 50 wei and growthBasisPoints = 100 (1%)\n2. Growth increment: 50 * 100 / 10000 = 0 (integer division)\n3. Price remains 50 wei forever\n4. Attacker mints thousands of claim NFTs at 50 wei each (negligible cost)\n5. If NFTs entitle holders to yield claims, attacker dominates future distributions",
+      "profitability": "Highly profitable if NFTs have any economic utility. Cost per NFT is only the stagnated price (potentially < 1 USD worth of tokens) plus gas.",
+      "affectedParties": ["Existing NFT holders (dilution)", "Protocol (if NFTs have economic rights)"],
+      "confidence": "medium",
+      "location": {
+        "primary": "src/NFTMinter.sol:139",
+        "related": [
+          "src/NFTMinter.sol:95-116",
+          "src/NFTMinter.sol:167-172"
+        ]
+      },
+      "recommendation": "Add a minimum price threshold that prevents registration or minting below a meaningful value. Alternatively, use a fixed additive price increment instead of (or in addition to) the multiplicative basis-point growth. Consider requiring that price * growthBasisPoints >= 10000 for non-zero growth configurations.",
+      "root_cause_code_snippet": "// NFTMinter.sol:139 - price growth rounds to zero when price * growthBasisPoints < 10000\nconfig.price = price + (price * config.growthBasisPoints) / 10000;\n\n// NFTMinter.sol:95 - no validation on initialPrice (can be 0 or very small)\nfunction registerDispatcher(address dispatcher, uint256 initialPrice, uint256 growthBasisPoints) external onlyOwner {\n    // ... no minimum price check ..."
+    },
+    {
+      "id": "ECON-004",
+      "title": "Zero initial price allows free unlimited NFT minting with permanently stuck price",
+      "type": "mechanism-design-flaw",
+      "severity": "medium",
+      "description": "registerDispatcher() and setPrice() do not validate that the price is non-zero. If initialPrice is set to 0 (or the owner calls setPrice(index, 0)), users can mint NFTs for free. Furthermore, the growth formula config.price = 0 + (0 * growthBasisPoints) / 10000 = 0 means the price can never increase from zero regardless of growthBasisPoints. This creates a permanent free-minting condition. While this requires owner action (either at registration or via setPrice), an owner misconfiguration or a compromised owner account could permanently break the NFT pricing mechanism.",
+      "impact": "Unlimited free minting of claim NFTs. If the NFTs carry economic value (yield claims, etc.), this represents unbounded value extraction. The transferFrom call with amount=0 will succeed on most ERC20 tokens (transferring nothing), so the mint completes successfully.",
+      "economicImpact": "Unlimited dilution of NFT supply at zero cost. All value associated with NFT ownership is drained.",
+      "attackScenario": "1. Owner mistakenly registers dispatcher with initialPrice = 0\n2. Or: compromised owner calls setPrice(index, 0)\n3. Anyone calls mint() for free indefinitely\n4. Price never grows: 0 + (0 * growthBps) / 10000 = 0\n5. NFT supply inflated without bound",
+      "profitability": "Free minting (only gas costs). Profitable if NFTs have any economic utility.",
+      "affectedParties": ["All existing NFT holders (unlimited dilution)", "Protocol economic integrity"],
+      "confidence": "medium",
+      "location": {
+        "primary": "src/NFTMinter.sol:95-116",
+        "related": [
+          "src/NFTMinter.sol:139",
+          "src/NFTMinter.sol:167-172"
+        ]
+      },
+      "recommendation": "Add require(initialPrice > 0) in registerDispatcher() and require(newPrice > 0) in setPrice(). Consider also adding a minimum price floor to prevent economically negligible pricing.",
+      "root_cause_code_snippet": "// NFTMinter.sol:95-116 - no validation that initialPrice > 0\nfunction registerDispatcher(address dispatcher, uint256 initialPrice, uint256 growthBasisPoints) external onlyOwner {\n    require(dispatcher != address(0), \"NFTMinter: zero dispatcher address\");\n    require(dispatcherToIndex[dispatcher] == 0, \"NFTMinter: dispatcher already registered\");\n    // ... no price validation ...\n    configs[index] = DispatcherConfig({dispatcher: dispatcher, price: initialPrice, ...});\n}\n\n// NFTMinter.sol:167-172 - setPrice also allows 0\nfunction setPrice(uint256 index, uint256 newPrice) external onlyOwner {\n    // ... no validation that newPrice > 0 ...\n    configs[index].price = newPrice;\n}"
+    },
+    {
+      "id": "ECON-005",
+      "title": "Front-running mint transactions to exploit price growth -- MEV extraction on rising price curve",
+      "type": "MEV-extraction",
+      "severity": "medium",
+      "description": "The mint price increases after each mint via the growth formula. Since the price is determined by on-chain state at execution time, there is no slippage protection -- the caller pays whatever the current config.price is. An MEV searcher or front-runner can observe pending mint transactions in the mempool and insert their own mint before the victim's transaction. This causes the victim to pay a higher price than they expected (the price increased due to the front-runner's mint). The front-runner obtains an NFT at a lower price, and the victim pays more. If NFTs are fungible (ERC1155 with a single token ID), the front-runner's NFT has the same economic rights as the victim's but was acquired at a lower cost.",
+      "impact": "Users consistently pay higher prices than expected for NFT mints. The value extracted is the price difference between what the victim expected and what they actually paid. With high growthBasisPoints, this can be significant per transaction.",
+      "economicImpact": "Per-transaction extraction equals: price * growthBasisPoints / 10000. At 2% growth (200 bps) and a 10 ETH price, the victim overpays by 0.2 ETH per front-run. Over many transactions, this represents systematic MEV extraction from legitimate users.",
+      "attackScenario": "1. Current price for dispatcher index 1 is 100 USDC, growth is 200 bps (2%)\n2. Alice submits mint transaction expecting to pay 100 USDC\n3. MEV bot front-runs with own mint, pays 100 USDC, price rises to 102 USDC\n4. Alice's transaction executes, pays 102 USDC instead of expected 100 USDC\n5. MEV bot obtained NFT at 100 USDC, Alice overpaid by 2 USDC\n6. Both hold identical CLAIM_TOKEN_ID = 1 NFTs",
+      "profitability": "Profitable when gas cost < price * growthBasisPoints / 10000. At 2% growth rate, profitable for any reasonably priced NFT.",
+      "affectedParties": ["All NFT mint users (pay more than expected)"],
+      "confidence": "high",
+      "location": {
+        "primary": "src/NFTMinter.sol:119-147",
+        "related": [
+          "src/NFTMinter.sol:139"
+        ]
+      },
+      "recommendation": "Add a maxPrice parameter to the mint() function that allows users to specify the maximum price they are willing to pay: require(config.price <= maxPrice, 'Price exceeds max'). This provides slippage protection against front-running.",
+      "root_cause_code_snippet": "// NFTMinter.sol:119-147 - no maxPrice/slippage parameter\nfunction mint(address token, uint256 index, address recipient) external returns (bool) {\n    // ...\n    uint256 price = config.price; // reads current on-chain price, no maximum check\n    // ...\n    IERC20(token).transferFrom(msg.sender, address(this), price);\n    // ...\n    config.price = price + (price * config.growthBasisPoints) / 10000; // price increases for next mint\n    // ...\n}"
+    },
+    {
+      "id": "ECON-006",
+      "title": "emergencyWithdraw can drain tokens accumulated by the Accumulator dispatcher, breaking cross-dispatcher economic design",
+      "type": "cross-contract-value-leakage",
+      "severity": "low",
+      "description": "The emergencyWithdraw() function allows the owner to withdraw the entire balance of any ERC20 token from the NFTMinter contract. The Accumulator dispatcher is designed as a no-op that intentionally leaves tokens in the NFTMinter for later consumption by other dispatchers (e.g., BalancerPooler). emergencyWithdraw() does not distinguish between 'stuck' tokens and tokens intentionally accumulated by the Accumulator. The owner can (accidentally or intentionally) drain accumulated tokens that are meant for BalancerPooler consumption, breaking the economic model. While this is an owner-only function, there is no accounting or safeguard to prevent withdrawing tokens that are part of the protocol's intended operation.",
+      "impact": "Owner can drain tokens accumulated for BalancerPooler consumption, breaking the intended token flow. Tokens meant to be donated to the Balancer pool are redirected to the owner's address.",
+      "economicImpact": "Loss of all accumulated tokens intended for Balancer pool donations. The protocol's intended value flow (accumulate then pool) is broken.",
+      "attackScenario": "1. Users mint NFTs via Accumulator dispatcher, sUSDS accumulates in NFTMinter\n2. Protocol intends for BalancerPooler to eventually consume these tokens\n3. Owner (or compromised owner) calls emergencyWithdraw(sUSDS)\n4. All accumulated sUSDS is sent to the owner\n5. BalancerPooler can no longer donate these tokens to the pool",
+      "profitability": "Direct financial gain for the owner equal to the value of all accumulated tokens.",
+      "affectedParties": ["Protocol (intended Balancer pool donations lost)", "Balancer pool LPs (expected donations never arrive)", "NFT holders (if NFTs represent claims on pooled value)"],
+      "confidence": "medium",
+      "location": {
+        "primary": "src/NFTMinter.sol:184-189",
+        "related": [
+          "src/dispatchers/Accumulator.sol:30-32"
+        ]
+      },
+      "recommendation": "Consider tracking accumulated balances per-dispatcher and ensuring emergencyWithdraw only rescues genuinely stuck tokens (excess beyond tracked accumulations). Alternatively, document this behavior clearly as a known admin capability.",
+      "root_cause_code_snippet": "// NFTMinter.sol:184-189 - withdraws ALL tokens, no distinction from accumulated amounts\nfunction emergencyWithdraw(address token) external onlyOwner {\n    uint256 balance = IERC20(token).balanceOf(address(this));\n    require(balance > 0, \"NFTMinter: no tokens to withdraw\");\n    IERC20(token).transfer(msg.sender, balance);\n    emit EmergencyWithdraw(token, msg.sender, balance);\n}\n\n// Accumulator.sol:30-32 - intentionally leaves tokens in minter\nfunction dispatch(address, uint256) external override whenNotPaused {\n    // No-op: tokens stay in the minter and accumulate\n}"
+    },
+    {
+      "id": "ECON-007",
+      "title": "Unchecked ERC20 transfer return values in NFTMinter.emergencyWithdraw and Gather.dispatch",
+      "type": "unsafe-transfer",
+      "severity": "low",
+      "description": "NFTMinter.emergencyWithdraw() uses IERC20(token).transfer() without checking the return value. Some ERC20 tokens (notably USDT) return false instead of reverting on failure. If such a token is used, the transfer could silently fail while the function emits EmergencyWithdraw as if it succeeded. Similarly, Gather.dispatch() uses IERC20(_token).transfer(_recipient, actualReceived) without checking the return value. While NFTMinter.mint() also uses unchecked transferFrom, the balance-before/after pattern provides implicit verification in that case. The transfer() calls in emergencyWithdraw and Gather's outgoing transfer do not have this balance-check protection.",
+      "impact": "For tokens that return false on failure (like USDT), transfers could silently fail. In emergencyWithdraw, the owner would believe tokens were rescued when they were not. In Gather.dispatch, tokens could remain stuck in the Gather contract instead of reaching the recipient.",
+      "economicImpact": "Tokens not actually transferred despite successful transaction execution. For emergencyWithdraw, tokens remain stuck. For Gather, tokens accumulate in the Gather contract with no retrieval mechanism.",
+      "attackScenario": "1. Protocol uses a token that returns false on transfer failure (e.g., USDT with insufficient balance edge case)\n2. Owner calls emergencyWithdraw() -- transfer fails silently, event emitted\n3. Owner believes tokens are rescued but they remain in the contract\n\nOr for Gather:\n1. Gather.dispatch() pulls tokens successfully but transfer to recipient returns false\n2. Tokens stuck in Gather contract with no recovery mechanism",
+      "profitability": "Not directly profitable for an attacker, but causes fund loss for the protocol.",
+      "affectedParties": ["Protocol (tokens stuck)", "Gather recipient (tokens not received)"],
+      "confidence": "low",
+      "location": {
+        "primary": "src/NFTMinter.sol:187",
+        "related": [
+          "src/dispatchers/Gather.sol:67"
+        ]
+      },
+      "recommendation": "Use SafeERC20.safeTransfer() from OpenZeppelin (already imported as a dependency) for all ERC20 transfer and transferFrom calls, or explicitly check return values.",
+      "root_cause_code_snippet": "// NFTMinter.sol:187 - unchecked transfer return value\nIERC20(token).transfer(msg.sender, balance);\n\n// Gather.sol:67 - unchecked transfer return value\nIERC20(_token).transfer(_recipient, actualReceived);"
+    },
+    {
+      "id": "ECON-008",
+      "title": "No upper bound on growthBasisPoints allows owner to set economically destructive growth rates",
+      "type": "governance-parameter-risk",
+      "severity": "low",
+      "description": "There is no maximum cap on growthBasisPoints in either registerDispatcher() or setGrowthFactor(). The owner can set growthBasisPoints to values like 1,000,000 (10,000%), meaning each mint multiplies the price by 101x. This can cause the price to overflow uint256 after just a few mints (e.g., starting at 1e18 with 10000% growth: after ~18 mints the price would overflow). An overflow would revert all subsequent mint transactions, effectively bricking the dispatcher. While this requires owner action, there is no validation to prevent accidental misconfiguration.",
+      "impact": "Extremely high growth rates cause the price to reach uint256 max and overflow, permanently bricking the mint function for that dispatcher. Even without overflow, excessively high prices make the NFT economically inaccessible.",
+      "economicImpact": "Permanent denial of service for a dispatcher if price overflows. Loss of future minting revenue and utility for that dispatcher.",
+      "attackScenario": "1. Owner (accidentally or maliciously) sets growthBasisPoints = 1000000 (10000%)\n2. First mint at 1e18: price grows to 101e18\n3. Second mint at 101e18: price grows to ~10201e18\n4. After ~18 mints: uint256 overflow, all subsequent mints revert\n5. Dispatcher is permanently bricked",
+      "profitability": "Not directly profitable -- this is a misconfiguration/griefing risk.",
+      "affectedParties": ["All users of the affected dispatcher (cannot mint)", "Protocol (lost revenue)"],
+      "confidence": "low",
+      "location": {
+        "primary": "src/NFTMinter.sol:175-179",
+        "related": [
+          "src/NFTMinter.sol:95-116",
+          "src/NFTMinter.sol:139"
+        ]
+      },
+      "recommendation": "Add a reasonable maximum cap on growthBasisPoints (e.g., 10000 = 100% per mint). Add overflow checks or use a maximum price threshold.",
+      "root_cause_code_snippet": "// NFTMinter.sol:175-179 - no upper bound validation\nfunction setGrowthFactor(uint256 index, uint256 newGrowthBasisPoints) external onlyOwner {\n    require(configs[index].dispatcher != address(0), \"NFTMinter: index not registered\");\n    uint256 oldGrowthBasisPoints = configs[index].growthBasisPoints;\n    configs[index].growthBasisPoints = newGrowthBasisPoints;\n    // ... no max check ...\n}"
+    }
+  ]
+}

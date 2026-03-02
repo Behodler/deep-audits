@@ -1,0 +1,148 @@
+{
+  "project": "yield-claim-NFT",
+  "auditType": "regular-c4",
+  "auditTimestamp": "2026-02-27T00:00:00Z",
+  "auditor": "severity-auditor",
+  "summary": {
+    "totalFindings": 6,
+    "confirmed": 3,
+    "downgraded": 3,
+    "upgraded": 0,
+    "agreementRate": "50%"
+  },
+  "findings": [
+    {
+      "findingId": "H-01",
+      "deduplicatedId": "DEDUP-001",
+      "title": "Missing access control on dispatch() -- anyone can drain NFTMinter tokens",
+      "claimedSeverity": "high",
+      "assessedSeverity": "high",
+      "agreement": true,
+      "confidence": "high",
+      "analysis": {
+        "assetRisk": "Direct token theft/destruction confirmed. Any caller can invoke dispatch(nftMinterAddress, amount) on any registered dispatcher to drain NFTMinter's entire token balance.",
+        "attackPath": "Valid and unconditional. No special conditions, privileges, or token types required. dispatch() is external with only whenNotPaused guard. The minter parameter is caller-supplied and used as the transferFrom source. NFTMinter grants type(uint256).max approval at registration.",
+        "conditions": "None required. Exploitable by any address at any time. Dispatchers start unpaused by default.",
+        "impact": "Full drain of all ERC20 tokens held by NFTMinter. Via Burner: irreversible token destruction. Via Gather: token redirection. Via BalancerPooler: forced donation at attacker-chosen timing."
+      },
+      "codeLocations": [
+        "src/dispatchers/ATokenDispatcher.sol:44",
+        "src/dispatchers/Burner.sol:32",
+        "src/dispatchers/Gather.sol:60",
+        "src/dispatchers/BalancerPooler.sol:63",
+        "src/NFTMinter.sol:106"
+      ],
+      "notes": "Textbook missing access control. Severity assessment is accurate. Unconditional direct asset loss with no hypotheticals."
+    },
+    {
+      "findingId": "M-01",
+      "deduplicatedId": "DEDUP-002",
+      "title": "Reentrancy in mint() -- CEI violation, dispatch before price update",
+      "claimedSeverity": "medium",
+      "assessedSeverity": "low",
+      "agreement": false,
+      "confidence": "high",
+      "analysis": {
+        "assetRisk": "Value leak (stale price minting), not direct theft. Even if exploitable, attacker saves only price * growthBps / 10000 per re-entrant call.",
+        "attackPath": "The claimed ERC1155 reentrancy path is factually incorrect: _mint (line 142) triggers onERC1155Received AFTER config.price is updated (line 139). The only viable path is via dispatch() callback, which requires the prime token to be an ERC777 or similar hook-enabled token. Standard ERC20 tokens (including FOT tokens tested in the codebase) have no transfer hooks.",
+        "conditions": "Requires ERC777 or equivalent transfer-hook-enabled prime token. The protocol's test suite uses only standard ERC20 and FOT tokens. C4 criteria explicitly list 'Non-standard/weird ERC-20 tokens' as Known Invalid Findings.",
+        "impact": "If all conditions met: minting at stale price, saving growthBps/10000 per re-entrant call. Not direct asset theft."
+      },
+      "codeLocations": [
+        "src/NFTMinter.sol:119-147",
+        "src/NFTMinter.sol:136",
+        "src/NFTMinter.sol:139",
+        "src/NFTMinter.sol:142"
+      ],
+      "disagreementReason": "Two independent reasons for downgrade: (1) The ERC1155 callback reentrancy path is factually incorrect -- price is updated on line 139 before _mint on line 142. (2) The only viable reentrancy path (via dispatch) requires ERC777 tokens, which are non-standard ERC-20 tokens and explicitly listed as C4 Known Invalid Findings. The codebase shows no evidence of ERC777 support or intent.",
+      "notes": "The finding description conflates two separate callback points (dispatch and _mint) but the _mint callback is NOT vulnerable because price is already updated. Only the dispatch callback path works, and it requires non-standard tokens."
+    },
+    {
+      "findingId": "M-02",
+      "deduplicatedId": "DEDUP-009",
+      "title": "BalancerPooler MEV sandwich on donation (minBptAmountOut=0)",
+      "claimedSeverity": "medium",
+      "assessedSeverity": "low",
+      "agreement": false,
+      "confidence": "high",
+      "analysis": {
+        "assetRisk": "No code-level vulnerability. The core claim (minBptAmountOut=0 enables sandwich attacks) is technically incorrect because Balancer V3 DONATION kind does NOT mint BPT tokens.",
+        "attackPath": "Invalid. Balancer V3 documentation confirms: 'Donation does not return BPTs, any number above 0 will revert.' Setting minBptAmountOut=0 is the ONLY correct value for DONATION kind. The sandwich attack as described cannot occur because no BPT is minted to the contract.",
+        "conditions": "N/A -- the vulnerability as described does not exist. The broader MEV concern (front-running donations by acquiring BPT beforehand) is inherent to Balancer V3 DONATION mechanism, not a code bug.",
+        "impact": "No impact from the code deficiency as claimed. The MEV extraction on donations is a known property of Balancer V3 DONATION, not a vulnerability in the BalancerPooler contract."
+      },
+      "codeLocations": [
+        "src/dispatchers/BalancerPooler.sol:98-107"
+      ],
+      "disagreementReason": "The core technical claim is incorrect. Balancer V3 DONATION kind does not mint BPT tokens. minBptAmountOut=0 is the only valid value -- setting it higher would REVERT the transaction. The finding's own text acknowledges uncertainty about DONATION semantics. Verification confirms the finding is based on a misunderstanding of Balancer V3 DONATION mechanics. The broader MEV sandwich concern is inherent to public pool donations, not a code-level deficiency.",
+      "notes": "The finding itself hedges: 'Note: the AddLiquidityKind is DONATION, which may mitigate this depending on Balancer V3 DONATION semantics (donations may not mint BPT).' Verification confirms DONATION does not mint BPT, invalidating the core claim.",
+      "references": [
+        "https://docs.balancer.fi/build/build-a-hook/interacting-with-the-vault.html",
+        "https://docs.balancer.fi/developer-reference/contracts/vault-api.html"
+      ]
+    },
+    {
+      "findingId": "M-03",
+      "deduplicatedId": "DEDUP-003",
+      "title": "1:1 phUSD minting ignores yield-bearing token premium",
+      "claimedSeverity": "medium",
+      "assessedSeverity": "medium",
+      "agreement": true,
+      "confidence": "medium",
+      "analysis": {
+        "assetRisk": "Value leak on every donation. Not direct theft but systematic protocol value loss. Arbitrageurs extract the price imbalance between yield-bearing prime token and phUSD after each donation.",
+        "attackPath": "Valid with stated assumptions. _normalizeToPhUSD() (BalancerPooler.sol:117-125) only performs decimal conversion, not value conversion. When sUSDS (explicitly mentioned in Accumulator NatSpec) is worth >1 USD, the donation is imbalanced. Arbitrageurs extract the difference.",
+        "conditions": "Prime token must be yield-bearing (explicitly supported per Accumulator.sol:9 NatSpec mentioning 'tokens like sUSDS'). The premium must be non-trivial for meaningful extraction.",
+        "impact": "Approximately (premium / 2) * donation_amount leaked per donation. At 5% sUSDS premium, ~2.5% of each donation is extractable by arbitrageurs."
+      },
+      "codeLocations": [
+        "src/dispatchers/BalancerPooler.sol:84-96",
+        "src/dispatchers/BalancerPooler.sol:117-125",
+        "src/dispatchers/Accumulator.sol:9"
+      ],
+      "notes": "Medium is appropriate. This is a value leak with stated assumptions (yield-bearing token) which matches C4 Medium definition. The assumptions are supported by the codebase (sUSDS mentioned in NatSpec). Could be argued as design choice, but 'phUSD' naming implies USD peg intent, making this likely an oversight."
+    },
+    {
+      "findingId": "M-04",
+      "deduplicatedId": "DEDUP-005",
+      "title": "Irrevocable infinite approval, no deregistration",
+      "claimedSeverity": "medium",
+      "assessedSeverity": "low",
+      "agreement": false,
+      "confidence": "medium",
+      "analysis": {
+        "assetRisk": "Theoretical only. The infinite approval is only exploitable through dispatch(), which is the subject of H-01. Independent of H-01, the dispatchers are not upgradeable contracts and have no arbitrary transferFrom capability.",
+        "attackPath": "Dependent on H-01. If H-01 is fixed (onlyMinter check added), the approval can only be used through dispatch(), which requires minter authorization. If H-01 is NOT fixed, this finding is already captured by H-01. Either way, it does not independently merit Medium.",
+        "conditions": "Requires either H-01 to remain unfixed (already captured by H-01) or a compromised dispatcher contract (not possible without upgradeability, which is absent from the codebase). Owner can mitigate by pausing the dispatcher via setDispatcherActive().",
+        "impact": "No independent asset risk beyond H-01. Pausing provides adequate mitigation for the approval concern."
+      },
+      "codeLocations": [
+        "src/NFTMinter.sol:95-116",
+        "src/NFTMinter.sol:106"
+      ],
+      "disagreementReason": "This finding is either (a) absorbed into H-01 if the access control issue remains, or (b) has minimal residual risk if H-01 is fixed, since dispatchers are not upgradeable and pausing prevents dispatch execution. Per C4 criteria, centralization risks and design recommendations are QA/Low. The lack of deregistration is a design recommendation, not a security vulnerability.",
+      "notes": "Borderline case. A reasonable argument could be made for Medium if the protocol intends to support upgradeable dispatchers in the future. But based on current codebase evidence, the dispatchers are immutable contracts and pausing is an available mitigation."
+    },
+    {
+      "findingId": "M-05",
+      "deduplicatedId": "DEDUP-008",
+      "title": "Price growth stagnation from integer rounding",
+      "claimedSeverity": "medium",
+      "assessedSeverity": "medium",
+      "agreement": true,
+      "confidence": "medium",
+      "analysis": {
+        "assetRisk": "Protocol function failure. Core pricing mechanism silently stops working under specific configurations. If NFTs carry economic rights, unlimited minting at a negligible fixed price enables unbounded value extraction.",
+        "attackPath": "Mathematical proof: config.price = price + (price * growthBasisPoints) / 10000. When price * growthBasisPoints < 10000, increment = 0 due to integer division. Example: price=99, growthBps=100 -> 99*100/10000 = 0. Price never increases.",
+        "conditions": "Requires price * growthBasisPoints < 10000. With 18-decimal tokens at reasonable prices (1e18+), this is unlikely with typical growth rates. But no validation prevents it, and the failure is silent.",
+        "impact": "Unlimited minting at the stagnated price. Bonding curve mechanism permanently broken for the affected dispatcher."
+      },
+      "codeLocations": [
+        "src/NFTMinter.sol:139",
+        "src/NFTMinter.sol:95-116",
+        "src/NFTMinter.sol:167-172"
+      ],
+      "notes": "Medium is defensible but borderline. The silent failure of a core protocol mechanism (bonding curve pricing) is a genuine protocol function impact. However, it requires owner misconfiguration with small prices. The lack of any validation or warning is the real issue. If C4 judges consider owner misconfiguration findings as Low regardless of downstream impact, this should be downgraded."
+    }
+  ]
+}
