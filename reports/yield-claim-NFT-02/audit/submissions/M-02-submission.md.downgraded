@@ -1,0 +1,131 @@
+<!--
+C4 Submission Metadata
+Title: [M-02] Unchecked 1:1 phUSD minting with UNBALANCED addLiquidity causes suboptimal BPT returns when pool ratio diverges
+Root Cause Link: src/dispatchers/BalancerPooler.sol#L83
+PoC File: M-02-poc.t.sol
+-->
+
+## Finding description and impact
+
+### Summary
+
+`BalancerPooler.unlockCallback()` always mints phUSD at a fixed 1:1 decimal-normalized ratio to the prime token and deposits both tokens via `AddLiquidityKind.UNBALANCED` into a Balancer V3 pool. When the pool's actual reserve ratio diverges from 1:1, the unbalanced deposit receives fewer BPT than the fair value of the deposited tokens. The surplus on the over-represented side is effectively donated to existing LPs and extracted by arbitrageurs who rebalance the pool.
+
+### Vulnerability details
+
+The root cause is at [BalancerPooler.sol#L83](src/dispatchers/BalancerPooler.sol#L83), where `_normalizeToPhUSD` is used to determine the phUSD mint amount:
+
+```solidity
+// Line 83 - always mints phUSD at 1:1 regardless of pool state
+uint256 phUSDAmount = _normalizeToPhUSD(actualPrimeInVault);
+```
+
+The `_normalizeToPhUSD` function (lines 122-130) performs purely mechanical decimal scaling with no reference to the pool's reserve ratio, any price oracle, or market conditions:
+
+```solidity
+function _normalizeToPhUSD(uint256 primeAmount) internal view returns (uint256) {
+    uint8 primeDecimals = IERC20Metadata(_primeToken).decimals();
+    uint8 phUSDDecimals = IERC20Metadata(_phUSD).decimals();
+    if (primeDecimals == phUSDDecimals) return primeAmount;
+    if (primeDecimals < phUSDDecimals) {
+        return primeAmount * 10 ** (phUSDDecimals - primeDecimals);
+    }
+    return primeAmount / 10 ** (primeDecimals - phUSDDecimals);
+}
+```
+
+The resulting equal amounts are then deposited as `UNBALANCED` liquidity (lines 96-105):
+
+```solidity
+AddLiquidityParams memory params = AddLiquidityParams({
+    pool: _pool,
+    to: address(this),
+    maxAmountsIn: maxAmountsIn,
+    minBptAmountOut: minBptAmountOut,
+    kind: AddLiquidityKind.UNBALANCED,
+    userData: ""
+});
+```
+
+In Balancer V3 constant-product math, an `UNBALANCED` deposit where the token ratio does not match the pool's reserve ratio incurs an implicit swap penalty (price impact). The depositor receives BPT equivalent to:
+
+```
+bptOut = totalSupply * ( sqrt((R0+d0)/R0 * (R1+d1)/R1) - 1 )
+```
+
+When `d0/R0 != d1/R1`, this always produces fewer BPT than a proportional deposit of equivalent value due to the AM-GM inequality. The difference in value is captured by arbitrageurs who trade against the pool to restore equilibrium.
+
+The `minBptAmountOut` slippage parameter (decoded from `extraData`) defaults to `0` when no extra data is provided, offering no protection against this value leak:
+
+```solidity
+uint256 minBptAmountOut = extraData.length > 0 ? abi.decode(extraData, (uint256)) : 0;
+```
+
+### Impact
+
+The protocol receives fewer BPT than the fair value of its deposited tokens on every `dispatch` call when the pool ratio is not exactly 1:1. This is not a one-time loss but a systemic value leak that compounds with each mint operation.
+
+The PoC quantifies the BPT loss at various pool ratio divergences (depositing 100 tokens into a 10,000-token pool):
+
+| Pool Ratio (PRM:phUSD) | BPT Loss vs. 1:1 Baseline |
+|-------------------------|---------------------------|
+| 2:1                     | ~26%                       |
+| 4:1                     | ~38%                       |
+| 10:1                    | ~46%                       |
+
+At a 4:1 pool ratio, 75% of the minted phUSD is excess relative to what a proportional deposit requires. This excess is implicitly swapped at unfavorable rates inside the `UNBALANCED` addLiquidity operation, yielding diminishing BPT returns per unit of deposited value.
+
+The lost value is not destroyed -- it accrues to arbitrageurs who rebalance the pool after each imbalanced deposit. The cumulative impact scales with:
+- The frequency of `dispatch` calls (each NFT mint triggers one)
+- The magnitude of pool ratio divergence from 1:1
+- The size of each deposit relative to pool reserves
+
+## Recommended mitigation steps
+
+There are several approaches to address this, listed in order of robustness:
+
+**Option A: Use PROPORTIONAL addLiquidity and adjust the phUSD mint amount to match the pool ratio.**
+
+Query the pool's current reserves before minting phUSD, then mint only the amount needed for a proportional deposit:
+
+```solidity
+// Query pool reserves
+(uint256 reservePrime, uint256 reservePhUSD) = _getPoolReserves();
+
+// Mint phUSD proportional to pool ratio instead of 1:1
+uint256 phUSDAmount = (actualPrimeInVault * reservePhUSD) / reservePrime;
+IMintable(_phUSD).mint(address(this), phUSDAmount);
+
+// Use PROPORTIONAL addLiquidity
+params.kind = AddLiquidityKind.PROPORTIONAL;
+```
+
+**Option B: Enforce a meaningful minimum BPT threshold.**
+
+If the protocol intends to keep the 1:1 minting design, enforce a non-zero `minBptAmountOut` that reflects the fair value of deposited tokens. The default of `0` should be replaced with a calculated floor:
+
+```solidity
+// Calculate expected proportional BPT and apply a tolerance
+uint256 expectedBpt = _calculateFairBpt(actualPrimeInVault, phUSDAmount);
+uint256 minBptAmountOut = expectedBpt * (10000 - MAX_SLIPPAGE_BPS) / 10000;
+```
+
+**Option C: Add an oracle-based sanity check.**
+
+Before minting, verify that the pool's implied exchange rate is within an acceptable band of a trusted oracle price. Revert if the pool is too far from parity to prevent value-destructive deposits.
+
+Option A is the most capital-efficient solution. Options B and C serve as protective guardrails but do not eliminate the underlying inefficiency of depositing at 1:1 into a non-1:1 pool.
+
+### Proof of Concept
+
+The PoC file is located at `workspace/yield-claim-nft/test/poc-M-02.t.sol` and contains five validated tests:
+
+1. **`test_poc_M02_phUSD_always_minted_1to1`** -- Proves phUSD is minted at exactly 1:1 regardless of pool ratio (tested at 1:1, 4:1, and 1:4 pool states, all produce identical phUSD output).
+
+2. **`test_poc_M02_always_uses_UNBALANCED_kind`** -- Confirms `AddLiquidityKind.UNBALANCED` is hardcoded and used for all deposits regardless of pool state.
+
+3. **`test_poc_M02_BPT_loss_at_diverged_pool_ratio`** -- Core quantitative demonstration. Deposits the same amount into pools at 1:1, 2:1, 4:1, and 10:1 ratios. Shows progressively fewer BPT received as pool divergence increases (26%, 38%, 46% loss respectively).
+
+4. **`test_poc_M02_proportional_vs_unbalanced_comparison`** -- Compares BPT-per-unit-value between the protocol's 1:1 UNBALANCED deposit and an optimal proportional deposit. Demonstrates that the protocol's approach yields strictly less BPT per unit of deposited value. At 4:1 pool ratio, 75% of minted phUSD is excess that gets implicitly swapped at unfavorable rates.
+
+5. **`test_poc_M02_normalizeToPhUSD_is_purely_mechanical`** -- Tests cross-decimal scenarios (6-to-18, 8-to-18) proving `_normalizeToPhUSD` contains no economic logic -- it mints 1 phUSD per 1 WBTC regardless of actual value.
