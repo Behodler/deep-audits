@@ -1,139 +1,59 @@
-# Validity Check Summary: stable-yield-accumulator
+# Validity Check Summary - stable-yield-accumulator
 
-**Date:** 2026-02-17
-**Checker:** Validity-Checker Agent
-**Findings Reviewed:** 5
-**Valid:** 3 | **Invalid:** 2
-
----
-
-## Results Overview
-
-| # | Finding | Severity | Verdict | Invalid Pattern |
-|---|---------|----------|---------|-----------------|
-| 1 | sqrtPriceX96 overflow in _getPhUSDPriceInUSDS | Medium | VALID | -- |
-| 2 | Hardcoded sUSDS_USDC_pool creates unsettled deltas | Medium | INVALID | Admin mistake |
-| 3 | CEI violation in claim() | Medium | INVALID | OOS / Speculation |
-| 4 | Inconsistent rewardToken caching | Low | VALID | -- |
-| 5 | Step 4 zero-amount error | Low | VALID | -- |
+**Date**: 2026-03-19
+**Findings Checked**: 2
+**Valid**: 2 | **Invalid**: 0
 
 ---
 
-## Detailed Analysis
+## M-01: Inverted Slippage Protection -- VALID (PASS)
 
-### Finding 1: sqrtPriceX96 overflow in _getPhUSDPriceInUSDS -- VALID
+**Finding**: The `claim()` function's `minRewardTokenSupplied` parameter enforces a floor on payment, not a ceiling. Claimer cannot protect against overpaying if owner changes discount rate between off-chain calculation and on-chain execution.
 
-**Claimed Severity:** Medium
+### Invalid Pattern Checks
 
-**Verdict:** VALID -- No invalid patterns detected.
+| Pattern | Detected | Reasoning |
+|---------|----------|-----------|
+| Non-standard token | No | Not a token standards issue |
+| Fee-on-transfer | No | Not a FOT issue |
+| Approve race | No | Not an approval issue |
+| User mistake | **No** | The bug is the direction of the comparison (`<` instead of `>`). No user input value can fix a check that protects in the wrong direction. The user is not making a mistake -- the code is broken. |
+| Admin mistake | **No** | The owner changing the discount rate is normal, expected administrative behavior (the function exists for this purpose). The root cause is the inverted slippage check at line 460, not admin misbehavior. Even without any admin action, the slippage parameter fundamentally cannot protect against overpaying. |
+| Out of scope | No | Root cause is in `StableYieldAccumulator.claim()` at line 460 |
+| Speculative | **No** | The inverted comparison `if (actualPayment < minRewardTokenSupplied)` is plainly visible in the current code. No hypothetical future state is required. |
 
-**Analysis:**
+### Key Distinction: Code Bug vs Admin Mistake
 
-This is a genuine code defect in `StableYieldAccumulator.sol` at lines 754-758 and 766-770. The expression `uint256(sqrtPriceX96) * uint256(sqrtPriceX96)` is evaluated as an intermediate result BEFORE being passed to `FullMath.mulDiv`. Since `sqrtPriceX96` is a `uint160`, its maximum value is approximately 2^160. Squaring a value above 2^128 produces a result exceeding 2^256, overflowing `uint256`.
-
-**Code evidence** (`StableYieldAccumulator.sol:754-758`):
-```solidity
-priceInSUSDS = FullMath.mulDiv(
-    uint256(sqrtPriceX96) * uint256(sqrtPriceX96),  // overflows when sqrtPriceX96 > 2^128
-    1e18,
-    1 << 192
-);
-```
-
-**Key facts:**
-- Uniswap V4 `MAX_SQRT_PRICE` = ~2^160, well above the 2^128 overflow threshold
-- The multiplication overflows before `FullMath.mulDiv` receives the argument
-- The fix is to pass `sqrtPriceX96` as a separate argument to `FullMath.mulDiv` to avoid intermediate overflow
-- Root cause is entirely within in-scope contract code
-- No admin mistake, no user error, no token assumption issues
-
-**Invalid pattern checks:** All negative.
+The "reckless admin mistake" pattern applies when the finding requires the admin to act irresponsibly or maliciously. Here, the admin changing the discount rate is a legitimate, intended operation. The vulnerability exists because the code's slippage protection mechanism is directionally wrong -- it reverts when payment is too LOW (protecting the protocol from getting too little) rather than when payment is too HIGH (protecting the claimer from overpaying). This is a logic error in the contract, not an assumption about admin behavior.
 
 ---
 
-### Finding 2: Hardcoded sUSDS_USDC_pool creates unsettled deltas when reward token != USDC -- INVALID
+## M-02: All-or-Nothing Claim DoS via Broken Strategy -- VALID (PASS)
 
-**Claimed Severity:** Medium
+**Finding**: If any registered strategy's `withdrawFrom` reverts, the entire `claim()` reverts, blocking all yield claims across all strategies.
 
-**Verdict:** INVALID -- Matches "reckless admin mistakes" pattern.
+### Invalid Pattern Checks
 
-**Analysis:**
+| Pattern | Detected | Reasoning |
+|---------|----------|-----------|
+| Non-standard token | No | Not a token standards issue |
+| Fee-on-transfer | No | Not a FOT issue |
+| Approve race | No | Not an approval issue |
+| User mistake | No | Not a user input issue |
+| Admin mistake | No | Not about admin misbehavior |
+| Out of scope | **No** | The root cause is the lack of error handling in the in-scope `claim()` function (lines 434-451). The vulnerability is in how `StableYieldAccumulator` handles external call failures, not in the external strategies themselves. |
+| Speculative | **No** | Strategy reverts are a standard operational risk. The contract itself demonstrates awareness of strategy-level issues by implementing `tokenConfigs[token].paused` functionality at line 439. A strategy can revert for many non-speculative reasons: being paused, running out of liquidity, being upgraded, having a bug, or encountering an unexpected state. |
 
-This finding describes a scenario where the SYA reward token changes from USDC to something else, but the admin fails to update `sUSDS_USDC_pool` in ClaimArbitrage. However, the code explicitly documents this as an admin responsibility.
+### Key Distinction: In-Scope Root Cause vs External Behavior
 
-**Code evidence** (`ClaimArbitrage.sol:366-370`):
-```solidity
-// Note on sUSDS_USDC_pool: This pool is genuinely an sUSDS/USDC pool used for slippage
-// coverage from the pump/unwind cycle. It is not renamed to reference the dynamic reward
-// token because it handles a specific known pair (sUSDS<->USDC). If the reward token
-// changes from USDC, the owner must update this pool accordingly.
-```
+The "out of scope" pattern applies when the root cause is in external/OOS code. Here, the root cause is the absence of try/catch or error isolation in the in-scope `claim()` loop. The fix belongs in `StableYieldAccumulator`, not in the external strategies. The external strategies reverting is the trigger, but the vulnerability is the lack of graceful degradation in the in-scope contract.
 
-**Why it is invalid:**
-1. The code comments explicitly state the admin must update the pool when reward token changes
-2. The `setPoolKeys()` function (line 543) exists precisely for this purpose
-3. Per C4 known-invalid rules: "Reckless admin mistakes" are invalid findings
-4. The finding itself carries a WARN flag acknowledging this is admin responsibility
-5. Admin is expected to execute configuration changes atomically or in correct order
+### Key Distinction: Operational Risk vs Speculation
 
----
-
-### Finding 3: CEI violation in claim(): yield sent before payment collected -- INVALID
-
-**Claimed Severity:** Medium
-
-**Verdict:** INVALID -- Matches "out-of-scope root cause" and "speculation on future code" patterns.
-
-**Analysis:**
-
-The finding identifies that `claim()` withdraws yield tokens to the claimer (line 594) before collecting payment (line 611). While this is technically a CEI ordering concern, two factors render it invalid:
-
-**Mitigating factor 1 -- nonReentrant guard:**
-```solidity
-function claim() external override whenNotPaused nonReentrant {  // line 566
-```
-The `nonReentrant` modifier from OpenZeppelin's `ReentrancyGuard` prevents any reentrant call to `claim()`. This is the standard, accepted mitigation for CEI ordering issues.
-
-**Mitigating factor 2 -- OOS dependency:**
-The finding acknowledges that exploitation requires a "callback-capable yield strategy" -- meaning the external yield strategy contract would need to execute a callback during `withdrawFrom()`. The yield strategy contracts are external dependencies (accessed via `IYieldStrategy` interface). The root cause of any exploit would be in the OOS yield strategy implementation, not in StableYieldAccumulator.
-
-**Why it is invalid:**
-1. Per C4 rules: "Issues in parent/forked contracts where root cause is OOS" are invalid
-2. The finding requires speculation about external contract behavior (callback in yield strategy)
-3. The `nonReentrant` guard provides standard protection
-4. No concrete, demonstrated exploit path exists that bypasses the reentrancy guard
+A "speculative" finding requires hypothetical future code changes or conditions that may never occur. Strategy reverts are not speculative -- they are a well-understood operational risk that any protocol integrating with external contracts must handle. The protocol's own `pauseToken` mechanism acknowledges that strategies can become unavailable.
 
 ---
 
-### Finding 4: Inconsistent rewardToken caching -- VALID
+## Conclusion
 
-**Claimed Severity:** Low
-
-**Verdict:** VALID -- No invalid patterns detected.
-
-**Analysis:**
-
-`ClaimArbitrage.sol` caches `sya.rewardToken()` at line 141 of `unlockCallback()`, but `_settleResidualDelta()` at line 381 queries `sya.rewardToken()` independently instead of using the cached value. This is a genuine code inconsistency in in-scope code.
-
-While there is no practical exploitability (the reward token cannot change mid-transaction), this represents a code quality issue and deviation from the contract's own stated design pattern (see the "PRE-FLIGHT: CACHE REWARD TOKEN" comment at line 135-139). Appropriately classified as Low/QA.
-
----
-
-### Finding 5: Step 4 zero-amount error -- VALID
-
-**Claimed Severity:** Low
-
-**Verdict:** VALID -- No invalid patterns detected.
-
-**Analysis:**
-
-When the pump swap in Step 4 produces zero output, the revert message is misleading. This is a genuine code quality issue within in-scope code. No funds at risk. Correctly classified as Low/QA. No invalid patterns apply.
-
----
-
-## Recommendation
-
-**Submit:** Findings 1, 4, 5
-**Do NOT submit:** Findings 2, 3
-
-Finding 1 (sqrtPriceX96 overflow) is the strongest finding and should be submitted as Medium. Findings 4 and 5 are appropriate for a QA report.
+Both findings pass the validity check. Neither matches any C4 known-invalid pattern. Both have clearly identifiable root causes in the in-scope `StableYieldAccumulator.sol` contract, and neither relies on speculative conditions, user errors, or reckless admin behavior.
