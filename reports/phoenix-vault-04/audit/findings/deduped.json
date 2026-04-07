@@ -1,0 +1,281 @@
+{
+  "project": "phoenix-vault-04",
+  "dedupTimestamp": "2026-04-07T00:00:00Z",
+  "inputCounts": {
+    "code-scanner": 7,
+    "econ-scanner": 15,
+    "total-raw": 22
+  },
+  "outputCounts": {
+    "high": 9,
+    "medium": 4,
+    "low": 5,
+    "total-deduped": 18
+  },
+  "mergeLog": [
+    {
+      "merged": ["CODE-001", "ECON-001"],
+      "into": "DEDUP-001",
+      "reason": "Identical root cause: minOut anchored to vault.convertToAssets/convertToShares instead of an AMM-fair price. Both flag the same four swap sites in ERC4626MarketYieldStrategy. ECON-001 added the active manipulation/sandwich attack angle; CODE-001 added the symmetric DoS-during-discount angle. Combined into one finding."
+    },
+    {
+      "merged": ["CODE-003", "ECON-004"],
+      "into": "DEDUP-005",
+      "reason": "Same root cause: child _totalWithdraw ignores the cached `amount` parameter from Phase 1 and recomputes shares against live state. CODE-003 highlights the literal unused parameter; ECON-004 details the dilution attack across the 24h window. Same fix."
+    },
+    {
+      "merged": ["CODE-004", "ECON-012"],
+      "into": "DEDUP-002",
+      "reason": "Same code (lines 350-359). CODE-004 frames it as accounting desync (clientBalances/totalDeposited not decremented). ECON-012 frames it as bypassing the documented 24h rugpull-protection delay. Both impacts arise from the same single function and the same fix (either remove emergencyWithdraw or gate it with the two-phase delay AND reconcile accounting)."
+    },
+    {
+      "merged": ["ECON-002", "ECON-014"],
+      "into": "DEDUP-003",
+      "reason": "Both describe the bank-run / winner-takes-all failure on a depeg. Shared root cause: withdraws decrement principal by REQUESTED (not RECEIVED) AND there is no proportional per-client share cap, so early withdrawers drain shares from late withdrawers. Same fix (proportional cap + decrement-by-received). Kept distinct from CODE-002 (which is a deposit-side dilution with a different fix)."
+    }
+  ],
+  "keptDistinct": [
+    {
+      "ids": ["CODE-002"],
+      "reason": "Principal tracked in underlying units enables deposit-side timing exploit when AMM rate diverges from vault rate. Different exploit path and different fix (track clientShares or assess at AMM rate at deposit time) than the withdraw-side bank run in DEDUP-003. Kept as its own finding."
+    },
+    {
+      "ids": ["CODE-005", "ECON-007"],
+      "reason": "Both touch setRoute but have different root causes and fixes. CODE-005 = missing structural validation (path/swapParams shape, hop-count consistency). ECON-007 = missing timelock/whitelist for owner-controlled route mutation. Kept separate per user instructions."
+    }
+  ],
+  "findings": [
+    {
+      "id": "DEDUP-001",
+      "title": "Slippage minOut is anchored to vault.convertToAssets/convertToShares instead of an AMM-fair price, simultaneously bricking withdraws during AMM discounts and enabling sandwich extraction",
+      "severity": "High",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:276-283",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:313-328",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:378-390",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:428-442"
+      ],
+      "rootCause": "All four swap sites (_depositInternal, _withdrawInternal, _totalWithdraw, _withdrawFrom) compute minOut from vault.convertToShares/convertToAssets (the ERC4626 staking exchange rate, e.g. ~1.10 for sUSDe) and apply a basis-point haircut. The Curve AMM that actually executes the trade can quote any price relative to that rate. The strategy has no independent price oracle (no Chainlink, no TWAP, no get_dy preview) so it lets the AMM grade its own homework. The whole purpose of an ERC4626MarketYieldStrategy is to handle vaults whose shares trade at an AMM discount versus the internal rate, yet the slippage check is calibrated against the very rate that fails to track market conditions.",
+      "impact": "Two distinct impact angles arising from the same broken check: (1) DENIAL OF SERVICE during the exact market condition the strategy was built for: when the AMM discount on sUSDe exceeds slippageToleranceBps, the AMM output drops below the inflated minOut and ALL withdrawal paths revert. The owner's only recovery is to raise slippageToleranceBps, which simultaneously disables protection on the deposit side. Funds are effectively frozen during a sUSDe redemption-pressure event. Note the asymmetry: deposits still work because the AMM gives MORE shares than convertToShares(amount) when the vault token is at a discount, so users can keep entering, deepening the trap. (2) ACTIVE EXTRACTION via sandwich/manipulation: an attacker who flash-loans and moves the Curve pool away from the vault rate can drain up to (slippageToleranceBps + (curve_price - vault_price)) on every victim swap. With a 0.5% tolerance and a $1M deposit, this is ~$5,000 of pure extraction per victim swap for ~$200 of gas + flash-loan fees. The same attack works on deposit, withdraw, _totalWithdraw, and _withdrawFrom because they all use the same broken check.",
+      "exploitPath": "DoS path: vault internal rate 1 sUSDe = 1.10 USDe; AMM rate 1 sUSDe = 1.05 USDe (5% market discount); slippageToleranceBps = 50. User withdraws 1000 USDe -> sharesToSell = convertToShares(1000) = 909.09 sUSDe -> idealUnderlying = convertToAssets(909.09) = 1000 -> minOut = 995 -> AMM returns 909.09 * 1.05 = 954.55 USDe < 995 -> swap reverts. Extraction path: attacker observes pending deposit() of 1M USDe in the mempool -> flash-loans USDe -> trades to push the Curve USDe/sUSDe pool so 1 USDe buys ~0.85 * convertToAssets sUSDe -> strategy's idealShares = 909,090 sUSDe and minOut = 904,545 sUSDe -> Curve delivers exactly the floor -> attacker unwinds the flash loan in the same tx, profiting from the spread. Same flow works on every site.",
+      "mergedFrom": ["CODE-001", "ECON-001"]
+    },
+    {
+      "id": "DEDUP-002",
+      "title": "_emergencyWithdraw bypasses the documented 24h rugpull delay AND leaves clientBalances/totalDeposited untouched, producing both a one-tx drain path and permanent accounting skew",
+      "severity": "High",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:350-359"
+      ],
+      "rootCause": "_emergencyWithdraw transfers raw vault shares to the owner with (a) no waiting period, in contrast to AYieldStrategy.totalWithdrawal which enforces a 24h delay 'to provide community protection against rugpulls', and (b) no decrement of clientBalances or totalDeposited. The function is owner-only with no on-chain reconciliation hook: there is no way to mark which clients were 'made whole' off-chain after a partial emergency withdrawal.",
+      "impact": "Two impact angles: (1) GOVERNANCE/SAFETY BYPASS: a malicious or compromised owner can call emergencyWithdraw(type(uint256).max), have it cap to totalShares, and walk away with the entire share pool in one tx. The two-phase delay that the documentation explicitly markets as a safety property is rendered moot. Pure-centralization risks are typically out of scope for C4 bounties, but bypassing a stated safety property is in scope per C4 spec-deviation rules. (2) ACCOUNTING SKEW: even in legitimate use, the function leaves vault.balanceOf shrunk while totalDeposited is unchanged. After a partial emergency withdrawal, totalBalanceOf(account) underreports balances, and subsequent regular withdrawals compete for an undersized share pool with no on-chain mechanism to reconcile principal with the depleted inventory. Users will receive a fraction of expected funds while losing 100% of their principal accounting.",
+      "exploitPath": "Drain path: owner calls emergencyWithdraw(type(uint256).max) -> _emergencyWithdraw caps at totalShares and transfers all sUSDe directly to owner() -> strategy holds 0 shares -> all subsequent client withdrawals revert (sharesToSell vs availableShares=0) -> clientBalances are not zeroed so on-chain accounting still shows clients owning principal that doesn't exist. Skew path: owner pulls 90% of vault shares via emergencyWithdraw -> clientBalances[user] unchanged -> user calls withdraw(amount=principal) -> _withdrawInternal computes sharesToSell = convertToShares(amount), caps to remaining shares (10% of original), sells, pays user, decrements user's principal by the requested amount -> user receives ~10% of expected funds and loses 100% of principal accounting.",
+      "mergedFrom": ["CODE-004", "ECON-012"]
+    },
+    {
+      "id": "DEDUP-003",
+      "title": "Withdraws decrement principal by REQUESTED not RECEIVED and have no proportional share cap, converting any peg loss into a winner-takes-all bank run that mixes client share pools",
+      "severity": "High",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:138-152",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:267-291",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:302-339"
+      ],
+      "rootCause": "Two interacting accounting flaws produce one bank-run / cross-client-mixing failure mode: (1) _withdrawInternal decrements clientBalances[holder] and totalDeposited by the REQUESTED amount, not the RECEIVED amount, so every successful withdraw overstates remaining principal by the slippage gap. (2) sharesToSell is capped against vault.balanceOf(address(this)) -- the TOTAL share pool -- not against the withdrawer's proportional slice (clientBalance/totalDeposited * totalShares). Together, the first client to withdraw can consume shares belonging to other clients, while still being recorded as having a fully-honored withdrawal.",
+      "impact": "On any peg loss (sUSDe depeg / Ethena bad debt / temporary AMM dislocation), early withdrawers recover ~100% of their stated principal while the residual share pool is left short. Late withdrawers find that the AMM no longer prices the shares high enough to satisfy any reasonable slippage check; their withdraws revert and they are stuck holding principal claims with no backing. There is no rateable, pro-rata distribution of loss. The attack does not need an attacker -- it triggers structurally on any depeg -- but it can also be weaponized by a sophisticated client who races to the front of the queue. Concrete illustration: 1.0M USDe-equivalent share pool, principal split A=500K, B=500K. sUSDe drops 10%. Share pool now ~900K. A withdraws 500K (with a 15% tolerance the swap clears at ~450K USDe). clientBalances[A] -= 500K = 0. Share pool now ~450K backing 500K of principal still owed to B. B's withdraw will revert or eat the entire loss.",
+      "exploitPath": "1. sUSDe drops to $0.80 in the Curve pool (e.g., real solvency event). 2. Client A withdraws 100,000 USDe of principal. With a generous slippage setting (~5%) the swap clears, A gets ~95,000 USDe, but clientBalances[A] is decremented by 100,000. 3. totalDeposited still implies 1:1 backing that no longer exists. 4. Client B tries to withdraw the same amount; Curve has even less depth, slippage check reverts, B's funds are stuck. Even before that point, a bank run is possible: every successful withdraw makes the next one less likely to succeed because the share buffer drops faster than the principal buffer.",
+      "mergedFrom": ["ECON-002", "ECON-014"]
+    },
+    {
+      "id": "DEDUP-004",
+      "title": "Principal tracked in underlying units while shares are bought at variable AMM rates breaks pro-rata yield distribution and enables deposit-side timing exploits",
+      "severity": "High",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:273-291"
+      ],
+      "rootCause": "_depositInternal credits clientBalances[token][recipient] += amount and totalDeposited[token] += amount using the underlying input, NOT the actual shares received from the AMM swap. totalBalanceOf then distributes vault value pro-rata by (totalValue * principal) / totalDeposited. Because the AMM rate diverges from the vault internal rate (and varies block-to-block), two depositors who put in the same `amount` at different times receive different real share counts, but the contract treats them as economically equivalent.",
+      "impact": "Silent value transfer between depositors. A depositor who arrives during a temporary AMM discount on sUSDe gets MORE shares per USDe but ends up with the SAME claim on the share pool as the next depositor -- the dilution flows from early depositors to late depositors (or vice versa) on a block-by-block basis. An MEV searcher who can predict AMM price movement can effectively extract value from existing depositors by frontrunning expected discounts with a deposit, then withdrawing at a profit once the average converges. This is distinct from DEDUP-003 (bank run on the withdraw side) -- the exploit path is on the deposit side and the fix is also different (track clientShares per recipient OR snapshot principal at the AMM rate at deposit time, rather than at face value).",
+      "exploitPath": "Alice deposits 1000 USDe when sUSDe trades at par on Curve, getting ~909 sUSDe. clientBalance[Alice]=1000, totalDeposited=1000. Next block, sUSDe drops to a 5% market discount. Bob deposits 1000 USDe and the AMM gives him ~952 sUSDe (more shares due to the discount). clientBalance[Bob]=1000, totalDeposited=2000. Strategy now holds 1861 sUSDe. totalBalanceOf(Alice) = (convertToAssets(1861) * 1000) / 2000 ~= 1023.5 USDe; totalBalanceOf(Bob) = same ~= 1023.5. Alice paid 1000 USDe for 909 sUSDe but is credited with the average of 930.5 sUSDe -- Bob diluted Alice's economic claim by ~23.5 USDe simply by depositing later at a better AMM rate. A surplus extractor running on top of _withdrawFrom would also pay out yield based on this distorted average.",
+      "mergedFrom": ["CODE-002"]
+    },
+    {
+      "id": "DEDUP-005",
+      "title": "Two-phase total withdrawal caches principal at Phase 1 but child _totalWithdraw ignores the cached `amount` and recomputes shares against live state at Phase 2",
+      "severity": "High",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:368-399",
+        "src/AYieldStrategy.sol:379-417"
+      ],
+      "rootCause": "AYieldStrategy.totalWithdrawal Phase 1 caches state.balance = balanceOf(token, client) (which for this child is principal) and passes that cached value as `amount` to _totalWithdraw in Phase 2. The whole point of the cache is to lock in the amount that the owner gave 24-hour notice on. ERC4626MarketYieldStrategy._totalWithdraw IGNORES the `amount` parameter (declared, never read) and instead reads clientBalances[token][client] live at execution time, then computes sharesToSell = (totalShares * clientStoredBalance) / totalDeposited[token] against LIVE totalShares and totalDeposited. The cached balance is only used as the eventual decrement amount.",
+      "impact": "Two failure modes from one bug: (a) A client can be silently swept along with deposits made AFTER Phase 1 -- the notice mechanism's stated guarantee is broken. Owner initiates totalWithdrawal(token, alice) with alice's principal at 100 USDe (state.balance cached as 100). During the 24-hour window, alice legitimately deposits another 1000 USDe (deposit() is gated by whenNotPaused but not by withdrawal-state checks). 24h later, owner executes Phase 2. The strategy reads live clientBalances[token][alice] = 1100, sweeps shares proportional to 1100, zeros alice's principal entirely, and transfers ~1100 USDe worth to owner. (b) An attacker (or colluding client) can deposit/withdraw between phases to dilute the pro-rata. Phase 1 caches A's principal at 100,000. During the 24h window, attacker deposits 1,000,000 into the strategy. totalDeposited = 1,100,000, totalShares roughly +10x. Phase 2 executes: sharesToSell = totalShares * 100,000 / 1,100,000 ~= totalShares / 11 -- A's pro rata is now diluted vs the moment Phase 1 was initiated. The colluder then withdraws their 1,000,000 and walks away, leaving A short. Magnitude: 1-5% of total withdrawn balance for typical slippage tolerances and intervening flow.",
+      "exploitPath": "See above; both attack scenarios share the same buggy code path (line 378, clientStoredBalance read live). The fix is to honor the `amount` parameter (use cached principal) AND to also snapshot totalShares/totalDeposited at Phase 1 so the entire pro-rata is frozen.",
+      "mergedFrom": ["CODE-003", "ECON-004"]
+    },
+    {
+      "id": "DEDUP-006",
+      "title": "_withdrawFrom (surplus extraction) operates on shared share pool state but is parameterized by client, allowing one client's authorized withdrawer to extract another client's surplus",
+      "severity": "High",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:411-451"
+      ],
+      "rootCause": "Two interacting bugs in one function. (a) The parent AYieldStrategy.withdrawFrom requires clientBalance = this.balanceOf(token, client) >= amount, but the child's balanceOf returns PRINCIPAL only -- so an authorized withdrawer can pull at most min(principal, surplus) of yield. If yield > principal, the excess yield is locked. (b) The child function checks amount <= surplus (computed as totalBalanceOf - principal at the time of call) but then sells convertToShares(amount) shares from the COMMON pool and credits the recipient with whatever Curve returns. Because totalDeposited is NOT decremented, the next caller's surplus = totalBalance - principal is recomputed against a smaller share pool. The withdrawer can pull surplus repeatedly without triggering any per-period limit and without per-client surplus accounting.",
+      "impact": "A compromised authorizedWithdrawer can drain the entire surplus on behalf of any client whose principal is large enough to satisfy the parent's per-call cap, even though the underlying surplus belongs pro-rata to all clients. After enough draws, the share buffer is below the implied principal backing, so any subsequent client withdraw fails the slippage check or eats principal loss (compounds with DEDUP-003). The function is simultaneously under-permissive (cannot extract surplus > principal for one client) and over-permissive (can extract another client's surplus).",
+      "exploitPath": "1. Strategy holds 1,100,000 sUSDe backing 1,000,000 USDe of client principal across multiple clients. Surplus = 100,000 USDe. 2. Compromised authorizedWithdrawer calls withdrawFrom for client A (principal=10,000, surplus share=1,000) and asks for 1,000. 3. The function calls vault.convertToShares(1,000) -- regardless of WHICH client owns the surplus, the swap drains shares pro rata. After a few such calls the share buffer is below 1,000,000 USDe of value, but principal[clients] still reads 1,000,000. 4. Now any client withdraw fails the slippage check or eats principal loss. The withdrawer has effectively stolen yield from clients OTHER than client A.",
+      "mergedFrom": ["ECON-003"]
+    },
+    {
+      "id": "DEDUP-007",
+      "title": "setSlippageTolerance allows up to MAX_BPS (100%), letting an owner set minOut=0 and drain shares via withdrawAsOwner / withdrawFrom",
+      "severity": "High",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:190-195",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:242-256"
+      ],
+      "rootCause": "setSlippageTolerance allows _bps up to MAX_BPS (10000), which means minOut = 0. There is no minimum sanity (e.g., 1000 bps cap) and no timelock on slippage changes. The constant MAX_BPS suggests a sanity bound, but the require uses <=, not <.",
+      "impact": "Owner can (a) set slippage to 100%, (b) execute withdrawAsOwner on any client (or call totalWithdrawal in Phase 2), (c) the AMM swap accepts any amount of underlying including zero, (d) the difference is silently absorbed. Combined with depositAsOwner setting recipient to anyone, the owner can sandwich themselves: set slippage high, sandwich-trade Curve, run a deposit-or-withdraw, reset slippage low. C4 explicitly notes 'unintended privilege' is in scope -- here the privilege to set slippage to 100% likely was not intended.",
+      "exploitPath": "1. Owner observes large client principal. 2. Owner calls setSlippageTolerance(10000). 3. Owner flash-loans USDe, dumps it into the Curve USDe/sUSDe pool. 4. Owner calls withdrawAsOwner(client, owner, principal). Curve returns far less USDe than expected -- but minOut = 0, so the swap clears. 5. Owner unwinds the flash loan; the share pool has shrunk by the manipulated amount, but principal is decremented only by `amount`. 6. Owner calls setSlippageTolerance(50) to cover tracks.",
+      "mergedFrom": ["ECON-006"]
+    },
+    {
+      "id": "DEDUP-008",
+      "title": "setRoute is owner-callable with no timelock and no whitelist, allowing instant route swap to a malicious pool that bypasses all on-chain price checks",
+      "severity": "High",
+      "files": [
+        "src/AMMAdapters/CurveAMMAdapter.sol:62-89"
+      ],
+      "rootCause": "Route mutability is not gated by a timelock or off-chain attestation. Intermediate pool addresses are not whitelisted. The adapter validates only that path[0] == tokenIn and path[last_nonzero] == tokenOut; Curve Router NG accepts arbitrary pool addresses for each hop. Combined with owner-controlled slippage (DEDUP-007), this gives the owner a one-tx drain.",
+      "impact": "Owner can install a route through a pool they control (e.g., a fresh, owner-funded Curve pool with 99% slippage on every trade) and then call any deposit/withdraw flow on the strategy. The strategy's slippage check uses vault.convertToAssets, not the new route's price, so the swap clears with massive value loss to the strategy. Up to the entire share pool value per call.",
+      "exploitPath": "1. Owner deploys a custom Curve-compatible pool C-mal where USDe trades 1:0.0001 sUSDe. 2. Owner calls setRoute(USDe, sUSDe, [USDe, C-mal, sUSDe, 0,0,...], ...). 3. Owner calls strategy.depositAsOwner(USDe, 1,000,000, owner). The strategy sends 1M USDe to the adapter, which routes through C-mal, getting 100 sUSDe back. The slippage check passes only because (1M USDe / vault rate) * (1 - bps) is ~909,090 -- DEDUP-001 says this check is broken. 4. With slippage = 10000 (DEDUP-007), the check is bypassed entirely. 5. Strategy's share pool drops from 909K sUSDe to 100 sUSDe.",
+      "mergedFrom": ["ECON-007"]
+    },
+    {
+      "id": "DEDUP-009",
+      "title": "Sandwich economics: every public deposit/withdraw is profitable to MEV because slippage is global and not per-call",
+      "severity": "High",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:190-195",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:276-283",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:320-328"
+      ],
+      "rootCause": "Slippage tolerance is owner-set globally and not per-call. Clients cannot override it. There is no per-call minOut, no commit-reveal, no batch auction, and no use of Curve's get_dy as a tighter sanity check immediately before the swap. The single global tolerance must be wide enough to accommodate the worst-case acceptable trade, which guarantees that better-case trades leak the difference to MEV.",
+      "impact": "For any swap larger than the slippage budget * pool depth, sandwich profit ~= slippage * tradeSize - gas - flash loan fees. With Curve Router NG and a multi-hop USDe -> USDC -> sUSDe path, a 100K USDe deposit with 50bps slippage is sandwich-profitable at the level of $250-500 per call. The loss is socialized into the share pool (compounds with DEDUP-003). Severity raised vs scanner because this is a recurring leak on every public-facing call rather than a one-shot.",
+      "exploitPath": "Standard sandwich: front-run with tokenIn, let victim trade, back-run with tokenOut. Profit ~ slippage_bps * notional - fees. For a 0.5% tolerance and $100K trade -> $500 captured by MEV per call. This is independent of DEDUP-001 (which is the more severe oracle-free issue) -- even if DEDUP-001 were fixed by wiring vault.convertToAssets correctly, this finding would still apply because the bound is on a global tolerance rather than per-call protection.",
+      "mergedFrom": ["ECON-010"]
+    },
+    {
+      "id": "DEDUP-010",
+      "title": "First-depositor / share donation: totalBalanceOf returns 0 if totalDeposited==0 regardless of vault.balanceOf, allowing donated shares to inflate the first depositor's accounting",
+      "severity": "Medium",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:138-152",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:267-291"
+      ],
+      "rootCause": "totalBalanceOf returns 0 if totalDeposited[token] == 0, regardless of how many vault shares the strategy holds. There is no internal accounting of 'shares this contract minted via swaps' separate from vault.balanceOf, so a direct token transfer to the strategy address mixes into the shared pool with no attribution.",
+      "impact": "An attacker who transfers sUSDe shares directly to the strategy address before any client deposit will have those shares counted into the FIRST real depositor's pro rata share. The first depositor sees totalBalanceOf returning essentially the entire donated sum as 'yield' on a tiny principal. authorizedWithdrawer can attempt to extract this but is capped by the parent's principal-based check (per-call), so direct one-shot drainage is limited. The accounting model is wrong, and confused dashboards / off-chain consumers may misreport balances. Sets up a confused state for first depositors and confuses surplus extraction.",
+      "exploitPath": "1. Strategy is freshly deployed. totalDeposited = 0, vault.balanceOf(strategy) = 0. 2. Malicious admin transfers 100,000 sUSDe directly to strategy. 3. First client deposits 1 USDe. totalDeposited = 1, vault.balanceOf(strategy) ~= 100,000.91 sUSDe. 4. totalBalanceOf for the first client returns essentially the entire donated sum, ~110,000 USDe of yield on a 1 USDe principal. 5. authorizedWithdrawer calls withdrawFrom -- capped by parent's `balanceOf >= amount` check (1 USDe per call). Drainage is throttled but accounting is wrong.",
+      "mergedFrom": ["ECON-005"]
+    },
+    {
+      "id": "DEDUP-011",
+      "title": "Read-only reentrancy footgun for downstream consumers of totalBalanceOf during a Curve swap",
+      "severity": "Medium",
+      "files": [
+        "src/AMMAdapters/CurveAMMAdapter.sol:120-141"
+      ],
+      "rootCause": "The Curve sUSDe-USDe route uses Curve crypto-pools (swap_type=1, pool_type=10) which have a documented read-only reentrancy bug whereby calls to get_virtual_price during a remove_liquidity call return stale values. The strategy's nonReentrant guard protects only itself, not external observers. There is no reentrancy lock around the swap path that protects view readers.",
+      "impact": "Forward-looking risk for any downstream consumer that reads strategy.totalBalanceOf during a Curve callback (e.g., a Vault that mints LP shares based on totalBalanceOf -- the standard Curator pattern). In the current scope no contract reads totalBalanceOf during a Curve callback, so this is a footgun for future client integrations rather than an in-scope exploit. Document for integrators.",
+      "exploitPath": "Requires (a) a Curve pool callback into a contract that reads strategy.totalBalanceOf, and (b) timing the read between the strategy's swap call and Curve's state finalization. Not directly exploitable in the in-scope code today.",
+      "mergedFrom": ["ECON-009"]
+    },
+    {
+      "id": "DEDUP-012",
+      "title": "convertToShares-based minOut breaks if sUSDe share price drops (Ethena slash / liquidation event)",
+      "severity": "Medium",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:276",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:314",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:321",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:383",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:428",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:435"
+      ],
+      "rootCause": "The contract banner says 'Rebasing vaults are NOT supported. This strategy assumes vault share prices only increase (or stay flat) over time.' But sUSDe IS subject to slashing / loss events: if Ethena's hedge legs go badly and totalAssets drops, convertToAssets(shares) drops too. The strategy treats convertToShares/convertToAssets as a sticky reference even though it is precisely the value being protected.",
+      "impact": "The contract's slippage check becomes LOOSER on sUSDe price drops (allows worse prices on withdraw), so client withdrawals lose value silently rather than reverting. Client A calls withdraw(100,000) after a 5% sUSDe markdown -> sharesToSell returns more shares than before -> minOut = idealUnderlying * (1 - bps) is also lower -> swap clears at the new lower price -> client A receives 95,000 USDe but clientBalances[A] decrements by 100,000. The 5,000 loss is silently absorbed and shows up as principal drift. Distinct from DEDUP-001 (which is about the AMM diverging from the vault rate); this is about the vault rate itself moving down, which the spec says is unsupported.",
+      "exploitPath": "1. Ethena marks down totalAssets by 5% due to a hedge loss. 2. Existing client A calls withdraw(100,000). 3. sharesToSell = convertToShares(100,000) returns more shares than before. 4. minOut is lower. 5. Swap clears at new lower price; client A receives 95,000 USDe but clientBalances[A] decrements by 100,000. The strategy should additionally enforce a price-floor relative to the previous deposit's share price OR pause on any decrease.",
+      "mergedFrom": ["ECON-011"]
+    },
+    {
+      "id": "DEDUP-013",
+      "title": "Round-trip arbitrage: deposit then withdraw within the same block griefs other clients out of slippage costs",
+      "severity": "Medium",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:276-283",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:320-328"
+      ],
+      "rootCause": "Both deposit and withdraw use vault.convertToShares/convertToAssets, which is invariant within a block. The 'principal decrements by REQUESTED, not RECEIVED' rule has an inverse failure mode for round trips: deposit credits principal at face value, withdraw debits principal at face value, but the share pool absorbs both rounds of slippage and Curve fees.",
+      "impact": "An authorized client can deposit X USDe, immediately withdraw X USDe, and walk away with their principal balance unchanged on-chain while the share pool eats both rounds of slippage. From the strategy's view, totalDeposited dropped by X even though the share pool is now short by ~2*slippage*X. Other clients experience a smaller share pool with the same totalDeposited -- their surplus is now negative or zero, and any subsequent withdraw eats the loss. Profitable as a griefing attack against competing clients; not profitable for the attacker individually unless they are being paid externally to do this.",
+      "exploitPath": "1. Authorized client A deposits 1,000,000 USDe. clientBalances[A] += 1M. Strategy's share pool +909,090 sUSDe minus pool fees. 2. A immediately withdraws 1,000,000 USDe. The strategy sells 909,090 sUSDe back, receives ~999,000 USDe, pays A 999,000, clientBalances[A] -= 1,000,000. 3. Net: A has lost 1,000 USDe of REAL value but its on-chain principal balance is unchanged. 4. Other clients now experience a smaller share pool with the same totalDeposited.",
+      "mergedFrom": ["ECON-013"]
+    },
+    {
+      "id": "DEDUP-014",
+      "title": "CurveAMMAdapter.setRoute does not validate path shape, swapParams correspondence, or hop count",
+      "severity": "Low",
+      "files": [
+        "src/AMMAdapters/CurveAMMAdapter.sol:62-89"
+      ],
+      "rootCause": "setRoute only validates path[0] == tokenIn and that the last non-zero entry equals tokenOut. It does not check that path is well-formed (alternating token/pool slots), that swapParams rows correspond 1:1 with hops, that swapParams for unused hops are zeroed, that pool addresses in path are non-zero contracts, or that the implied hop count is consistent across path/swapParams/pools. Distinct from DEDUP-008 (timelock/whitelist); this is about input shape validation.",
+      "impact": "Owner-only function so direct exploitation requires a compromised/buggy owner key. Realistic risk is operational: a deployment script generates a route from AMMRoutes.json with the wrong number of hops or a swap_type that doesn't match the actual pool's interface. setRoute accepts it. swap() then either reverts at Curve (DoS) or, in the worst case, executes a swap through unintended pools and gives an unexpected output. The minOut check in the strategy is the only backstop, and that backstop is itself broken (see DEDUP-001).",
+      "exploitPath": "Operational misconfiguration during deployment leads to a stored route that swap() will accept and forward to Curve Router NG, where the failure mode depends on the router's own validation.",
+      "mergedFrom": ["CODE-005"]
+    },
+    {
+      "id": "DEDUP-015",
+      "title": "Cap-to-availableShares in _withdrawInternal can leave the strategy with stranded shares after the last withdrawer exits",
+      "severity": "Low",
+      "files": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:307-339"
+      ],
+      "rootCause": "When the final depositor withdraws their full principal, sharesToSell = convertToShares(amount) typically rounds DOWN to fewer shares than the strategy actually holds (because earlier deposits at favorable AMM rates accumulated 'extra' shares that were never credited as principal). The cap to availableShares does not trigger because sharesToSell is smaller than availableShares. After the withdrawal: clientBalances=0, totalDeposited=0, but vault.balanceOf(this) is non-zero. Compounds with DEDUP-004.",
+      "impact": "Stranded share value with no on-chain owner, recoverable only via _withdrawFrom (surplus extractor) or _emergencyWithdraw. If the surplus tracker is not wired up, the shares are stranded permanently and cannot be reattributed because all principal pointers are zero. Over many cycles, a non-trivial share balance accumulates with no on-chain owner.",
+      "exploitPath": "Not directly exploitable; this is a value-leak scenario that compounds with DEDUP-004: every deposit that captures favorable AMM pricing leaves residual share value that no client can claim through the standard withdraw path.",
+      "mergedFrom": ["CODE-006"]
+    },
+    {
+      "id": "DEDUP-016",
+      "title": "CurveAMMAdapter has no pause mechanism, leaving no on-chain kill switch during a Curve incident",
+      "severity": "Low",
+      "files": [
+        "src/AMMAdapters/CurveAMMAdapter.sol:120-142"
+      ],
+      "rootCause": "The adapter is Ownable but not Pausable. There is no whenNotPaused on swap() and no kill switch.",
+      "impact": "If a Curve pool is exploited, depegs catastrophically, or the Router NG itself misbehaves, the only on-chain mitigation available to the adapter owner is to overwrite the route via setRoute (which still requires both directions to be valid for the bidirectional invariant) or to deauthorize the strategy upstream. During a Curve pool incident the owner has to scramble: either overwrite the route (slow, requires off-chain route computation), or call setClient(strategy, false) on every consuming strategy. A pause()/unpause() on the adapter would let the owner freeze all consuming strategies in one tx.",
+      "exploitPath": "Operational risk during incident response, not a direct exploit.",
+      "mergedFrom": ["CODE-007"]
+    },
+    {
+      "id": "DEDUP-017",
+      "title": "CurveAMMAdapter does not refund residual approval or token dust after partial-fill swaps",
+      "severity": "Low",
+      "files": [
+        "src/AMMAdapters/CurveAMMAdapter.sol:131-141"
+      ],
+      "rootCause": "swap pulls amountIn from msg.sender and forceApprove(router, amountIn). If router.exchange consumes less than amountIn, the remaining approval persists. There is no refund of residual tokenIn back to msg.sender either, so any unused tokens remain stranded in the adapter. Missing post-swap balance check + refund. Standard AMM-adapter pattern is to transfer back any residual tokenIn to msg.sender.",
+      "impact": "Tiny per-call dust accumulates in the adapter. The strategy decremented its on-chain balance by amountIn but only got value for what Curve consumed. The adapter has no sweep function and no refund-to-caller path; the residue is permanently stranded. Over time this socializes a small loss away from clients.",
+      "exploitPath": "Passive accumulation, not exploitable.",
+      "mergedFrom": ["ECON-008"]
+    },
+    {
+      "id": "DEDUP-018",
+      "title": "AMMRoutes.json USDe<->sUSDe path is a 2-hop USDC-routed path instead of a direct sUSDe/USDe pool",
+      "severity": "Low",
+      "files": [
+        "AMMRoutes.json:9-67"
+      ],
+      "rootCause": "The configured route is USDe -> 0xF55B... (USDe/USDC pool) -> 0xf939E0A0 (USDC token, intermediate) -> 0x57064F49... (sUSDe/USDC pool) -> sUSDe. This is a 2-hop route through USDC, paying Curve fees twice and exposing the strategy to USDC depeg risk in addition to sUSDe peg risk. There exists a direct sUSDe/USDe Curve pool not configured here.",
+      "impact": "If USDC depegs even briefly (CB-style event), both legs of the swap are affected. Worse: an attacker can sandwich BOTH pools simultaneously. Marginal under normal conditions; significant during USDC depeg events. May be intentional if the direct pool has insufficient liquidity.",
+      "exploitPath": "Configuration choice rather than a code bug.",
+      "mergedFrom": ["ECON-015"]
+    }
+  ]
+}

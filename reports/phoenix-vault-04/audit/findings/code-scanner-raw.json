@@ -1,0 +1,154 @@
+{
+  "project": "phoenix-vault-04",
+  "scanTimestamp": "2026-04-07T00:00:00Z",
+  "scanType": "code",
+  "scope": [
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+    "src/AMMAdapters/CurveAMMAdapter.sol",
+    "src/AMMAdapters/IAMMAdapter.sol",
+    "src/AMMAdapters/ICurveRouterNG.sol",
+    "AMMRoutes.json"
+  ],
+  "contractsScanned": 5,
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "incorrect-pricing-assumption",
+      "severity": "high",
+      "title": "Withdrawals brick when AMM diverges from ERC4626 internal exchange rate (the very condition the strategy was built for)",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_withdrawInternal",
+      "line": 322,
+      "lineStart": 313,
+      "lineEnd": 328,
+      "description": "Slippage protection in _withdrawInternal computes minOut from `vault.convertToAssets(sharesToSell)` (the vault's INTERNAL exchange rate), not the AMM's market rate. The whole purpose of this strategy is to handle ERC4626 vaults whose shares trade at a discount on the AMM (e.g., sUSDe under cooldown / redemption pressure). When that discount exceeds `slippageToleranceBps`, the AMM's actual output drops below the inflated minOut and the swap reverts. The same anti-pattern is repeated in `_totalWithdraw` (line 384) and `_withdrawFrom` (line 436).",
+      "codeSnippet": "uint256 sharesToSell = vault.convertToShares(amount);\n...\nuint256 idealUnderlying = vault.convertToAssets(sharesToSell);\nuint256 minOut = idealUnderlying * (MAX_BPS - slippageToleranceBps) / MAX_BPS;\n...\nuint256 underlyingReceived = ammAdapter.swap(address(vault), address(underlyingToken), sharesToSell, minOut);",
+      "attackVector": "Scenario: vault internal rate 1 sUSDe = 1.10 USDe; AMM rate 1 sUSDe = 1.05 USDe (5% market discount). User withdraws 1000 USDe. sharesToSell = convertToShares(1000) = 909.09 sUSDe. idealUnderlying = convertToAssets(909.09) = 1000. minOut = 1000 * 0.995 = 995 (with 50 bps tolerance). AMM returns 909.09 * 1.05 = 954.55 USDe < 995, swap reverts. ALL withdrawals (`withdraw`, `withdrawAsOwner`, `_totalWithdraw`, `_withdrawFrom`) are bricked until the owner raises slippageToleranceBps far enough — which simultaneously disables slippage protection on the deposit side and during recovery. Funds are effectively frozen during the exact market condition this strategy was designed for. Note also the asymmetry: deposits still work (the AMM gives MORE shares than `convertToShares(amount)` when the vault token is at a discount), so users can still enter, deepening the trap.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-002",
+      "type": "principal-accounting",
+      "severity": "high",
+      "title": "Principal tracked in underlying units while shares are bought at variable AMM rates breaks pro-rata yield distribution",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_depositInternal",
+      "line": 287,
+      "lineStart": 273,
+      "lineEnd": 291,
+      "description": "`_depositInternal` credits `clientBalances[token][recipient] += amount` and `totalDeposited[token] += amount` using the underlying input, not the actual shares received from the AMM. `totalBalanceOf` then distributes vault value pro-rata by `(totalValue * principal) / totalDeposited`. Because the AMM rate diverges from the vault internal rate (and varies block-to-block), two depositors who put in the same `amount` at different times receive different *real* share counts, but the contract treats them as economically equivalent. A depositor who deposits when sUSDe is at a discount gets MORE shares per USDe, yet ends up with the SAME claim on the share pool as the next depositor — the dilution silently transfers value from early depositors to late depositors (or vice versa).",
+      "codeSnippet": "uint256 sharesReceived = ammAdapter.swap(address(underlyingToken), address(vault), amount, minOut);\nrequire(sharesReceived > 0, \"...\");\n\n// Update principal tracking\nclientBalances[token][recipient] += amount;   // tracks INPUT, not OUTPUT\ntotalDeposited[token] += amount;",
+      "attackVector": "Sandwich/timing exploit. Alice deposits 1000 USDe when sUSDe trades at par on Curve, getting ~909 sUSDe. clientBalance[Alice]=1000, totalDeposited=1000. The next block, sUSDe drops to a 5% market discount (e.g., redemption pressure begins). Bob deposits 1000 USDe and the AMM gives him ~952 sUSDe (more shares because of the discount). clientBalance[Bob]=1000, totalDeposited=2000. Strategy now holds 909+952=1861 sUSDe. totalBalanceOf(Alice) = (convertToAssets(1861) * 1000) / 2000 ≈ 1023.5 USDe; totalBalanceOf(Bob) = same ≈ 1023.5. Alice paid 1000 USDe for 909 sUSDe but is credited with the average of 930.5 sUSDe — Bob diluted Alice's economic claim by ~23.5 USDe simply by depositing later at a better AMM rate. A surplus extractor running on top of `_withdrawFrom` would also pay out yield based on this distorted average, so an MEV searcher who can predict AMM price movement can effectively extract value from existing depositors by frontrunning expected discounts with a deposit, then withdrawing at a profit once `convertToAssets` catches up. The correct fix is to track `clientShares[recipient] += sharesReceived` (or to assess value at deposit time using the AMM rate, not vault rate).",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-003",
+      "type": "stale-cached-amount",
+      "severity": "medium",
+      "title": "_totalWithdraw ignores the cached `amount` from the two-phase notice flow and uses the live balance instead",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_totalWithdraw",
+      "line": 378,
+      "lineStart": 368,
+      "lineEnd": 399,
+      "description": "AYieldStrategy's two-phase total withdrawal caches `state.balance = balanceOf(client)` at Phase 1 and passes that cached value as `amount` to `_totalWithdraw` in Phase 2 (`AYieldStrategy.sol:406`). The whole point of caching is to lock in the amount that owner gave 24-hour notice on. ERC4626MarketYieldStrategy._totalWithdraw IGNORES the `amount` parameter (line 368 — declared, never read) and instead reads `clientBalances[token][client]` live at execution time (line 378). The same bug exists in the inherited ERC4626YieldStrategy, but it's reproduced verbatim in this NEW file.",
+      "codeSnippet": "function _totalWithdraw(address token, address client, uint256 amount) internal override {\n    require(token == address(underlyingToken), \"...\");\n    require(amount > 0, \"...\");\n    ...\n    uint256 clientStoredBalance = clientBalances[token][client];   // <- live, not cached\n    uint256 sharesToSell = (totalShares * clientStoredBalance) / totalDeposited[token];\n    ...\n    clientBalances[token][client] = 0;\n    totalDeposited[token] -= clientStoredBalance;",
+      "attackVector": "Owner initiates `totalWithdrawal(token, alice)` with alice's principal at 100 USDe (state.balance cached as 100). During the 24-hour waiting window, alice legitimately deposits another 1000 USDe (deposit() is gated by `whenNotPaused` but not by withdrawal-state checks). 24h later, owner executes Phase 2. The strategy reads live `clientBalances[token][alice] = 1100`, sweeps shares proportional to 1100, zeros alice's principal entirely, and transfers ~1100 USDe worth to owner. Alice's freshly-deposited 1000 USDe is silently swept along with the 100 USDe she expected. The notice mechanism is meant to give clients certainty about what will be withdrawn — using the live balance defeats that guarantee.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-004",
+      "type": "accounting-skew-after-emergency",
+      "severity": "medium",
+      "title": "_emergencyWithdraw drains shares without touching principal accounting, leaving the contract in an inconsistent state",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_emergencyWithdraw",
+      "line": 358,
+      "lineStart": 350,
+      "lineEnd": 359,
+      "description": "`_emergencyWithdraw` transfers vault shares from the strategy to the owner but never decrements `clientBalances` or `totalDeposited`. After an emergency withdrawal, `vault.balanceOf(this)` shrinks but `totalDeposited` is unchanged, so `totalBalanceOf(account)` underreports balances and subsequent regular withdrawals will compete for an undersized share pool. There is no on-chain mechanism to reconcile principal with the depleted share inventory.",
+      "codeSnippet": "function _emergencyWithdraw(uint256 amount) internal override {\n    uint256 totalShares = vault.balanceOf(address(this));\n    require(totalShares > 0, \"...\");\n    uint256 sharesToTransfer = amount < totalShares ? amount : totalShares;\n    IERC20(address(vault)).safeTransfer(owner(), sharesToTransfer);\n}",
+      "attackVector": "Owner pulls 90% of vault shares via emergencyWithdraw. clientBalances[user] is unchanged. user calls withdraw(amount=principal). _withdrawInternal computes sharesToSell = convertToShares(amount), caps to remaining shares (10% of original), sells whatever's left, transfers to user, decrements user's principal by the requested amount. User receives ~10% of expected funds and loses 100% of principal accounting. Subsequent users see totalBalanceOf reflecting a depleted pool and may also withdraw at a loss in random ordering. There's no accounting hook to mark which clients were 'made whole' off-chain by the owner.",
+      "confidence": "medium"
+    },
+    {
+      "id": "CODE-005",
+      "type": "input-validation-gap",
+      "severity": "low",
+      "title": "CurveAMMAdapter.setRoute does not validate intermediate path entries, swapParams shape, or hop count",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "function": "setRoute",
+      "line": 75,
+      "lineStart": 62,
+      "lineEnd": 89,
+      "description": "`setRoute` only validates `path[0] == tokenIn` and that the *last non-zero* entry equals `tokenOut`. It does not check that path is well-formed (alternating token/pool slots), that `swapParams` rows correspond 1:1 with hops, that `swapParams` for unused hops are zeroed, that pool addresses in `path` are non-zero contracts, or that the implied hop count is consistent across path/swapParams/pools. A misconfiguration produces a stored route that swap() will accept and forward to Curve Router NG, where the failure mode depends on the router's own validation.",
+      "codeSnippet": "for (uint256 i = 0; i < 11; i++) {\n    if (path[i] != address(0)) {\n        lastToken = path[i];\n    }\n}\nrequire(lastToken == tokenOut, \"CurveAMMAdapter: path must end at tokenOut\");\n// No validation of swapParams matching hop count, no validation of intermediate slots,\n// no per-hop coin index sanity checks.",
+      "attackVector": "Owner-only function so direct exploitation requires a compromised/buggy owner key. Realistic risk is operational: a deployment script generates a route from AMMRoutes.json with the wrong number of hops or a swap_type that doesn't match the actual pool's interface. setRoute accepts it. swap() then either reverts at Curve (DoS) or, in the worst case, executes a swap through unintended pools and gives an unexpected output. The minOut check in the strategy is the only backstop, and that backstop is itself broken (see CODE-001).",
+      "confidence": "medium"
+    },
+    {
+      "id": "CODE-006",
+      "type": "withdrawal-leaves-dust",
+      "severity": "low",
+      "title": "Cap-to-availableShares in _withdrawInternal can leave the strategy with stranded shares after the last withdrawer exits",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_withdrawInternal",
+      "line": 314,
+      "lineStart": 307,
+      "lineEnd": 339,
+      "description": "When the final depositor withdraws their full principal, `sharesToSell = convertToShares(amount)` typically rounds DOWN to fewer shares than the strategy actually holds (because earlier deposits at favorable AMM rates accumulated 'extra' shares that were never credited as principal). The cap to availableShares does not trigger because sharesToSell is smaller than availableShares. After the withdrawal: clientBalances=0, totalDeposited=0, but `vault.balanceOf(this)` is non-zero. Those leftover shares are only recoverable via `_withdrawFrom` (surplus extractor) or `_emergencyWithdraw`, which is acceptable IF the surplus tracker is wired up — but if it isn't, the shares are stranded permanently and cannot be reattributed because all principal pointers are zero.",
+      "codeSnippet": "uint256 sharesToSell = vault.convertToShares(amount);\nuint256 availableShares = vault.balanceOf(address(this));\nif (sharesToSell > availableShares) {\n    sharesToSell = availableShares;\n}",
+      "attackVector": "Not directly exploitable; this is a value-leak scenario. The leakage compounds with CODE-002: every deposit that captures favorable AMM pricing leaves residual share value that no client can claim through the standard withdraw path. Over many cycles, a non-trivial share balance accumulates with no on-chain owner — fully recoverable only via owner-initiated emergency withdraw.",
+      "confidence": "medium"
+    },
+    {
+      "id": "CODE-007",
+      "type": "missing-pause-on-route-config",
+      "severity": "low",
+      "title": "CurveAMMAdapter has no pause mechanism — strategies cannot stop swapping through it during an incident",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "function": "swap",
+      "line": 120,
+      "lineStart": 120,
+      "lineEnd": 142,
+      "description": "The adapter is `Ownable` but not `Pausable`. If a Curve pool is exploited, depegs catastrophically, or the Router NG itself misbehaves, the only on-chain mitigation available to the adapter owner is to overwrite the route via setRoute (which still requires both directions to be valid for the bidirectional invariant) or to deauthorize the strategy upstream. There is no `whenNotPaused` on swap() and no kill switch.",
+      "codeSnippet": "function swap(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut)\n    external\n    override\n    returns (uint256 amountOut)\n{\n    Route storage r = routes[tokenIn][tokenOut];\n    require(r.configured, \"CurveAMMAdapter: route not configured\");\n    require(routes[tokenOut][tokenIn].configured, \"...\");\n    ...\n}",
+      "attackVector": "Operational. During a Curve pool incident, owner has to scramble: either overwrite the route to point to a different pool (slow, requires off-chain route computation), or call `setClient(strategy, false)` on every consuming strategy (the adapter doesn't know who its clients are). A `pause()/unpause()` on the adapter would let the owner freeze all consuming strategies in one tx.",
+      "confidence": "low"
+    }
+  ],
+  "explicitlyReviewedAndOk": [
+    {
+      "area": "ReentrancyGuard coverage",
+      "note": "All value-handling externals (deposit, withdraw, depositAsOwner, withdrawAsOwner, withdrawFrom, totalWithdrawal) are nonReentrant. CEI ordering is technically violated in _withdrawInternal (transfer before state update) but the modifier blocks reentrancy. Acceptable."
+    },
+    {
+      "area": "Approval handling",
+      "note": "Strategy uses safeIncreaseAllowance per swap and Curve Router NG consumes exactly amountIn, leaving zero residual. Adapter uses forceApprove with the reset-then-set pattern. No approval leakage observed under normal flows."
+    },
+    {
+      "area": "AMMRoutes.json USDe-sUSDe routes",
+      "note": "Both directions present (USDe-sUSDe AND sUSDe-USDe). Route addresses are internally consistent: path[0]==tokenIn, path[4]==tokenOut, swapParams flip i/j between directions. Pool addresses (0xF55B...0442 and 0x5706...e85) are syntactically valid; coin indices (0,1) and (1,0) match the bidirectional convention. pool_type=10 corresponds to Curve stable-NG, swap_type=1 corresponds to standard exchange — both valid for the Router NG. Without on-chain verification this is the most that can be checked statically, but no inconsistency was found in the JSON itself."
+    },
+    {
+      "area": "Bidirectional invariant in CurveAMMAdapter",
+      "note": "The check `routes[tokenOut][tokenIn].configured` is enforced at swap-time (line 128) so the invariant cannot be bypassed by setting only one direction. Confirmed."
+    },
+    {
+      "area": "Solidity 0.8.x arithmetic",
+      "note": "No unchecked blocks in either contract. All subtraction in _withdrawInternal is preceded by a cap that prevents underflow. totalDeposited -= amount is safe because the invariant totalDeposited == sum(clientBalances) is maintained."
+    },
+    {
+      "area": "depositAsOwner / withdrawAsOwner pause bypass",
+      "note": "Confirmed intentional. Owner can already drain via _emergencyWithdraw, so bypassing the pause for owner-initiated calls does not expand the trust model."
+    },
+    {
+      "area": "ICurveRouterNG interface match",
+      "note": "Function signature matches the documented Curve Router NG `exchange` ABI: address[11], uint256[5][5], uint256, uint256, address[5], address. payable. Returns uint256."
+    },
+    {
+      "area": "CurveAMMAdapter swap reentrancy surface",
+      "note": "swap() is not nonReentrant, but it has no state to corrupt across reentrancy (routes are read-only during swap, no per-call accounting). The strategy's nonReentrant guard covers the cross-contract path."
+    }
+  ]
+}
