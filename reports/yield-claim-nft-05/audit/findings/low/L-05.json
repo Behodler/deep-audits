@@ -1,0 +1,17 @@
+{
+  "id": "L-05",
+  "title": "NFTMigrator.migrate() inner mintFor loop runs quantity-many cross-contract calls per V1 index, enabling gas DoS for users with large V1 balances and imposing per-mint hook/debt side-effects",
+  "severity": "low",
+  "status": "open",
+  "file": "src/V2/NFTMigrator.sol; src/V2/NFTMinterV2.sol",
+  "lines": "NFTMigrator.sol:65-75; NFTMinterV2.sol:206-214",
+  "function": "migrate / mintFor",
+  "description": "NFTMigrator.migrate() loops over every V1 index in `[1, v1.nextIndex())` and, for each index holding `balance > 0`, calls `v2.mintFor(v2Index, msg.sender)` *once per unit held* (inner `for j in balance`). Every call writes a storage slot in ERC1155, emits Transfer + ClaimMintedFor, and runs any ERC1155 receiver callback. A user with 1000 NFTs at a single index pays gas for 1000 separate mintFor calls (plus the outer iteration over every V1 index). This is unbounded in the per-user balance dimension.\n\nEconomic implication relative to this round's focus: mintFor does NOT pass through the dispatcher (no dispatch, no hook.onDispatch). So the mint-debt hook does NOT accrue debt on migrated V1→V2 NFTs — the BalancerPoolerMintDebtHook's ratio is only applied to paid mints through _executeMint. This is arguably intentional (migration is value-neutral, not a new economic event), but the protocol's documented tax (ratio% of USDS dispatched) is not applied to migrating users. If migrating V1 NFTs represents significant economic weight (e.g. thousands of NFTs mapped to BalancerPoolerV2 indexes), the protocol's phUSD-debt beneficiary is systematically under-compensated relative to new minters for the same economic outcome (NFT in circulation, backed by BPT).",
+  "impact": "Two distinct gaps: (1) operational — users with many V1 NFTs cannot migrate in a single tx due to block gas limit. (2) economic — the mint-debt mechanism does not apply to migrated NFTs, so the phUSD-debt beneficiary receives debt only from new mints even though migrated NFTs share the same BPT backing. The protocol's advertised `ratio%` tax is therefore a tax on new mints only, not on all NFTs in circulation.",
+  "attack_path": [
+    "User holds N NFTs at V1 index i. migrate() iterates i in outer loop, then j in [0, N) calling mintFor N times.",
+    "N large enough → block gas limit exceeded → tx reverts; user cannot migrate.",
+    "Workaround: migrate in batches by transferring NFTs to a second EOA first. Friction only, no fund loss."
+  ],
+  "recommendation": "In NFTMigrator, collapse the inner quantity loop by adding a `mintForBatch(index, recipient, quantity)` to NFTMinterV2 that calls `_mint(recipient, index, quantity, '')` once with a quantity > 1. This preserves ERC1155 semantics (ERC1155 natively handles quantities >1), reduces gas by O(N), and removes the per-unit DoS surface. Separately, document explicitly whether the mint-debt hook is intended to tax migrated NFTs; if yes, add a hook-like path for mintFor, if no, document the asymmetry."
+}

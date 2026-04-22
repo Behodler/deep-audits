@@ -1,0 +1,19 @@
+{
+  "id": "L-07",
+  "title": "Mint-debt hook's ratio reduction fails to cap already-accrued debt; owner cannot shrink a runaway ledger without pulling first",
+  "severity": "low",
+  "status": "open",
+  "file": "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+  "lines": "67-74, 97-107",
+  "function": "setRatio / pull",
+  "description": "`setRatio(newRatio)` only changes the rate at which NEW dispatches accrue debt; it does not touch the existing `mintDebt` balance. If dispatches arrive under an unexpectedly large ratio (e.g. owner set ratio=45 thinking of some future plan, or an interface bug), the accrued debt accumulates and can only be cleared by calling `pull()` — which mints the full (possibly wildly inflated) phUSD amount to `recipient`. There is no `writeDownDebt()`, no `setMintDebt()`, no partial-cancellation path, no admin clawback.\n\nCombined with the observation that the hook's debt is in nominal USDS wei and phUSD is a mintable token trading against the sUSDS/phUSD pool, this means: any accidental over-accrual is unrecoverable except by realising it into circulating phUSD supply. There is no path to reduce `mintDebt` that does not involve printing phUSD.\n\nRelated liveness: if phUSD has a hard supply cap (common for algorithmic stablecoins) and `mintDebt` exceeds the remaining headroom, `pull()` reverts permanently inside `phUSD.mint`. The hook has no partial-pull, no cap awareness, and no way to write down the debt to a feasible number — debt ledger becomes permanently unredeemable while still growing on every subsequent dispatch. `setRatio(0)` stops new accrual but cannot unfreeze the stuck ledger.",
+  "impact": "Owner loses the ability to reverse operational mistakes on the debt ledger without fully materialising the mistake on-chain as freshly minted phUSD. In combination with a phUSD supply cap, the debt ledger can become permanently stuck, bricking the hook's only settlement path. This is a structural mechanism-design flaw: any setRatio error compounds irrevocably into real phUSD issuance.",
+  "attack_path": [
+    "Not attacker-driven in the classic sense — the failure mode is owner-operational combined with phUSD-supply dynamics.",
+    "Owner misconfigures ratio high (e.g. 45) during a period of heavy minting.",
+    "Accrued mintDebt reaches D, materially larger than intended.",
+    "Owner cannot reduce D; only option is pull() which mints D phUSD to recipient.",
+    "If phUSD is approaching its supply cap, pull() reverts — ledger is frozen; new dispatches keep growing mintDebt further with no settlement path."
+  ],
+  "recommendation": "Add an owner-only `adjustDebt(int256 delta)` or `writeDown(uint256 amount)` function (onlyOwner) so the ledger can be reduced without forcing a phUSD mint. Alternatively: make `pull()` support partial amounts (`pull(uint256 amount)`) so the hook can drain the ledger incrementally under a supply cap. Also consider adding an explicit `maxDebt` cap parameter so `onDispatch` reverts (or silently caps) once the outstanding obligation exceeds a protocol-configured ceiling."
+}

@@ -1,0 +1,19 @@
+{
+  "id": "L-01",
+  "title": "Mint-debt hook denominates debt in USDS wei but mints phUSD 1:1, silently mispricing when USDS and phUSD decimals differ",
+  "severity": "low",
+  "status": "open",
+  "file": "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+  "lines": "85-107",
+  "function": "onDispatch / pull",
+  "description": "The hook accrues debt as `added = amount * ratio / 100` where `amount` is the raw USDS wei delta that arrived on BalancerPoolerV2. That number is then accumulated verbatim in `mintDebt` and, when `pull()` runs, fed directly into `phUSD.mint(recipient, debt)`. Nothing in the hook reads `decimals()` of either asset or scales between them. The entire debt accounting implicitly assumes 1 USDS wei = 1 phUSD wei.\n\nUSDS on Ethereum is 18 decimals; phUSD's decimals are whatever the deployer sets. The hook takes `phUSD_` as a raw IMintable in the constructor and accepts any token. If phUSD is ever deployed with decimals != USDS decimals (e.g. 6 decimals, matching USDC-denominated stablecoins), each unit of USDS dispatched mints 1e12 phUSD per unit of USDS wei — wildly over-minting phUSD and handing the recipient a massively inflated IOU. Symmetrically, if phUSD had more decimals than USDS, `pull()` would materially under-mint. Either way the hook's declared semantics (`ratio`% of dispatched USDS becomes a phUSD IOU) are silently broken because no unit conversion exists.",
+  "impact": "Direct protocol-wide value leak on `pull()`. The phUSD recipient receives wildly mis-scaled tokens versus what the dispatched USDS amount justifies; if phUSD is listed in the sUSDS/phUSD Balancer pool that backs NFT holders, the recipient can dump the over-minted phUSD into that pool, draining the sUSDS side and destroying the BPT that collateralises NFT claims. The hook's docstring and implementation imply matching decimals as an undocumented trust assumption.",
+  "attack_path": [
+    "Owner deploys BalancerPoolerMintDebtHook with `phUSD_` pointing at a phUSD contract whose decimals differ from USDS.",
+    "setHook binds the hook to BalancerPoolerV2; minters dispatch USDS (18 decimals) through the pooler.",
+    "Hook records debt += amount * ratio / 100 using USDS wei but treats that number as phUSD wei.",
+    "Recipient calls pull(); phUSD.mint(recipient, debt) materialises the wrong number of phUSD.",
+    "Recipient sells the inflated phUSD into the sUSDS/phUSD pool, draining sUSDS away from the protocol's BPT backing."
+  ],
+  "recommendation": "Either (a) require in the constructor that `IERC20Metadata(phUSD_).decimals() == IERC20Metadata(USDS).decimals()` (the hook needs the USDS address to enforce this; currently it never references USDS directly), (b) scale inside `onDispatch` using the on-chain decimals of both tokens, or (c) document and hard-code a single phUSD decimals value and revert if the supplied phUSD does not match. Option (a) is the least-code change; any decimals mismatch should revert at construction."
+}
