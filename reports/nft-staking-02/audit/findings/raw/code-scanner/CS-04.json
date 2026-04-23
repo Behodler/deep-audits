@@ -1,0 +1,19 @@
+{
+  "id": "CS-04",
+  "title": "Reward-token accounting in _syncBudget/topUp still fragile against fee-on-transfer or rebasing reward tokens",
+  "severity-estimate": "low",
+  "regression-risk": "pre-existing (CS-04 from prior audit, unaddressed)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "185-194 (topUp), 208-220 (_syncBudget)",
+    "line": 190,
+    "lineStart": 185,
+    "lineEnd": 220
+  },
+  "description": "Two distinct sites credit `rewardBudget` under the assumption that phUSD is a canonical 1-for-1 ERC20. `_syncBudget` (lines 212-216) measures `inflow = balanceOf(this) - pre` and credits that delta; `topUp` (lines 189-190) credits the full input `amount` without measuring the actual balance delta. If the reward token ever has non-standard transfer semantics (fee-on-transfer, rebasing, mint-with-fee, blacklist), one side or the other over- or under-credits the budget.\n\nThe `_safePay` revert-on-shortfall in story-002 does NOT mitigate this: over-credited budget still causes `accRewardPerShare` to rise beyond what the balance can support, so future claims will revert (instead of silently forfeiting as before — an improvement, but the root cause remains). Users are blocked from legitimate claims until the owner manually tops up the gap.\n\nThis contract's `rewardToken` is immutable, so the concern is specifically about whether phUSD's current or future implementations include any non-canonical transfer behavior. The project spec states phUSD is a vanilla ERC20, which if true makes this a defensive-coding finding rather than an active bug.",
+  "impact": "If phUSD is ever fee-on-transfer or rebasing: (a) in `_syncBudget`, measured inflow diverges from dispatcher's debt-cleared accounting, causing persistent drift between the hook's view of 'debt realised' and this contract's `rewardBudget`; (b) in `topUp`, the budget can exceed the real balance, and future claims will revert with 'insufficient reward balance' — locking users out of legitimate rewards they are accounting-entitled to.",
+  "proof": "topUp with a 1% FoT token: owner calls `topUp(100e18)`; `safeTransferFrom` delivers 99e18 to the contract; `rewardBudget += 100e18`. After elapsed time, accRewardPerShare is issued for 100e18 of emissions. Users try to claim their pro-rata share (which totals 100e18) but the on-chain balance is only 99e18 — `_safePay` reverts on the last claimants. Those users cannot claim until another top-up plugs the 1e18 gap.",
+  "suggested-fix": "For `topUp`: snapshot `rewardToken.balanceOf(this)` before and after the `safeTransferFrom`, credit the delta rather than the input amount. For `_syncBudget`: either have `dispatcherHook.pull()` return the amount actually credited (and use that instead of balance-sniffing), or add an assertion reconciling the dispatcher's view with the balance delta. Additionally, document the 'phUSD is canonical ERC20' assumption explicitly in the `rewardToken` NatSpec and add a deployment-time check (e.g., via a constructor probe) if feasible.",
+  "confidence": "medium"
+}

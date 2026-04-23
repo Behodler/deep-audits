@@ -1,0 +1,18 @@
+{
+  "id": "ES-07",
+  "title": "Direct ERC20 donation to the contract inflates totalDebt view and becomes stranded or claimed asymmetrically",
+  "severity": "informational",
+  "contract": "src/NFTStaker.sol",
+  "location": "src/NFTStaker.sol:301-307, 352-363",
+  "function": "_safePay / totalDebt",
+  "description": "Anyone can `rewardToken.transfer(address(NFTStaker), X)` without going through `topUp`. The donation is NOT added to `rewardBudget`, so it does not affect `rewardRate` or `windowEnd` — but it IS visible to `_safePay` (which checks raw `balanceOf`) and to the `totalDebt` view (which computes `balance - budget`). Consequences: (1) `totalDebt()` over-reports because it treats donated funds as already-accrued user debt. (2) `_safePay` will happily transfer donated funds if a user's `pending` exceeds `rewardBudget` plus settlement (e.g. due to truncation dust accumulating or a mis-accounted state). (3) The donated funds are stranded in the contract after window end unless owner reconfigures via `setWindowDuration` (which at least pulls them into the next rate calc — but `setWindowDuration` itself has the mintDebt exclusion issue from ES-04).",
+  "codeSnippet": "function _safePay(uint256 amount) internal returns (uint256) {\n    require(rewardToken.balanceOf(address(this)) >= amount, \"NFTStaker: insufficient reward balance\");\n    if (amount > 0) rewardToken.safeTransfer(msg.sender, amount);\n    return amount;\n}\n\nfunction totalDebt() external view returns (uint256) {\n    uint256 budget = rewardBudget;\n    if (block.timestamp > lastRewardTime && totalStaked > 0) {\n        // settle in-flight accrual into local budget\n        ...\n    }\n    uint256 balance = rewardToken.balanceOf(address(this));\n    return balance > budget ? balance - budget : 0;\n}",
+  "economicImpact": "Low. Donations can silently inflate the view-layer's `totalDebt` output by their full magnitude, which off-chain dashboards may interpret as stakers having more claimable reward than they do. `_safePay` uses donations as a buffer for rounding-up edge cases, which preserves payment safety but also means a malicious donor could inject a known amount to bait off-chain monitors that alert on `totalDebt` spikes.",
+  "attackPath": "1. Adversary transfers Y phUSD directly to the NFTStaker contract.\n2. `totalDebt()` immediately reports `+Y` additional debt.\n3. Off-chain monitors / UIs that display 'unpaid rewards' mis-report by Y.\n4. Eventually, if the schedule expires and Y remains, it is owner-rescue-able only via `setWindowDuration` / implicit use as a shortfall-pay buffer.",
+  "quantifiedLoss": "No direct loss to stakers; view-layer inaccuracy and minor ops-confusion risk. Donated funds are non-refundable to the donor (no exit path).",
+  "recommendation": "Consider tracking accounted balance explicitly and using it (rather than `balanceOf(this)`) in both `_safePay` and `totalDebt`. A `donate()` entry point that adds the transferred amount to `rewardBudget` and logs an event would give donors a predictable, accounted path. At minimum document in `totalDebt`'s NatSpec that the returned value includes any raw donated balance.",
+  "affectedParties": "Off-chain monitors, UIs, donors (stranded).",
+  "profitability": "N/A.",
+  "confidence": "medium",
+  "regressionRisk": "new-observation"
+}

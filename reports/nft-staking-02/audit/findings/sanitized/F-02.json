@@ -1,0 +1,22 @@
+{
+  "id": "F-02",
+  "title": "emergencyWithdraw skips _updatePool, redistributing the exiting user's pending emission to remaining stakers",
+  "severity-estimate": "low",
+  "regression-risk": "pre-existing (prior ES-05, unaddressed across stories 001/002/003)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "314-323",
+    "line": 320,
+    "lineStart": 314,
+    "lineEnd": 323
+  },
+  "description": "`emergencyWithdraw` correctly skips `_syncBudget()` (per spec — the escape hatch must survive a broken dispatcher). However it also skips `_updatePool()`, which has no dispatcher dependency. It decrements `totalStaked` and zeros the caller's position WITHOUT first settling per-share accrual under the OLD denominator. On the next `_updatePool` call (triggered by any subsequent user action), accrual over the entire interval `[lastRewardTime, now]` is divided by the already-REDUCED `totalStaked`, so the exiting user's pro-rata share of that interval is silently shifted onto the remaining stakers instead of being forfeited back to `rewardBudget`.\n\nThe escape-hatch property is fully preserved by calling `_updatePool()` alone — only `_syncBudget()`'s external call to `dispatcherHook.pull()` is dispatcher-dependent. Prior finding ES-05 noted this; no fix was applied.",
+  "impact": "A staker controlling two accounts can stake a large balance on account A and a small balance on account B, let time elapse (especially while paused — `whenNotPaused` does NOT gate `emergencyWithdraw`), then `emergencyWithdraw` on A. On the next update, B's pending reward inflates because the per-share increment for the elapsed interval is computed over the smaller post-exit `totalStaked`. Magnitude is bounded by `(exiting.amount / old_totalStaked) * (rewardRate * (now - lastRewardTime))`. In normal operation the gap is small (every user action updates `lastRewardTime`), but during a long pause the gap can be arbitrary — e.g. a 3-day pause at 1e18/day emission with 1000-vs-1 sizing extracts ~2.997e18 phUSD from the forfeit that should have gone back to budget.",
+  "proof": "1. Attacker stakes 1000 units on A and 1 unit on B. `totalStaked = 1001`.\n2. Time T passes with reward rate R and no user interaction (contract paused or simply quiet).\n3. Attacker calls `emergencyWithdraw()` from A. `totalStaked = 1`; A's position zeroed; `_updatePool` NOT called.\n4. B (or anyone) calls `claim()`. `_updatePool` runs over full `[lastRewardTime, now]` with `totalStaked = 1`: `accRewardPerShare += (T*R * 1e18) / 1`.\n5. B's pending is ~T*R — the whole emission over the interval, despite owning 1/1001 of the stake during that interval.\n6. Baseline (with `_updatePool` called pre-exit): B would have received T*R*(1/1001); A's T*R*(1000/1001) would have stayed in `rewardBudget` as forfeit.",
+  "suggested-fix": "Call `_updatePool()` (NOT `_syncBudget`) at the start of `emergencyWithdraw`, before decrementing `totalStaked`. `_updatePool` only mutates internal state and the block timestamp; no external calls, so the escape-hatch property is preserved even if the dispatcher is broken. This correctly attributes the exiting user's pro-rata share of the accrual interval to the old denominator, eliminating the redistribution bonus.",
+  "confidence": "high",
+  "sources": ["CS-05", "ES-02"],
+  "consolidation-note": "CS-05 and ES-02 describe the same bug. Merged; preserved ES-02's attack-path quantification and CS-05's pause-extends-gap note.",
+  "sanitizer-note": "No known-issue match. Concrete bug with self-attack path; pause-extends-gap makes magnitude unbounded. Keep."
+}

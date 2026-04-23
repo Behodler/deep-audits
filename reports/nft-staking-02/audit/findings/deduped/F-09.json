@@ -1,0 +1,21 @@
+{
+  "id": "F-09",
+  "title": "emergencyWithdraw does not credit forfeited pending back to rewardBudget, causing balance/budget/debt invariant drift",
+  "severity-estimate": "low",
+  "regression-risk": "pre-existing (prior CS-08, unaddressed)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "314-323",
+    "line": 320,
+    "lineStart": 314,
+    "lineEnd": 323
+  },
+  "description": "`emergencyWithdraw` zeroes `user.amount` and `user.rewardDebt` and decrements `totalStaked`, but does NOT credit the forfeited pending reward back to `rewardBudget`. The forfeited portion was already decremented from `rewardBudget` by a prior `_updatePool` call (while the user was still staked) and now sits on the contract balance with no user's `rewardDebt` referencing it. The NatSpec invariant `balance == rewardBudget + totalDebt` drifts upward by the forfeited amount on each emergency exit.\n\nWhile not directly exploitable (the orphaned funds stay on-contract), this complicates accounting and monitoring. `totalDebt()` over-reports owed funds until another `rewardBudget` top-up folds it in. Compounds with F-02 (which addresses WHICH denominator the accrual uses) — F-02 prevents redistribution, F-09 prevents orphaning. Both fixes need to be applied together for the emergency path to be fully hygienic.",
+  "impact": "Accounting invariant drift, monitoring noise, no direct loss of funds. Orphaned phUSD becomes phantom `totalDebt` that no user can claim against, so `totalDebt()` over-reports until a future top-up re-folds it.",
+  "proof": "1. User stakes 100 units; accrues 50 phUSD pending (rewardBudget decremented by 50).\n2. User calls `emergencyWithdraw`. `user.amount = 0`, `user.rewardDebt = 0`, `totalStaked -= 100`. The 50 phUSD remains on the contract but no rewardDebt references it.\n3. `totalDebt()` now reads `balance - rewardBudget` and includes the orphaned 50 as phantom debt.",
+  "suggested-fix": "After calling `_updatePool()` (per F-02) and before zeroing the user's position, compute `forfeited = (user.amount * accRewardPerShare) / ACC_PRECISION - user.rewardDebt` and `rewardBudget += forfeited`. This preserves the invariant `balance == rewardBudget + totalDebt` AND matches the 'forfeit rolls back to the pool' philosophy, re-emitting to remaining stakers via the next `rewardRate` recomputation rather than redistributing instantly via a smaller denominator.",
+  "confidence": "high",
+  "sources": ["CS-11"],
+  "consolidation-note": "No direct ES overlap. Closely linked to F-02 (same function, complementary fix); kept separate because the root cause is different (missing budget credit vs missing accrual settlement) and either fix can be applied without the other."
+}

@@ -1,0 +1,19 @@
+{
+  "id": "CS-05",
+  "title": "emergencyWithdraw still does not call _updatePool, preserving the exiting-user's accrual redistribution to remaining stakers",
+  "severity-estimate": "low",
+  "regression-risk": "pre-existing (ES-05 from prior audit, unaddressed)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "314-323",
+    "line": 320,
+    "lineStart": 314,
+    "lineEnd": 323
+  },
+  "description": "`emergencyWithdraw` correctly skips `_syncBudget()` (per spec — so a broken dispatcher cannot trap principal). However, it also skips `_updatePool()`, which has no dispatcher dependency and would simply settle the existing per-share accumulator against the OLD denominator. By skipping it, the code decrements `totalStaked` before the accrual interval [lastRewardTime, now] is attributed to the pre-exit denominator. On the next `_updatePool` call (from any user), accrual over that interval is computed against the SMALLER `totalStaked`, and the per-share increment is artificially inflated — redistributing the exiting user's pro-rata share to whoever remains staked.\n\nThis is identical to prior finding ES-05 and has not been addressed. The emergency path's stated purpose — never revert because the dispatcher is broken — is fully preserved by calling `_updatePool()` alone (which touches only internal state and the block timestamp). Only `_syncBudget()`'s outer call to `dispatcherHook.pull()` is dispatcher-dependent.",
+  "impact": "A staker controlling multiple accounts can stake a large balance on account A and a small balance on account B, let time elapse, then `emergencyWithdraw` on A. On the next update, account B's pending reward inflates because the per-share increment for the elapsed interval is computed over the smaller `totalStaked`. Magnitude is bounded by (exitingUserAmount / oldTotalStaked) * (rewardRate * (block.timestamp - lastRewardTime)). In normal operation the elapsed gap is small (every user action updates lastRewardTime), but `emergencyWithdraw` is callable while paused — during a long pause the gap can be arbitrary.",
+  "proof": "See prior ES-05 proof: attacker stakes 1000 units on A and 1 unit on B, lets 1 day pass with reward rate R producing daily emission D, calls emergencyWithdraw on A (totalStaked drops from 1001 to 1), then any next user action triggers `_updatePool` with accRewardPerShare += (D * 1e18) / 1 — B captures essentially the entire day's emission despite owning only 1/1001 of the stake during that day.",
+  "suggested-fix": "Call `_updatePool()` (NOT `_syncBudget`) at the start of `emergencyWithdraw`, before decrementing `totalStaked`. `_updatePool` only mutates internal state and the block timestamp; it does not touch the dispatcher, so the escape-hatch property of `emergencyWithdraw` is preserved even if the dispatcher is broken. This correctly attributes the exiting user's pro-rata share of the accrual interval to the old denominator, eliminating the redistribution bonus without reintroducing dispatcher dependence.",
+  "confidence": "high"
+}

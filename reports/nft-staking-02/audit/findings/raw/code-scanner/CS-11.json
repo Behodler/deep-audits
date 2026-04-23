@@ -1,0 +1,19 @@
+{
+  "id": "CS-11",
+  "title": "emergencyWithdraw does not reset accounting when totalStaked drops, creating balance/rewardBudget/totalDebt invariant drift",
+  "severity-estimate": "low",
+  "regression-risk": "pre-existing (CS-08 from prior audit, unaddressed)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "314-323",
+    "line": 320,
+    "lineStart": 314,
+    "lineEnd": 323
+  },
+  "description": "`emergencyWithdraw` sets `user.amount = 0`, `user.rewardDebt = 0`, and decrements `totalStaked`, but does not credit the forfeited pending reward back to `rewardBudget`. The forfeited portion has already been decremented from `rewardBudget` by a prior `_updatePool` call (when the user was still staked) and is now sitting on the contract's balance but is no longer tracked by any user's `rewardDebt`. The invariant stated in `totalDebt()` NatSpec — `balance == rewardBudget + totalDebt` (plus bounded dust) — drifts upward by the forfeited amount on each emergency-withdraw.\n\nWhile this drift is not exploitable (the orphaned funds stay on the contract and continue to be claimable via future `rewardBudget` top-ups or simply inflate `totalDebt()` which reads as `balance - budget`), it complicates accounting and monitoring. Operators reconciling funds-in vs funds-owed will see a spurious mismatch after any emergency-withdraw.",
+  "impact": "Accounting invariant drift, monitoring noise, no direct loss of funds. The orphaned phUSD effectively becomes phantom 'totalDebt' that no user can claim against — so the `totalDebt()` view over-reports owed funds after emergency-withdraws, until another `rewardBudget` top-up folds it in.",
+  "proof": "1. User stakes 100 units. Over time accrues 50 phUSD of pending reward (rewardBudget decremented by 50).\n2. User calls `emergencyWithdraw`. user.amount = 0, user.rewardDebt = 0, totalStaked -= 100. The 50 phUSD remains on the contract balance but no user's rewardDebt references it.\n3. `totalDebt()` now returns `balance - rewardBudget` = something like 50 + accRewardPerShare * totalStaked / PREC for remaining stakers. The 50 is counted as owed debt but is actually forfeited.",
+  "suggested-fix": "On `emergencyWithdraw`, after computing the forfeited portion, credit it back to `rewardBudget` so it is re-emitted in future windows. Computation: call `_updatePool` first (per CS-05 above) to settle accrual under the old denominator; then `forfeited = (user.amount * accRewardPerShare) / ACC_PRECISION - user.rewardDebt`; then `rewardBudget += forfeited`. This preserves the clean balance == rewardBudget + totalDebt invariant AND matches the 'rounds in favor of protocol (re-emits to remaining stakers)' philosophy.",
+  "confidence": "high"
+}

@@ -1,0 +1,19 @@
+{
+  "id": "CS-03",
+  "title": "pullAndRefresh() remains non-nonReentrant, exposing cross-function reentrancy via a malicious or upgradable dispatcherHook",
+  "severity-estimate": "low",
+  "regression-risk": "pre-existing (CS-03 from prior audit, unaddressed)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "200-202 (pullAndRefresh), 208-220 (_syncBudget)",
+    "line": 200,
+    "lineStart": 200,
+    "lineEnd": 220
+  },
+  "description": "`pullAndRefresh()` is external, permissionless (subject only to `ownerOrNotGriefed`), and calls `_syncBudget`, which in turn calls `dispatcherHook.pull()` before updating `rewardBudget`/`windowEnd`/`rewardRate` from a balance delta. `pullAndRefresh` carries no `nonReentrant` modifier. The `dispatcherHook` address is mutable and treated as external/mutable in the project design.\n\nA malicious, buggy, or upgraded dispatcher can reenter `pullAndRefresh` (or any of the guarded user entrypoints — those are blocked by their own `nonReentrant`) from inside its own `pull()`. The concrete attack: the nested `pullAndRefresh` also executes `_syncBudget`, pulling once more and crediting the minted amount to `rewardBudget` in the nested frame. On return, the outer frame computes `inflow = balanceOf(this) - outerPre`, which includes the nested frame's already-credited inflow — double-counting it into `rewardBudget`.\n\nAdditionally, the `ownerOrNotGriefed` post-check now runs in both frames. The nested frame's post-check compares against its own snapshot of `rewardRate` / `windowEnd`; the outer frame's snapshot is now stale because the nested frame already mutated those variables. The combination does not strictly corrupt the rate-guard semantics (both checks must pass), but it complicates reasoning.",
+  "impact": "If the dispatcher hook is ever malicious or compromised, `rewardBudget` can be double-credited per reentrant invocation, allowing the rate to be inflated or budget to be over-reported. Guarded user entrypoints (stake/unstake/claim) protect user principal, but reward emissions can still be corrupted via `pullAndRefresh`. Note: this vulnerability depends on the trust assumption that the dispatcher hook is trusted; flagged here because the hook is explicitly described as a mutable sibling that can be upgraded.",
+  "proof": "Mechanism: (1) attacker-controlled dispatcher is set via `setDispatcherHook`. (2) Attacker calls `pullAndRefresh`. (3) Outer frame: `_updatePool` runs, `outerPre = balanceOf(this)`, then `dispatcherHook.pull()` — which transfers X phUSD and reenters `pullAndRefresh`. (4) Nested frame: `_updatePool` runs (no change), `nestedPre = balanceOf(this) = outerPre + X`, `dispatcherHook.pull()` transfers Y phUSD (could be zero, could be non-zero), nested computes `inflow = Y`, adds to budget, updates windowEnd/rate. (5) Nested returns. Outer computes `inflow = balanceOf(this) - outerPre = X + Y`, adds that to budget — but Y was already credited in the nested frame. Budget = original + X + Y + Y = original + X + 2Y.",
+  "suggested-fix": "Add `nonReentrant` to `pullAndRefresh`. Additionally, consider adding a reentrancy guard to `_syncBudget` itself, or refactor so the inflow is sourced from a return value of `dispatcherHook.pull()` rather than a balance delta — removing the TOCTOU window. A cleaner interface would also make the hook's return semantics part of the contract rather than relying on balance sniffing.",
+  "confidence": "medium"
+}

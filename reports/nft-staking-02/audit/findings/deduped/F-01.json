@@ -1,0 +1,21 @@
+{
+  "id": "F-01",
+  "title": "ownerOrNotGriefed guard is bypassed via claim() / stake() / unstake(), re-enabling the ES-01 rate-dilution grief",
+  "severity-estimate": "medium",
+  "regression-risk": "direct regression of prior ES-01 fix (story-003)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "114-121 (ownerOrNotGriefed), 208-220 (_syncBudget), 246-290 (stake/unstake/claim)",
+    "line": 282,
+    "lineStart": 114,
+    "lineEnd": 290
+  },
+  "description": "Story-003 added the `ownerOrNotGriefed` modifier to `topUp` and `pullAndRefresh` to mitigate prior finding ES-01 (rate-dilution grief via permissionless window reset). The dilution mechanism itself lives inside `_syncBudget` (lines 208-220), which is still invoked unconditionally — and without any guard — from three additional entry points: `stake()` (line 248), `unstake()` (line 268), and `claim()` (line 282). `claim()` in particular does not require the caller to have any prior stake or pending reward; if `user.amount == 0`, `pending == 0` and the function body is a no-op, but `_syncBudget` has already executed and reset the schedule.\n\nOn any non-zero dispatcher inflow, `_syncBudget` unconditionally sets `windowEnd = block.timestamp + windowDuration` and `rewardRate = rewardBudget / windowDuration`. Because the dispatcher accrues mint-debt on essentially every block, any EOA (no stake, no role) can spam `claim()` to continuously dilute the per-second rate for legitimate stakers, identical in outcome to the pre-fix ES-01 attack. `stake(1)` / `unstake(1)` offer additional entry points.\n\nThe guard is a locked front door while the back door (claim-with-zero-stake) is wide open.",
+  "impact": "Rate-dilution grief against legitimate stakers, permissionlessly and at low gas cost, identical in outcome to pre-fix ES-01. Each call resets `windowEnd` to `now + windowDuration` and floor-recomputes the rate against the remaining budget, compounding dilution over repeated calls. Long-term stakers systematically under-earn; value shifts from patient holders to late/JIT entrants. With a 540-day window and 90e18 phUSD remaining on 90 days left, one poke drops the realised rate from ~1.157e13 wei/sec to ~1.929e12 wei/sec — an ~83% forward-emission cut that can be pinned indefinitely for ~50k gas per call.",
+  "proof": "1. Contract live with `rewardBudget > 0`, `windowDuration = 540 days`, dispatcher continuously accruing any non-zero mint-debt.\n2. Attacker (with no stake, no role) calls `NFTStaker.claim()`.\n3. `whenNotPaused` passes. `_syncBudget()` executes: `_updatePool` settles accrual at the OLD rate; `dispatcherHook.pull()` mints X > 0 phUSD; inflow = X > 0 triggers the reset branch; `windowEnd = now + 540 days`; `rewardRate = rewardBudget / 46,656,000`.\n4. `user.amount == 0` → `pending == 0` → no transfer. Function returns successfully.\n5. `ownerOrNotGriefed` never evaluates — it is not on `claim()`. Repeat every block.\n6. Legitimate stakers observe their effective rate collapse toward `budget / windowDuration` asymptotically instead of the originally-promised rate.",
+  "suggested-fix": "Move the defence out of the modifier and into `_syncBudget` itself so every caller (user entry points included) is protected. Before applying the reset branch, compute the tentative new rate and only accept the reset when `newRate >= oldRate` OR the prior window has expired. Alternatively remove the unconditional window reset from `_syncBudget` entirely (amortise inflow into the REMAINING window: `rate = (budget + inflow) / (windowEnd - now)`), which eliminates the grief vector at its root rather than gating it behind a caller check. Owner-initiated lower-rate extensions can still be routed through a separate `ownerForceRefresh()` that bypasses the floor.",
+  "confidence": "high",
+  "sources": ["CS-01", "ES-01"],
+  "consolidation-note": "CS-01 and ES-01 describe identical bug, identical root cause, identical attack path. Merged as single finding; preserved CS-01's line-precise citation and ES-01's quantified 83% rate-drop example."
+}

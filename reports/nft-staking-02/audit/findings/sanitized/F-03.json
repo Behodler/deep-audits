@@ -1,0 +1,22 @@
+{
+  "id": "F-03",
+  "title": "setWindowDuration does not call _syncBudget, so pending dispatcher mint-debt is excluded from the new rate and a subsequent sync silently overrides the duration change",
+  "severity-estimate": "low",
+  "regression-risk": "pre-existing (prior CS-06, unaddressed)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "166-175",
+    "line": 169,
+    "lineStart": 166,
+    "lineEnd": 175
+  },
+  "description": "`setWindowDuration` calls `_updatePool()` (line 169) to settle accrual at the old rate, but it does NOT call `_syncBudget()`. Any outstanding mint-debt at the dispatcher is therefore NOT pulled before `rewardRate = rewardBudget / newDuration` is recomputed at line 174. Two consequences follow:\n\n1. The new rate is derived from the in-contract-only budget and EXCLUDES dispatcher mint-debt, even though `totalBudget()` and `runwaySeconds()` both INCLUDE that mint-debt in their accounting. UI/monitors promising a runway will immediately mismatch the on-chain schedule.\n2. The NEXT user interaction invokes `_syncBudget` which pulls the pending mint-debt and performs ANOTHER unconditional reset at the newly-shortened duration. The new rate the owner just set is silently overridden, producing a two-step low-then-high emission spike driven purely by settlement ordering. In the worst case (substantial pending mint-debt + shortened window), the post-sync rate can spike dramatically — e.g. 10M phUSD pending + 1-day window = 10M/86400 phUSD/sec.\n\nBecause the subsequent reset happens inside a user-facing path (stake/unstake/claim), it is NOT covered by the `ownerOrNotGriefed` guard (see F-01).",
+  "impact": "Operator footgun with MEV surface: (a) the announced rate and the effective rate diverge; (b) a JIT-staker who times entry to the next post-setWindowDuration sync captures a brief very-high-rate window; (c) combined with centralisation, an owner who coordinates pause + duration-change + unpause can produce a controllable emission spike. No direct value-leak in the benign case, but unpredictability creates an MEV surface and complicates off-chain monitoring.",
+  "proof": "1. Dispatcher has 10M phUSD pending mint-debt; in-contract `rewardBudget` is near zero.\n2. Owner calls `setWindowDuration(1 day)`. `_updatePool` runs (settles negligible accrual). `rewardRate = rewardBudget / 86400 ≈ 0`.\n3. A user calls `claim()` (or stake/unstake). `_syncBudget` pulls 10M phUSD; `windowEnd = now + 86400`; `rewardRate = 10M / 86400` — a massive rate spike.\n4. Any staker timing their entry to land just before step 3 captures a disproportionate share of the spike.",
+  "suggested-fix": "Have `setWindowDuration` call `_syncBudget()` (not just `_updatePool()`) before recomputing the rate, so the new rate is derived from the complete budget including pending dispatcher debt. Consider also snapshot-logging the effective `(rewardBudget, rewardRate, windowEnd)` in the emitted event so operators can reconcile intent against state. Optionally gate with `whenNotPaused` and/or a per-call magnitude bound to prevent sudden large rate swings.",
+  "confidence": "high",
+  "sources": ["CS-06", "ES-04"],
+  "consolidation-note": "CS-06 and ES-04 describe the same ordering bug. Merged; preserved CS-06's emission-spike framing and ES-04's totalBudget/runwaySeconds mismatch framing.",
+  "sanitizer-note": "No known-issue match. Not pure operator-mistake: the ordering is a coding defect, and the follow-on unguarded-reset via user entry point extends the attack surface. Keep."
+}

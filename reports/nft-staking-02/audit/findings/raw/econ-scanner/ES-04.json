@@ -1,0 +1,18 @@
+{
+  "id": "ES-04",
+  "title": "setWindowDuration does not call _syncBudget, so in-flight dispatcher mintDebt is excluded from the rate recomputation and the new rate under-counts available budget",
+  "severity": "low",
+  "contract": "src/NFTStaker.sol",
+  "location": "src/NFTStaker.sol:166-175",
+  "function": "setWindowDuration",
+  "description": "`setWindowDuration` calls `_updatePool()` (settles accrual) but does NOT call `_syncBudget()` (does not pull outstanding mint-debt from the dispatcher hook). It then recomputes `rewardRate = rewardBudget / newDuration`, using whatever `rewardBudget` is sitting on-contract. Any mint-debt that has accrued on the dispatcher side — which `totalBudget()` explicitly includes in the reported on-chain + pending sum — is excluded from the rate recomputation. The resulting per-second rate under-states the true available supply. When the dispatcher is eventually pulled later (via a user action), the window resets anyway and the 'new duration' the owner just set can be silently overridden depending on inflow magnitude.",
+  "codeSnippet": "function setWindowDuration(uint256 newDuration) external onlyOwner {\n    require(newDuration >= MIN_WINDOW && newDuration <= MAX_WINDOW, \"NFTStaker: window out of bounds\");\n    // Settle accrual under the OLD rate before mutating the schedule.\n    _updatePool();                                       // <-- does NOT pull\n    emit WindowDurationChanged(windowDuration, newDuration);\n    windowDuration = newDuration;\n    windowEnd = block.timestamp + newDuration;\n    rewardRate = newDuration == 0 ? 0 : rewardBudget / newDuration;   // <-- excludes dispatcher.mintDebt()\n}",
+  "economicImpact": "The rate the owner sets does not reflect the full pot. If the dispatcher has accumulated X phUSD of mint-debt when the owner calls `setWindowDuration(newDuration)`, the rate is set to `rewardBudget / newDuration` instead of `(rewardBudget + X) / newDuration`. The difference either (a) under-emits until the next `_syncBudget` call, which then re-expands the window unexpectedly, or (b) results in the rate jumping upward right after the duration change — making the duration change opaque to off-chain monitoring. `runwaySeconds()` computes against `rewardBudget + mintDebt`, so any UI promising a runway will immediately mis-match the on-chain schedule.",
+  "attackPath": "N/A — owner operator footgun, not an adversarial exploit. The mismatch between `setWindowDuration`'s rate and `totalBudget() / runwaySeconds()` views makes owner operations less predictable and can be exploited by a JIT-staker who times entry to the next post-setWindowDuration sync call to capture the back-loaded rate jump.",
+  "quantifiedLoss": "Bounded by `dispatcherHook.mintDebt() / newDuration * stake-weight`. Non-adversarial in typical operation; affects transparency and predictability more than direct loss.",
+  "recommendation": "Have `setWindowDuration` call `_syncBudget()` (not just `_updatePool()`) before recomputing the rate, so the new rate is derived from the complete budget including pending mint-debt. Consider also snapshot-logging the effective `(rewardBudget, rewardRate, windowEnd)` in the emitted event so operators can reconcile intent against state.",
+  "affectedParties": "Owner / operator (predictability); minor MEV surface for JIT-stakers timing the next sync.",
+  "profitability": "Negligible direct exploit; signalling/predictability issue.",
+  "confidence": "medium",
+  "regressionRisk": "new-observation"
+}

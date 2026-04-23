@@ -1,0 +1,19 @@
+{
+  "id": "CS-09",
+  "title": "ownerOrNotGriefed expired-window fallback lets anyone restart a dormant schedule at an arbitrarily low rate",
+  "severity-estimate": "low",
+  "regression-risk": "new (introduced by story-003 ownerOrNotGriefed modifier)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "114-121",
+    "line": 119,
+    "lineStart": 114,
+    "lineEnd": 121
+  },
+  "description": "The `ownerOrNotGriefed` modifier permits any caller whose snapshot `endPre <= block.timestamp` to bypass the rate-floor check, on the rationale that 'there is no active rate to protect'. However, `windowEnd` having passed does NOT imply that `rewardBudget` is zero — a window can expire with substantial unemitted budget remaining (e.g., if the dispatcher was lagging, if `_updatePool` clamped emissions at a balance shortfall, or simply if `rewardBudget > windowDuration * rewardRate` because of floor-division or because `setWindowDuration` was called with a shorter duration leaving the old budget).\n\nWhen the window has expired but `rewardBudget > 0`, any non-owner caller can invoke `topUp(1)` or `pullAndRefresh()` to (a) reset `windowEnd = now + windowDuration` at the MAXIMUM configured duration, and (b) set `rewardRate = (rewardBudget + newInflow) / windowDuration` — which may be arbitrarily low. There is no lower-bound check on the post-call rate when the expired-window clause is satisfied.\n\nThis creates a race-to-restart: as soon as `windowEnd` has passed, the first caller to the restart can choose the new schedule. An attacker who monitors the window can front-run the owner (or any legitimate user) at window expiry to lock in a diluted-forever schedule, forcing the owner to re-intervene via `setWindowDuration`/`topUp` with larger inflows to raise the rate back.",
+  "impact": "A griefer can wait for `windowEnd` to pass, then front-run the first restart with a minimal `topUp(1)` or a `pullAndRefresh` call that catches small pending mint-debt, locking in a dilute-over-full-windowDuration rate. Owner must intervene to correct. Time-bounded grief but re-exploitable at every window boundary.",
+  "proof": "1. Contract runs to windowEnd with substantial `rewardBudget` remaining (e.g., 10e18 phUSD, windowDuration = 540 days).\n2. `block.timestamp > windowEnd`. Attacker calls `pullAndRefresh()`. `rPre = oldRate`, `endPre = oldWindowEnd (passed)`.\n3. `_syncBudget` runs. Assume dispatcher has 1 wei of mint-debt accrued since last pull — inflow = 1 wei.\n4. `rewardBudget = 10e18 + 1`. `windowEnd = now + 540 days`. `rewardRate = (10e18 + 1) / 46,656,000 = ~2.14e11 wei/sec`.\n5. Post-check: `rewardRate >= rPre` may be FALSE (new rate is much lower than the pre-expiry rate). But `endPre <= block.timestamp` is TRUE. Modifier passes. The rate is locked in.\n6. Owner must call `setWindowDuration` or `topUp` to raise the rate back.",
+  "suggested-fix": "When the expired-window clause fires, additionally require that the new rate be non-trivial relative to the remaining budget — e.g., require `rewardRate * minAcceptableDuration >= rewardBudget` where `minAcceptableDuration` is a conservative bound. Alternatively, require `msg.sender == owner()` for any restart call where `rewardBudget > 0` at entry (non-owner restarts only allowed on fresh/empty budgets). Alternatively, require the caller's inflow to be non-trivial relative to the existing budget (e.g. `>= rewardBudget / 100`) — so dust-inflow front-runs at window boundaries cannot lock in a bad rate.",
+  "confidence": "medium"
+}

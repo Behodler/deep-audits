@@ -1,0 +1,19 @@
+{
+  "id": "CS-06",
+  "title": "setWindowDuration still accrues under OLD rate without first calling _syncBudget, enabling stale-state rate recomputation",
+  "severity-estimate": "low",
+  "regression-risk": "pre-existing (CS-06 from prior audit, unaddressed)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "166-175",
+    "line": 169,
+    "lineStart": 166,
+    "lineEnd": 175
+  },
+  "description": "`setWindowDuration` calls `_updatePool()` (line 169) to settle accrual at the old rate, but it does NOT call `_syncBudget()`. Any outstanding mint-debt accrued at the dispatcher hook is therefore not pulled in before `rewardRate = rewardBudget / newDuration` is computed at line 174. When owner shortens the window, the rate is floor-computed against the in-contract-only budget; the next user interaction then invokes `_syncBudget` which pulls the pending mint-debt and performs ANOTHER unconditional reset at the newly-shortened duration. The net effect is a two-step emission spike: low-then-high, driven by the ordering of settlement.\n\nThis matches the prior CS-06 finding and is not addressed in the updated code. No ordering change was introduced in story-001/002/003. The behavior is particularly visible because the `ownerOrNotGriefed` guard does NOT apply to the second-step `_syncBudget` call (it happens inside a user-facing `stake/claim/unstake` which doesn't carry the guard — see CS-01 of this report).",
+  "impact": "Changing window duration computes the new rate against a stale budget, then an immediately-subsequent user action re-resets the rate over the now-current budget at the new shorter duration. If the pending dispatcher mint-debt is substantial relative to the in-contract balance, this produces a brief very-high-rate window. Combined with centralization (owner can coordinate the pause/duration-change/drain), this is a potential admin-driven rate-spike vector.",
+  "proof": "See prior CS-06 proof: owner calls setWindowDuration(1 day) while dispatcher has 10M phUSD of pending mint-debt and in-contract rewardBudget is near zero. First reset: rate ~= 0. Next user action: _syncBudget pulls 10M phUSD, triggers another reset at 1-day duration, rate = 10M / 86400 phUSD/sec — an emission spike.",
+  "suggested-fix": "Have `setWindowDuration` call `_syncBudget()` (not just `_updatePool()`) before recomputing the rate. This folds in any pending mint-debt at the CURRENT rate before the duration change, so the post-change rate is computed against the complete budget rather than a stale snapshot. Additionally consider gating with `whenNotPaused` and/or a per-call magnitude bound (e.g. newDuration in [oldDuration/2, 2*oldDuration]) to prevent sudden large swings.",
+  "confidence": "high"
+}

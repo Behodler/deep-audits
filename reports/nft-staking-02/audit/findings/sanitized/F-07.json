@@ -1,0 +1,22 @@
+{
+  "id": "F-07",
+  "title": "Balance-sniffing accounting allows external phUSD donations to inflate totalDebt() and leak into _safePay buffer",
+  "severity-estimate": "low",
+  "regression-risk": "pre-existing (ES-07 donation-inflation angle only; the FoT/rebasing sub-case from CS-04 is out of scope — see sanitizer-note)",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "208-220 (_syncBudget), 301-307 (_safePay), 352-363 (totalDebt)",
+    "line": 360,
+    "lineStart": 208,
+    "lineEnd": 363
+  },
+  "description": "`_safePay` and `totalDebt()` rely on raw `rewardToken.balanceOf(this)` instead of a tracked balance. Anyone can `rewardToken.transfer` directly to the NFTStaker contract; the donated amount is NOT credited to `rewardBudget`, yet it IS visible to `_safePay` (passes the balance check) and to `totalDebt()` which computes `balance - rewardBudget`.\n\nConsequences:\n1. `totalDebt()` over-reports by the donation size. Off-chain dashboards and monitoring that display 'unpaid rewards' spuriously alert.\n2. `_safePay` may silently spend donated funds as an opportunistic buffer for accumulated floor-division truncation overages that would otherwise revert (see F-08). This obscures the underlying accounting drift.\n3. Donated funds are stranded: after `windowEnd` they are not swept into `rewardBudget` unless the owner calls `setWindowDuration` (which itself has the mint-debt-exclusion issue described in F-03).",
+  "impact": "View-consistency / observability issue. No direct value-leak to stakers. Any party (including an adversary seeking to obscure accounting or force off-chain monitors to produce false positives/negatives) can donate phUSD to corrupt the `totalDebt` view and silently provision a `_safePay` buffer that masks truncation stranding.",
+  "proof": "Donation example: an external actor transfers Y phUSD directly to the NFTStaker contract. `totalDebt()` immediately reports `balance - rewardBudget = (prior_balance + Y) - rewardBudget`, over-reporting owed funds by Y. Off-chain 'unpaid rewards' monitors alert spuriously. Y remains unaccounted-for in `rewardBudget` and is consumed as a transparent buffer for `_safePay` rounding overages until `windowEnd`, after which it is stranded.",
+  "suggested-fix": "Introduce an `accountedBalance` storage variable updated at every credit/debit site, and replace `rewardToken.balanceOf(this)` in `_safePay` and `totalDebt` with the tracked value. Have `dispatcherHook.pull()` RETURN the amount credited and use that return value in `_syncBudget` instead of balance-sniffing — this also removes the reentrancy-delta concern of F-06. Add a dedicated `donate()` entrypoint that folds the transferred amount into `rewardBudget` and emits an event, giving donors a predictable path and eliminating accidental stranding.",
+  "confidence": "medium",
+  "sources": ["ES-07"],
+  "consolidation-note": "Original F-07 bundled a fee-on-transfer / rebasing sub-case (CS-04) with the donation-accounting sub-case (ES-07). The FoT/rebasing sub-case has been dropped per C4 out-of-scope rules (phUSD is specified as a vanilla ERC20 in CLAUDE.md line 7, and C4 explicitly treats non-standard/weird ERC20 and fee-on-transfer concerns as known-invalid unless in scope). The donation-accounting sub-case (ES-07) survives because it is a real observable mis-accounting regardless of token transfer semantics.",
+  "sanitizer-note": "Split finding. Removed the FoT/rebasing half (C4 known-invalid for vanilla-ERC20 reward tokens; phUSD spec is vanilla per /home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/CLAUDE.md). Kept the donation-accounting half: an externally-reachable behavior that drifts the published invariants and provides a hidden `_safePay` buffer, independent of token semantics."
+}

@@ -1,0 +1,22 @@
+{
+  "id": "F-14",
+  "title": "JIT sandwich of topUp / pullAndRefresh captures disproportionate share of inflow-triggered rate bump",
+  "severity-estimate": "low",
+  "regression-risk": "new-observation",
+  "contract": "src/NFTStaker.sol",
+  "location": {
+    "file": "src/NFTStaker.sol",
+    "lines": "185-220 (topUp / _syncBudget), 246-279 (stake / unstake)",
+    "line": 192,
+    "lineStart": 185,
+    "lineEnd": 279
+  },
+  "description": "Every successful `topUp` or dispatcher-inflow `_syncBudget` performs the reset branch: `windowEnd = now + windowDuration`, `rewardRate = rewardBudget / windowDuration`. If the inflow is large (owner top-up, or a period of accumulated mint-debt being drained), the new rate is strictly higher than pre-call. The reset happens AFTER `_updatePool` settles pre-call accrual, so the higher rate applies only to time post-reset. An MEV searcher who observes the top-up in the mempool can:\n\n1. Front-run with `stake(X)`;\n2. Let the top-up land;\n3. Hold briefly to accumulate emission at the bumped rate;\n4. Back-run with `unstake(X)` + `claim()`.\n\nThere is no minimum stake duration. With `stakedToken` being the BalancerPooler ERC1155, a searcher with access to any amount of the NFT can sandwich every owner top-up. The `ownerOrNotGriefed` modifier explicitly permits rate increases, so the sandwich surface is 'by design' under the current modifier spec.",
+  "impact": "Searchers extract a slice of every rate-bumping inflow proportional to `(searcher_stake / (totalStaked + searcher_stake)) * (new_rate - old_rate) * held_duration`. Per-sandwich loss is small (e.g. 540-day window + 540e18 top-up + 10x-totalStaked searcher + 12s hold ≈ 1.25e14 wei = 0.000125 phUSD), but it repeats on every top-up and every large dispatcher drain. Scales with top-up size and searcher inventory.",
+  "proof": "1. Owner submits `topUp(large_amount)` via public mempool.\n2. Searcher front-runs with `stake(X)`. `_syncBudget` runs; searcher's `user.amount = X`, `rewardDebt` snapshots current `accRewardPerShare`.\n3. Owner's `topUp` lands. `rewardBudget` grows, `rewardRate` jumps, `windowEnd` resets.\n4. Next block: searcher back-runs with `unstake(X)` + `claim()`. `_updatePool` accrues at new higher rate; searcher captures pro-rata of that accrual.\n5. Net profit = `X / (totalStaked + X) * new_rate * elapsed`. For X >> totalStaked, searcher captures most of the first-block emission post-topUp.",
+  "suggested-fix": "Introduce a minimum stake duration or cooldown between stake and unstake (e.g. forfeit rewards for the first N seconds of a new stake, returning forfeit to `rewardBudget`). Alternatively, route owner top-ups through a private mempool / commit-reveal path. At minimum document that top-ups are MEV-visible.\n\nNote: adopting the F-01 structural fix (amortise inflow into remaining window instead of resetting) materially reduces the sandwich surface because the rate no longer JUMPS on top-ups — it smoothly increases.",
+  "confidence": "medium",
+  "sources": ["ES-06"],
+  "consolidation-note": "No CS overlap. Standalone MEV observation from econ-scanner.",
+  "sanitizer-note": "REMOVED. (1) The `ownerOrNotGriefed` modifier explicitly permits rate-increasing resets — so the rate-bump behavior is the intended design, not a bug; (2) The sandwich requires the searcher to hold BalancerPooler ERC1155 inventory at ≥10x totalStaked for meaningful extraction (the finding's own worst-case is ~0.000125 phUSD per sandwich — dust); (3) Stakers whose rate is INCREASED by a topUp suffer no harm: the sandwicher diluting that rate is a zero-sum allocation among concurrent stakers, not a theft; (4) The user has no ACTION required when topUp happens — rates are externally set — so standard 'user signed a tx that got sandwiched' MEV patterns don't cleanly apply. C4 treats this kind of speculative low-magnitude MEV on permissioned rate adjustments as non-HM without a demonstrated exploit of material value. Recommending removal rather than demotion because the behavior is spec-permitted and per-event profit is sub-cent."
+}
