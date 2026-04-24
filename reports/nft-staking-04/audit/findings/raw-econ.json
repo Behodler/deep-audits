@@ -1,0 +1,127 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanType": "economic",
+  "scope": ["src/NFTStaker.sol"],
+  "findings": [
+    {
+      "id": "ECON-001",
+      "title": "Budget stranded post-expiry when dispatcher hook has no pending debt",
+      "severity_estimate": "Medium",
+      "file": "src/NFTStaker.sol",
+      "lines": "203-214, 189-200",
+      "description": "After windowEnd passes with leftover rewardBudget (e.g. because totalStaked was 0 for part of the window, or because floor-division drift left a residual), the schedule needs to be reset to redistribute the leftover. The reset branch of `_applyAsymmetricWindow` fires when `scheduleExpired` is true, but `_applyAsymmetricWindow` is only invoked by `_syncBudget` AFTER the `inflow == 0 → return;` early exit. So if `dispatcherHook.pull()` returns zero (no new mint-debt) and no owner `topUp` has occurred, `_syncBudget` exits before reaching `_applyAsymmetricWindow`, leaving `windowEnd < block.timestamp` and the leftover `rewardBudget > 0` permanently non-emitting. Stakers calling claim get no more rewards (emissions clamped to windowEnd via `end = min(now, windowEnd)` in `_updatePool`), and the budget sits in the contract indefinitely.",
+      "attack_path": "1. Owner tops up B = 540d * rate. windowEnd = now + 540d.\n2. All stakers unstake at t = windowEnd - 1d. During the 1-day zero-stake tail, _updatePool skips accrual and just bumps lastRewardTime. rewardBudget is unchanged.\n3. Block.timestamp advances past windowEnd. Dispatcher hook has no mint debt to pull (steady state).\n4. A new staker stakes. stake() → _syncBudget() → _updatePool() (elapsed clipped to 0 since end=windowEnd <= lastRewardTime) → pull() returns 0 → early return. _applyAsymmetricWindow is NOT called. Schedule stays expired (windowEnd in the past), rewardRate still nonzero in storage but currentRewardRate() returns 0. No new emissions. rewardBudget still holds the leftover ~1d * rate of phUSD forever.\n5. Only an owner topUp (requires amount > 0, moves real tokens in) can reset the schedule.",
+      "impact": "Leftover budget from a prior window (expected to roll into the next 540-day schedule automatically on next interaction) is instead silently stranded. Stakers who expected continuous emissions stop receiving anything until the owner manually tops up. Depending on how much is trapped (could be days of emissions if zero-stake gaps or small-trickle accumulation happened), this is a meaningful availability / value-loss issue. It also violates the intent that windows auto-restart on pull.",
+      "profit_analysis": "No attacker profit; this is a passive value-lock. Magnitude equals cumulative untouched budget at expiry: up to `rewardRate * (duration of zero-stake gaps)` per cycle, plus floor-division residuals from extend-branch rounding.",
+      "recommendation": "Move the reset on `scheduleExpired` out from under the `if (inflow == 0) return;` guard — either call `_applyAsymmetricWindow(0)` when the schedule has expired but budget > 0, or have `_updatePool` itself trigger a schedule reset when `block.timestamp >= windowEnd` and `rewardBudget > 0`. Alternatively allow `pullAndRefresh` to force a schedule reset independent of inflow."
+    },
+    {
+      "id": "ECON-002",
+      "title": "emergencyWithdraw permanently strands forfeited rewards",
+      "severity_estimate": "Medium",
+      "file": "src/NFTStaker.sol",
+      "lines": "308-317",
+      "description": "When a staker calls `emergencyWithdraw`, `_updatePool` is deliberately not called (correctly — this is the escape hatch). At that moment, the staker's accrued pending reward (= user.amount * accRewardPerShare / ACC_PRECISION - user.rewardDebt at last settlement) has already been debited from `rewardBudget` and credited to `accRewardPerShare` in earlier `_updatePool` calls. The phUSD tokens backing that accrual are therefore sitting in `rewardToken.balanceOf(contract)` but outside `rewardBudget`. When the user exits via emergencyWithdraw, their claim on those tokens is silently erased (`user.amount = 0; user.rewardDebt = 0`). The tokens remain in the contract but are no longer owed to anyone: `accRewardPerShare` was not rewound, so other stakers' pending is unchanged (they earn their own shares, not the forfeited one). The result is permanently dead phUSD locked in the contract — no user can claim it, no owner rescue function exists, and subsequent schedule resets don't touch it because `rewardBudget` has already been decremented for it.",
+      "attack_path": "1. Alice stakes 10 units. Bob stakes 10 units. Schedule runs.\n2. 100 seconds pass. _updatePool credits 100*rate in accrual to accRewardPerShare; rewardBudget decrements by 100*rate. Alice and Bob each have pending = 50*rate. The 100*rate of phUSD is in the contract balance (outside rewardBudget).\n3. Alice panics and calls emergencyWithdraw. user.amount=0, rewardDebt=0. The 50*rate of phUSD that backed her pending is still in contract balance, but no one is owed it anymore.\n4. Bob eventually claims his 50*rate. Invariant `balance == rewardBudget + totalDebt` now has a persistent 50*rate gap: the contract holds 50*rate more than anyone is owed. This phUSD is lost forever.",
+      "impact": "Every emergencyWithdraw call silently burns the caller's already-debited accrual into permanently dead funds. Not recoverable by the exiting user (forfeiture is the design), but also not redistributed to remaining stakers and not reclaimable by the owner. Over a long-lived pool with multiple emergency exits (which the design explicitly anticipates — pause + ID migration scenarios, broken-hook scenarios), this accumulates into meaningfully stranded phUSD.",
+      "profit_analysis": "Loss-only, no attacker profit. Loss per event = user's pending reward at the moment of emergencyWithdraw. The design intends forfeiture but didn't specify where the tokens should go; implicit assumption that they'd redistribute is not borne out by the code.",
+      "recommendation": "On emergencyWithdraw, either (a) call _updatePool first and then re-credit the forfeited pending back to rewardBudget so it rolls into future emissions (compromises the 'never touch pool state' property), or (b) add an owner-only `rescueDust` function that sweeps `balance - rewardBudget - liveTotalDebt` at owner's discretion, or (c) explicitly credit forfeited amounts back to `rewardBudget` via a minimal write that doesn't depend on the dispatcher hook."
+    },
+    {
+      "id": "ECON-003",
+      "title": "currentRewardRate view returns nonzero after budget exhaustion",
+      "severity_estimate": "Low",
+      "file": "src/NFTStaker.sol",
+      "lines": "336-339",
+      "description": "`currentRewardRate()` returns `rewardRate` whenever `block.timestamp < windowEnd`, with no check on `rewardBudget`. Once `_updatePool` has clamped `reward > rewardBudget` to `rewardBudget` (budget exhausted mid-window), actual per-second emissions are zero but the view continues to advertise the stored `rewardRate`. Frontends using this view for APR / runway calculations will overstate yield.",
+      "attack_path": "1. Owner sets a very short windowDuration and/or large rate, OR zero-stake gaps cause the nominal schedule to drift such that budget depletes before windowEnd.\n2. Actual emissions reach zero (rewardBudget = 0) while windowEnd is still in the future.\n3. currentRewardRate() still returns the full rewardRate, misleading depositors into staking fresh principal expecting yield that won't arrive.",
+      "impact": "Frontend / integrator misinformation. Users may deposit capital expecting yield that will not materialize until the next owner top-up or pull. No direct theft but misaligned expectations.",
+      "profit_analysis": "No direct attacker profit. Indirect grief: an adversary aware of the exhaustion can continue to advertise the pool externally while withholding top-up info.",
+      "recommendation": "Return 0 when `rewardBudget == 0` regardless of windowEnd, or expose a separate `effectiveRate()` view that accounts for exhaustion."
+    },
+    {
+      "id": "ECON-004",
+      "title": "Griefer can block ID migration by staking 1 unit before setStakedId",
+      "severity_estimate": "Low",
+      "file": "src/NFTStaker.sol",
+      "lines": "139-143",
+      "description": "`setStakedId` requires `totalStaked == 0`. The owner has no way to atomically migrate: they must first coordinate all stakers to exit, then call setStakedId. An adversary holding any quantity of the current stakedId NFT can front-run by staking 1 unit, causing the owner's setStakedId to revert. Attacker then unstakes and repeats on the next try. Cost to attacker = gas for stake/unstake; no principal loss.",
+      "attack_path": "1. Owner broadcasts `setStakedId(newId)` after confirming totalStaked reached 0.\n2. Attacker's mempool bot observes; submits `stake(1)` with higher gas.\n3. setStakedId reverts with 'stake outstanding'.\n4. Attacker unstakes (pays 0 reward since negligible accrual) — net cost ~= 2x gas.\n5. Repeat indefinitely. Owner cannot complete migration.\n\nMitigation the contract already has: pause. If owner pauses first, stake() reverts and griefer is blocked. But pause is not enforced as a precondition of setStakedId, so an unobservant operator could be caught.",
+      "impact": "Operational / availability grief on ID migration. Recoverable by pausing first, but not enforced. Does not directly risk principal because stakers still have their old-ID balance and can emergencyWithdraw.",
+      "profit_analysis": "Attacker pays gas; no profit. Pure griefing. Only attractive to actors with extrinsic reasons to block migration (competitor, disgruntled user).",
+      "recommendation": "Require `paused() == true` inside setStakedId, or add a two-step migration (owner initiates, users forced to exit within a window, then setStakedId executes). Alternatively document that operators must pause before attempting ID change."
+    },
+    {
+      "id": "ECON-005",
+      "title": "Extend-branch floor division silently accumulates under-extended windowEnd",
+      "severity_estimate": "Low",
+      "file": "src/NFTStaker.sol",
+      "lines": "196-199",
+      "description": "In the extend branch of `_applyAsymmetricWindow`, `windowEnd += inflow / rewardRate`. When `inflow < rewardRate`, the extension is zero but the budget still grows by `inflow`. Many successive tiny inflows (e.g. dispatcher hook drizzling small mint-debt batches via claim-triggered pulls) can accumulate a large `rewardBudget` with windowEnd extending much less than proportionally. Eventually `candidate = rewardBudget / windowDuration` exceeds `rewardRate` and the reset branch fires — creating a 'saved-up rate jump' that benefits stakers present at the reset moment but not stakers who left just before it. This timing discontinuity is an MEV surface: a staker aware that rewardBudget is close to tripping the reset can time their stake accordingly; a leaver can be induced to exit right before the reset.",
+      "attack_path": "1. Observer monitors rewardBudget / windowDuration vs rewardRate on-chain.\n2. When the ratio is just under the reset threshold (say within 1% of tripping), observer stakes maximally and waits for the next hook pull (which triggers reset). Post-reset rate is higher; observer accrues more than they would have in the extend-only regime.\n3. Conversely, an adversary observing a victim about to unstake can delay their own pull-triggering action to let the victim exit before the rate-raise reset, shrinking the victim's payout.",
+      "impact": "Soft MEV / timing-arbitrage. Does not steal principal, but reallocates reward distribution based on exact stake/unstake timing relative to reset events. Stakers who cannot watch the mempool and predict reset timing earn slightly less in expectation than those who can.",
+      "profit_analysis": "Profit = (newRate - oldRate) * remainingWindow * attacker_share. In typical parameters (rate = 100 phUSD/s, reset doubles rate, 10% attacker share, 100 days remaining) this is on the order of 86,400 phUSD for a 10% staker — meaningful but requires mempool-level observation and tight timing. Accessible to MEV searchers, not retail.",
+      "recommendation": "Scale precision of the extend-branch: replace `windowEnd += inflow / rewardRate` with `windowEnd += (inflow * ACC_PRECISION) / rewardRate` tracked against a high-precision accumulator, so small inflows always extend windowEnd proportionally and the rate-reset threshold is smoothly approached rather than stepwise. Alternatively, emit an event whenever the extend branch would leave leftover budget unspent so integrators can reason about timing."
+    },
+    {
+      "id": "ECON-006",
+      "title": "Monotonic-upward rate can leave rewardRate stuck above sustainable level after budget drain",
+      "severity_estimate": "Low",
+      "file": "src/NFTStaker.sol",
+      "lines": "189-200",
+      "description": "The monotonic-upward invariant (`rewardRate` only rises within a live schedule) means owner cannot reduce rate without letting the schedule expire. If a topUp accidentally sets rate too high and budget drains before windowEnd, emissions stop but the schedule is still nominally alive (windowEnd > now). The only way to recover is to wait for the schedule to expire naturally, then topUp again (which hits the reset branch and chooses a new rate). During the intervening period, stakers are earning zero but the pool is still marketed as 'live' (see ECON-003). Combined with the pause mechanism, owner has limited tools to correct a misconfiguration.",
+      "attack_path": "1. Owner accidentally tops up with a very large amount AND sets a short windowDuration, producing rate = bigAmount / shortDuration. Rate is now large.\n2. Stakers claim aggressively, draining rewardBudget before windowEnd.\n3. Emissions stop. Owner realizes rate was wrong.\n4. Owner cannot lower rate: topUp only raises rate (candidate > current fires reset, candidate <= current leaves rate unchanged). setWindowDuration is config-only and does not mutate rate. There is no 'resetRate' admin function.\n5. Owner must wait until windowEnd, or injection of a huge new amount that re-hits reset at a newly-chosen (lower-duration) rate.",
+      "impact": "Operational rigidity. No direct fund loss, but owner-side errors are irrecoverable within the current window. Stakers stuck in a zero-emission phase even though documented rate is nonzero.",
+      "profit_analysis": "No attacker profit. Self-inflicted operational risk on owner side; stakers suffer opportunity cost but not principal loss.",
+      "recommendation": "Add an owner-only `resetSchedule()` that allows the reset branch to fire unconditionally (bounded by sanity checks like windowDuration constraints) or allow setWindowDuration to optionally trigger reset via an explicit flag."
+    },
+    {
+      "id": "ECON-007",
+      "title": "Zero-stake periods do not advance budget consumption, producing phantom-rate schedules on resume",
+      "severity_estimate": "Low",
+      "file": "src/NFTStaker.sol",
+      "lines": "219-234",
+      "description": "During zero-stake periods, `_updatePool` skips accrual and only advances `lastRewardTime`. This is correct for avoiding reward loss, but it means `rewardBudget` is preserved while `windowEnd` continues ticking (nominal rate > 0 but no emissions). When stakers return, remaining runway is `(windowEnd - now)` seconds at `rewardRate` but `rewardBudget` can be much larger than `rewardRate * (windowEnd - now)`. The surplus is locked until windowEnd expires, at which point the next inflow-reset redistributes it. If the schedule merely expires with no inflow, ECON-001 strands it permanently.",
+      "attack_path": "1. Everyone unstakes shortly after the schedule starts. totalStaked = 0. _updatePool skips accrual; rewardBudget remains at near-full.\n2. Months pass with no staker and no owner pull.\n3. Just before windowEnd, one attacker stakes with a large amount. _syncBudget pulls (zero inflow assumed), _updatePool advances lastRewardTime to now but doesn't accrue (still totalStaked=0 logic from prior call set lastRewardTime forward). Actually since attacker just staked, _updatePool sees totalStaked nonzero and accrues elapsed*rate. Elapsed could be very short (seconds). Attacker accrues only a tiny amount, leaving budget near-full at windowEnd.\n4. windowEnd hits. Attacker unstakes, gets tiny reward. Leftover budget (close to full) is stranded per ECON-001 unless owner tops up.",
+      "impact": "Budget under-utilization — stakers who want to earn through a 540-day window may find that gaps (voluntary exits) produce stranded budget. Not a direct theft but a suboptimal distribution.",
+      "profit_analysis": "No direct attacker profit; aligns with ECON-001 as the stranding mechanism.",
+      "recommendation": "When _updatePool detects a zero-stake gap (totalStaked == 0 and elapsed > 0), consider shortening windowEnd by elapsed to keep `rewardBudget` / `remainingWindow` proportional to the originally-set rate — or document that zero-stake gaps produce strands and require owner intervention to reset."
+    },
+    {
+      "id": "ECON-008",
+      "title": "setWindowDuration does not revalidate solvency of existing schedule",
+      "severity_estimate": "Low",
+      "file": "src/NFTStaker.sol",
+      "lines": "145-151",
+      "description": "setWindowDuration mutates `windowDuration` but leaves `rewardRate` and `windowEnd` unchanged. The effective schedule (rate * (windowEnd - now)) may now exceed rewardBudget if the window is shortened below the natural drain time, OR a later inflow may compute `candidate = rewardBudget / newDuration` as much larger than prior rate, producing a sudden rate spike on the next hook pull even from a tiny inflow. Tests in NFTStakerPermissions.t.sol explicitly exercise this ('shorter window + 1 wei inflow → rate rises'). An owner shortening the window, whether intentionally or mistakenly, bakes in a latent rate spike that fires on the next nonzero pull/topUp — the timing of which is partly dependent on external hook behavior.",
+      "attack_path": "1. Owner calls setWindowDuration(shorter). No immediate state change to rate/windowEnd — current schedule persists.\n2. Later, hook produces any nonzero mint-debt. Next stake/unstake/claim invokes _syncBudget. candidate = rewardBudget / shorterDuration >> rewardRate. Reset branch fires: rate jumps, windowEnd resets to now + shorterDuration.\n3. A staker who unstaked between step 1 and step 2 missed the rate spike. A staker who staked just before step 2 captures the spike. This is a timing surface accessible to anyone watching the chain for setWindowDuration events.",
+      "impact": "Timing-sensitive reward redistribution. Similar to ECON-005: rewards shift based on stake-timing relative to rate-jump events. Not principal theft.",
+      "profit_analysis": "Similar to ECON-005; moderate MEV surface bounded by the magnitude of (newRate - oldRate) * remainingWindow. Requires watching setWindowDuration events and predicting hook inflow timing.",
+      "recommendation": "Either apply the rate/window update atomically in setWindowDuration (call _applyAsymmetricWindow(0) with scheduleExpired path), or document the latent-spike behavior prominently for integrators."
+    },
+    {
+      "id": "ECON-009",
+      "title": "No minimum-stake check allows 1-wei stakes to trigger _syncBudget and extend schedule",
+      "severity_estimate": "Low",
+      "file": "src/NFTStaker.sol",
+      "lines": "240-256",
+      "description": "`stake` requires `amount > 0` but accepts 1 unit. Every call triggers `_syncBudget`, which pulls from the dispatcher hook. A griefer holding just 1 unit of the NFT can repeatedly stake(1) / unstake(1) with minimal principal at risk, forcing repeated pulls and under-refills. Under the monotonic-upward invariant this cannot lower the rate (M-01 regression), but it can extend windowEnd in the extend branch, pushing budget depletion further into the future. This delays the moment at which rewardBudget / windowDuration could cross the reset-raise threshold, effectively capping long-term rate growth.",
+      "attack_path": "1. Griefer acquires 1 NFT unit.\n2. Every epoch where the hook has accumulated small mint-debt that WOULD (if left alone until a legit staker interacts) aggregate into a reset, griefer front-runs by staking 1 unit — triggering a small pull, burning it into extend-branch, and preventing the aggregate reset.\n3. Over many cycles, rate stays flat instead of rising. Stakers earn less than they would have under a bursty-pull schedule.",
+      "impact": "Long-term rate suppression for legitimate stakers. Modest — the monotonic-upward invariant still protects against outright decrease, but upward trajectory is dampened. Stakers earn the same total phUSD eventually (conservation) but across a stretched timeline with lower instantaneous APR.",
+      "profit_analysis": "Attacker gains nothing directly unless they're short the pool's token elsewhere or competing with stakers for TVL. Cost = gas per stake/unstake cycle. Only rational for adversaries with external motive.",
+      "recommendation": "Option A: introduce a minimum-stake threshold (e.g. 10 units) to raise griefing cost. Option B: make pull-triggering a separate owner-or-permissioned flow and have stake/unstake/claim skip _syncBudget when inflow would be below a threshold. Option C: batch hook pulls on a time interval rather than every interaction."
+    },
+    {
+      "id": "ECON-010",
+      "title": "pendingReward view ignores hook's pending mint-debt, understating accurate runway and APR",
+      "severity_estimate": "Low",
+      "file": "src/NFTStaker.sol",
+      "lines": "323-334",
+      "description": "`pendingReward` simulates `_updatePool` under the on-contract `rewardBudget` only — it does not fold in `dispatcherHook.mintDebt()` pending inflow. A user querying pendingReward immediately after a long pauseless gap will see a figure that understates what they would receive if they called claim (claim would trigger `_syncBudget`, pull mint-debt, potentially raise rate on reset, and then settle). Frontends relying on pendingReward as a single source of truth will display misleading figures that diverge from actual claim outcomes.",
+      "attack_path": "Not an attack, but exploitable UX surface: a counterparty who shows the user pendingReward as 'your balance' underrepresents what they'd actually be paid. An attacker offering to buy out a staker's position at `pendingReward` price gets the hidden upside.",
+      "impact": "UX / information asymmetry. Off-chain OTC purchases of staking positions could be mispriced to the seller's disadvantage.",
+      "profit_analysis": "Bounded by hook.mintDebt() at query time multiplied by the queried user's share fraction. On a pool with frequent pulls this is small; on a pool with long gaps between pulls this can be meaningful.",
+      "recommendation": "Mirror `totalDebt()`'s pattern: in `pendingReward`, include `hook.mintDebt()` as a hypothetical inflow, apply `_applyAsymmetricWindow` logic in-memory, and return the post-hypothetical-pull pending. Alternatively, expose a separate `pendingRewardSimulated()` that includes the simulation and keep the existing view for simplicity."
+    }
+  ]
+}

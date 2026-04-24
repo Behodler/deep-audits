@@ -1,0 +1,208 @@
+{
+  "project": "nft-staking-04",
+  "phase": "classified",
+  "scanTimestamp": "2026-04-24",
+  "mode": "audit",
+  "targetContract": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/NFTStaker.sol",
+  "scopeContext": {
+    "inScope": ["src/NFTStaker.sol"],
+    "outOfScope": [
+      "lib/immutable/openzeppelin-contracts (external OZ)",
+      "lib/immutable/forge-std",
+      "lib/mutable/yield-claim-nft (sibling submodule; interfaces only)",
+      "lib/mutable/pauser (sibling submodule; interfaces only)"
+    ]
+  },
+  "inputs": {
+    "sanitized_count": 9
+  },
+  "outputs": {
+    "classified_count": 9,
+    "high_count": 0,
+    "medium_count": 2,
+    "low_count": 6,
+    "centralization_count": 1
+  },
+  "findings": [
+    {
+      "submission_id": "M-01",
+      "severity": "Medium",
+      "severity_rationale": "Meets C4 Medium criteria: 'value leak with stated assumptions and external requirements.' Legitimate emissions budget (rewardBudget) is permanently stranded after a schedule expires with no dispatcher inflow and no owner topUp, violating the documented feature-spec intent that windows auto-restart on pull. Stated assumption: a zero-stake tail occurs before windowEnd, or schedule expires while dispatcher mint-debt is zero. External requirement: no owner topUp during the gap. No direct asset theft (stakers never held title to that surplus), but real phUSD is locked with no on-chain recovery path, and the protocol's advertised emission continuity is broken. Not High because the stranding is not an attacker-controlled theft path and requires idle time plus a specific ordering of states. Not Low because the value at stake (up to rewardRate * zero-stake duration + floor-division residuals) is non-dust and the behavior contradicts explicit spec intent.",
+      "id": "DEDUP-006",
+      "merged_from": ["ECON-001", "ECON-007"],
+      "title": "Budget stranded post-expiry when schedule expires with no dispatcher inflow; zero-stake gaps feed the stranding",
+      "severity_estimate": "medium",
+      "file": "src/NFTStaker.sol",
+      "lines": "203-214, 189-200, 219-234",
+      "description": "Two cooperating root causes permanently strand rewardBudget: (1) _applyAsymmetricWindow is only invoked by _syncBudget AFTER the `inflow == 0 return` early exit. So if dispatcherHook.pull() returns zero (steady-state, no mint-debt) and no owner topUp has happened, _syncBudget exits before reaching _applyAsymmetricWindow. Once windowEnd has passed, the schedule stays expired; emissions clamp to windowEnd via `end = min(now, windowEnd)` in _updatePool, and no new emissions occur. (2) Zero-stake periods preserve rewardBudget (correctly avoiding reward loss) but windowEnd continues ticking. When stakers return, remaining runway is (windowEnd - now) at rewardRate but rewardBudget can be much larger than rewardRate * (windowEnd - now). Combined with (1), the surplus is then stranded at expiry with no inflow path to trigger the reset branch that would redistribute it.",
+      "attack_path": "1) Owner tops up B = 540d * rate. windowEnd = now + 540d. 2) All stakers unstake at t = windowEnd - 1d. During the 1-day zero-stake tail, _updatePool skips accrual and just bumps lastRewardTime; rewardBudget is unchanged. 3) Block.timestamp advances past windowEnd. Dispatcher hook has no mint debt to pull (steady state). 4) A new staker stakes. stake() -> _syncBudget() -> _updatePool() (elapsed clipped to 0 since end=windowEnd <= lastRewardTime) -> pull() returns 0 -> early return. _applyAsymmetricWindow is NOT called. Schedule stays expired; rewardRate still nonzero in storage but currentRewardRate() returns 0 (windowEnd in past). rewardBudget holds the leftover ~1d * rate of phUSD forever. 5) Only an owner topUp (amount > 0, real tokens moved in) can reset the schedule.",
+      "impact": "Leftover budget from a prior window — expected to roll into the next 540-day schedule automatically on the next interaction per the intended design — is instead silently stranded. Stakers who expected continuous emissions stop receiving anything until an owner manually tops up. Magnitude equals cumulative untouched budget at expiry: up to rewardRate * (duration of zero-stake gaps) per cycle, plus floor-division residuals from extend-branch rounding. Violates the explicit intent that windows auto-restart on pull.",
+      "recommendation": "Move the reset on scheduleExpired out from under the `if (inflow == 0) return;` guard. Two concrete options: (a) inside _syncBudget, call _applyAsymmetricWindow(0) when the schedule has expired AND rewardBudget > 0, regardless of inflow; (b) have _updatePool itself trigger a schedule reset when block.timestamp >= windowEnd and rewardBudget > 0. Alternatively, allow pullAndRefresh to force a schedule reset independent of inflow. Additionally, when _updatePool detects a zero-stake gap (totalStaked == 0, elapsed > 0), consider shortening windowEnd by elapsed to keep rewardBudget / remainingWindow proportional to the originally-set rate.",
+      "sanitization": {
+        "status": "kept",
+        "rootCauseInScope": true,
+        "rationale": "Root cause is _syncBudget control flow and _updatePool zero-stake handling in NFTStaker.sol. Directly contradicts feature spec item 5 intent ('emissions continue against the existing schedule')."
+      }
+    },
+    {
+      "submission_id": "M-02",
+      "severity": "Medium",
+      "severity_rationale": "Meets C4 Medium criteria: 'value leak with stated assumptions and external requirements.' Every emergencyWithdraw with non-zero accrued pending permanently strands phUSD tokens that are already debited from rewardBudget, credited to accRewardPerShare, but owed to no one after the user's stake is zeroed. The conservation invariant (balance == rewardBudget + totalDebt) is permanently broken. Stated assumption: user has non-zero pending accrual at time of emergency exit. External requirement: an emergency-exit event occurs (pause, hook breakage, or user panic — all anticipated by design). The forfeiture itself is spec-blessed (masterchef-style), but the downstream stranding (tokens neither recoverable by owner nor redistributable to remaining stakers) is not explicitly blessed and represents a real value leak per exit event, accumulating over a long-lived pool. Not High because no direct theft path exists — the tokens are locked, not stolen. Not Low because each event produces non-dust stranding and the design explicitly anticipates multiple emergency exits.",
+      "id": "ECON-002",
+      "merged_from": ["ECON-002"],
+      "title": "emergencyWithdraw permanently strands forfeited rewards as dead tokens in the contract",
+      "severity_estimate": "medium",
+      "file": "src/NFTStaker.sol",
+      "lines": "308-317",
+      "description": "When a staker calls emergencyWithdraw, _updatePool is deliberately not called (the escape hatch). At that moment, the staker's accrued pending reward (user.amount * accRewardPerShare / ACC_PRECISION - user.rewardDebt at last settlement) has already been debited from rewardBudget and credited to accRewardPerShare in earlier _updatePool calls. The phUSD tokens backing that accrual are therefore sitting in rewardToken.balanceOf(contract) but outside rewardBudget. When the user exits, their claim is silently erased (user.amount = 0; user.rewardDebt = 0). accRewardPerShare is not rewound, so other stakers' pending is unchanged — they earn their own shares, not the forfeited one. The tokens remain in the contract but are owed to no one: rewardBudget has already been decremented for them, so subsequent schedule resets don't touch them, and no owner rescue path exists.",
+      "attack_path": "1) Alice stakes 10 units. Bob stakes 10 units. Schedule runs. 2) 100 seconds pass. _updatePool credits 100*rate in accrual to accRewardPerShare; rewardBudget decrements by 100*rate. Alice and Bob each have pending = 50*rate. The 100*rate of phUSD is in the contract balance (outside rewardBudget). 3) Alice panics and calls emergencyWithdraw. user.amount = 0, rewardDebt = 0. The 50*rate of phUSD that backed her pending is still in contract balance, but no one is owed it anymore. 4) Bob eventually claims his 50*rate. Invariant `balance == rewardBudget + totalDebt` now has a persistent 50*rate gap: the contract holds 50*rate more than anyone is owed. Permanently lost.",
+      "impact": "Every emergencyWithdraw silently burns the caller's already-debited accrual into permanently dead funds. Not recoverable by the exiting user (forfeiture is the design) but also not redistributed to remaining stakers and not reclaimable by the owner. The design explicitly anticipates multiple emergency exits (pause + ID migration, broken-hook scenarios), so accumulation into meaningfully stranded phUSD is expected over a long-lived pool. Conservation invariant (balance == rewardBudget + totalDebt) is permanently broken after any emergencyWithdraw with non-zero accrued pending.",
+      "recommendation": "Three options, ranked: (a) On emergencyWithdraw, rewind the user's debited accrual back into rewardBudget (computed as user.amount * accRewardPerShare / ACC_PRECISION - user.rewardDebt) before zeroing out their stake — this rolls forfeited rewards into future emissions without touching accRewardPerShare, preserving the 'never trigger pool updates' property of the escape hatch. (b) Add an owner-only rescueDust function that sweeps balance - rewardBudget - liveTotalDebt. (c) Document the stranding as intentional and accept the conservation break.",
+      "sanitization": {
+        "status": "kept_flagged",
+        "rootCauseInScope": true,
+        "rationale": "Root cause is emergencyWithdraw implementation in NFTStaker.sol. The user-forfeits-pending behavior IS spec-stated, but the conservation-invariant break (tokens stranded with no owner) is NOT explicitly blessed in CLAUDE.md and is a consequence rather than a stated design goal. Flagged for human review because standard masterchef forks show the same behavior; a judge may treat it as intentional. Severity may be downgraded by classifier."
+      }
+    },
+    {
+      "submission_id": "L-01",
+      "severity": "Low",
+      "severity_rationale": "C4 Low/QA: 'State handling issues, spec deviations.' Direct spec deviation — feature spec item 6 states setWindowDuration should recompute per-second rate, but implementation only writes windowDuration. No direct funds-at-risk path: the monotonic-upward rate invariant means owner cannot slow emissions, but emissions still happen against an already-funded budget. The 'MEV rate-spike on next pull' is a timing redistribution among stakers, not external theft, and requires adversarial mempool observation plus favorable candidate arithmetic. Classified Low rather than Medium because no value is lost or stranded — all rewardBudget eventually emits; only the rate and timing are affected.",
+      "id": "DEDUP-001",
+      "merged_from": ["CODE-001", "ECON-008"],
+      "title": "setWindowDuration does not recompute rewardRate or windowEnd, violating spec and creating a latent rate-spike MEV surface on next pull",
+      "severity_estimate": "medium",
+      "file": "src/NFTStaker.sol",
+      "lines": "145-151",
+      "description": "setWindowDuration(newDuration) only updates the windowDuration storage variable (after _updatePool). It does not touch rewardRate or windowEnd. Two consequences follow from this single root cause: (1) Spec violation — feature spec item 6 in the submodule CLAUDE.md states: 'Changing the duration resets the remaining time to the new full duration and recomputes the per-second rate against the current balance.' The implementation violates this; emissions continue at the pre-existing rewardRate until the pre-existing windowEnd elapses. Because _applyAsymmetricWindow enforces a monotonic-upward rate, future refills can only raise the rate, never lower it, so the owner has no on-chain lever to slow emissions. (2) Latent rate-spike surface — after a shortening call, the effective schedule (rate * (windowEnd - now)) can diverge badly from rewardBudget / newWindowDuration. On the next nonzero _syncBudget pull, candidate = rewardBudget / shorterDuration is computed and can be >> rewardRate, triggering the reset branch and causing rate to jump with windowEnd reset to now + shorterDuration. Tests in NFTStakerPermissions.t.sol explicitly exercise this ('shorter window + 1 wei inflow rises rate').",
+      "attack_path": "Spec-violation path: 1) Owner funds B over default 540-day window. 2) Owner wants to slow emissions; calls setWindowDuration(10 years). 3) rewardRate and windowEnd unchanged — emissions continue at the higher rate until the original 540-day windowEnd. 4) Future refills cannot lower rate (monotonic invariant). Owner has no on-chain slow-down lever.\n\nMEV path: 1) Owner calls setWindowDuration(shorter). No immediate state change to rate/windowEnd. 2) External observer watches the event. 3) Next hook pull produces any nonzero mint-debt; next stake/unstake/claim invokes _syncBudget. candidate = rewardBudget / shorterDuration >> rewardRate; reset branch fires; rate spikes; windowEnd = now + shorterDuration. 4) A staker who unstaked between step 1 and step 2 missed the spike. A staker who staked just before step 2 captures it. Timing-arbitrageable by anyone watching setWindowDuration events.",
+      "impact": "Owner loses a documented governance control (cannot reduce emission rate) and users near a setWindowDuration event are exposed to MEV-style timing redistribution of rewards. The shortening case bakes in a latent rate spike that fires on the next nonzero pull, disadvantaging stakers who cannot watch chain state.",
+      "recommendation": "Either (a) implement the spec behavior by atomically resetting rewardRate = rewardBudget / newDuration and windowEnd = now + newDuration inside setWindowDuration (breaks the monotonic-upward invariant, but this is the documented intent of the setter), or (b) trigger _applyAsymmetricWindow(0) with the scheduleExpired path from inside setWindowDuration so the rate and window update atomically, or (c) update the spec to document that setWindowDuration only affects subsequent refills. Option (a) or (b) also closes the MEV surface.",
+      "sanitization": {
+        "status": "kept",
+        "rootCauseInScope": true,
+        "rationale": "Root cause is setWindowDuration in NFTStaker.sol (lines 145-151). Directly contradicts documented spec item 6 in submodule CLAUDE.md. Not a C4 universal-invalid pattern (not admin mistake: owner has no on-chain way to achieve documented behavior)."
+      }
+    },
+    {
+      "submission_id": "L-02",
+      "severity": "Low",
+      "severity_rationale": "C4 Low/QA: 'State handling issues.' Operational rigidity — bootstrap-stuck-at-zero and stuck-above-sustainable states can arise, but no funds are lost or stranded (rewardBudget is preserved; conservation holds). Missing owner recovery path is a design gap, not a theft or value-leak path. Classified Low because the primary trigger is owner misconfiguration (reckless-admin-adjacent) even though the contract offers no recovery path; the user-observable harm is zero-emission phases rather than asset loss.",
+      "id": "DEDUP-002",
+      "merged_from": ["CODE-002", "ECON-006"],
+      "title": "Monotonic-upward invariant combined with integer-floor candidate traps rewardRate below usable levels with no owner recovery path",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "189-200",
+      "description": "_applyAsymmetricWindow computes candidate = rewardBudget / windowDuration with integer division, and the monotonic-upward invariant means rewardRate can only increase within a live schedule. Two related failure modes fall out of this: (1) Bootstrap-stuck-at-zero: with the default 540-day window (~46.6M seconds), any rewardBudget < windowDuration yields candidate = 0. On bootstrap (windowEnd == 0, scheduleExpired true), the reset branch sets rewardRate = 0 and windowEnd = now + windowDuration. The under-refill branch's `rewardRate > 0` guard then blocks any further adjustment, so successive small top-ups accumulate rewardBudget but never unlock emissions until a single top-up brings candidate > 0. (2) Stuck-above-sustainable: if a topUp accidentally sets rate too high and stakers drain rewardBudget before windowEnd, emissions stop but the schedule is still nominally alive. Owner cannot lower rate: topUp only raises rate (candidate <= current leaves rate unchanged), setWindowDuration is config-only (see DEDUP-001), and there is no resetRate admin path. The owner must wait for windowEnd or inject a huge new amount that hits the reset branch.",
+      "attack_path": "Bootstrap-stuck: 1) Deploy with windowDuration = 540 days. 2) Owner calls topUp(1_000_000). 3) candidate = 1_000_000 / 46_656_000 = 0; reset branch sets rewardRate = 0, windowEnd = now + 540 days. 4) Owner calls topUp(500_000). 5) candidate still 0; rewardRate is 0 so under-refill branch skipped. 6) Budget accumulates but no emissions until a single top-up crosses candidate >= 1.\n\nStuck-above: 1) Owner accidentally tops up with a very large amount and short windowDuration; rate is now large. 2) Stakers drain rewardBudget before windowEnd. 3) Emissions stop, rate is still nominally nonzero. 4) Owner cannot lower rate or force a reset; setWindowDuration doesn't mutate rate; only recourse is waiting or a new giant inflow that trips reset at new parameters.",
+      "impact": "Operational rigidity on both ends. No direct fund loss — conservation still holds — but stakers experience zero-emission phases the owner cannot correct on-chain. Combined with pause and the dispatcher-hook flow, owner has limited tools to recover from misconfiguration.",
+      "recommendation": "Three-part fix: (1) Relax the `rewardRate > 0` gate in the under-refill branch so that when rewardRate is 0 and the schedule has not expired, a non-zero inflow triggers a recomputation of candidate against the new cumulative budget. (2) Add an owner-only resetSchedule() (or an explicit flag on setWindowDuration) that allows the reset branch to fire unconditionally with sanity-checked parameters. (3) Either enforce a minimum bootstrap top-up (e.g. amount >= windowDuration) or document the edge case explicitly.",
+      "sanitization": {
+        "status": "kept",
+        "rootCauseInScope": true,
+        "rationale": "Root cause is _applyAsymmetricWindow logic in NFTStaker.sol. Not a simple admin mistake — the contract offers no admin-mistake recovery path even if the owner acts in good faith."
+      }
+    },
+    {
+      "submission_id": "L-03",
+      "severity": "Low",
+      "severity_rationale": "C4 Low/QA: precision/rounding state-handling issue. Conservation of budget holds; the described drift is sub-second and sub-unit over individual pulls. The soft-MEV timing surface requires sophisticated searcher infrastructure and mempool observation, and the profit scale is bounded by a small fraction of a single reset's delta. No direct theft, no value permanently lost. Classified Low because it is a rounding / state-handling issue per C4 criteria.",
+      "id": "DEDUP-003",
+      "merged_from": ["CODE-003", "CODE-009", "ECON-005"],
+      "title": "_applyAsymmetricWindow integer divisions in extend-branch and candidate computation silently under-account small inflows and budget changes",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "189-200",
+      "description": "Two integer divisions in _applyAsymmetricWindow lose precision in ways that affect both runway accounting and rate-change timing: (1) Extend-branch: windowEnd += inflow / rewardRate. When inflow < rewardRate (common for dispatcher-hook drizzle), the extension rounds to zero but rewardBudget still grows. Small, frequent pulls accumulate budget without proportionally extending the window. (2) Candidate boundary: candidate = rewardBudget / windowDuration is integer-floored. For any rewardBudget in [k*windowDuration, (k+1)*windowDuration), candidate = k; the fractional inflow contributes budget but not rate. Consequences: (a) windowEnd becomes an unreliable runway indicator, occasionally triggering scheduleExpired resets earlier than the protocol should. (b) When accumulated under-extended budget eventually tips candidate above rewardRate (possibly via a single later pull), a 'saved-up rate jump' fires at a time determined by the cadence of hook pulls — creating an MEV timing surface. Stakers present at the reset moment benefit; stakers who exited just before do not. A mempool-aware observer can time stakes around the predicted reset.",
+      "attack_path": "Accounting drift: 1) rewardRate = 1e18 phUSD/sec. 2) Dispatcher hook drizzles 1e17-sized mint-debt batches every few stake/unstake calls. 3) Each _syncBudget inflow extends windowEnd by 0; budget accumulates. 4) Eventually scheduleExpired prematurely fires on a subsequent call (windowEnd advanced by fewer seconds than budget should have afforded), resetting rate at an unintended time.\n\nMEV timing: 1) Observer monitors rewardBudget / windowDuration vs rewardRate on-chain. 2) When ratio is within 1% of the reset threshold, observer stakes maximally. 3) Next hook pull crosses the candidate boundary, reset fires, rate rises. 4) Observer accrues at the higher rate. Conversely, an adversary wanting to shrink a victim's payout can delay their own pull-triggering interaction until after the victim unstakes. Rough profit scale: (newRate - oldRate) * remainingWindow * attacker_share — meaningful (tens of thousands of phUSD) for parameters where a reset roughly doubles rate.",
+      "impact": "Conservation of budget holds, but distribution and window accounting drift from the intended smooth schedule. Soft MEV surface accessible to searchers watching mempool; retail stakers lose a small expected amount to timing-aware counterparties. Combined with DEDUP-002, produces unintuitive operational behavior for slowly-funded or drizzle-fed pools.",
+      "recommendation": "Scale extend-branch precision: track a high-precision accumulator, e.g. windowEndFractional += (inflow * ACC_PRECISION) / rewardRate and apply integer seconds when accumulated; this smooths both the sub-second extension and the reset-boundary crossing. For the candidate computation, consider storing rewardRate at 1e18 precision and dividing at accrual time. At minimum, emit events when extend-branch would leave leftover unspent so integrators can reason about upcoming resets.",
+      "sanitization": {
+        "status": "kept",
+        "rootCauseInScope": true,
+        "rationale": "Precision/rounding is in NFTStaker.sol arithmetic. Not a universal-invalid pattern."
+      }
+    },
+    {
+      "submission_id": "L-04",
+      "severity": "Low",
+      "severity_rationale": "C4 Low/QA: view-function inaccuracy. C4 guidance explicitly states 'Unused view functions (QA at best)' and even for used views, inaccuracy without a direct funds-at-risk attack path maps to Low. pendingReward is mandated by spec (item 10) and is used by integrators, but the inaccuracy only understates realized rewards (never overstates them, so no one is tricked into claiming more than they have earned). OTC mispricing requires a willing counterparty and off-chain trading infrastructure outside the protocol's control. No direct theft of funds, no protocol function impacted — just an informational discrepancy.",
+      "id": "DEDUP-004",
+      "merged_from": ["CODE-007", "ECON-010"],
+      "title": "pendingReward view does not simulate dispatcherHook.pull() inflow, understating realized rewards and enabling OTC mispricing",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "323-334",
+      "description": "pendingReward(account) computes pending rewards using the current on-chain rewardRate, windowEnd, rewardBudget, and accRewardPerShare, plus an in-memory accrual extension up to min(now, windowEnd). It does not simulate the dispatcherHook.pull() that stake/unstake/claim will trigger via _syncBudget, and does not fold in dispatcherHook.mintDebt() as a hypothetical inflow. When mintDebt is non-zero and would push candidate above rewardRate (triggering the reset branch and raising the rate), pendingReward underestimates the reward the user will actually realize on the next interaction. After windowEnd, pendingReward returns accrual under the pre-pull state rather than the post-pull state.",
+      "attack_path": "UX / information-asymmetry surface rather than a direct attack: 1) User queries pendingReward() to decide whether to claim or to price an OTC sale of their staking position. 2) dispatcherHook.mintDebt() is non-zero and would, on pull, bring candidate > rewardRate; rate would reset upward. 3) Displayed figure understates actual claim payout. 4) A counterparty offering to buy out the staker's position at pendingReward captures the hidden upside. Magnitude is bounded by hook.mintDebt() at query time multiplied by the queried user's share fraction — meaningful on pools with long gaps between pulls.",
+      "impact": "Inconsistent view vs mutation semantics. Frontends/integrators relying on pendingReward as a single source of truth display misleading figures that diverge from actual claim outcomes. Enables OTC mispricing of staking positions.",
+      "recommendation": "Mirror totalDebt()'s pattern inside pendingReward: peek at dispatcherHook.mintDebt(), apply _applyAsymmetricWindow logic in-memory, and return the post-hypothetical-pull pending. Alternatively, expose a separate pendingRewardSimulated() that includes the simulation and keep the existing view simple, while documenting that pendingReward is pre-pull and realized rewards may be higher.",
+      "sanitization": {
+        "status": "kept",
+        "rootCauseInScope": true,
+        "rationale": "Root cause is the pendingReward view implementation in NFTStaker.sol. Note: C4 universal-invalid rules say 'Unused view functions (QA at best)' — pendingReward IS used (it is spec-mandated per feature item 10), and the finding is NOT about it being unused, it is about it being incorrect relative to the mutation path. Keep; classifier may rate as low/QA given magnitude."
+      }
+    },
+    {
+      "submission_id": "L-05",
+      "severity": "Low",
+      "severity_rationale": "C4 Low: griefing/DoS path requiring active adversary to spend gas repeatedly on a contingent operation (setStakedId is a rare governance action). C4 guidance: 'Migration blocking / griefing → Medium if realistic, Low if costly for attacker.' Here the attacker must front-run each governance attempt at roughly 2x gas per cycle indefinitely, and the owner has a trivial off-chain mitigation (pause() before setStakedId). No direct fund loss; principal and accrued rewards remain owed to stakers. The unresponsive-staker variant is not attacker-driven — it is simply a missing forced-exit admin path. Classified Low because the operational deadlock is real but costly to sustain and mitigable by a single pause() call.",
+      "id": "DEDUP-005",
+      "merged_from": ["CODE-008", "ECON-004"],
+      "title": "setStakedId can be blocked indefinitely by a single 1-unit staker, front-running or simply refusing to exit",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "139-143",
+      "description": "setStakedId(newId) reverts if totalStaked > 0. emergencyWithdraw is the only staker exit, and it must be initiated by the staker (or their approved operator). There is no owner-triggered forceExit and pause() is not an enforced precondition of setStakedId. Two variants of the same blocker emerge: (1) Unresponsive staker — one or more holders with lost keys, dead smart-contract wallets, or simple inaction leave totalStaked > 0 and block setStakedId indefinitely. (2) Active griefer — an adversary observing the owner's setStakedId mempool broadcast front-runs with stake(1), causing the call to revert; attacker then unstakes, pays ~2x gas, and repeats on every attempt. Because pause is not required, an unobservant operator can be caught. The module's CLAUDE.md documents the 'ID change never strands principal' property intentionally; the cost is this operational deadlock.",
+      "attack_path": "Griefing path (primary): 1) Owner announces NFT-ID migration (e.g. a Balancer pool reissues the NFT). 2) Owner broadcasts setStakedId(newId) after coordinating stakers to exit, totalStaked reaches 0. 3) Attacker's mempool bot observes; submits stake(1) with higher gas priority. 4) setStakedId reverts with 'stake outstanding'. 5) Attacker unstakes at negligible reward accrual, pays ~2x gas. 6) Repeat on every subsequent attempt. Owner's only recourses: pause first (not enforced by the contract), or deploy a second NFTStaker (fragments TVL), or social (compensate griefer).\n\nUnresponsive path: A single holder with a 1-unit stake and lost keys blocks migration with no active griefing required.",
+      "impact": "Operational deadlock on NFT-ID migrations. No direct fund loss — principal and accrued rewards remain owed — but the designed migration flow cannot complete on-chain without coordinated social action.",
+      "recommendation": "Require paused() == true inside setStakedId (makes stake() unavailable to front-runners while migration is pending). Additionally, consider a two-step migration: owner initiates a migration window, stakers must exit within the window, then setStakedId executes. At minimum, document prominently that operators must pause before attempting an ID change.",
+      "sanitization": {
+        "status": "kept",
+        "rootCauseInScope": true,
+        "rationale": "Root cause is setStakedId's precondition in NFTStaker.sol. Not a 'reckless admin mistake' — this is a protocol design gap (missing paused() gate / missing forced exit) that prevents the documented migration flow from completing even if the admin acts correctly."
+      }
+    },
+    {
+      "submission_id": "L-06",
+      "severity": "Low",
+      "severity_rationale": "C4 Low: DoS requiring a reverting external contract (dispatcher hook). C4 guidance: 'DoS requiring attacker control of an external contract → often Low.' Here the hook is a trusted sibling, but liveness-coupling means any hook bug (or temporary pause) DoSes stake/unstake/claim. Principal remains recoverable via emergencyWithdraw (confirmed by spec). Accrued rewards are forfeited only if the user chooses emergency exit during the DoS window, and the DoS is bounded by owner responsiveness (setDispatcherHook(0)). No direct theft; principal is never at risk. Classified Low per C4 external-contract-DoS guidance.",
+      "id": "CODE-004",
+      "merged_from": ["CODE-004"],
+      "title": "stake / unstake / claim revert when dispatcherHook.pull() reverts, forcing users through emergencyWithdraw and forfeiting rewards",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "203-214",
+      "description": "_syncBudget is invoked at the top of stake(), unstake(), and claim(). When dispatcherHook is set to a non-zero address, _syncBudget makes an external call to dispatcherHook.pull() with no try/catch. If the dispatcher hook reverts (bug, upgrade breakage, griefing, or intentional pause in the sibling yield-claim-nft module), every user-facing non-emergency path reverts. Users keep principal but cannot claim rewards or unstake normally until the owner either fixes the hook or clears it via setDispatcherHook(address(0)).",
+      "attack_path": "1) Owner (or governance flow) sets dispatcherHook = H. 2) H's pull() begins reverting (e.g., H is paused, H's own dependency is broken, H is maliciously upgraded, or caller-gated check fails because NFTStaker is not wired as recipient). 3) All stake/unstake/claim calls revert at _syncBudget -> dispatcherHook.pull(). 4) Users must either wait for owner intervention or exit via emergencyWithdraw, forfeiting accrued rewards (compounds with DEDUP-007 / ECON-002 to produce permanently stranded tokens). 5) Owner action required (setDispatcherHook(0) or hook repair) to restore normal flow. Combines with DEDUP-007 (setDispatcherHook does not drain old hook) for a compound failure: a broken hook forces emergency exits, and swapping hooks strands any accrued mint-debt.",
+      "impact": "Temporary denial-of-service of stake/unstake/claim and forced forfeiture of accrued rewards for any user who cannot wait and uses emergencyWithdraw. Principal is never at risk (emergencyWithdraw skips _syncBudget per spec, confirmed at line 305-317), but accrued rewards are socially/economically lost. Severity bounded by owner responsiveness.",
+      "recommendation": "Wrap dispatcherHook.pull() in try/catch so a reverting hook degrades to a no-op instead of DoSing the whole call. Example: `try dispatcherHook.pull() returns (uint256 delta) { /* use delta */ } catch { /* skip, continue with current budget */ }`. Preserves the escape-hatch property while making stake/unstake/claim hook-independent.",
+      "sanitization": {
+        "status": "kept",
+        "rootCauseInScope": true,
+        "rationale": "Verified: root cause is in NFTStaker.sol _syncBudget (line 208: `dispatcherHook.pull();` with no try/catch). The hook itself being able to revert is normal external-call behavior; defensive wrapping is NFTStaker's responsibility. Not a 'parent/forked contract OOS' case. The hook is a trusted sibling but liveness-coupling without a try/catch is the in-scope bug."
+      }
+    },
+    {
+      "submission_id": "C-01",
+      "severity": "Centralization",
+      "severity_rationale": "C4 Centralization: admin-only operation (setDispatcherHook is onlyOwner) with missing atomic drain logic that could strand accrued mint-debt on the outgoing hook during a governance-initiated migration. Per C4 criteria: 'Governance/Centralization risk including admin privileges' goes to QA/Centralization. The harm only materialises when the owner performs a hook-swap governance action without first externally pulling from the old hook — this is admin-process risk rather than a protocol bug exploitable by an external attacker. No direct theft path; recovery requires off-chain owner action on the old hook. Classified Centralization (C-01) because the issue is a missing ordering discipline in an admin-only setter.",
+      "id": "CODE-010",
+      "merged_from": ["CODE-010"],
+      "title": "setDispatcherHook does not run _syncBudget before swapping the hook, stranding undrawn mint-debt on the outgoing hook",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "134-137",
+      "description": "setDispatcherHook(newHook) replaces the dispatcherHook storage variable with no prior call to the outgoing hook's pull(). Any accrued mintDebt on the outgoing hook remains unclaimed (and potentially unclaimable by this contract) after the swap, because pull() on the new hook does not realise the old hook's ledger. The comment on _syncBudget emphasises 'Always settle accrual under the OLD rate before mutating anything,' but setDispatcherHook bypasses that discipline for the hook's own accrual.",
+      "attack_path": "1) Dispatcher hook A has accumulated 1000 phUSD of mintDebt available to this contract via A.pull(). 2) Owner sets dispatcherHook = B (e.g., migration to a new hook contract). 3) The 1000 phUSD mintDebt on A is stranded unless A.pull() can still be called out-of-band by the old recipient (which is still this contract, but this contract only ever calls `dispatcherHook.pull()`, which now points to B). 4) There is no admin path in NFTStaker to drain A. Owner must go off-chain / through governance on A to recover.",
+      "impact": "Potential loss of accrued mint-debt during hook migrations. Magnitude depends on accrued debt at migration time. Mitigation requires out-of-band intervention on the old hook.",
+      "recommendation": "In setDispatcherHook, call _syncBudget() first (which calls the current hook's pull() and then settles accrual) before storing newHook. Alternatively add a one-shot `pullFromOldHook(IBalancerPoolerMintDebtHook old) external onlyOwner` that allows draining a previous hook after migration.",
+      "sanitization": {
+        "status": "kept",
+        "rootCauseInScope": true,
+        "rationale": "Root cause is setDispatcherHook setter ordering in NFTStaker.sol (lines 134-137): mutating dispatcherHook before syncing. Not a 'reckless admin mistake' — migration is an expected, documented operation; the contract should atomically drain the outgoing hook as part of the swap."
+      }
+    }
+  ]
+}

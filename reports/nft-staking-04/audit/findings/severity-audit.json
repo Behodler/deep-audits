@@ -1,0 +1,188 @@
+{
+  "auditor": "severity-auditor",
+  "audited_at": "2026-04-24",
+  "project": "nft-staking-04",
+  "criteria_ruleset": "C4 Regular Audit",
+  "overall_confidence": "medium",
+  "summary": {
+    "total_findings": 9,
+    "agreements": 6,
+    "disagreements": 3,
+    "recommended_downgrades": 3,
+    "recommended_upgrades": 0,
+    "headline_concerns": [
+      "M-01 is on shakier ground than the rationale implies: spec item 5 in the submodule CLAUDE.md EXPLICITLY states 'If pull() produced zero new phUSD, do not reset — emissions continue against the existing schedule.' The finding describes behavior that matches the spec, not violates it. Judges will likely read this as intentional design.",
+      "M-02 is the weaker Medium: standard masterchef forks have identical emergencyWithdraw-forfeit behavior and the spec explicitly blesses 'forfeiting pending reward.' Judges commonly treat this as intentional.",
+      "L-01 is genuinely borderline Medium — there IS a documented spec item stating the setter should recompute rate, and the owner has no on-chain lever to slow emissions. Stronger Medium candidate than either of the current Mediums."
+    ]
+  },
+  "findings": [
+    {
+      "submission_id": "M-01",
+      "claimed_severity": "Medium",
+      "assessed_severity": "Low",
+      "agreement": false,
+      "confidence": "medium",
+      "analysis": {
+        "assetRisk": "No direct theft. Legitimate rewardBudget stranded when schedule expires with no dispatcher inflow AND no owner topUp. Magnitude up to rewardRate * zero-stake-tail-duration.",
+        "attackPath": "Valid state path, no attacker control. Requires: (a) stakers exit leaving zero-stake tail, (b) schedule expires during that tail, (c) dispatcher has no mint-debt, (d) owner does not topUp. Passive sequence, not exploit.",
+        "conditions": "Multiple cooperating external conditions: zero-stake tail + expired schedule + zero dispatcher inflow + no owner topUp. Owner-recoverable via a single topUp(1 wei).",
+        "impact": "Budget stranded UNTIL owner intervenes. PoC confirms owner topUp(1) is the ONE recovery path. Not permanent — owner has full recovery capability."
+      },
+      "spec_collision": "CRITICAL: submodule CLAUDE.md feature spec item 5 EXPLICITLY states 'If pull() produced zero new phUSD, do not reset — emissions continue against the existing schedule.' The current behavior (inflow == 0 early return leaves windowEnd unchanged, never restarts schedule) IS the documented behavior. The finding's claim that this 'violates the documented feature-spec intent that windows auto-restart on pull' is inverted — the spec says the opposite. The stranding is the cost of a deliberate design choice (not coupling the schedule reset to a zero-debt hook pull) and the owner has an explicit documented lever (topUp) to recover.",
+      "disagreementReason": "The severity rationale leans on 'violates documented feature-spec intent,' but the submodule CLAUDE.md explicitly documents the zero-inflow-no-reset behavior as intentional. Without the spec-violation leg, this reduces to: (a) owner-recoverable via a single 1-wei topUp, (b) no attacker control, (c) requires a state sequence that only arises if the pool is allowed to go idle past windowEnd. That profile matches C4 Low/QA: 'state handling issue, spec deviation' — but here there is not even a clear spec deviation. Recommend downgrade to Low. Keep as standalone Low or fold into the QA report.",
+      "recommendation": "Downgrade to Low. Revise rationale to remove the spec-violation claim and frame it as a rigidity/operational issue. A judge who reads the submodule CLAUDE.md will likely bounce this Medium."
+    },
+    {
+      "submission_id": "M-02",
+      "claimed_severity": "Medium",
+      "assessed_severity": "Low",
+      "agreement": false,
+      "confidence": "medium",
+      "analysis": {
+        "assetRisk": "Per-exit value leak. Forfeited accrual already debited from rewardBudget and credited to accRewardPerShare sits as 'dead' tokens owned by no one. Conservation invariant balance == rewardBudget + totalDebt breaks after any emergencyWithdraw with non-zero accrued pending.",
+        "attackPath": "No attack — arises whenever a user calls emergencyWithdraw with accrued pending. Spec-blessed path.",
+        "conditions": "User chooses emergencyWithdraw instead of claim/unstake. Magnitude equals user.amount * accRewardPerShare / ACC_PRECISION - user.rewardDebt at time of exit.",
+        "impact": "Tokens stranded per emergency exit; accumulates over many exits. Not recoverable by owner (no rescue function) and not redistributed to remaining stakers (accRewardPerShare is not rewound)."
+      },
+      "spec_collision": "Submodule CLAUDE.md spec item 1 states emergencyWithdraw 'returns principal, forfeits pending reward.' The forfeiture IS explicitly spec-blessed. Where the finding tries to stand apart is the downstream stranding (tokens neither owner-recoverable nor redistributed). This is a more subtle claim and mirrors textbook masterchef behavior. Judges commonly classify textbook masterchef forfeiture — including the unclaimed dust it leaves behind — as informational/QA because every SushiMasterChef-style fork has it.",
+      "disagreementReason": "This is the classic masterchef forfeit-on-emergency pattern. Even though the stranding is real and the conservation invariant technically breaks, every SushiMasterChef-derived contract on mainnet exhibits this exact behavior. C4 judges typically rule 'intentional / informational' or at best Low on masterchef forfeit-dust findings. The finding's own sanitization note flags this: 'standard masterchef forks show the same behavior; a judge may treat it as intentional.' The PoC demonstrates 50000000000000 wei stranded (50 micro-phUSD in the mock), which is non-dust but not alarming in absolute terms. Recommend downgrade to Low. It is worth submitting as Low since the spec does not explicitly bless the downstream stranding — only the forfeiture.",
+      "recommendation": "Downgrade to Low. The value-leak framing is technically accurate but runs straight into the masterchef-convention wall that C4 judges have repeatedly ruled on. Submit as Low (or QA) with clear scoping of the conservation-break claim (not the forfeiture itself)."
+    },
+    {
+      "submission_id": "L-01",
+      "claimed_severity": "Low",
+      "assessed_severity": "Low (borderline Medium)",
+      "agreement": true,
+      "confidence": "medium",
+      "analysis": {
+        "assetRisk": "No direct theft. Owner loses on-chain ability to reduce emission rate; emissions continue at the pre-existing rate. Shortening the window bakes in a latent rate-spike on next nonzero pull.",
+        "attackPath": "Spec-violation path is a missing governance lever, not an attack. MEV path requires mempool observation of setWindowDuration events and favorable candidate arithmetic.",
+        "conditions": "MEV needs: mempool-aware observer, shortening call, and candidate crossing rewardRate on next pull. Governance path is always-on when owner attempts to slow emissions.",
+        "impact": "Owner loses a documented governance control. Per-event MEV redistribution is bounded but real."
+      },
+      "spec_collision": "Genuine spec deviation — submodule CLAUDE.md feature spec item 6 EXPLICITLY states 'Changing the duration resets the remaining time to the new full duration and recomputes the per-second rate against the current balance.' Implementation only writes windowDuration. This is the clearest spec violation in the audit.",
+      "disagreementReason": "I lean Low but can see a reasonable Medium argument: (a) genuine documented-spec deviation (not 'intent,' but literal spec text), (b) the monotonic-upward invariant means the owner has NO on-chain path to achieve the documented behavior, (c) 'protocol function / availability impacted' is arguably met when a documented governance setter is inert. C4 judges do sometimes treat 'owner loses a documented lever' as Medium under the 'protocol function impacted' Medium criterion. Staying Low is defensible because no funds are lost. Upgrade to Medium is defensible because the on-chain contract literally cannot perform the documented behavior. Recommend KEEP AS LOW but if the warden wants one Medium chance beyond M-01 and M-02, this is the stronger candidate. If both M-01 and M-02 are downgraded, consider promoting L-01 to Medium in their place.",
+      "recommendation": "Keep as Low. Submit either in QA report or consider a Medium submission if the warden is comfortable defending 'protocol function impacted — owner cannot exercise a documented governance setter.' Higher confidence than M-01 or M-02 if a Medium slot is needed."
+    },
+    {
+      "submission_id": "L-02",
+      "claimed_severity": "Low",
+      "assessed_severity": "Low",
+      "agreement": true,
+      "confidence": "high",
+      "analysis": {
+        "assetRisk": "No funds lost — rewardBudget preserved; conservation holds.",
+        "attackPath": "Operational rigidity. No attacker. Bootstrap-stuck-at-zero requires owner under-funding; stuck-above-sustainable requires owner mis-parameterizing.",
+        "conditions": "Primary trigger is owner misconfiguration. Recovery requires waiting for windowEnd or a large reset-triggering inflow.",
+        "impact": "Zero-emission phases. No direct fund loss."
+      },
+      "spec_collision": "No explicit spec deviation. Monotonic-upward invariant is documented intent.",
+      "disagreementReason": null,
+      "recommendation": "Keep as Low. Primarily an admin-mistake-adjacent issue with a legitimate missing-recovery-path angle. Appropriate for QA report."
+    },
+    {
+      "submission_id": "L-03",
+      "claimed_severity": "Low",
+      "assessed_severity": "Low (leans QA)",
+      "agreement": true,
+      "confidence": "high",
+      "analysis": {
+        "assetRisk": "No funds lost. Sub-second and sub-unit precision drift.",
+        "attackPath": "Soft MEV requires sophisticated searcher infrastructure, mempool observation, and favorable state. Profit scale bounded by a fraction of a single reset delta.",
+        "conditions": "Searcher infrastructure, drizzle-fed pools, candidate near rewardRate boundary.",
+        "impact": "Informational drift and soft MEV surface."
+      },
+      "spec_collision": "No explicit spec deviation. Integer floor is expected Solidity behavior.",
+      "disagreementReason": null,
+      "recommendation": "Keep as Low or fold into QA. The soft-MEV framing is speculative; the precision-rounding framing is textbook QA. Safer as QA-only to avoid judge skepticism on the MEV leg."
+    },
+    {
+      "submission_id": "L-04",
+      "claimed_severity": "Low",
+      "assessed_severity": "QA",
+      "agreement": false,
+      "confidence": "high",
+      "analysis": {
+        "assetRisk": "None. View-function inaccuracy only.",
+        "attackPath": "No on-chain attack. OTC mispricing requires willing counterparty and off-chain trading infrastructure outside the protocol.",
+        "conditions": "Only manifests when mintDebt is non-zero and would trigger a reset-branch rate raise on next pull.",
+        "impact": "Informational — view understates realized rewards. Never overstates, so no one is tricked into claiming more than earned."
+      },
+      "spec_collision": "pendingReward is spec-mandated (item 10) but the spec does not specify it must simulate a hypothetical pull.",
+      "disagreementReason": "Recommend downgrade to QA (not standalone Low). C4 universal-invalid guidance says 'Unused view functions (QA at best).' pendingReward is used, but the issue is not a theft path, not a protocol-function impairment, and not a spec deviation. It is a 'view underestimates, not overestimates' accuracy issue with no actionable attack. Bundle into QA report rather than file as a standalone Low.",
+      "recommendation": "Include in QA report as a view-inaccuracy / informational item. Do not submit as a standalone Low finding — judges are likely to rule 'informational.'"
+    },
+    {
+      "submission_id": "L-05",
+      "claimed_severity": "Low",
+      "assessed_severity": "Low",
+      "agreement": true,
+      "confidence": "high",
+      "analysis": {
+        "assetRisk": "None — principal and accrued rewards are preserved.",
+        "attackPath": "Active griefer must sustain ~2x gas per attempt indefinitely. Unresponsive-staker variant is design gap, not attack.",
+        "conditions": "Griefing is mitigable by pause() before setStakedId (trivial off-chain mitigation). Unresponsive variant requires stakers with lost keys or inactive holdings.",
+        "impact": "Operational deadlock on NFT-ID migrations."
+      },
+      "spec_collision": "setStakedId precondition is explicit in spec item 1: 'only while totalStaked == 0.' Migration flow is designed to rely on stakers exiting voluntarily.",
+      "disagreementReason": null,
+      "recommendation": "Keep as Low. Appropriate for QA report. The pause() mitigation is cheap and always available, which is the main reason this does not clear the Medium bar."
+    },
+    {
+      "submission_id": "L-06",
+      "claimed_severity": "Low",
+      "assessed_severity": "Low (borderline Medium)",
+      "agreement": true,
+      "confidence": "medium",
+      "analysis": {
+        "assetRisk": "Principal never at risk (emergencyWithdraw spec-blessed). Accrued rewards forfeited ONLY if user chooses emergency exit during DoS window.",
+        "attackPath": "Requires the hook to revert. Hook is trusted sibling but could be paused, broken, or maliciously upgraded. No direct attacker control over the NFTStaker contract.",
+        "conditions": "Bounded by owner responsiveness (setDispatcherHook(0) clears it). DoS window is a function of owner response time.",
+        "impact": "Temporary DoS of stake/unstake/claim; forced emergency exit forfeits accrued rewards."
+      },
+      "spec_collision": "Spec item 1 explicitly calls emergencyWithdraw the 'escape hatch' for broken dispatcher hook. The spec anticipates hook breakage and routes users through emergencyWithdraw — which is exactly what the finding describes.",
+      "disagreementReason": "I lean Low but the borderline-Medium argument is: if you combine L-06 (DoS forces emergency exit) with M-02 (emergency exit strands accrued rewards), you get 'hook revert directly leads to forfeited accrued rewards.' That compound is closer to Medium. Staying Low is correct because: (a) the escape hatch is documented and blessed, (b) hook reversion requires the hook itself to break, (c) owner can clear the hook atomically, (d) 'DoS requiring attacker control of an external contract' is explicit C4 Low guidance. Do not upgrade unless M-02 is also upgraded (they amplify each other).",
+      "recommendation": "Keep as Low. Include in QA. The try/catch recommendation is good defensive-coding advice but does not change severity."
+    },
+    {
+      "submission_id": "C-01",
+      "claimed_severity": "Centralization",
+      "assessed_severity": "Centralization",
+      "agreement": true,
+      "confidence": "high",
+      "analysis": {
+        "assetRisk": "Potential loss of accrued mint-debt on old hook during governance-initiated migration. Requires owner swap without pre-draining.",
+        "attackPath": "Admin process risk. No external attacker.",
+        "conditions": "Owner swaps dispatcherHook without first calling pullAndRefresh() on the old hook. Mitigation available: owner can pullAndRefresh() before setDispatcherHook.",
+        "impact": "Stranded accrued mint-debt on outgoing hook. Off-chain recovery via the old hook still possible depending on recipient semantics."
+      },
+      "spec_collision": "No explicit spec text about hook-swap atomicity.",
+      "disagreementReason": null,
+      "recommendation": "Keep as Centralization. Appropriate classification — missing atomic-drain discipline in an admin-only setter."
+    }
+  ],
+  "medium_defense": {
+    "M-01": {
+      "clears_medium_bar": false,
+      "reasoning": "The severity rationale rests on 'violates documented feature-spec intent that windows auto-restart on pull.' The submodule CLAUDE.md spec item 5 states the OPPOSITE: 'If pull() produced zero new phUSD, do not reset — emissions continue against the existing schedule.' Without the spec-violation leg, this reduces to a state-handling issue with a trivial owner recovery path (topUp of 1 wei resets the schedule). Does not meet Medium 'protocol function impaired' bar because the recovery lever exists and works.",
+      "risk_if_submitted_as_medium": "High. A judge who reads the submodule CLAUDE.md will almost certainly downgrade or invalidate on the spec question."
+    },
+    "M-02": {
+      "clears_medium_bar": "borderline",
+      "reasoning": "The forfeiture itself is spec-blessed. The novel claim is the downstream stranding (not recoverable by owner, not redistributed). The per-exit magnitude is real and non-dust, and the design explicitly anticipates multiple emergency exits. However, this is textbook masterchef-fork behavior; C4 has historically ruled similar findings as informational/QA because every SushiMasterChef derivative exhibits it. The finding's own sanitization flag notes this concern.",
+      "risk_if_submitted_as_medium": "Moderate-to-high. Judges commonly treat this as intentional masterchef behavior. Downgrading to Low and framing as 'conservation invariant break on emergency exit, tokens stranded with no recovery path' is safer."
+    }
+  },
+  "recommended_final_classifications": {
+    "Medium": [],
+    "Low": ["M-01 (downgrade)", "M-02 (downgrade)", "L-01", "L-02", "L-03", "L-05", "L-06"],
+    "QA_only": ["L-04 (downgrade from standalone Low)"],
+    "Centralization": ["C-01"],
+    "notes": "If the warden wants to preserve ONE Medium submission, L-01 is the strongest candidate because it is a literal documented-spec deviation with no on-chain owner workaround. Both current Mediums (M-01, M-02) collide with explicit spec text or established masterchef convention."
+  },
+  "confidence_in_current_classification": {
+    "overall": "medium-low",
+    "reasoning": "Two of the nine findings (M-01, M-02) are classified at a severity I would not defend under C4 criteria given the submodule CLAUDE.md spec text. The low findings are well-classified but L-04 leans QA-only."
+  }
+}

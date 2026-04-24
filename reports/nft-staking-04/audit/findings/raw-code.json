@@ -1,0 +1,130 @@
+{
+  "project": "nft-staking-04",
+  "scanType": "code",
+  "scanTimestamp": "2026-04-24",
+  "contractsScanned": 1,
+  "targetContract": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/NFTStaker.sol",
+  "findings": [
+    {
+      "id": "CODE-001",
+      "title": "setWindowDuration does not recompute rewardRate or windowEnd, silently deviating from spec",
+      "severity_estimate": "medium",
+      "file": "src/NFTStaker.sol",
+      "lines": "145-151",
+      "description": "The setWindowDuration(newDuration) owner setter only updates the windowDuration storage variable after calling _updatePool(). It does not touch rewardRate or windowEnd. As a result, after setWindowDuration runs, emissions continue at the pre-existing rewardRate until the pre-existing windowEnd elapses exactly as before the call. The new duration only takes effect the next time a budget-augmenting event (pull() via _syncBudget or topUp) routes through _applyAsymmetricWindow. Feature spec item 6 in the submodule CLAUDE.md states: 'Changing the duration resets the remaining time to the new full duration and recomputes the per-second rate against the current balance.' The implementation violates this.",
+      "attack_path": "1) Owner deploys staker, funds with B phUSD over the 540-day default window (rewardRate = B/540d). 2) Owner decides to slow emissions and calls setWindowDuration(10 years). 3) The function records the new duration but does not lower rewardRate or extend windowEnd. Emissions continue at the higher rate and the original 540-day windowEnd, so the full B is emitted in 540 days instead of the intended 10 years. 4) Because _applyAsymmetricWindow enforces a monotonic-upward rate, even future refills can only raise the rate, never lower it. The owner has no on-chain lever to achieve the spec-documented slow-down.",
+      "impact": "Owner loses an expected governance control. The per-second emission rate cannot be reduced by setWindowDuration even though the spec and function name imply it should. Operators who rely on the documented behavior may unintentionally burn through the reward budget at the legacy rate, shortening runway.",
+      "recommendation": "Either (a) implement the spec behavior by also resetting rewardRate = rewardBudget / newDuration and windowEnd = block.timestamp + newDuration inside setWindowDuration (acknowledging this breaks the monotonic-upward invariant and is therefore a deliberate owner action), or (b) update the NatSpec and the submodule CLAUDE.md spec item 6 to document that setWindowDuration only affects subsequent refills and that the current rate cannot be lowered by design."
+    },
+    {
+      "id": "CODE-002",
+      "title": "Bootstrap with rewardBudget < windowDuration locks rewardRate at zero and cannot be raised by further small top-ups",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "189-200",
+      "description": "_applyAsymmetricWindow computes candidate = rewardBudget / windowDuration using integer division. With the default 540-day window (~46.6M seconds) any rewardBudget < windowDuration yields candidate = 0. On bootstrap (windowEnd == 0 so scheduleExpired is true), the reset branch executes and sets rewardRate = 0 and windowEnd = now + windowDuration. Because rewardRate is now 0, subsequent top-ups that do not push rewardBudget above windowDuration hit the second branch's else-if guard `rewardRate > 0` which is false, so windowEnd is never extended and rewardRate stays at 0. Emissions remain stuck at zero until a single top-up causes candidate > 0 (i.e., cumulative rewardBudget >= windowDuration).",
+      "attack_path": "1) Contract deployed with default windowDuration = 540 days (~46,656,000 seconds). 2) Owner calls topUp(1_000_000) to seed a small initial reward budget. 3) _applyAsymmetricWindow computes candidate = 1_000_000 / 46_656_000 = 0. 4) scheduleExpired is true (bootstrap), so rewardRate is set to 0 and windowEnd to now + 540 days. 5) Owner calls topUp(500_000) later. 6) candidate = 1_500_000 / 46_656_000 = 0. scheduleExpired is false. rewardRate is 0, so the under-refill branch is skipped. 7) rewardBudget accumulates but rewardRate stays at 0 and no emissions occur. 8) Only when a single top-up brings candidate > 0 does the rate begin emitting; the accumulated small top-ups contribute budget but never unlock emissions.",
+      "impact": "Emissions can be inadvertently stalled after bootstrap if funding cadence is a stream of small top-ups. Funds are not lost (still recoverable via owner top-up that raises the candidate above 0), but users expecting emissions during this period earn nothing and may exit via emergencyWithdraw, forfeiting non-existent rewards. In practice this is a misconfiguration hazard rather than a theft vector.",
+      "recommendation": "In _applyAsymmetricWindow, relax the `rewardRate > 0` gate in the under-refill branch so that when rewardRate is 0 and the schedule has not expired, a non-zero inflow triggers a recomputation of candidate against the new budget. Alternatively require a minimum initial top-up in topUp (e.g., amount >= windowDuration) so candidate is guaranteed non-zero on bootstrap. Document this edge case in the spec."
+    },
+    {
+      "id": "CODE-003",
+      "title": "Under-refill branch silently discards extension time when inflow < rewardRate",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "196-199",
+      "description": "The under-refill branch computes `windowEnd += inflow / rewardRate`. Integer division rounds to zero whenever inflow < rewardRate. The accompanying `rewardBudget += inflow` (done by the caller before _applyAsymmetricWindow) is still applied, so the new budget is tracked, but the window is NOT extended. Because subsequent rewards are paid out at the unchanged rewardRate, the rewardBudget will be consumed earlier than the inflow would suggest and the windowEnd timestamp becomes increasingly inaccurate as a runway indicator. With a 540-day window and budgets sized so rewardRate is measured in phUSD/sec, small dispatcher-hook pulls (fractions of rewardRate worth per pull) will extend the window by zero seconds every time.",
+      "attack_path": "1) rewardRate = 1e18 phUSD/sec (arbitrary example). 2) Dispatcher hook accrues 1e17 phUSD of mint-debt and stake() triggers _syncBudget. 3) inflow = 1e17. rewardBudget += 1e17. candidate = rewardBudget / windowDuration (not necessarily > rewardRate). 4) windowEnd += 1e17 / 1e18 = 0. 5) Budget accumulates but windowEnd never advances, so the schedule may report a nearer expiry than the protocol actually owes, and on the next pull the scheduleExpired check may prematurely fire and trigger a rate reset that would not otherwise have happened.",
+      "impact": "Loss of runway-extension accounting for frequent small pulls; can cause premature scheduleExpired triggers on the next _applyAsymmetricWindow call, which in turn resets the rate (usually upward, but at an unintended time). Funds are not lost but window accounting drifts from ground truth. Combined with CODE-002, this can produce unintuitive operational behavior for a slowly-funded pool.",
+      "recommendation": "Consider accumulating fractional extension debt in a separate storage variable or using a higher-precision representation (e.g., scale windowEnd extension by ACC_PRECISION and track remainder). At minimum, document the behavior in the spec and set an operational policy that pulls should be batched to amounts >= rewardRate."
+    },
+    {
+      "id": "CODE-004",
+      "title": "stake / unstake / claim revert when dispatcherHook.pull() reverts, forcing users through emergencyWithdraw and forfeiting rewards",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "203-214",
+      "description": "_syncBudget is invoked at the top of stake(), unstake(), and claim(). When dispatcherHook is set to a non-zero address, _syncBudget makes an external call to dispatcherHook.pull() with no try/catch. If the dispatcher hook reverts (bug, upgrade breakage, griefing, or intentional pause in the sibling yield-claim-nft module), every user-facing non-emergency path reverts. Users keep their principal but cannot claim rewards or unstake normally until the owner either fixes the hook or clears it via setDispatcherHook(address(0)).",
+      "attack_path": "1) Owner (or governance flow) sets dispatcherHook = H. 2) H's pull() begins reverting (e.g., H is paused, H's own dependency is broken, H is maliciously upgraded, or caller-gated check fails because NFTStaker is not wired as recipient). 3) All stake/unstake/claim calls revert at _syncBudget -> dispatcherHook.pull(). 4) Users must either wait for owner intervention or exit via emergencyWithdraw, forfeiting all pending rewards. 5) Owner action required (setDispatcherHook(0) or hook repair) to restore normal flow.",
+      "impact": "Temporary denial-of-service of stake/unstake/claim and forced forfeiture of accrued rewards for any user who cannot wait and uses emergencyWithdraw. Principal is never at risk (emergencyWithdraw skips _syncBudget per spec, confirmed at line 305-317), but accrued rewards are socially/economically lost. Severity is bounded by owner responsiveness.",
+      "recommendation": "Wrap dispatcherHook.pull() in a try/catch so a reverting hook degrades to a no-op instead of DoSing the whole call. Example: `try dispatcherHook.pull() { /* use delta */ } catch { /* skip, continue with current budget */ }`. This preserves the escape-hatch property while making stake/unstake/claim hook-independent."
+    },
+    {
+      "id": "CODE-005",
+      "title": "setPauser accepts address(0) with no validation, silently disabling pause capability",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "117-120",
+      "description": "setPauser(newPauser) updates the `pauser` storage variable with no zero-address check. If the owner sets pauser = address(0), the pause()/unpause() modifier onlyPauser (line 97-100) requires msg.sender == address(0), which no EVM transaction can satisfy. The contract is then unpauseable, including being unable to be paused during an emergency. This also contradicts IPausable which exposes pauser() as a getter implying a real address.",
+      "attack_path": "1) Owner, in error or due to a faulty deployment script, calls setPauser(address(0)). 2) The global Pauser (or any other authorised pauser) can no longer invoke pause(). 3) During an emergency, the contract cannot be paused to protect users. 4) Only remedy is owner action to reset pauser to a real address; if owner keys are lost or slow to act, the emergency response window is missed.",
+      "impact": "Loss of the pause escape hatch during an emergency. Severity is low because it requires owner misconfiguration and can be corrected by owner action, but it is a common oversight worth hardening.",
+      "recommendation": "Add `require(newPauser != address(0), \"NFTStaker: zero pauser\")` to setPauser. If intentionally disabling pauser is a supported flow, document it explicitly and provide a dedicated `clearPauser()` path that makes the intent obvious."
+    },
+    {
+      "id": "CODE-006",
+      "title": "topUp lacks nonReentrant, relies entirely on onlyOwner and standard-ERC20 assumption for safety",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "162-170",
+      "description": "topUp performs an external `rewardToken.safeTransferFrom(msg.sender, address(this), amount)` call between the _updatePool() settlement and the rewardBudget mutation + _applyAsymmetricWindow. It is marked onlyOwner but not nonReentrant. If the reward token is ever an ERC777 or hook-equipped token (phUSD is documented as a standard ERC20, so this is hypothetical), a transfer hook executing during safeTransferFrom could reenter topUp, setDispatcherHook, setWindowDuration, or pullAndRefresh before the outer call's state mutations complete. Because only the owner can invoke topUp, exploitability requires owner-controlled reentrancy; however defense-in-depth is a widely-accepted norm.",
+      "attack_path": "Hypothetical: 1) rewardToken is switched (via deployment error or governance) to an ERC777-style token with transfer hooks. 2) Owner (or an owner contract with an attacker-callable function) initiates topUp. 3) Hook fires during safeTransferFrom and reenters pullAndRefresh, which runs _syncBudget and mutates rewardBudget / rewardRate / windowEnd before topUp's own rewardBudget increment and _applyAsymmetricWindow call. 4) The interleaving produces a state inconsistent with the intended monotonic invariants, potentially allowing a rate raise that bypasses the intended schedule.",
+      "impact": "Bounded by rewardToken standardness. For plain ERC20 phUSD there is no exploit. If the reward token ever becomes a hook-equipped token, the contract's budget-window invariants can be corrupted by owner-interaction.",
+      "recommendation": "Add nonReentrant to topUp and pullAndRefresh. Both perform reward-state mutations and external calls; a reentrancy guard is cheap insurance and consistent with the guard already present on stake/unstake/claim/emergencyWithdraw."
+    },
+    {
+      "id": "CODE-007",
+      "title": "pendingReward view does not simulate pull() inflow, reporting pre-pull accrual when the next interaction would actually trigger a rate reset",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "323-334",
+      "description": "pendingReward(account) computes the user's pending reward using the current on-chain rewardRate, windowEnd, rewardBudget, and accRewardPerShare, plus an in-memory extension up to min(now, windowEnd). It does not simulate the dispatcherHook.pull() that stake/unstake/claim will trigger via _syncBudget. When mintDebt is non-zero and would push candidate above rewardRate (triggering the reset branch and raising the rate), pendingReward underestimates the reward the user will actually realize on their next interaction. Similarly, after windowEnd, pendingReward returns the accrual under the (post-expiry, about-to-be-reset) state, not the state after the pull.",
+      "attack_path": "1) A user queries pendingReward() to decide whether to call claim(). 2) mintDebt in dispatcherHook would bring candidate > rewardRate on pull(). 3) The UI shows a lower pending figure than what claim() actually pays out. 4) User either claims with surprise upside (no harm) or skips claim under-valuing their position. This is a UX issue, not an exploit.",
+      "impact": "Inconsistent view vs. mutation semantics. Users / frontends may display misleading pending-reward figures. No direct fund loss.",
+      "recommendation": "Either (a) make pendingReward explicitly document that it is pre-pull and that realized rewards may be higher, or (b) extend the view to peek at dispatcherHook.mintDebt() and simulate the candidate/rate logic. Option (a) is cheaper and matches masterchef conventions; option (b) is more accurate but duplicates the _applyAsymmetricWindow logic."
+    },
+    {
+      "id": "CODE-008",
+      "title": "setStakedId requires totalStaked == 0 and cannot be forced, allowing a single non-cooperative staker to block NFT migrations indefinitely",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "139-143",
+      "description": "setStakedId(newId) reverts if totalStaked > 0. emergencyWithdraw is the only way a user can be exited, and it must be called by the user (or their approved operator). There is no owner-triggered forceExit. If one or more stakers are unresponsive (lost keys, dead smart contract wallet, griefing), totalStaked stays above zero and the owner cannot migrate the pool to a new NFT ID even when a Balancer pool migration has reissued the NFT. This is documented as intentional ('ID change never strands principal') in the submodule CLAUDE.md but it means a small griefer with a 1-unit stake can block a protocol-wide migration.",
+      "attack_path": "1) Griefer stakes 1 unit of stakedId. 2) Protocol announces a Balancer pool migration that reissues the NFT under a new ID. 3) Owner attempts setStakedId(newId); reverts on `totalStaked > 0`. 4) Griefer refuses to unstake or emergencyWithdraw. 5) Migration is blocked indefinitely. Owner's only recourse is social (compensate griefer) or deploying a second NFTStaker (which fragments TVL).",
+      "impact": "Operational deadlock risk during NFT-ID migrations. No direct fund loss; cooperative stakers are always unstakeable and griefer's 1 unit is still owed rewards. But the protocol loses the ability to perform the designed migration flow.",
+      "recommendation": "This is a spec-level design decision and the spec author may prefer it. If a forced-migration path is ever wanted, consider: (a) adding a timelocked owner-initiated `evacuateStakers()` that returns principal to each holder (requires iterating users, which conflicts with the single-ID / no-loops design), or (b) deploying a migration helper contract that lets users claim new NFTs in exchange for old ones off-chain. At minimum, call out the griefing vector in operator documentation."
+    },
+    {
+      "id": "CODE-009",
+      "title": "_applyAsymmetricWindow candidate rounding means large top-ups just below windowDuration multiples do not raise the rate",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "189-200",
+      "description": "candidate = rewardBudget / windowDuration is integer-floored. For any rewardBudget in [k * windowDuration, (k+1) * windowDuration), candidate = k. Two distinct rewardBudget values in that interval produce the same rewardRate, and the inflow that occupies the fractional portion of the interval accrues to rewardBudget but does not raise the rate. Combined with CODE-002 this can lead to a pool whose rewardRate never reflects recent large-ish top-ups because they fall just below the next integer boundary.",
+      "attack_path": "1) windowDuration = 540 days, current rewardRate = 100 phUSD/sec, rewardBudget = 100 * 540 days - 1. 2) Owner tops up 2 phUSD, bringing rewardBudget to 100 * 540 days + 1. 3) candidate = 100 (just barely over). Reset branch fires because scheduleExpired may or may not be true; if not, candidate > rewardRate is false (candidate == rewardRate), so under-refill branch runs and windowEnd += 2 / 100 = 0. 4) Neither rate nor window extended meaningfully despite the top-up.",
+      "impact": "Rate and window stickiness around integer-multiple boundaries of windowDuration. Funds are conserved in rewardBudget but emissions do not fully reflect them. Minor accounting imprecision.",
+      "recommendation": "Accept the rounding as inherent to the current design (masterchef-style pools all have this) and document it, or introduce a scaled rewardRatePerSecond with higher precision (e.g., rewardRate stored at 1e18 scaling, divided out only at accrual). The latter is a larger refactor."
+    },
+    {
+      "id": "CODE-010",
+      "title": "setDispatcherHook does not run _syncBudget before swapping the hook, silently discarding undrawn mint-debt on the outgoing hook",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "134-137",
+      "description": "setDispatcherHook(newHook) replaces the dispatcherHook storage variable with no prior call to the outgoing hook's pull(). Any accrued mintDebt on the outgoing hook will remain unclaimed (and potentially unclaimable by this contract) after the swap, because pull() on the new hook does not realise the old hook's ledger. The comment on _syncBudget emphasises 'Always settle accrual under the OLD rate before mutating anything,' but setDispatcherHook bypasses that discipline for the hook's own accrual.",
+      "attack_path": "1) Dispatcher hook A has accumulated 1000 phUSD of mintDebt available to this contract via A.pull(). 2) Owner sets dispatcherHook = B (e.g., migration to a new hook contract). 3) The 1000 phUSD mintDebt on A is stranded unless A.pull() can still be called out-of-band by the old recipient (which is still this contract, but this contract only ever calls `dispatcherHook.pull()`, which now points to B). 4) There is no admin path in NFTStaker to drain A. Owner must go off-chain / through governance on A to recover.",
+      "impact": "Potential loss of accrued mint-debt during hook migrations. Magnitude depends on how much debt was accrued at migration time. Mitigation requires out-of-band intervention on the old hook.",
+      "recommendation": "In setDispatcherHook, call _syncBudget() first (which calls the current hook's pull() and then settles accrual) before storing newHook. Alternatively add a one-shot `pullFromOldHook(IBalancerPoolerMintDebtHook old) external onlyOwner` that allows draining a previous hook after migration."
+    },
+    {
+      "id": "CODE-011",
+      "title": "_safePay revert on insufficient balance can DOS unstake under edge cases, forcing emergencyWithdraw and reward forfeiture",
+      "severity_estimate": "low",
+      "file": "src/NFTStaker.sol",
+      "lines": "295-301",
+      "description": "_safePay reverts if the on-chain reward token balance is less than the computed pending amount. Under the documented invariant `balance == rewardBudget + totalDebt`, this should never trigger. However, the invariant can be broken by: (a) fee-on-transfer behavior in rewardToken (explicitly scoped out as phUSD is assumed standard ERC20), (b) external direct transfer of reward tokens out of the contract (no such vector exists in the contract itself, but if rewardToken is a malicious or buggy ERC20 that allows transfers initiated by other callers, e.g., a rebasing token with negative rebase, the balance could drop below rewardBudget), or (c) an edge case where rewardBudget is incremented via topUp / pull but the corresponding balance increment is clawed back. If _safePay reverts inside unstake, the user cannot exit via normal unstake; they must fall back to emergencyWithdraw and forfeit rewards.",
+      "attack_path": "1) rewardToken is a rebasing or FOT token (not standard phUSD, hypothetical). 2) Over time, balance drifts below rewardBudget due to negative rebase. 3) User with non-trivial pending rewards calls unstake. 4) _syncBudget runs, _updatePool decrements rewardBudget by accrued amount, pending is computed as a positive value. 5) _safePay sees balance < pending and reverts. 6) Entire unstake reverts. User must call emergencyWithdraw, forfeiting pending rewards.",
+      "impact": "Forced forfeiture of rewards in rewardToken edge cases. Bounded by rewardToken assumptions; under standard ERC20 phUSD this is impossible by construction. Documented explicitly in the _safePay NatSpec as an intentional trade-off (see M-01 audit finding reference in code).",
+      "recommendation": "For a standard-ERC20 reward token this is working-as-intended. If any rewardToken generalization is planned, change unstake's reward-payout path to best-effort (pay up to balance, track shortfall as debt) rather than all-or-nothing revert. Alternatively, allow unstake to proceed even when _safePay would revert, by recording the missed payout against rewardDebt so the user retains a claim."
+    }
+  ]
+}
