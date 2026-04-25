@@ -1,0 +1,258 @@
+{
+  "project": "nft-staking",
+  "scanTimestamp": "2026-04-24T00:00:00Z",
+  "stage": "classified",
+  "mode": "audit",
+  "contractsScanned": 1,
+  "scope": [
+    "lib/phoenix-nft-staking/src/NFTStaker.sol"
+  ],
+  "counts": {
+    "high": 0,
+    "medium": 3,
+    "low": 3,
+    "centralization": 2,
+    "qa": 4,
+    "total": 12,
+    "totalHM": 3,
+    "totalLCQA": 9
+  },
+  "classificationNotes": [
+    "Regular-audit C4 criteria applied. High reserved for direct asset theft/loss/freeze via a realistic attack path with no hypotheticals. Medium for availability / protocol-function impact or value leak with stated assumptions. Low for state handling / spec deviations. Centralization (C) for findings whose attack vector requires or materially depends on admin action.",
+    "DEDUP-001 considered for High but downgraded to Medium: principal is always recoverable via emergencyWithdraw (users forfeit rewards, not principal); there is no single-actor profit path; the 'frozen rewards' outcome requires an extended sequence of recomputes between accrual and claim. This is availability + value-leak with stated assumptions (infrequent claims, frequent interactions), the textbook Medium shape under C4 rules.",
+    "DEDUP-003 routed to Centralization: every listed attack scenario begins with a malicious/compromised owner installing a hostile or buggy dispatcher hook. A legitimate owner installing a well-behaved hook does not produce the loss. Kept as C rather than Medium per top-level CLAUDE.md ('centralization risks QA at best' equivalent; we surface as Centralization line-item rather than outright QA because the code-level fix is concrete).",
+    "DEDUP-004 routed to Centralization: the only attack path is owner rotating dispatcherHook while old mintDebt is outstanding; finding itself describes it as a 'live-ops footgun' with no external-attacker path. The recommended fix is a defensive code change (totalStaked==0 gate or auto _syncBudget), so we surface as C line-item rather than QA — but it is not Medium because reward loss is recoverable via owner topUp.",
+    "No High findings. C4 explicitly discourages severity overstatement; none of the kept findings meet the 'direct theft / permanent freeze with no owner recovery' bar."
+  ],
+  "findings": [
+    {
+      "id": "M-01",
+      "originalId": "DEDUP-001",
+      "mode": "audit",
+      "severity": "medium",
+      "plausibility": "n/a",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "_recomputeSchedule / _syncBudget",
+      "line": 375,
+      "title": "rewardBudget reset to full balance on every recompute double-counts already-accrued rewards, over-committing emissions and DoSing late claimers",
+      "classification": {
+        "assetImpact": "Accrued-but-unclaimed rewards of late claimers can be frozen until owner top-up. Principal always recoverable via emergencyWithdraw.",
+        "attackPath": [
+          "1. Alice stakes at t=0; rewardBudget set to balance.",
+          "2. Time passes; Alice accrues pending rewards, balance unchanged because no interaction has fired _updatePool or a claim.",
+          "3. Bob stakes: _syncBudget runs _updatePool (commits Alice's accrual to accRewardPerShare and decrements rewardBudget), then _recomputeSchedule overwrites rewardBudget back to balance (which still includes Alice's committed rewards). windowEnd extended.",
+          "4. Over the next window, accRewardPerShare advances against a budget that was already partially spent on paper.",
+          "5. First claimer is paid; later claimers hit _safePay shortfall and revert. Earned rewards frozen until owner tops up or users take emergencyWithdraw (forfeiting rewards)."
+        ],
+        "likelihood": "medium - no special privilege required; triggered by natural user activity (stake/unstake/claim/topUp/pullAndRefresh) over time. Requires pending accrual to sit uncommitted-to-balance between recomputes, which is the default state between interactions.",
+        "assumptions": "Pool sees multiple recompute-triggering interactions between a given staker's accrual and their claim. Reward balance does not grow fast enough via pull() / topUp to absorb the over-commitment.",
+        "externalRequirements": "None external. All triggers are in-protocol."
+      },
+      "justification": "Assets not directly at risk (principal safe via emergencyWithdraw) but protocol solvency invariant is broken and claim availability is impacted for late claimers — value leak with stated assumptions, textbook C4 Medium."
+    },
+    {
+      "id": "M-02",
+      "originalId": "DEDUP-002",
+      "mode": "audit",
+      "severity": "medium",
+      "plausibility": "n/a",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "emergencyWithdraw",
+      "line": 452,
+      "title": "emergencyWithdraw decrements totalStaked without calling _updatePool, retroactively repricing the pre-withdrawal window at the new smaller denominator",
+      "classification": {
+        "assetImpact": "Protocol over-emits rewards: forfeited accrual from an emergency-withdrawing staker is redistributed pro-rata to survivors at a re-priced rate, rather than staying with the protocol. Amplifies DEDUP-001 solvency gap.",
+        "attackPath": [
+          "1. Alice and Bob both stake at t=0, totalStaked=20.",
+          "2. Bob calls emergencyWithdraw at t=100. totalStaked drops to 10; lastRewardTime and accRewardPerShare unchanged (no _updatePool).",
+          "3. At t=200 Alice claims. _updatePool computes elapsed=200 * rewardRate and divides by current totalStaked=10, crediting Alice for the full [0,200] period at the post-withdrawal denominator.",
+          "4. Alice receives ~200R instead of the fair 150R; Bob's forfeited 50R is redirected to Alice rather than retained by the protocol."
+        ],
+        "likelihood": "medium - requires at least one emergencyWithdraw and no intervening _updatePool between that withdrawal and the next settlement. Normal in pools with sparse activity.",
+        "assumptions": "A user triggers emergencyWithdraw while pool has other active stakers and _updatePool has not been called in the current block.",
+        "externalRequirements": "None."
+      },
+      "justification": "Protocol-function impact (over-emission beyond nominal rewardRate) with stated assumptions; value leak to survivors. Not direct theft — the surviving staker did not steal, they received over-credited emissions the protocol should have retained. Matches C4 Medium."
+    },
+    {
+      "id": "M-03",
+      "originalId": "DEDUP-005",
+      "mode": "audit",
+      "severity": "medium",
+      "plausibility": "n/a",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "_recomputeSchedule / stake",
+      "line": 370,
+      "title": "rewardRate derived from total minted NFT supply but divided by totalStaked allows a lone staker to capture full T-derived emissions at unbounded effective APY",
+      "classification": {
+        "assetImpact": "Reward budget is drained far faster than the advertised targetAPY implies when participation is low. Over-emission relative to APY target; late or non-participating NFT holders see runway exhausted before they can stake.",
+        "attackPath": [
+          "1. Protocol configures targetAPY at MAX=50% against N=100 minted NFTs.",
+          "2. Sophisticated actor mints 1 NFT and stakes it alone while totalStaked is tiny (e.g. 1).",
+          "3. rewardRate is computed against the full T (all 100 NFTs' notional value) but accRewardPerShare is divided by totalStaked=1 — lone staker captures 100% of the T-derived reward rate.",
+          "4. Effective APY on that 1 NFT = targetAPY * (N / totalStaked), unbounded for small totalStaked. Budget depletes ~N times faster than documented."
+        ],
+        "likelihood": "medium - requires low participation. Realistic at launch and during low-TVL periods; sophisticated actors can deliberately stake early and alone.",
+        "assumptions": "targetAPY is non-zero and totalStaked is small relative to N. No upper cap on individual APY is documented.",
+        "externalRequirements": "None."
+      },
+      "justification": "Budget drains faster than advertised APY suggests; protocol function (runway predictability) impacted; profit path exists for early lone stakers but not a direct theft — they staked legitimately. Value leak with stated assumptions (low participation). C4 Medium."
+    },
+    {
+      "id": "L-01",
+      "originalId": "DEDUP-006",
+      "mode": "audit",
+      "severity": "low",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "_recomputeSchedule",
+      "line": 365,
+      "title": "_recomputeSchedule reads balanceOf(this) directly, allowing donation griefing to extend runway and amplify DEDUP-001",
+      "classification": {
+        "assetImpact": "Runway / schedule predictability impacted. No direct fund loss; donors voluntarily subsidise the pool.",
+        "attackPath": [
+          "1. Owner intends to run setTargetAPY to adjust rate.",
+          "2. Attacker front-runs with a 1-wei phUSD transfer to the staker.",
+          "3. Subsequent _recomputeSchedule reads the donor-inflated balance into V, extending windowEnd against the over-committed budget.",
+          "4. Interacts with DEDUP-001: budget reset wipes prior-emission correction."
+        ],
+        "likelihood": "low - griefing only; no profit motive on its own.",
+        "assumptions": "Attacker is willing to burn gas for a minor schedule perturbation; interacts meaningfully with DEDUP-001."
+      },
+      "justification": "State-handling / spec deviation (internal accounting should not trust raw balance reads). No direct asset loss. C4 Low."
+    },
+    {
+      "id": "L-02",
+      "originalId": "DEDUP-007",
+      "mode": "audit",
+      "severity": "low",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "setTargetAPY / _updatePool",
+      "line": 239,
+      "title": "setTargetAPY settles prior accrual using current totalStaked, mispricing pre-setter period if an emergencyWithdraw has shrunk totalStaked since lastRewardTime",
+      "classification": {
+        "assetImpact": "Child of DEDUP-002: minor amplification of over-emission at the APY-change boundary.",
+        "attackPath": [
+          "1. Alice and Bob stake at t=0 (totalStaked=20).",
+          "2. Bob emergencyWithdraws at t=100 without _updatePool running.",
+          "3. Owner calls setTargetAPY at t=150; _updatePool uses elapsed=150 but totalStaked=10, over-crediting Alice for the [0,100] window.",
+          "4. Fix is the same as DEDUP-002: call _updatePool inside emergencyWithdraw."
+        ],
+        "likelihood": "low - only manifests when an emergencyWithdraw has occurred and no _updatePool has fired since.",
+        "assumptions": "Owner changes APY while totalStaked has shrunk since lastRewardTime."
+      },
+      "justification": "State-handling / spec deviation; subordinate to DEDUP-002. No independent attack path. C4 Low."
+    },
+    {
+      "id": "L-03",
+      "originalId": "DEDUP-009",
+      "mode": "audit",
+      "severity": "low",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "pendingReward",
+      "line": 467,
+      "title": "pendingReward view diverges from what claim() actually pays due to stale mintDebt and uncapped-vs-balance computation",
+      "classification": {
+        "assetImpact": "UX / integrator impact only. Front-ends may show a 'claimable' value that claim() cannot fulfil or that differs from the paid amount.",
+        "attackPath": [
+          "1. DEDUP-001 or a pending hook mintDebt creates divergence between stored state and post-claim state.",
+          "2. User queries pendingReward, sees value X.",
+          "3. User calls claim: reverts on shortfall OR pays a different amount than X because the view did not simulate pull() + _recomputeSchedule."
+        ],
+        "likelihood": "low - UX/integrator impact, not asset impact.",
+        "assumptions": "Front-end or integrator consumes pendingReward as authoritative claimable value."
+      },
+      "justification": "View function correctness issue with documented integrator consumers. Not the 'unused view' pattern (has real consumers per finding), but impact is UX / documentation. C4 Low."
+    },
+    {
+      "id": "C-01",
+      "originalId": "DEDUP-003",
+      "mode": "audit",
+      "severity": "centralization",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "_recomputeSchedule / _syncBudget",
+      "line": 367,
+      "title": "dispatcher-hook mintDebt() is trusted input to V and windowEnd — malicious or buggy hook can over-commit emissions",
+      "classification": {
+        "assetImpact": "Stakers' accrued rewards can be made unpayable (frozen behind _safePay revert) if the owner installs a hostile or buggy dispatcher hook whose mintDebt() overstates inflow vs. pull() actual.",
+        "attackPath": [
+          "1. Owner (or compromised owner key) installs a dispatcher hook whose mintDebt() returns a huge number but whose pull() mints little or nothing.",
+          "2. Natural user activity triggers _syncBudget + _recomputeSchedule; V = balance + hugeMintDebt inflates rewardBudget and windowEnd.",
+          "3. Stakers accrue against the inflated schedule; claims start reverting once balance < pending.",
+          "4. Recovery: owner topUp, or users take emergencyWithdraw (forfeiting rewards)."
+        ],
+        "likelihood": "low - requires owner action to install a bad hook; legitimate owner with well-behaved hook does not produce this loss.",
+        "assumptions": "Owner is malicious or deploys an untested / buggy hook.",
+        "externalRequirements": "Owner key controls setDispatcherHook; no totalStaked==0 gate."
+      },
+      "justification": "Every attack path routes through the owner installing a hostile or buggy hook. Per C4 Universal Invalid + top-level CLAUDE.md ('centralization risks QA at best'), this is centralization. Surfaced as C rather than QA because the recommended fix is a concrete code change (cap V on pull delta, or validate mintDebt against pull inflow)."
+    },
+    {
+      "id": "C-02",
+      "originalId": "DEDUP-004",
+      "mode": "audit",
+      "severity": "centralization",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "setDispatcherHook",
+      "line": 199,
+      "title": "setDispatcherHook rotation orphans the OLD hook's outstanding mintDebt and leaves rewardBudget stale until corrective action",
+      "classification": {
+        "assetImpact": "Reward flow can be bricked between rotation and owner corrective action (topUp or hook with matching debt). Principal remains withdrawable via emergencyWithdraw; users forfeit rewards if they take that path.",
+        "attackPath": [
+          "1. Owner routinely rotates dispatcherHook while the OLD hook still has outstanding mintDebt.",
+          "2. Outstanding mintDebt becomes unreachable because pull() now targets the NEW hook.",
+          "3. rewardBudget remains inflated from the prior _recomputeSchedule that included old_hook.mintDebt.",
+          "4. Subsequent user interactions advance accRewardPerShare against the stale budget until _safePay starts reverting.",
+          "5. Recovery: owner topUp or install a replacement hook with sufficient debt to cover the gap."
+        ],
+        "likelihood": "low - requires owner to rotate hook without first calling pullAndRefresh; operational discipline issue, no external-attacker path.",
+        "assumptions": "Owner rotates dispatcherHook while old hook has non-trivial outstanding mintDebt.",
+        "externalRequirements": "Owner key controls setDispatcherHook; on-chain workflow does not enforce pre-rotation drain."
+      },
+      "justification": "Live-ops footgun requiring owner action; no external-attacker path. Finding itself says 'not profitable for an external attacker but a realistic live-ops footgun'. Sister setters (setDispatcherIndex, setNFTMinter) already apply a totalStaked==0 gate and self-healing _recomputeSchedule; this setter is the outlier. Classified as centralization rather than Medium because recovery is always owner-controlled and principal is never at risk."
+    },
+    {
+      "id": "QA-01",
+      "originalId": "DEDUP-008",
+      "mode": "audit",
+      "severity": "qa",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "setTargetAPY / setDispatcherHook",
+      "line": 237,
+      "title": "Owner can zero out emissions mid-stake via setTargetAPY(0) or setDispatcherHook(address(0))",
+      "justification": "Pure centralization risk; explicitly designed-in (setTargetAPY(0) documented as 'supported pause emissions via APY mode' in the spec). QA report only."
+    },
+    {
+      "id": "QA-02",
+      "originalId": "DEDUP-010",
+      "mode": "audit",
+      "severity": "qa",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "setPauser",
+      "line": 182,
+      "title": "setPauser accepts address(0) without validation, silently disabling pause/unpause capability",
+      "justification": "Admin input-validation / reckless-admin-mistake pattern. QA report only."
+    },
+    {
+      "id": "QA-03",
+      "originalId": "DEDUP-011",
+      "mode": "audit",
+      "severity": "qa",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "setStakedId",
+      "line": 204,
+      "title": "setStakedId does not call _recomputeSchedule, leaving rewardRate / windowEnd stale until the next interaction",
+      "justification": "State-hygiene / consistency fix between sister admin setters; no external attack path. QA report only."
+    },
+    {
+      "id": "QA-04",
+      "originalId": "DEDUP-012",
+      "mode": "audit",
+      "severity": "qa",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "setDispatcherHook / setNFTMinter",
+      "line": 199,
+      "title": "Admin setter input-validation gaps on setDispatcherHook and setNFTMinter",
+      "justification": "Admin input-validation pattern; owner misconfiguration only; no external attack path. QA report only."
+    }
+  ]
+}
