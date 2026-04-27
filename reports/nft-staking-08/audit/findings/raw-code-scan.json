@@ -1,0 +1,228 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanRun": "nft-staking-08",
+  "scanTimestamp": "2026-04-27T00:00:00Z",
+  "scanType": "code",
+  "scope": [
+    "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "lib/phoenix-nft-staking/src/NFTStaker.sol",
+    "lib/phoenix-nft-staking/src/INFTSupply.sol"
+  ],
+  "scopeNotes": "BatchNFTMinter is brand-new (story-009, no prior audit); given full-surface scan. NFTStaker only has the M-03 fix since nft-staking-07; only reviewed the new staked-subset reward sizing and adjacent paths. Pre-existing intentional-design items from prior audits intentionally NOT re-flagged.",
+  "findings": {
+    "BatchNFTMinter.sol": [
+      {
+        "id": "CODE-BNM-001",
+        "title": "batchMint passes empty extraData to nftMinter.mint(), forfeiting dispatcher-side slippage protection on every iteration",
+        "severitySuggestion": "medium",
+        "type": "missing-slippage-protection",
+        "file": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+        "function": "batchMint",
+        "line": 73,
+        "lineStart": 72,
+        "lineEnd": 74,
+        "codeSnippet": "for (uint256 i; i < count; ++i) {\n    nftMinter.mint(address(paymentToken), dispatcherIndex, recipient);\n}",
+        "description": "BatchNFTMinter calls the no-extraData overload of `ITokenMinter.mint(token, index, recipient)`. The ITokenMinter natspec explicitly documents the second overload's `extraData` as `Dispatcher-specific encoded data (e.g. slippage parameters)`. The BalancerPooler dispatcher (the production target inferred from the sibling repo) routes payment through a Balancer pool swap; without slippage parameters the swap executes at whatever price the pool offers at execution time. Single-mint callers can choose between the two overloads on the underlying NFTMinter. Batch callers cannot — every iteration of every batch is forced into the no-slippage path.",
+        "impact": "MEV searchers can sandwich every batch mint on the Balancer leg. The aggregate `paymentAmount` upfront pull bounds the caller's loss only by the dispatcher's revert behaviour on insufficient balance — within that ceiling the dispatcher will accept whatever output the sandwich leaves it with. For batches large enough to move the pool, the loss can dwarf the per-iteration price growth `paymentAmount` is sized for. Single-mint callers can opt in to slippage protection by selecting the extraData overload directly on `nftMinter`; batch callers structurally cannot.",
+        "recommendation": "Add an `extraData` (or per-iteration `extraData[]`) parameter to `batchMint` and forward it to the second `mint` overload. If a single shared extraData per batch is sufficient, the cost is a single `bytes calldata` parameter. If per-iteration deadlines / minOuts are needed, accept `bytes[] calldata extraDatas` of length `count`.",
+        "confidence": "medium",
+        "crossContract": true
+      },
+      {
+        "id": "CODE-BNM-002",
+        "title": "batchMint pre-approves nftMinter for type(uint256).max before the loop, granting the configured dispatcher unlimited drain authority for the duration of the batch",
+        "severitySuggestion": "low",
+        "type": "excess-approval",
+        "file": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+        "function": "batchMint",
+        "line": 70,
+        "lineStart": 69,
+        "lineEnd": 76,
+        "codeSnippet": "paymentToken.safeTransferFrom(msg.sender, address(this), paymentAmount);\npaymentToken.forceApprove(address(nftMinter), type(uint256).max);\n\nfor (uint256 i; i < count; ++i) {\n    nftMinter.mint(address(paymentToken), dispatcherIndex, recipient);\n}\n\npaymentToken.forceApprove(address(nftMinter), 0);",
+        "description": "The helper sets allowance to `type(uint256).max` before any inner mint runs and only revokes after the entire loop completes. During every iteration the configured `nftMinter` (which itself transfers payment to `config.dispatcher` via `safeTransferFrom(msg.sender=this, dispatcher, price)`) has authority to pull the contract's full balance, not just the per-iteration `price`. If the registered dispatcher ever calls back into the payment token (e.g. via a malicious or compromised dispatcher contract, or a future hook that re-enters the token via a callback before `dispatch()` returns), it can pull the entire `paymentAmount` in one transferFrom rather than the metered per-mint amount. After the batch the surplus would not be available for refund to the caller because the contract balance would be drained.",
+        "impact": "Caller's full `paymentAmount` is at risk if the configured `nftMinter`/dispatcher pair turns hostile or has a callback bug between batch start and batch end. The same caller making N independent single-mint calls would only ever expose `price` per call (the underlying NFTMinter pulls exactly `price` and immediately forwards to the dispatcher). The batch helper amplifies the trust requirement on the dispatcher contract by a factor of `count * paymentAmount / price`.",
+        "recommendation": "Approve only the next iteration's expected price (`nftMinter.getPrice(dispatcherIndex)`) before each `mint` call, then revoke. Or use a single approve for the cumulative amount the caller authorises (`paymentAmount`) rather than `type(uint256).max`. The latter is a single line change: `paymentToken.forceApprove(address(nftMinter), paymentAmount);`. The over-approval beyond the caller's stated `paymentAmount` is gratuitous — the dispatcher cannot legitimately need more than the caller signalled willingness to spend.",
+        "confidence": "medium",
+        "crossContract": true
+      },
+      {
+        "id": "CODE-BNM-003",
+        "title": "totalPaid return value reports 0 when the caller actually spent paymentAmount and received an unrelated donation refund as a windfall",
+        "severitySuggestion": "low",
+        "type": "incorrect-return-value",
+        "file": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+        "function": "batchMint",
+        "line": 81,
+        "lineStart": 78,
+        "lineEnd": 84,
+        "codeSnippet": "uint256 remaining = paymentToken.balanceOf(address(this));\nif (remaining / DUST_THRESHOLD != 0) {\n    paymentToken.safeTransfer(msg.sender, remaining);\n    totalPaid = paymentAmount > remaining ? paymentAmount - remaining : 0;\n} else {\n    totalPaid = paymentAmount;\n}",
+        "description": "If a third party donates tokens to the BatchNFTMinter contract before a call (intentional design — natspec says donations flow forward to the next caller), `remaining` after the loop will exceed `paymentAmount`. The `paymentAmount > remaining ? paymentAmount - remaining : 0` clamp produces `totalPaid = 0` even though the dispatcher pulled real cost from the contract. Off-chain accounting that consumes `totalPaid` as the caller's net spend will mis-attribute the spend (treating a paid mint as free) and may double-spend the donation if the integrator uses `totalPaid == 0` as a 'no-op' indicator.",
+        "impact": "Off-chain integrator accounting bug. No on-chain asset loss. The caller still pays the dispatcher; they also receive the donation as a refund; net wallet flow is correct. Only the reported `totalPaid` is wrong.",
+        "recommendation": "Compute net spend by tracking pre-call balance: `uint256 preBal = paymentToken.balanceOf(address(this)); ... totalPaid = paymentAmount + preBal > remaining ? paymentAmount + preBal - remaining : 0;` — or, more simply, compute and return `dispatcherSpend = paymentAmount + donation - remaining` and let the caller decide what to surface. Alternatively, document in the natspec that `totalPaid == 0` does not imply zero-cost mint when donations are present.",
+        "confidence": "high"
+      },
+      {
+        "id": "CODE-BNM-004",
+        "title": "batchMint ignores the bool return value of nftMinter.mint(); a non-reverting false return silently consumes payment without minting",
+        "severitySuggestion": "low",
+        "type": "unchecked-return-value",
+        "file": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+        "function": "batchMint",
+        "line": 73,
+        "lineStart": 72,
+        "lineEnd": 74,
+        "codeSnippet": "for (uint256 i; i < count; ++i) {\n    nftMinter.mint(address(paymentToken), dispatcherIndex, recipient);\n}",
+        "description": "`ITokenMinter.mint` is declared `returns (bool success)`. The current production V1 `NFTMinter._executeMint` always returns `true` and reverts on failure, so this is benign today. But the interface contract permits a `false` return as a non-reverting failure signal. A future `NFTMinter` upgrade or an alternate `nftMinter` implementation that returns `false` on, say, a recoverable dispatcher-side failure would be silently treated as success by the batch loop — payment would be pulled and no NFT minted.",
+        "impact": "None today (the only known implementation reverts on failure). Latent risk if the interface's documented `bool` semantics are ever exercised by an implementation the caller passes in.",
+        "recommendation": "`require(nftMinter.mint(...), 'BatchMint: mint failed');` or revert with a typed error `if (!nftMinter.mint(...)) revert BatchMint__MintFailed(i);`.",
+        "confidence": "high"
+      },
+      {
+        "id": "CODE-BNM-005",
+        "title": "Caller-controlled count has no upper bound; a typo or front-end overflow can OOG the entire batch",
+        "severitySuggestion": "low",
+        "type": "missing-bound",
+        "file": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+        "function": "batchMint",
+        "line": 66,
+        "lineStart": 66,
+        "lineEnd": 67,
+        "codeSnippet": "if (count == 0) revert BatchMint__ZeroCount();\nif (recipient == address(0)) revert BatchMint__ZeroRecipient();",
+        "description": "`count` has only a non-zero check; an integration that passes `count = 1e18` (e.g. fat-fingered slider value, decimal mismatch on a UI) burns the caller's gas budget and reverts on OOG. The natspec promises atomicity on inner-mint revert but does not document a max iteration count. The gas-burn impact is on the caller only; no protocol-side asset risk.",
+        "impact": "Self-inflicted gas burn. UX gotcha, not a vulnerability.",
+        "recommendation": "Cap count at a reasonable maximum (e.g. 256 or 1024) and revert with a typed error when exceeded — saves callers gas on obvious mis-inputs and bounds the worst-case loop. Or document the cap explicitly in natspec so integrators can clamp upstream.",
+        "confidence": "high"
+      },
+      {
+        "id": "CODE-BNM-006",
+        "title": "batchMint amplifies prior-audit L-04 (external mints accelerate NFTStaker runway) by an order of magnitude — atomic 100x mints in one tx",
+        "severitySuggestion": "low",
+        "type": "cross-contract-amplification",
+        "file": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+        "function": "batchMint",
+        "line": 72,
+        "lineStart": 72,
+        "lineEnd": 74,
+        "codeSnippet": "for (uint256 i; i < count; ++i) {\n    nftMinter.mint(address(paymentToken), dispatcherIndex, recipient);\n}",
+        "description": "Prior audit nft-staking-07 finding L-04 documents that external NFT mints push `latestPrice` up geometrically (`price *= 1 + growthBasisPoints/10_000` per mint), and NFTStaker's next `_recomputeSchedule` re-sizes `R` against the new `latestPrice` — accelerating runway depletion. BatchNFTMinter makes this one-shot: a single batch of `count = 100` produces `latestPrice * (1 + g)^100` in one transaction. With `growthBasisPoints == 100` (1% growth) that is a ~2.7x price jump in a single tx, and the next NFTStaker interaction immediately re-sizes `R` upward, collapsing windowEnd. The L-04 attacker now needs only a single tx (instead of 100 sequential mint txs that an alert operator could front-run mid-stream) to weaponise the surface.",
+        "impact": "Same severity ceiling as L-04 (low — attacker pays mint costs, no direct profit). But the attacker's coordination cost falls to a single transaction, removing the 'operator can react between mints' mitigation. Operators counting on rate-limited mint cadence as a runway-stability assumption now have no inter-mint window to react.",
+        "recommendation": "Either (a) document this amplification in the BatchNFTMinter natspec and the NFTStaker runway-stability discussion so operators size buffers accordingly, or (b) gate `batchMint` count on a per-block / per-tx mint-rate limit at the dispatcher layer (out of BatchNFTMinter scope but relevant for the ecosystem). The minimum action is documentation.",
+        "confidence": "medium",
+        "crossContract": true,
+        "relatedPriorFinding": "nft-staking-07/L-04"
+      },
+      {
+        "id": "CODE-BNM-007",
+        "title": "batchMint silently corrupts caller accounting for fee-on-transfer payment tokens — paymentAmount pulled is greater than amount received and refund math doesn't reconcile",
+        "severitySuggestion": "low",
+        "type": "fot-token-incompatibility",
+        "file": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+        "function": "batchMint",
+        "line": 69,
+        "lineStart": 69,
+        "lineEnd": 84,
+        "codeSnippet": "paymentToken.safeTransferFrom(msg.sender, address(this), paymentAmount);\npaymentToken.forceApprove(address(nftMinter), type(uint256).max);\n\nfor (uint256 i; i < count; ++i) {\n    nftMinter.mint(address(paymentToken), dispatcherIndex, recipient);\n}\n\npaymentToken.forceApprove(address(nftMinter), 0);\n\nuint256 remaining = paymentToken.balanceOf(address(this));\nif (remaining / DUST_THRESHOLD != 0) {\n    paymentToken.safeTransfer(msg.sender, remaining);\n    totalPaid = paymentAmount > remaining ? paymentAmount - remaining : 0;\n} else {\n    totalPaid = paymentAmount;\n}",
+        "description": "If `paymentToken` is fee-on-transfer (FOT) the contract receives `paymentAmount * (1 - fee)` not `paymentAmount`, and the refund leg sends `remaining * (1 - fee)` to the caller. The `totalPaid = paymentAmount - remaining` accounting double-counts the fee burn and reports inflated spend. The dispatcher (NFTMinter V1) already balance-before/after measures `actualReceived` for FOT-safety on its own leg, so the inner mint succeeds for FOT — but BatchNFTMinter's accounting layer doesn't.",
+        "impact": "Off-chain integrator accounting bug for FOT tokens. The 'known invalid findings' list in C4 docs notes fee-on-transfer is generally OOS unless explicitly in scope, so flagging at QA only. No principal loss — caller's wallet flow remains internally consistent, only the helper's `totalPaid` return is wrong.",
+        "recommendation": "Document non-support for FOT payment tokens in the natspec, OR compute spend via balanceOf-before/balanceOf-after on the caller side (requires a separate pre-call snapshot the helper does not currently take).",
+        "confidence": "medium"
+      }
+    ],
+    "NFTStaker.sol": [
+      {
+        "id": "CODE-NFS-001",
+        "title": "M-03 staked-subset notional `S = totalStaked * latestPrice` uses bare multiplication; safe for current params but unprotected against future high-supply / high-price configs",
+        "severitySuggestion": "low",
+        "type": "potential-overflow",
+        "file": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+        "function": "_recomputeSchedule",
+        "line": 401,
+        "lineStart": 398,
+        "lineEnd": 402,
+        "codeSnippet": "// M-03: size the rate against the staked subset, not the aggregate\n// notional of all minted NFTs. Bare multiplication is exact and\n// cheaper than a mulDiv; the bound argument lives in the NatSpec.\nuint256 S = (totalStaked == 0 || latestPrice == 0) ? 0 : totalStaked * latestPrice;",
+        "description": "The M-03 fix replaces the prior aggregate `T = totalSupply * latestPrice` with the staked subset `S = totalStaked * latestPrice`. The natspec at lines 373-376 bounds `totalStaked <= 1e6 (ERC1155 supply)` and `latestPrice ~1e21 wei`, product `~1e27 < 2^256`. The bound holds for the current ecosystem config. However, `totalStaked` is not enforced on-chain — it is the cumulative balance of an ERC1155 token that the protocol owner controls supply on. A future config combining (a) a different `stakedId` with much higher supply (e.g. 1e12 units) and (b) a high `latestPrice` (e.g. ~1e30 with aggressive growthBasisPoints over many mints) would overflow uint256 here — `_recomputeSchedule` would revert and DoS every interaction (stake/unstake/claim/topUp/setTargetAPY/setDispatcherIndex/setNFTMinter/pullAndRefresh) until `emergencyWithdraw` brought `totalStaked` back below the overflow boundary.",
+        "impact": "Currently no exploitable path under documented param bounds. The risk surfaces only if future deployments push outside the documented envelope — at which point the failure mode is total interaction DoS, not silent bad math (Solidity 0.8's checked arithmetic catches it). Solvency invariant is not affected; principal is still recoverable via emergencyWithdraw which doesn't touch _recomputeSchedule.",
+        "recommendation": "Either (a) switch to `S = totalStaked.mulDiv(latestPrice, 1)` or `Math.mulDiv` (rejects overflow gracefully but requires choosing a divisor), (b) explicitly require `totalStaked * latestPrice` does not overflow before the bare mul (e.g. `require(latestPrice == 0 || totalStaked <= type(uint256).max / latestPrice, 'NFTStaker: S overflow')` with a clear error), or (c) leave as-is and treat the natspec bound as a hard invariant the deploy/governance process must respect. Option (b) is the lightest hardening.",
+        "confidence": "medium"
+      },
+      {
+        "id": "CODE-NFS-002",
+        "title": "M-03 ScheduleRecomputed event field `totalNFTValue` retains its pre-M-03 name despite carrying a different quantity; off-chain consumers must read the natspec to disambiguate",
+        "severitySuggestion": "informational",
+        "type": "event-semantics-drift",
+        "file": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+        "function": "ScheduleRecomputed event / _recomputeSchedule",
+        "line": 176,
+        "lineStart": 164,
+        "lineEnd": 177,
+        "codeSnippet": "/// NOTE: the first field name (`totalNFTValue`) is preserved\n/// from the pre-M-03 schema to minimise off-chain consumer\n/// churn, but the value's MEANING shifted: pre-M-03 it carried\n/// the aggregate notional `T` of all minted NFTs; post-M-03 it\n/// carries the staked-subset notional `S`.\nevent ScheduleRecomputed(uint256 totalNFTValue, uint256 availableValue, uint256 newRate, uint256 newWindowEnd);",
+        "description": "Per the project's pre-existing-design-decisions list, the field name is intentionally retained for off-chain consumer compatibility. Documenting here only as informational confirmation that the scan considered and explicitly excluded this from the findings list per the scope guidance. The semantics drift is documented in the natspec adjacent to the event declaration.",
+        "impact": "None — intentional design decision, documented in natspec. Listing only to confirm scan-time consideration.",
+        "recommendation": "No action required.",
+        "confidence": "high",
+        "intentionalDesign": true,
+        "noActionRequired": true
+      }
+    ]
+  },
+  "summary": {
+    "totalFindings": 9,
+    "bySeverity": {
+      "high": 0,
+      "medium": 1,
+      "low": 7,
+      "informational": 1
+    },
+    "byContract": {
+      "BatchNFTMinter.sol": 7,
+      "NFTStaker.sol": 2
+    },
+    "crossContractFindings": 3,
+    "intentionalDesignAcknowledgements": 1
+  },
+  "patternsOfConcern": {
+    "BatchNFTMinter": [
+      "Caller-controlled `nftMinter` and `paymentToken` parameters with `type(uint256).max` pre-approval — every batch trusts the configured dispatcher with full balance authority for the loop's duration. The contract is stateless so the trust window closes at end-of-tx, but in-tx a malicious or compromised dispatcher can drain the entire `paymentAmount` in a single transferFrom rather than the metered per-mint amount (CODE-BNM-002).",
+      "No slippage forwarding to the dispatcher leg — every batch mint structurally bypasses the slippage-protection extraData path that single-mint callers can opt into (CODE-BNM-001). This is the most exploit-relevant finding in the new contract.",
+      "Cross-contract amplification of prior-audit L-04: BatchNFTMinter collapses the multi-tx mint cadence assumption that operators may have implicitly relied on for NFTStaker runway stability (CODE-BNM-006).",
+      "Return-value semantics drift on three axes (totalPaid sign in donation case, ignored mint() bool, FOT accounting) — none are exploitable but all surface as off-chain integrator gotchas that should be documented or fixed (CODE-BNM-003, 004, 007)."
+    ],
+    "NFTStaker_M03": [
+      "M-03 math is implemented correctly; staked-subset sizing and the `(totalStaked == 0 || latestPrice == 0) ? 0 : ...` short-circuit cleanly preserves the zero-emission edge cases.",
+      "Solvency invariant `balance == rewardBudget + committedDebt` is preserved across the M-03 change — the change touches only the rate-sizing path, not the budget book; `_safePay`, `_updatePool`, and `emergencyWithdraw` are unchanged.",
+      "The bare-multiply overflow risk (CODE-NFS-001) is the only mechanical concern, and it is bounded by the documented param envelope. Worth a defensive `require` per the recommendation but does not affect current-config solvency."
+    ]
+  },
+  "scopeExclusions": {
+    "preExistingIntentionalDesign": [
+      "setStakedId/setDispatcherIndex/setNFTMinter empty-pool guard",
+      "setDispatcherHook live rotation (no empty-pool guard)",
+      "emergencyWithdraw skip-sync / pause-bypass / reward-forfeit",
+      "topUp does not call _syncBudget",
+      "R = 0 in zero-emission edge cases",
+      "Math.mulDiv floor rounding",
+      "_safePay shortfall revert (not silent cap)",
+      "Owner-controlled APY/dispatcher/minter/hook bounded by MAX_TARGET_APY",
+      "ScheduleRecomputed.totalNFTValue field name retained for consumer compat (logged as informational only)"
+    ],
+    "priorAuditDuplicates": [
+      "Donation-griefing of NFTStaker recompute (L-01)",
+      "Permissionless claim() triggering pull (L-02)",
+      "Constructor dispatcherIndex==0 (L-03)",
+      "External mints accelerate runway via latestPrice growth (L-04 — see CODE-BNM-006 for the new BatchNFTMinter amplification)",
+      "setStakedId omits _recomputeSchedule (L-05)",
+      "setPauser zero-address (L-06)",
+      "setDispatcherHook input validation (L-07)",
+      "_safePay return-value dead-code (L-08)",
+      "Non-pull recompute transient solvency gap (L-09)",
+      "View staleness (L-10)",
+      "stakedId race vs setStakedId (L-11)",
+      "Dust loss in _updatePool rounding (L-12)",
+      "No admin sweep for abandoned pools (L-13)",
+      "ERC1155 receiver hook surface (L-14)",
+      "Owner setters lack nonReentrant (L-15)",
+      "Dispatcher hook trust (C-01, C-02, C-03)",
+      "emergencyWithdraw no _updatePool (M-01)"
+    ]
+  }
+}

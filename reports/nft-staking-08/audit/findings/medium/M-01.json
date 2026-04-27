@@ -1,0 +1,55 @@
+{
+  "id": "M-01",
+  "project": "phoenix-nft-staking",
+  "scanRun": "nft-staking-08",
+  "mode": "audit",
+  "status": "pending_poc",
+  "severity": "medium",
+  "title": "BatchNFTMinter wired to V1 ITokenMinter interface; non-functional against production NFTMinterV2",
+  "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+  "function": "batchMint",
+  "line": 73,
+  "lineStart": 65,
+  "lineEnd": 78,
+  "description": "BatchNFTMinter imports the legacy V1 ITokenMinter interface and calls the 3-arg `mint(address,uint256,address)` selector inside its loop. The production minter (NFTMinterV2, verified by INFTSupply.sol natspec L15-L18 — direct cast of the deployed NFTMinterV2 address) only exposes `mint(uint256,address)` and `mint(uint256,address,bytes)`. The selectors differ, so every `batchMint` call against the production V2 minter reverts on the first iteration's selector miss. The MockITokenMinter used by the test suite mirrors V1, so the regression is invisible in CI.",
+  "impact": "Functional denial-of-service of the entire BatchNFTMinter helper against the spec-bound production minter. `batchMint` reverts atomically on the first inner `mint()` call; the `safeTransferFrom(msg.sender -> contract, paymentAmount)` and `forceApprove(nftMinter, type(uint256).max)` are rolled back in the same revert. Users lose only gas (no principal at risk), but the documented UX optimisation introduced in story-009 is undelivered for every caller. Because BatchNFTMinter is the recommended batch-mint entrypoint per its NatSpec, every honest user who follows the docs hits the revert.",
+  "attackPath": [
+    "User calls BatchNFTMinter.batchMint(nftMinter=NFTMinterV2, ...)",
+    "Helper executes safeTransferFrom(msg.sender -> contract, paymentAmount)",
+    "Helper executes forceApprove(nftMinter, type(uint256).max)",
+    "First loop iteration calls nftMinter.mint(address,uint256,address) — selector does not exist on V2 (V2 only has mint(uint256,address) and mint(uint256,address,bytes))",
+    "Call reverts; entire transaction reverts; safeTransferFrom and forceApprove are rolled back",
+    "User loses gas; no batch mint ever succeeds"
+  ],
+  "recommendation": "Re-target BatchNFTMinter at `ITokenMinterV2` (`lib/phoenix-nft-staking/lib/yield-claim-nft/src/V2/interfaces/ITokenMinterV2.sol`) and call `mint(dispatcherIndex, recipient)` (or the slippage-aware `mint(uint256,address,bytes)` overload — see M-02). Add an integration test that exercises batchMint against the real NFTMinterV2 ABI rather than the V1 mock; the current MockITokenMinter masks the regression.",
+  "severityRationale": "DOWNGRADED from high to medium. C4 High requires assets to be 'stolen/lost/compromised'. Here no funds are at risk: atomic revert returns the user's prepayment in the same tx. The impact is a complete denial-of-service of a deployed user-facing helper contract (BatchNFTMinter is the recommended batch-mint entrypoint per its NatSpec and was added in story-009 as a UX optimisation). C4 Medium covers 'function of the protocol or its availability could be impacted' — a deployed helper that is 100% non-functional against the spec-bound production minter is the textbook example. Not invalid: the contract is deployed and is part of the product surface, not dead code; users will reasonably try to use it. Not High: the loss is gas + foregone optimisation, never principal. The defect is deterministic and trivial to demonstrate, supporting a confident Medium.",
+  "classification": {
+    "assetImpact": "No assets at risk. Every batchMint reverts atomically on the first inner mint() call (selector miss against V2). The safeTransferFrom from msg.sender is undone in the same revert. User loses gas only; no funds can be stuck or stolen.",
+    "likelihood": "Certain — every invocation against the production V2 minter reverts deterministically.",
+    "assumptions": "Production wiring is NFTMinterV2 (verified by INFTSupply.sol natspec L15-L18 — direct cast of deployed NFTMinterV2 address).",
+    "externalRequirements": "None.",
+    "plausibility": "plausible"
+  },
+  "scannerAttribution": {
+    "originalIds": ["ECON-001"],
+    "scanners": ["econ-scanner"],
+    "dedupId": "DEDUP-001",
+    "classifyId": "CLASS-001",
+    "dedupNotes": "No code-scanner counterpart; econ-scanner uniquely caught the V1/V2 selector mismatch. Strongest finding in the set; should anchor the submission.",
+    "mergedFrom": null
+  },
+  "sanitization": {
+    "decision": "KEEP",
+    "notes": "VERIFIED. INFTSupply.sol NatSpec (L15-L18) explicitly states the production wiring is NFTMinterV2. NFTStaker depends on INFTSupply (which exposes only configs+totalSupply, both of which V2 implements). The V1 ITokenMinter at lib/.../yield-claim-nft/src/interfaces/ITokenMinter.sol declares mint(address,uint256,address); the V2 ITokenMinterV2 at lib/.../yield-claim-nft/src/V2/interfaces/ITokenMinterV2.sol declares mint(uint256,address). Selectors differ (computed from canonical signatures). The audit assumption that production is V2 is correct per the project's own documentation. Not in any known-issues list. No prior audit submission addresses BatchNFTMinter (introduced in story-009)."
+  },
+  "metadata": {
+    "createdAt": "2026-04-27T00:00:00Z",
+    "updatedAt": "2026-04-27T00:00:00Z",
+    "scanOrigin": "nft-staking-08/raw-econ-scan",
+    "dedupOrigin": "nft-staking-08/deduplicated.json",
+    "classificationOrigin": "nft-staking-08/classified.json",
+    "originalSeveritySuggestion": "high",
+    "reclassified": true,
+    "reclassificationReason": "Atomic revert means user loses only gas, not principal. C4 High requires asset theft/loss; protocol-function denial of a deployed helper fits Medium."
+  }
+}
