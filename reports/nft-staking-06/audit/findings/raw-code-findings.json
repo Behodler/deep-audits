@@ -1,0 +1,242 @@
+[
+  {
+    "id": "CODE-001",
+    "title": "rewardBudget reset to full V on every recompute double-counts already-accrued, unclaimed rewards and DoSes late claimers via _safePay shortfall",
+    "severity_estimate": "medium",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:340-379",
+    "description": "_recomputeSchedule unconditionally overwrites rewardBudget with V = balance + dispatcherHook.mintDebt(). It does NOT subtract the totalDebt already accrued to stakers (i.e., rewards committed via accRewardPerShare advances inside _updatePool but not yet paid out via claim). Each _syncBudget call therefore (a) settles pending accrual via _updatePool (which decrements rewardBudget correctly), and then (b) immediately resets rewardBudget back to the *full* on-chain balance plus mintDebt. Across multiple recompute-triggering interactions while one or more stakers leave their pending rewards uncollected, accRewardPerShare advances against the same balance more than once, over-committing emissions relative to the on-chain budget. _safePay then reverts on the first under-funded claim, freezing earned rewards until owner topUp or emergencyWithdraw (which forfeits rewards).",
+    "impact": "Stakers' accrued, unclaimed rewards become unpayable until owner intervention. Principal remains recoverable via emergencyWithdraw (forfeiting rewards). Protocol's solvency invariant (balance == rewardBudget + totalDebt) is broken at every recompute boundary that follows a non-zero totalDebt state. Same-block accrual stability and APY-as-floor properties are violated for late claimers.",
+    "attack_path": "1. Alice stakes at t=0; budget set to balance B. 2. Time elapses, Alice accrues but does not claim; balance is still B because _updatePool only mutates rewardBudget. 3. Bob calls stake (or any recompute trigger): _updatePool commits Alice's accrual (rewardBudget shrinks), then _recomputeSchedule resets rewardBudget back to B. 4. Bob's actions advance accRewardPerShare again against the full B over the next window. 5. Eventually balance < pending for the late claimer; _safePay reverts; user must emergencyWithdraw and forfeit rewards or wait for owner topUp.",
+    "recommendation": "Subtract committed totalDebt before assigning rewardBudget. Concretely: rewardBudget = V > totalDebt ? V - totalDebt : 0, where totalDebt is the live obligation to existing stakers. Alternatively, only assign newRate / windowEnd from _recomputeSchedule and leave rewardBudget to be advanced exclusively by _updatePool (treating it as a draining counter that gets *added to* by inflows, not reset)."
+  },
+  {
+    "id": "CODE-002",
+    "title": "emergencyWithdraw decrements totalStaked without calling _updatePool, retroactively repricing the pre-withdrawal window at the new smaller denominator and over-paying surviving stakers",
+    "severity_estimate": "medium",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:452-461",
+    "description": "emergencyWithdraw is intentionally an escape hatch that skips _syncBudget and _updatePool so principal is never trapped by a broken hook / minter / recompute path. The side effect is that totalStaked drops while lastRewardTime and accRewardPerShare are NOT advanced. The next _updatePool that finally fires (on someone else's stake/unstake/claim) will compute (now - lastRewardTime) * rewardRate and divide by the *new, smaller* totalStaked when adding to accRewardPerShare. The emergency-withdrawer's forfeited share of the [lastRewardTime, now] window is therefore retroactively redistributed to survivors at the post-withdrawal denominator, rather than retained by the protocol. This breaks the 'late stakers never get retroactive rewards' invariant in spirit and amplifies the rewardBudget over-commit in CODE-001.",
+    "impact": "Survivors over-receive rewards proportional to the size of the emergency withdrawal and the elapsed time since lastRewardTime. Protocol over-emits relative to the nominal rewardRate * elapsed budget. Drains rewardBudget faster than the stated APY target implies; combined with CODE-001 it can accelerate the _safePay shortfall on subsequent claims.",
+    "attack_path": "1. Alice and Bob each stake 10 at t=0 (totalStaked=20). 2. Bob calls emergencyWithdraw at t=100 - totalStaked becomes 10, lastRewardTime still 0, accRewardPerShare still 0. 3. Alice calls claim at t=200: _updatePool computes elapsed=200 * rewardRate, divides by totalStaked=10. Alice receives ~2x what she would have under the fair denominator (totalStaked=20 for [0,100], totalStaked=10 for [100,200]). 4. Bob's forfeited 50R is redirected to Alice rather than retained.",
+    "recommendation": "Either (a) call _updatePool() at the start of emergencyWithdraw before mutating totalStaked - accepting the small risk that a corrupted _updatePool path could brick the escape hatch (mitigated because _updatePool is pure arithmetic with no external calls and itself safe), or (b) snapshot lastRewardTime = block.timestamp inside emergencyWithdraw so the next _updatePool only credits rewards from now onward. Option (b) preserves the no-external-calls property of the escape hatch while preventing the retroactive repricing."
+  },
+  {
+    "id": "CODE-003",
+    "title": "rewardRate derived from total minted NFT supply but divided by totalStaked allows a lone staker to capture full T-derived emissions at unbounded effective APY",
+    "severity_estimate": "medium",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:340-379",
+    "description": "_recomputeSchedule sets rewardRate = T * targetAPY / SECONDS_PER_YEAR where T is the aggregate value of ALL minted NFTs in the configured dispatcher (nftMinter.totalSupply(stakedId)). Per-share accrual then divides by totalStaked (stakers only). When totalStaked << totalSupply, the lone (or sparsely staked) cohort captures emissions intended for the entire NFT population. Effective per-staker APY scales as targetAPY * (totalSupply / totalStaked), unbounded as totalStaked -> 1. Documented APY-as-floor property holds (it IS a floor in this case) but the protocol over-emits its budget catastrophically, depleting runway far faster than advertised.",
+    "impact": "Reward budget drains at totalSupply/totalStaked multiplied by the nominal APY rate. Late or non-staking NFT holders find runway exhausted before they can stake. Sophisticated actors can deliberately stake early-and-alone to capture this. Combined with CODE-001 / CODE-002, accelerates the _safePay revert state.",
+    "attack_path": "1. Project mints 100 NFTs and configures targetAPY = 50%. T is computed against all 100 NFTs' geometric-series value. 2. Alice stakes 1 NFT at t=0; totalStaked = 1. 3. Alice's effective APY = 50% * 100 = 5000% on her single NFT's value. 4. rewardBudget drains 100x faster than targeted. 5. Within hours/days the runway is depleted, _safePay reverts on others' claims, requiring owner topUp.",
+    "recommendation": "Either (a) divide rewardRate by totalSupply rather than implicitly by totalStaked: scale F by (totalStaked / totalSupply) so emissions track participation; or (b) document and budget for the worst case (totalStaked == 1) when sizing topUps; or (c) introduce a participation floor that throttles rewardRate when totalStaked < some fraction of totalSupply. Option (a) is the simplest spec-aligned fix - rewardRate then represents emission to the staked subset only."
+  },
+  {
+    "id": "CODE-004",
+    "title": "setDispatcherHook rotation orphans the old hook's outstanding mintDebt and leaves rewardBudget stale until corrective action",
+    "severity_estimate": "low",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:199-202",
+    "description": "setDispatcherHook overwrites the dispatcherHook reference without (a) calling pull() on the OLD hook to materialise its mintDebt, or (b) calling _recomputeSchedule against the new hook to refresh rewardBudget / windowEnd / rewardRate. Outstanding mintDebt at the OLD hook becomes unreachable because subsequent _syncBudget calls invoke pull() on the NEW hook. Meanwhile rewardBudget retains the value computed from the previous _recomputeSchedule, which included old_hook.mintDebt(). Subsequent user interactions fire _updatePool against this stale, inflated budget; eventually accRewardPerShare advances past what the actual on-chain balance can cover and _safePay reverts.",
+    "impact": "Reward flow can be bricked between the rotation and the next owner corrective action. Operationally similar to CODE-001 but driven by an admin event rather than natural drift. Principal is recoverable via emergencyWithdraw (forfeiting rewards). Sister setters (setDispatcherIndex, setNFTMinter) already apply totalStaked==0 and self-recompute; setDispatcherHook is the outlier.",
+    "attack_path": "1. Owner rotates dispatcherHook to a new hook while old hook has non-trivial mintDebt M. 2. Old M is now orphaned (pull() is never called against the old hook again). 3. rewardBudget still reflects balance + M from the prior recompute. 4. Subsequent user actions decrement rewardBudget at the new rate without M ever materialising. 5. _safePay reverts when balance < pending; users must emergencyWithdraw or wait for owner topUp.",
+    "recommendation": "Either (a) gate setDispatcherHook on totalStaked == 0 to match sister setters, or (b) call _syncBudget() inside setDispatcherHook BEFORE writing the new reference (drains the old hook), then call _recomputeSchedule() AFTER (refreshes against the new hook). Option (b) preserves live rotation capability while preventing orphaned debt."
+  },
+  {
+    "id": "CODE-005",
+    "title": "dispatcher-hook mintDebt() is trusted-input to V and windowEnd; a malicious or buggy hook can over-commit emissions",
+    "severity_estimate": "low",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:365-368",
+    "description": "_recomputeSchedule trusts dispatcherHook.mintDebt() as a budgetable component of V. There is no on-chain verification that pull() actually delivers that quantity (or any quantity) into the contract balance. A hostile or buggy hook can return an arbitrarily large mintDebt() while pull() mints little or nothing; rewardBudget and windowEnd inflate accordingly, and stakers accrue against value the contract does not control. The next _safePay reverts on shortfall.",
+    "impact": "Same end-state as CODE-001 / CODE-004: rewards become unpayable until owner topUp. Requires owner action to set the bad hook, so primarily a centralization risk - but a buggy (not malicious) hook in the same trust domain triggers the same outcome.",
+    "attack_path": "1. Compromised owner or careless deployment installs a hook returning huge mintDebt() but minting <<that on pull(). 2. _recomputeSchedule inflates rewardBudget; windowEnd extends; rewardRate is set against the inflated V. 3. Stakers accrue against the inflated schedule. 4. Claims revert via _safePay shortfall once balance < pending.",
+    "recommendation": "Cap V on the *delta* delivered by pull(), not on the hook's mintDebt() claim. Concretely, use only the actual balance delta after pull() to update budget, and treat mintDebt() as a hint for the rate floor calculation (T) rather than a budget input."
+  },
+  {
+    "id": "CODE-006",
+    "title": "_recomputeSchedule reads balanceOf(this) directly, allowing donation griefing to extend runway and amplify CODE-001",
+    "severity_estimate": "low",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:365",
+    "description": "V is computed as rewardToken.balanceOf(address(this)) + mintDebt(). An external donor can send phUSD directly to the contract before any _recomputeSchedule trigger, inflating V. Subsequent recompute extends windowEnd and resets rewardBudget to the donor-inflated value, which combined with CODE-001 wipes prior emission corrections. Pure griefing: the donor loses the donated phUSD, the protocol's runway is perturbed.",
+    "impact": "Schedule predictability impacted; small amplification of CODE-001 over-commit. No direct theft. Donor pays for the perturbation.",
+    "attack_path": "1. Owner is about to call setTargetAPY or setDispatcherIndex. 2. Attacker front-runs with a phUSD transfer to the contract. 3. _recomputeSchedule reads inflated balance, sets rewardBudget higher than the protocol intended. 4. Combined with CODE-001 the over-commit propagates and accelerates the _safePay shortfall.",
+    "recommendation": "Track an internal accountedBalance counter that only changes on protocol-recognized inflows (topUp, pull()) and use it in place of balanceOf(this) inside _recomputeSchedule. Alternatively accept the existing behaviour as a feature (donations are 'free' subsidies) and document it explicitly."
+  },
+  {
+    "id": "CODE-007",
+    "title": "setTargetAPY settles prior accrual using current totalStaked, mispricing pre-setter period if an emergencyWithdraw has shrunk totalStaked since lastRewardTime",
+    "severity_estimate": "low",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:237-243",
+    "description": "setTargetAPY calls _updatePool() before mutating targetAPY (intended: settle prior accrual at the OLD rate). However, _updatePool divides accumulated reward by *current* totalStaked. If an emergencyWithdraw has reduced totalStaked since lastRewardTime without calling _updatePool, the accumulated reward over [lastRewardTime, now] is divided by the post-withdrawal denominator, over-crediting survivors at the OLD rate boundary. Subordinate to CODE-002 (same root cause: emergencyWithdraw's missing _updatePool).",
+    "impact": "Minor amplification of CODE-002 at the APY-change boundary. No independent attack path.",
+    "attack_path": "1. Alice and Bob stake at t=0 (totalStaked=20). 2. Bob emergencyWithdraws at t=100, no _updatePool fired. 3. Owner calls setTargetAPY at t=150. _updatePool elapses 150 * rewardRate; divides by totalStaked=10; Alice over-credited for [0,100].",
+    "recommendation": "Fix CODE-002 (call _updatePool inside emergencyWithdraw or snapshot lastRewardTime there) and this finding is automatically resolved."
+  },
+  {
+    "id": "CODE-008",
+    "title": "pendingReward view does not simulate _syncBudget, diverging from what claim() actually pays",
+    "severity_estimate": "low",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:467-478",
+    "description": "pendingReward replicates _updatePool's accrual math but does NOT simulate a pull()/recompute. In steady state where dispatcher mintDebt has accrued since the last on-chain interaction, pendingReward returns a value that differs from what claim() will pay (which first calls _syncBudget -> pull() -> _recomputeSchedule, mutating rewardRate and windowEnd). Front-ends, indexers, and auto-compounders that consume pendingReward as authoritative claimable get inconsistent values.",
+    "impact": "UX / integrator impact only. May display values that revert at claim time (interacting with CODE-001) or that differ from the actual paid amount. No asset loss.",
+    "attack_path": "Consumer reads pendingReward, sees value X. Calls claim. claim runs _syncBudget which mutates schedule then computes pending against the new acc. Paid amount can differ from X (typically slightly higher in the expansion case, can be lower if a recompute reduced rate).",
+    "recommendation": "Either document the gap explicitly in the NatSpec (pendingReward does not simulate pull()/recompute - call pullAndRefresh first for an accurate read) or expose a sibling view simulatedPendingReward that performs a notional _recomputeSchedule against current mintDebt."
+  },
+  {
+    "id": "CODE-009",
+    "title": "setStakedId does not call _recomputeSchedule, leaving rewardRate / windowEnd reflecting the previous token ID until the next interaction",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:204-208",
+    "description": "Sister setters setDispatcherIndex (line 218) and setNFTMinter (line 229) call _recomputeSchedule() at the end. setStakedId does not, so views (currentRewardRate, runwaySeconds, pendingReward, totalDebt) and the ScheduleRecomputed event stream report values computed against the previous stakedId until the next user-triggered _syncBudget. Because totalStaked == 0 is required, no rewards are leaked, but the asymmetry breaks the implicit invariant 'schedule reflects current config once setter returns'.",
+    "impact": "State-hygiene / consistency. Off-chain indexers and front-ends may show stale schedule data in the window between setStakedId and the first subsequent interaction.",
+    "attack_path": "None direct. Operational/integration only.",
+    "recommendation": "Call _recomputeSchedule() at the end of setStakedId (matching sister setters) and emit ScheduleRecomputed; or document the asymmetry explicitly."
+  },
+  {
+    "id": "CODE-010",
+    "title": "setPauser accepts address(0) without validation, silently disabling pause/unpause capability",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:182-185",
+    "description": "setPauser does not validate newPauser != address(0). Because onlyPauser compares msg.sender == pauser, setting pauser = address(0) silently disables pause()/unpause() (no EOA produces msg.sender == address(0) under the normal EVM invariants). Spec requires pause/unpause to be callable by the registered pauser; a stale or zero assignment breaks emergency-pause without any on-chain warning.",
+    "impact": "Emergency-pause capability silently lost until owner reassigns. No external attacker path; admin misconfiguration only. Recoverable.",
+    "attack_path": "Owner deploys with default-empty config var resolving to address(0), or fat-fingers a 0x0 address. Pause becomes unreachable until owner notices and fixes.",
+    "recommendation": "require(newPauser != address(0), 'NFTStaker: zero pauser') or document that zero is an intentional 'pause disabled' state."
+  },
+  {
+    "id": "CODE-011",
+    "title": "Admin setter input-validation gaps on setDispatcherHook and setNFTMinter (no contract-existence check)",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:199-230",
+    "description": "setDispatcherHook accepts any address (including EOAs and address(0)) and persists it. _syncBudget short-circuits cleanly on address(0), but a non-zero EOA or wrong-interface contract causes pull() to revert on every subsequent stake/unstake/claim, forcing users onto emergencyWithdraw (forfeit rewards). setNFTMinter has a zero-address guard but no interface-conformance probe; a non-zero misconfigured address causes _recomputeSchedule to revert, but because that revert propagates from inside the setter the bad value is never persisted (self-healing). Dispatcher-hook misconfiguration is the more dangerous gap.",
+    "impact": "Owner misconfiguration only; no external attacker path. Combined with CODE-004 widens the freeze window when hook rotation is fumbled.",
+    "attack_path": "Admin sets dispatcherHook to a wrong or non-contract address; subsequent user interactions revert at pull(); users must emergencyWithdraw and forfeit rewards or wait for owner correction.",
+    "recommendation": "Optionally validate address(newHook).code.length > 0 and probe a low-level staticcall to mintDebt() before persisting; or accept current behaviour and surface in operator runbooks."
+  },
+  {
+    "id": "CODE-012",
+    "title": "_safePay's return value is always the input amount, creating dead-code that suggests partial-pay semantics that no longer exist",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:439-445",
+    "description": "Post audit M-01 hardening, _safePay reverts on shortfall and unconditionally returns the input amount. Callers (stake, unstake, claim) re-assign the return back over the input variable (`pending = _safePay(pending);`) - a no-op. The return-value contract is misleading: it implies _safePay might transfer a different amount than requested.",
+    "impact": "Maintainability / readability only. No security impact.",
+    "attack_path": "None.",
+    "recommendation": "Drop the return value (signature becomes `internal` returning nothing) or restore partial-pay semantics by removing the revert and returning the actually-transferred amount. Current hybrid is the worst of both worlds."
+  },
+  {
+    "id": "CODE-013",
+    "title": "Owner can zero out emissions mid-stake via setTargetAPY(0) or setDispatcherHook(address(0))",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:237-243, 199-202",
+    "description": "setTargetAPY(0) is documented as a supported 'pause emissions via APY' mode. Combined with setDispatcherHook(0), the owner can unilaterally halt all reward accrual without triggering Pausable's pause(). The change is logged via events but cannot be vetoed by users. Documented spec behaviour, not a bug, but worth surfacing as a centralization risk.",
+    "impact": "No theft; users retain principal and any already-accrued rewards. Full centralization control over reward flow.",
+    "attack_path": "Compromised owner key. Per C4 universal invalid, owner key compromise is out of scope; surfaced as QA only.",
+    "recommendation": "Document the design intent and consider a timelock on critical setters if governance maturity warrants."
+  },
+  {
+    "id": "CODE-014",
+    "title": "_recomputeSchedule called from non-pull paths (topUp / setTargetAPY / setDispatcherIndex / setNFTMinter) sets rewardBudget to balance + mintDebt despite mintDebt not being materialised, breaking solvency between recomputes",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:340-379",
+    "description": "Several callers of _recomputeSchedule (topUp, setTargetAPY, setDispatcherIndex, setNFTMinter) do NOT pre-materialise mintDebt via pull(). V on line 365-368 still includes dispatcherHook.mintDebt(), so rewardBudget is set to a value strictly greater than the actual phUSD balance in the common case. Between that recompute and the next _syncBudget, _updatePool decrements rewardBudget at the new rate, advancing accRewardPerShare against value the contract does not yet hold. _safePay reverts on shortfall if pull() later yields less than the projected mintDebt. The CLAUDE.md solvency invariant is phrased as 'holds at recompute boundaries' rather than 'holds always', acknowledging this gap; but the gap can compound with CODE-001 to produce extended freeze windows.",
+    "impact": "Operational: reward-claim DoS whenever dispatcher-hook health degrades between a recompute-without-pull and the next _syncBudget. Recoverable via owner topUp.",
+    "attack_path": "1. Owner calls topUp(small) - _recomputeSchedule sets rewardBudget = balance + mintDebt. 2. Dispatcher hook health degrades (mintDebt not actually realisable). 3. Stakers accrue. 4. Next _syncBudget pulls less than projected. 5. _safePay reverts on subsequent claims.",
+    "recommendation": "Either (a) make topUp / setTargetAPY / setDispatcherIndex / setNFTMinter call _syncBudget rather than the bare _recomputeSchedule (couples those paths to dispatcher liveness, defeating topUp's hook-independence design), or (b) tighten NatSpec on _recomputeSchedule to make the invariant-hold window explicit and add an operational note to setTargetAPY."
+  },
+  {
+    "id": "CODE-015",
+    "title": "_updatePool dust loss: small reward divided by larger totalStaked rounds accRewardPerShare delta to zero while still decrementing rewardBudget",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:299-304",
+    "description": "_updatePool unconditionally decrements rewardBudget by `reward = elapsed * rewardRate` (capped at rewardBudget) and adds `(reward * ACC_PRECISION) / totalStaked` to accRewardPerShare. With ACC_PRECISION = 1e18 and totalStaked typically a small NFT count, the share-delta only rounds to zero when reward < totalStaked / 1e18 (i.e., reward < ~1 wei for any realistic totalStaked). In practice negligible, but it does mean rewardBudget can be drained by sub-wei increments that never propagate to per-staker balances. Cumulative loss is bounded by the number of _updatePool calls and is sub-microscopic at realistic phUSD magnitudes.",
+    "impact": "Sub-wei reward loss to stakers per call; cumulatively negligible.",
+    "attack_path": "Adversarial caller could repeatedly trigger _updatePool with very small elapsed values (1 second) hoping for rounding. With totalStaked=1000 NFT units and rewardRate=1e10 wei/sec, reward=1e10, share-delta = 1e28/1000 = 1e25 - no rounding loss. Genuinely negligible.",
+    "recommendation": "Acceptable as-is. Document explicitly if desired."
+  },
+  {
+    "id": "CODE-016",
+    "title": "currentRewardRate / runwaySeconds views can return values inconsistent with the real next-_syncBudget output because they read stored state without simulating recompute",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:482-520",
+    "description": "currentRewardRate returns stored rewardRate (or zero past windowEnd). runwaySeconds returns (balance + mintDebt) / rewardRate. Neither simulates _recomputeSchedule against potentially-changed nftMinter.totalSupply or configs. After an external NFT mint or dispatcher config change, the next on-chain _syncBudget will recompute T and rate, but views expose the stale snapshot. Front-ends may display rates that diverge from on-chain reality.",
+    "impact": "Integrator/UX only; no asset impact. Sister to CODE-008.",
+    "attack_path": "None direct.",
+    "recommendation": "Document the staleness semantics or add simulated-view variants that perform an in-memory recompute."
+  },
+  {
+    "id": "CODE-017",
+    "title": "stakedId == 0 is accepted by constructor and setStakedId; ERC1155 reads against id 0 may behave unexpectedly on some implementations",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:160-208",
+    "description": "Neither the constructor nor setStakedId guards against stakedId == 0. OpenZeppelin ERC1155Supply treats 0 as a valid id, so totalSupply(0) returns 0 (no NFTs minted at id 0 by NFTMinterV2 - dispatcher indices are 1-based per the INFTSupply NatSpec). _recomputeSchedule reads totalSupply(stakedId); if stakedId is 0 in production by accident, T = 0, rewardRate = 0, all emissions paused. Recoverable via setStakedId, but no on-chain warning that 0 is likely a misconfiguration.",
+    "impact": "Misconfiguration vector that silently zeroes emissions.",
+    "attack_path": "Default-uninitialised constructor argument (in deployment script) supplies 0; emissions paused until owner notices.",
+    "recommendation": "Optionally require(newId != 0) in setStakedId and the constructor; or document stakedId == 0 as 'emissions disabled' policy."
+  },
+  {
+    "id": "CODE-018",
+    "title": "Constructor lacks zero-validation on dispatcherIndex; subsequent _recomputeSchedule may revert if configs(0) reverts on the deployed nftMinter",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:160-176",
+    "description": "INFTSupply.configs is documented as 1-based on NFTMinterV2. The constructor accepts any dispatcherIndex (including 0) without validation or a probing call. If dispatcherIndex==0 is supplied and the deployed NFTMinter reverts on configs(0), every subsequent stake/unstake/claim that triggers _recomputeSchedule will revert. Recoverable via setDispatcherIndex(non-zero) since totalStaked is necessarily 0 right after deployment.",
+    "impact": "Deployment-time misconfiguration only; self-healing because totalStaked is 0 at deploy time.",
+    "attack_path": "None direct. Deployment hazard.",
+    "recommendation": "Optionally call _recomputeSchedule() at the end of the constructor as a liveness probe (will revert and abort deployment if the index/minter combo is bad). Currently the constructor does not call _recomputeSchedule, so deployment succeeds with broken config."
+  },
+  {
+    "id": "CODE-019",
+    "title": "topUp transfers reward tokens before recompute; non-standard ERC20 (rebasing/fee-on-transfer) would corrupt budget accounting",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:251-257",
+    "description": "topUp calls safeTransferFrom(msg.sender, address(this), amount) and assumes the contract balance increases by exactly `amount`. _recomputeSchedule then reads balanceOf(this) directly. With a fee-on-transfer or rebasing reward token, the recorded V would not match the requested amount, and the schedule would over-commit emissions vs. actually-received tokens. Out of scope per C4 known invalid (non-standard ERC20s), but the contract's reward token (phUSD) is sibling-controlled so the assumption holds in production.",
+    "impact": "None in production; flagged for completeness against the spec's standard-ERC20 assumption.",
+    "attack_path": "Inapplicable to phUSD.",
+    "recommendation": "Acceptable as-is. Comment explicitly that rewardToken must be a standard ERC20."
+  },
+  {
+    "id": "CODE-020",
+    "title": "ERC1155 staking with id == 0 + the recipient hook execution path: stake/unstake call safeTransferFrom which invokes onERC1155Received on the recipient, opening a re-entrancy surface that is mitigated only by nonReentrant",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:385-461",
+    "description": "stake calls stakedToken.safeTransferFrom(msg.sender, address(this), ...) which triggers onERC1155Received on this contract (handled by ERC1155Holder, safe). unstake and emergencyWithdraw call stakedToken.safeTransferFrom(address(this), msg.sender, ...) which triggers onERC1155Received on msg.sender. If msg.sender is a contract, it can re-enter. All entrypoints (stake, unstake, claim, emergencyWithdraw) are correctly marked nonReentrant, so the standard re-entrancy is blocked. However, *cross-function* re-entrancy from the ERC1155 callback into a non-guarded view (or into the dispatcher hook to manipulate mintDebt) is theoretically possible. No exploit identified because state is updated before the external transfer in all four functions.",
+    "impact": "None identified; defensive depth note. nonReentrant + state-before-call ordering closes the obvious paths.",
+    "attack_path": "None observed.",
+    "recommendation": "Acceptable as-is. The nonReentrant + checks-effects-interactions ordering is correctly applied."
+  },
+  {
+    "id": "CODE-021",
+    "title": "totalStaked decrement in unstake / emergencyWithdraw uses unchecked subtraction semantics from Solidity 0.8 - underflow reverts but only after totalStaked is already shadowed by user.amount",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:413-418, 458",
+    "description": "unstake checks `user.amount >= amount` (line 406) and decrements totalStaked by amount (line 414). If user.amount accounting is ever desynced from totalStaked (no path identified, but worth noting), totalStaked -= amount would revert via Solidity 0.8 underflow. emergencyWithdraw decrements totalStaked by user.amount; same property. This is a defensive property, not a bug.",
+    "impact": "None; the underflow revert is the desired safety mechanism if state ever desyncs.",
+    "attack_path": "None.",
+    "recommendation": "Acceptable as-is."
+  },
+  {
+    "id": "CODE-022",
+    "title": "_recomputeSchedule uses block.timestamp for windowEnd; within-block multiple recomputes do not advance windowEnd predictably across recompute triggers",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:376",
+    "description": "windowEnd = block.timestamp + runway. Within a single block, multiple recompute-trigger calls (e.g., setTargetAPY then topUp) all use the same block.timestamp, but if balance/mintDebt change between them, runway changes and windowEnd is overwritten each time. The 'APY stability under repeated pulls/top-ups within a block' invariant in CLAUDE.md is preserved for *unchanged* T and A, but windowEnd does shift if V changes. This is documented behaviour (windowEnd is derived, V/R), not a bug, but the 'stability' invariant in the spec applies only to rate, not windowEnd.",
+    "impact": "None; spec-aligned. Flagged for monitoring/integrator clarity.",
+    "attack_path": "None.",
+    "recommendation": "Document that windowEnd shifts with V even when rate is stable."
+  },
+  {
+    "id": "CODE-023",
+    "title": "Public stakedToken / rewardToken are immutable but stakedId is mutable - off-chain consumers reading stakedId mid-migration may transact against the wrong id",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:67",
+    "description": "stakedId is owner-mutable while totalStaked == 0. A user who reads stakedId off-chain and then submits a stake transaction may have it executed against a NEW stakedId if the owner front-runs with setStakedId. The user's safeTransferFrom would fail (they don't hold units of the new id) - so principal is safe - but the UX is brittle.",
+    "impact": "UX only; transactions revert cleanly.",
+    "attack_path": "Owner front-runs a user stake with setStakedId; user's stake reverts at the ERC1155 transfer.",
+    "recommendation": "Document that stakedId is mutable in this state; consider exposing a `expectedStakedId` parameter to stake() that reverts on mismatch."
+  },
+  {
+    "id": "CODE-024",
+    "title": "claim does not require user.amount > 0; a user with zero stake can call claim and waste gas on a no-op _syncBudget",
+    "severity_estimate": "qa",
+    "location": "lib/phoenix-nft-staking/src/NFTStaker.sol:420-429",
+    "description": "claim() unconditionally calls _syncBudget(), which calls dispatcherHook.pull() if a hook is set. A caller with zero stake gets pending == 0 and no payout, but their call has triggered an external pull(). This is by design (anyone can refresh the schedule via claim) but means anyone can grief by calling claim repeatedly, forcing pull() invocations on the hook. Cost is borne by the caller (gas), no protocol harm.",
+    "impact": "None; griefer pays gas. Potentially useful as a permissionless refresh trigger.",
+    "attack_path": "None.",
+    "recommendation": "Acceptable as-is. Could add `require(user.amount > 0)` if the permissionless refresh is unwanted, but pullAndRefresh is owner-only so the public claim() is the only way for non-owners to materialise dispatcher mintDebt - removing that capability has UX cost."
+  }
+]
