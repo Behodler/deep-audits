@@ -251,7 +251,7 @@ The risk for the judge is interpretive: if the judge reads the natspec broadly a
 
 ## Files referenced
 
-- `/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol`
-- `/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/AYieldStrategy.sol`
-- `/home/justin/code/C4/solidity-audit/reports/phoenix-vault-04/audit/findings/high/H-01.json` through `H-05.json`
-- `/home/justin/code/C4/solidity-audit/reports/phoenix-vault-04/audit/findings/medium/M-01.json`
+- `<repo>/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol`
+- `<repo>/lib/reflax-yield-vault/src/AYieldStrategy.sol`
+- `<repo>/reports/phoenix-vault-04/audit/findings/high/H-01.json` through `H-05.json`
+- `<repo>/reports/phoenix-vault-04/audit/findings/medium/M-01.json`

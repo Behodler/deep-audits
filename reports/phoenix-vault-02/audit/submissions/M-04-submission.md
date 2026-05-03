@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-04] Untracked Leftover Tokens After Liquidity Addition Causes Value Leakage
 Root Cause Link: https://github.com/Behodler/reflax-yield-vault/blob/main/src/concreteYieldStrategies/UniV4StableYieldStrategy.sol#L569-L587
-PoC File: /home/justin/code/C4/solidity-audit/workspace/phoenix-vault/test/poc-M-04.t.sol
+PoC File: <repo>/workspace/phoenix-vault/test/poc-M-04.t.sol
 -->
 
 ## Finding description and impact

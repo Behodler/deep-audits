@@ -4,7 +4,7 @@
 **Medium**
 
 ## Affected Contract
-`/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- `_withdrawInternal()` (lines 264-291)
+`<repo>/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- `_withdrawInternal()` (lines 264-291)
 
 ## Root Cause
 

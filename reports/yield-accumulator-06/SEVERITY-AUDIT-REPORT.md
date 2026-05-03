@@ -102,12 +102,12 @@
 
 ## Files Referenced
 
-- **M-01 Finding:** `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-06/audit/findings/medium/M-01.json`
-- **M-01 Submission:** `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-06/audit/submissions/M-01-submission.md`
-- **M-02 Finding:** `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-06/audit/findings/medium/M-02.json`
-- **M-02 Submission:** `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-06/audit/submissions/M-02-submission.md`
-- **M-03 Finding:** `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-06/audit/findings/medium/M-03.json`
-- **M-03 Submission:** `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-06/audit/submissions/M-03-submission.md`
-- **Source (SYA):** `/home/justin/code/C4/solidity-audit/lib/stable-yield-accumulator/src/StableYieldAccumulator.sol`
-- **Source (CA):** `/home/justin/code/C4/solidity-audit/lib/stable-yield-accumulator/src/ClaimArbitrage.sol`
-- **Prior L-01:** `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-01/audit/findings/low/L-01-precision-loss-decimal-normalization.json`
+- **M-01 Finding:** `<repo>/reports/yield-accumulator-06/audit/findings/medium/M-01.json`
+- **M-01 Submission:** `<repo>/reports/yield-accumulator-06/audit/submissions/M-01-submission.md`
+- **M-02 Finding:** `<repo>/reports/yield-accumulator-06/audit/findings/medium/M-02.json`
+- **M-02 Submission:** `<repo>/reports/yield-accumulator-06/audit/submissions/M-02-submission.md`
+- **M-03 Finding:** `<repo>/reports/yield-accumulator-06/audit/findings/medium/M-03.json`
+- **M-03 Submission:** `<repo>/reports/yield-accumulator-06/audit/submissions/M-03-submission.md`
+- **Source (SYA):** `<repo>/lib/stable-yield-accumulator/src/StableYieldAccumulator.sol`
+- **Source (CA):** `<repo>/lib/stable-yield-accumulator/src/ClaimArbitrage.sol`
+- **Prior L-01:** `<repo>/reports/yield-accumulator-01/audit/findings/low/L-01-precision-loss-decimal-normalization.json`

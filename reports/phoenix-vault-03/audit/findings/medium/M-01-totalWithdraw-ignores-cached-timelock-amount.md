@@ -4,8 +4,8 @@
 **Medium**
 
 ## Affected Contracts
-- `/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- `_totalWithdraw()` (lines 332-356)
-- `/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/AYieldStrategy.sol` -- `_initiateWithdrawal()` (lines 379-394) and `_executeWithdrawal()` (lines 403-417)
+- `<repo>/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- `_totalWithdraw()` (lines 332-356)
+- `<repo>/lib/reflax-yield-vault/src/AYieldStrategy.sol` -- `_initiateWithdrawal()` (lines 379-394) and `_executeWithdrawal()` (lines 403-417)
 
 ## Root Cause
 

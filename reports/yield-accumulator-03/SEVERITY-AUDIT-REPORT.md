@@ -39,7 +39,7 @@
 
 **Impact Verification:** The targetPrice mechanism is the protocol's sole defense against depeg-based yield extraction. With it bypassed, the full discount spread is extractable. Impact scales linearly with total accumulated yield.
 
-**PoC Verification:** A standalone PoC exists at `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-03/audit/pocs/poc-H-01.t.sol`. Three tests demonstrate: (1) claim correctly reverts at true price 0.90 below target 0.95, (2) atomic price manipulation to 1.10 bypasses the check and extracts full yield, (3) pool price returns to 0.90 after attack. The PoC uses a mocked PoolManager but accurately reproduces the `extsload`/`getSlot0` pattern from Uniswap V4's `StateLibrary`.
+**PoC Verification:** A standalone PoC exists at `<repo>/reports/yield-accumulator-03/audit/pocs/poc-H-01.t.sol`. Three tests demonstrate: (1) claim correctly reverts at true price 0.90 below target 0.95, (2) atomic price manipulation to 1.10 bypasses the check and extracts full yield, (3) pool price returns to 0.90 after attack. The PoC uses a mocked PoolManager but accurately reproduces the `extsload`/`getSlot0` pattern from Uniswap V4's `StateLibrary`.
 
 ### Verdict
 

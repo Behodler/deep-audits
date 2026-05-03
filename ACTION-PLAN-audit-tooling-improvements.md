@@ -37,7 +37,7 @@ solc-select use 0.8.24
 
 ```bash
 # Test on an existing project
-cd /home/justin/code/C4/solidity-audit
+cd <repo>
 slither lib/legion-contracts/contracts/ --json reports/legion/bounty/slither-test.json 2>/dev/null
 
 # View results
@@ -525,7 +525,7 @@ Write to: `reports/<project>/<mode>/pattern-matches.json`
 ### Step 2.3: Create patterns Directory
 
 ```bash
-mkdir -p /home/justin/code/C4/solidity-audit/patterns
+mkdir -p <repo>/patterns
 ```
 
 ---

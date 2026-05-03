@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-02] Withdrawal Gas Cost Scales with Total TVL Enabling Griefing Attacks
 Root Cause Link: https://github.com/Behodler/reflax-yield-vault/blob/main/src/concreteYieldStrategies/AutoPoolYieldStrategy.sol#L264-L286
-PoC File: /home/justin/code/C4/solidity-audit/workspace/phoenix-vault/test/poc-M-02.t.sol
+PoC File: <repo>/workspace/phoenix-vault/test/poc-M-02.t.sol
 -->
 
 ## Finding description and impact

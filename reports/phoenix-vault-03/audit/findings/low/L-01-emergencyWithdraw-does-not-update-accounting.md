@@ -4,7 +4,7 @@
 **Low**
 
 ## Affected Contract
-`/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- `_emergencyWithdraw()` (lines 301-323)
+`<repo>/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- `_emergencyWithdraw()` (lines 301-323)
 
 ## Root Cause
 
@@ -43,7 +43,7 @@ Either:
 **Low**
 
 ## Affected Contract
-`/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/AYieldStrategy.sol` -- `withdrawFrom()` (line 292)
+`<repo>/lib/reflax-yield-vault/src/AYieldStrategy.sol` -- `withdrawFrom()` (line 292)
 
 ## Root Cause
 
@@ -69,7 +69,7 @@ Replace `this.balanceOf(token, client)` with `this.totalBalanceOf(token, client)
 **Low**
 
 ## Affected Contract
-`/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- constructor (lines 79-88)
+`<repo>/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- constructor (lines 79-88)
 
 ## Root Cause
 

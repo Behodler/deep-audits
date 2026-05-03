@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Purpose
 
-This repository generates security audit reports for Code4rena (C4) competitions. The target audience is C4 wardens who need to identify vulnerabilities in Solidity projects and submit findings that conform to C4 standards.
+This repository contains the audit tooling used to review the Phoenix/Behodler smart-contract suite. Findings are written in a format compatible with Code4rena (C4) conventions so the same artefacts can be repurposed if a Phoenix component is ever submitted to a public audit; treat the C4 framing as an output spec, not a contest goal.
 
 ## Terminology
 
@@ -12,7 +12,7 @@ This repository generates security audit reports for Code4rena (C4) competitions
 
 ## Critical Rules
 
-**Source repos are strictly read-only.** Never modify files in source repos. Never commit to source repos. They must remain exactly as cloned from the original C4 competition repository.
+**Source repos are strictly read-only.** Never modify files in source repos. Never commit to source repos. They must remain exactly as cloned from the upstream Behodler-org repository.
 
 **Never use recursive submodule commands.** When adding or updating source repos, do not use `--recursive` flag. We must experience the repo exactly as the original developers intended, without pulling nested dependencies.
 
@@ -152,9 +152,9 @@ Note: Exploit complexity/sophistication is NOT a factor in likelihood.
 
 ## Quality Standards
 
-Reports must match professional audit quality. C4 explicitly discourages:
+Reports must match professional audit quality. The pipeline rejects:
 - LLM-generated nonsense or low-effort reports
-- Overstating severity to angle for higher payouts
-- Submissions without sufficient proof (judge should not need additional research)
+- Overstated severity (a finding's impact must justify its label)
+- Findings without sufficient proof (a reader should not need additional research)
 
-Duplicate findings dilute earnings - prioritize unique, high-urgency issues over obvious vulnerabilities any tool would find.
+Low-value or duplicate findings dilute the report. Prioritise unique, high-impact issues over obvious vulnerabilities any tool would surface.

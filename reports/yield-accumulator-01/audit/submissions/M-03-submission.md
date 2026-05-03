@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-03] All-or-Nothing Claim Design Creates Griefing Vector via Paused Token Inconsistency
 Root Cause Link: https://github.com/Behodler/stable-yield-accumulator/blob/main/src/StableYieldAccumulator.sol#L434
-PoC File: /home/justin/code/C4/solidity-audit/workspace/yield-accumulator/test/poc-M-03.t.sol
+PoC File: <repo>/workspace/yield-accumulator/test/poc-M-03.t.sol
 -->
 
 ## Finding description and impact

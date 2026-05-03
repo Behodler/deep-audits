@@ -96,7 +96,7 @@ contract TargetSymbolic is Test {
 ### Step 3: Run Halmos
 
 ```bash
-cd /home/justin/code/C4/solidity-audit
+cd <repo>
 PATH="$HOME/.foundry/bin:$PATH" ~/.local/bin/halmos \
   --contract TargetSymbolic \
   --solver-timeout-assertion 60000 \

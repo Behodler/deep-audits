@@ -4,7 +4,7 @@
 **High**
 
 ## Affected Contract
-`/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol`
+`<repo>/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol`
 
 **Primary location**: `_withdrawFrom()` (lines 368-396)
 **Contributing location**: `totalBalanceOf()` (lines 119-133)

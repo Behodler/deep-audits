@@ -4,9 +4,9 @@
 **Medium**
 
 ## Affected Contracts
-- `/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- `totalBalanceOf()` (lines 119-133), `_withdrawFrom()` (lines 368-396)
-- `/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/SurplusWithdrawer.sol` -- `withdrawSurplusPercent()` (lines 90-123)
-- `/home/justin/code/C4/solidity-audit/lib/reflax-yield-vault/src/SurplusTracker.sol` -- `getSurplus()` (lines 36-57)
+- `<repo>/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol` -- `totalBalanceOf()` (lines 119-133), `_withdrawFrom()` (lines 368-396)
+- `<repo>/lib/reflax-yield-vault/src/SurplusWithdrawer.sol` -- `withdrawSurplusPercent()` (lines 90-123)
+- `<repo>/lib/reflax-yield-vault/src/SurplusTracker.sol` -- `getSurplus()` (lines 36-57)
 
 ## Root Cause
 

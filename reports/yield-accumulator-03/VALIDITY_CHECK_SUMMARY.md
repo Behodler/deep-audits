@@ -55,7 +55,7 @@
 
 **Root Cause Verification (Source Code)**:
 
-Lines 320-354 of `/home/justin/code/C4/solidity-audit/lib/stable-yield-accumulator/src/ClaimArbitrage.sol`:
+Lines 320-354 of `<repo>/lib/stable-yield-accumulator/src/ClaimArbitrage.sol`:
 
 ```solidity
 function _settleResidualDelta(address token) internal {
@@ -126,7 +126,7 @@ Checked against all 8 known issues:
 
 **Root Cause Verification (Source Code)**:
 
-Lines 195-217 of `/home/justin/code/C4/solidity-audit/lib/stable-yield-accumulator/src/ClaimArbitrage.sol`:
+Lines 195-217 of `<repo>/lib/stable-yield-accumulator/src/ClaimArbitrage.sol`:
 
 ```solidity
 // STEP 5: CONVERT RECEIVED STABLECOINS -> USDC
