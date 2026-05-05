@@ -1,0 +1,283 @@
+{
+  "project": "yield-accumulator",
+  "contract": "lib/stable-yield-accumulator/src/StableYieldAccumulator.sol",
+  "sanitization_metadata": {
+    "input_findings": 26,
+    "kept_findings": 24,
+    "removed_findings": 2,
+    "flagged_for_review": 0,
+    "sanitization_date": "2026-05-05",
+    "policy_notes": [
+      "Nudge-mechanism findings (DEDUP-01, DEDUP-18, DEDUP-20, DEDUP-21) explicitly preserved per user guidance: nudge introduces NEW unilateral 100% revenue-diversion power BEYOND documented owner trust scope (registering strategies, exchange rates, pausing). Not 'reckless admin mistakes'.",
+      "DEDUP-24 (flash-loan donation / external balance trust) preserved per user guidance: strategy-side root cause OOS but SYA-layer defensive gap is in scope.",
+      "Owner-trust findings that arise from documented trust scope (e.g., owner setting exchange rates, pausing tokens) preserved when they expose architecturally-relevant gaps (e.g., DEDUP-08, DEDUP-17, DEDUP-25, DEDUP-26 — these document slippage/timing gaps the bot/claimer can defend against, not pure 'admin mistakes')."
+    ]
+  },
+  "findings": [
+    {
+      "id": "DEDUP-01",
+      "merged_from": ["code-01", "econ-04"],
+      "title": "Owner can front-run claim() to redirect entire payment via nudgeSplit (slippage does not cover split distribution)",
+      "location": "StableYieldAccumulator.sol:410-427, 498-517",
+      "severity_estimate": "high",
+      "description": "setNudgeAddress() and setNudgeSplit() are unguarded onlyOwner setters with no timelock and no per-claim authorization. A malicious or MEV-aware owner can observe a pending claim() in the mempool and atomically set nudgeSplit=100 with an owner-controlled nudge address before inclusion. The slippage parameter minRewardTokenSupplied only checks actualPayment >= min (the total paid by the claimer), NOT the split distribution between phlimbo and nudge. Result: claimer pays full amount, NFT burned, strategies drained, but 100% of payment routes to the owner instead of Phlimbo. This is both a per-claim revenue grab (econ-04 mempool-race framing) and a systemic theft vector since slippage cannot defend the share split (code-01 framing).",
+      "preconditions": "Owner is malicious, compromised, or accidentally misconfigures; mempool visibility of pending claim() useful but not strictly required.",
+      "suggested_fix": "Add per-claim minPhlimboAmount (or expectedPhlimboShare) slippage parameter; cap nudgeSplit (e.g., to 30); impose 1-block timelock on nudge changes."
+    },
+    {
+      "id": "DEDUP-02",
+      "merged_from": ["code-03"],
+      "title": "claim() denormalization can compute actualPayment==0 while still draining strategies, allowing free claims of small yield",
+      "location": "StableYieldAccumulator.sol:489-517, 605-628",
+      "severity_estimate": "medium",
+      "description": "After totalNormalizedYield>0 check, claimerPayment = totalNormalizedYield * (10000 - discountRate) / 10000, then actualPayment = _denormalizeAmount(claimerPayment, rewardToken). With low-decimal reward token (USDC=6) and tiny 18-dec yield, actualPayment can floor to 0. Strategies are still drained to claimer; no actualPayment==0 guard. Free yield extraction up to NFT supply.",
+      "preconditions": "rewardToken decimals < 18 AND strategy yield small enough to truncate.",
+      "suggested_fix": "Revert if actualPayment==0 before withdrawing from strategies."
+    },
+    {
+      "id": "DEDUP-03",
+      "merged_from": ["code-04", "econ-12"],
+      "title": "NFT burn before yield availability check (gas griefing only)",
+      "location": "StableYieldAccumulator.sol:464-489",
+      "severity_estimate": "low",
+      "description": "NFT burn occurs at start of claim(); reverts roll back the burn so this is mostly cosmetic. Wastes claimer gas on bad-state claims; minor griefing edge cases.",
+      "suggested_fix": "Move NFT validate/burn after totalNormalizedYield computed."
+    },
+    {
+      "id": "DEDUP-04",
+      "merged_from": ["code-05"],
+      "title": "Cross-contract reentrancy via nudge address with hookable rewardToken",
+      "location": "StableYieldAccumulator.sol:510-515",
+      "severity_estimate": "medium",
+      "description": "nudge is an arbitrary owner-set address receiving reward tokens BEFORE phlimbo.collectReward. nonReentrant blocks claim() re-entry but not cross-contract callbacks if rewardToken has hooks (ERC777, ERC1363). With standard USDC: low risk. setRewardToken does not enforce hookless tokens.",
+      "preconditions": "rewardToken has transfer hooks AND nudge is attacker-controlled.",
+      "suggested_fix": "Reorder: phlimbo.collectReward first, then nudge transfer (CEI). Or guard rewardToken type."
+    },
+    {
+      "id": "DEDUP-05",
+      "merged_from": ["code-06"],
+      "title": "No validation that nudge != phlimbo, address(this), minterAddress",
+      "location": "StableYieldAccumulator.sol:410-414",
+      "severity_estimate": "low",
+      "description": "setNudgeAddress accepts any address. Aliasing to phlimbo, address(this), or minter causes silent misallocation. address(this) is particularly bad — no rescue function exists.",
+      "suggested_fix": "Revert if _nudge in {address(this), phlimbo, minterAddress, nftMinter, rewardToken}. Add rescueToken function."
+    },
+    {
+      "id": "DEDUP-06",
+      "merged_from": ["code-07"],
+      "title": "approvePhlimbo allows owner to revoke phlimbo allowance, DoSing claims",
+      "location": "StableYieldAccumulator.sol:394-399, 514",
+      "severity_estimate": "low",
+      "description": "If phlimbo.collectReward pulls via transferFrom, owner setting approval to 0 DoSes claim flow. Tx reverts so no fund loss; pure liveness.",
+      "suggested_fix": "Push to phlimbo via safeTransfer instead of relying on pull approval."
+    },
+    {
+      "id": "DEDUP-07",
+      "merged_from": ["code-08"],
+      "title": "setRewardToken emits no event; missing two-step pattern across config setters",
+      "location": "StableYieldAccumulator.sol:385-388",
+      "severity_estimate": "low",
+      "description": "setRewardToken emits no event (asymmetric vs other setters). Old reward token's allowance to phlimbo not zeroed during rotation.",
+      "suggested_fix": "Emit RewardTokenUpdated; clear old allowance on rotation."
+    },
+    {
+      "id": "DEDUP-08",
+      "merged_from": ["code-09", "econ-08"],
+      "title": "Slippage protection only one-sided; calculateClaimAmount inconsistent with claim() under owner-state changes",
+      "location": "StableYieldAccumulator.sol:492-496, 605-628, 634-658",
+      "severity_estimate": "low",
+      "description": "Owner can pause tokens or change exchange rates between calculateClaimAmount() and claim(), causing actualPayment to swing. Only minRewardTokenSupplied (lower bound) is protected; no upper bound. The view function matches claim() at fixed state but state is fluid (pause, exchange rate, discount). Compounds the higher-severity slippage gap (econ-01 family).",
+      "suggested_fix": "Add max-payment slippage parameter. See DEDUP-09 for the higher-severity claimer overpayment angle."
+    },
+    {
+      "id": "DEDUP-09",
+      "merged_from": ["code-11"],
+      "title": "NFT burn assumes NFTMinter honors burn semantics",
+      "location": "StableYieldAccumulator.sol:526-535",
+      "severity_estimate": "low",
+      "description": "_validateAndBurnNFT trusts NFTMinter to actually decrement balance. Bug or malicious minter could let user re-claim without burn.",
+      "suggested_fix": "Compare balanceOf before/after burn, or require NFTMinter enforces invariant."
+    },
+    {
+      "id": "DEDUP-10",
+      "merged_from": ["code-13"],
+      "title": "No event for nudge/phlimbo split amounts",
+      "location": "StableYieldAccumulator.sol:481, 517",
+      "severity_estimate": "low",
+      "description": "RewardsClaimed reports total but not nudgeAmount/phlimboAmount. Off-chain attribution requires trace inspection.",
+      "suggested_fix": "Emit NudgePayment and PhlimboPayment events."
+    },
+    {
+      "id": "DEDUP-11",
+      "merged_from": ["code-14", "code-02"],
+      "title": "Independent setters for nudge/nudgeSplit allow inconsistent state DoS; nudgeSplit==100 bypasses phlimbo.collectReward hook",
+      "location": "StableYieldAccumulator.sol:410-427, 501, 507-515",
+      "severity_estimate": "low",
+      "description": "setNudgeSplit(50) while nudge==address(0) DoSes claim() until owner fixes. setNudgeAddress(0) when nudgeSplit>0 also breaks the invariant. Additionally, when nudgeSplit==100, phlimboAmount=0 so collectReward(0) is never called and Phlimbo accounting hooks may be bypassed.",
+      "suggested_fix": "Atomic setNudgeConfig(addr, split); setters revert on inconsistency; consider always calling collectReward(0)."
+    },
+    {
+      "id": "DEDUP-13",
+      "merged_from": ["code-16", "econ-14"],
+      "title": "Single misbehaving strategy reverts entire claim() (liveness loss across all strategies)",
+      "location": "StableYieldAccumulator.sol:470-487",
+      "severity_estimate": "medium",
+      "description": "No try/catch around strategy.withdrawFrom. Any failing strategy DoSes the whole claim across all strategies until owner removes/pauses the offending one. Full liveness loss for legitimate claimers while the failing strategy persists.",
+      "suggested_fix": "Wrap withdrawFrom in try/catch; emit StrategyFailed; continue with remaining strategies."
+    },
+    {
+      "id": "DEDUP-15",
+      "merged_from": ["code-18", "econ-10"],
+      "title": "setPhlimbo does not zero old phlimbo's allowance on rewardToken",
+      "location": "StableYieldAccumulator.sol:385-399",
+      "severity_estimate": "low",
+      "description": "Old phlimbo retains rewardToken approval after rotation. Bounded by trusted phlimbo and transient SYA balance, but expands trust surface unnecessarily.",
+      "suggested_fix": "Zero old phlimbo's allowance in setPhlimbo before approving the new one."
+    },
+    {
+      "id": "DEDUP-16",
+      "merged_from": ["code-19"],
+      "title": "setDiscountRate allows 100% discount, enabling free strategy drain",
+      "location": "StableYieldAccumulator.sol:337-343, 492",
+      "severity_estimate": "medium",
+      "description": "rate==10000 allowed; produces actualPayment==0; combined with absent zero-payment guard (DEDUP-02 / code-03), any NFT holder drains strategies for free.",
+      "preconditions": "Owner sets discountRate=10000.",
+      "suggested_fix": "Require rate < 10000; guard actualPayment > 0."
+    },
+    {
+      "id": "DEDUP-17",
+      "merged_from": ["code-20"],
+      "title": "Admin setters not gated by whenNotPaused — config drift during pause",
+      "location": "StableYieldAccumulator.sol:217-228, 410-427",
+      "severity_estimate": "low",
+      "description": "Owner can mutate config while paused. Next claim post-unpause uses new config without warning. Amplifies front-running risk (see DEDUP-01).",
+      "suggested_fix": "Gate config setters with whenNotPaused or add settling delay."
+    },
+    {
+      "id": "DEDUP-18",
+      "merged_from": ["econ-01"],
+      "title": "Slippage parameter does not protect claimer against adverse discount-rate / exchange-rate changes (claimer overpays)",
+      "location": "StableYieldAccumulator.sol:496",
+      "severity_estimate": "high",
+      "description": "minRewardTokenSupplied checks actualPayment >= min (lower bound) — but the bot's risk is OVERPAYING, not underpaying. If owner reduces discount rate or raises exchange rate between simulation and inclusion, claimer pays MORE than expected for the same yield. Slippage check passes (actualPayment > min); claimer is forced into an unprofitable trade.",
+      "attack_path": "Bot quotes 14.7 USDC for 15 USD yield at 2% discount, sets min=14.7. Owner sets discount=0; actualPayment becomes 15. Check passes; claimer pays full price for 0 profit.",
+      "suggested_fix": "Add maxRewardTokenPaid (upper bound) AND/OR minNormalizedYieldReceived; or rename current parameter."
+    },
+    {
+      "id": "DEDUP-19",
+      "merged_from": ["econ-02"],
+      "title": "Yield withdrawn to claimer BEFORE payment collected (CEI violation)",
+      "location": "StableYieldAccumulator.sol:470-504",
+      "severity_estimate": "medium",
+      "description": "strategy.withdrawFrom transfers yield to msg.sender (line 480) before safeTransferFrom payment (line 504). FOT rewardToken would brick the claim. Callback-token strategies allow intra-tx external manipulation.",
+      "suggested_fix": "Move payment collection BEFORE strategy withdrawal loop (CEI)."
+    },
+    {
+      "id": "DEDUP-20",
+      "merged_from": ["econ-03"],
+      "title": "Nudge mechanism allows owner to redirect 100% of claim revenue with no cap",
+      "location": "StableYieldAccumulator.sol:106-112, 410-427, 498-515",
+      "severity_estimate": "high",
+      "description": "setNudgeAddress accepts any address; setNudgeSplit accepts up to 100. Owner can synchronously redirect all claim revenue to an EOA. No cap, no timelock, no beneficiary lock. Expands trust model beyond documented assumptions. Distinct from DEDUP-01 (front-running) — this is the standing systemic-redirect vector.",
+      "attack_path": "Owner key compromise → setNudgeAddress(attacker); setNudgeSplit(100) → all future claim revenue diverted permanently.",
+      "suggested_fix": "Cap nudgeSplit (e.g., 20-30%); require nudge has code; add timelock; pauser-callable emergency reset."
+    },
+    {
+      "id": "DEDUP-21",
+      "merged_from": ["econ-05"],
+      "title": "Nudge as 'soft pause' bypasses dual-unpause governance",
+      "location": "StableYieldAccumulator.sol:421-427",
+      "severity_estimate": "medium",
+      "description": "Behodler3's dual-unpause design intends bilateral unpause to prevent owner-only reward denial. Setting nudgeSplit=100 to a burn address achieves permanent rewards denial unilaterally. Pauser has no nudge authority, so the governance invariant is undermined.",
+      "suggested_fix": "Pauser-callable emergencyZeroNudge; or cap nudgeSplit < 50%."
+    },
+    {
+      "id": "DEDUP-22",
+      "merged_from": ["econ-06"],
+      "title": "Compound precision loss in normalize/denormalize round-trip",
+      "location": "StableYieldAccumulator.sol:484, 492-493",
+      "severity_estimate": "low",
+      "description": "Per-strategy normalization, then aggregate denormalization, rounds DOWN systematically — claimer-favored. Dust per-call.",
+      "suggested_fix": "Document; or per-strategy denormalize and reconcile."
+    },
+    {
+      "id": "DEDUP-23",
+      "merged_from": ["econ-07"],
+      "title": "Strategy removal strands accumulated yield",
+      "location": "StableYieldAccumulator.sol:256-272",
+      "severity_estimate": "medium",
+      "description": "removeYieldStrategy doesn't require zero pending yield. Phlimbo loses that yield permanently. Re-addition produces a windfall to the first claimer.",
+      "suggested_fix": "Require zero pending yield (or force-claim) before removal."
+    },
+    {
+      "id": "DEDUP-24",
+      "merged_from": ["econ-09"],
+      "title": "Strategy yield computation trusts external balance reads (flash-loan donation)",
+      "location": "StableYieldAccumulator.sol:543-552",
+      "severity_estimate": "medium",
+      "description": "yield = totalBalance - principal. If a strategy's balance is inflatable via flash-loan donation, an attacker drains real reserves at discount. SYA-layer makes no defensive bound. Strategies themselves are OOS, but SYA's defensive gap is in-scope.",
+      "suggested_fix": "Per-claim yield cap; or TWAP yield."
+    },
+    {
+      "id": "DEDUP-25",
+      "merged_from": ["econ-11"],
+      "title": "Token-pause yield backlog captured by single MEV claimer on unpause",
+      "location": "StableYieldAccumulator.sol:475, 306-318",
+      "severity_estimate": "low",
+      "description": "MEV bot back-runs unpauseToken to capture the entire pause-window yield at standard discount.",
+      "suggested_fix": "Delayed unpause, or metered backlog release."
+    },
+    {
+      "id": "DEDUP-26",
+      "merged_from": ["econ-13"],
+      "title": "setRewardToken mid-life leaves stale tokenConfig assumptions",
+      "location": "StableYieldAccumulator.sol:385-388, 493",
+      "severity_estimate": "medium",
+      "description": "Owner switching reward token changes the denormalization base. Front-running a pending claim with setRewardToken DoSes the claim or shifts payment unit. Distinct from DEDUP-07 which is event/allowance hygiene.",
+      "suggested_fix": "Require new token has tokenConfig; two-step migration; expectedRewardToken parameter in claim()."
+    }
+  ],
+  "removed": [
+    {
+      "id": "DEDUP-12",
+      "merged_from": ["code-15"],
+      "title": "Unconfigured token decimals/exchangeRate fall back silently",
+      "reason": "known_issue",
+      "matched_to": "Known Issue #8: 'Token config with zero decimals/exchange rate defaults to 18 decimals and 1:1 rate'",
+      "confidence": "high",
+      "rationale": "Finding's own description explicitly self-identifies as the documented known issue (#8). Sponsor has explicitly acknowledged this design — fallback to 18 decimals / 1:1 rate is intentional documented behavior. Removed per known_issue match."
+    },
+    {
+      "id": "DEDUP-14",
+      "merged_from": ["code-17"],
+      "title": "Fee-on-transfer behavior in strategy withdrawals miscounts received yield",
+      "reason": "out_of_scope",
+      "matched_to": "C4 known-invalid: Fee-on-transfer tokens (unless explicitly in scope)",
+      "confidence": "high",
+      "rationale": "Finding describes fee-on-transfer behavior on the asset withdrawn from a strategy. SYA does not register FOT-supporting strategies in documented deployments and FOT tokens are explicitly listed as known-invalid in the C4 OOS catalog (CLAUDE.md). User instruction explicitly directed removal of code-17. Removed per out_of_scope match."
+    }
+  ],
+  "flagged_for_review": [],
+  "preserved_high_severity_nudge_findings": [
+    "DEDUP-01 (code-01+econ-04) — nudge front-running",
+    "DEDUP-18 (econ-01) — slippage upper-bound gap (compounded by owner exchange-rate / discount-rate authority but the slippage interface defect is the in-scope root cause)",
+    "DEDUP-20 (econ-03) — standing 100% revenue redirect",
+    "DEDUP-21 (econ-05) — nudge as soft pause bypassing dual-unpause"
+  ],
+  "preservation_rationale": {
+    "nudge_findings": "Nudge code is NEW and introduces unilateral 100% revenue diversion power that exceeds the documented owner trust scope ('registering strategies, exchange rates, pausing'). Per user guidance these are NOT 'reckless admin mistakes' — they are privilege expansions beyond the documented trust model and remain in scope.",
+    "DEDUP-24_flash_loan": "Strategy-side root cause is OOS, but SYA's lack of defensive bounding (per-claim yield cap, TWAP) is an in-scope SYA-layer gap per user guidance.",
+    "DEDUP-08_DEDUP-17_DEDUP-25_DEDUP-26": "These document timing / slippage / config-drift gaps that the bot/claimer interface fails to defend against. They are architectural defects in the claim flow's interaction model, not pure 'admin mistakes'.",
+    "DEDUP-19_CEI": "CEI violation enables FOT and callback-token edge cases. The defensive gap is in-scope at SYA layer even though some downstream tokens may themselves be OOS."
+  },
+  "known_issues_referenced": [
+    "Dual-unpause mechanism (owner AND pauser can unpause) - intentional Behodler3 pattern",
+    "Decimal normalization to 18 decimals internally - documented design",
+    "Circular reference between Phlimbo and StableYieldAccumulator - documented deployment order",
+    "No oracles/AMMs; assumed 1:1 stablecoin exchange rates (owner-adjustable for permanent depegs)",
+    "Owner trust assumptions (registering strategies, exchange rates, pausing) - operational risk",
+    "Pauser trust assumptions - designated pauser can pause operations",
+    "External yield strategy behavior assumptions - out of scope",
+    "Token config with zero decimals/exchange rate defaults to 18 decimals and 1:1 rate"
+  ]
+}
