@@ -1,0 +1,21 @@
+{
+  "id": "ECON-011",
+  "title": "No guard preventing `nudgePaymentToken == NFTStaker.rewardToken (phUSD)`; misconfiguration siphons would-be staker rewards into nudges",
+  "severity_hint": "medium",
+  "nudge_related": true,
+  "location": {
+    "file": "src/BatchNFTMinter.sol",
+    "function": "setNudgePaymentToken / batchMint",
+    "lineStart": 76,
+    "lineEnd": 79,
+    "criticalLines": "121-126 (only paymentToken-equality guard)"
+  },
+  "scope": "BatchNFTMinter.sol vs NFTStaker.sol",
+  "economicDescription": "The contract enforces `nudgePaymentToken != paymentToken` at line 121-126 (a sensible accounting guard so the dust refund and the nudge payout don't share a token). It does NOT enforce that `nudgePaymentToken != rewardToken` (where rewardToken = NFTStaker's reward, i.e. phUSD).\n\nIn the production wiring described by CLAUDE.md, `paymentToken` for mints is the dispatcher's prime token (typically phUSD as well — see CLAUDE.md NFTStaker section: 'earn per-second emissions of phUSD'). So in practice `paymentToken == phUSD`, and the existing guard already forbids `nudgePaymentToken == phUSD`. BUT: if the dispatcher is reconfigured (different `dispatcherIndex`) to use a non-phUSD prime token (say, USDC mints), `paymentToken == USDC` and the existing guard then ALLOWS `nudgePaymentToken == phUSD`.\n\nWhen this configuration ships, every qualifying batchMint pays out the contract's phUSD balance to `recipient`. If anyone (the yield funnel, an admin, or a stray transfer) ever sends phUSD to BatchNFTMinter, that phUSD is now claimable as a nudge instead of flowing to NFTStaker (where the same phUSD funds staker emissions). In other words, a misconfiguration creates a draining channel from the staker reward pool into nudge recipients.\n\nFurther: the yield-claim-nft architecture mints phUSD as mint-debt at the dispatcher and recipient is NFTStaker. If for any reason the dispatcher's recipient is set (or accidentally rotated) to BatchNFTMinter while `nudgePaymentToken == phUSD`, all the phUSD that should have funded NFTStaker emissions is paid out as nudges instead. Catastrophic for staker APY.",
+  "attackScenario": "Misconfiguration scenario:\n1. Multi-dispatcher deployment where dispatcherIndex 1 mints in phUSD and dispatcherIndex 2 mints in USDC.\n2. BatchNFTMinter is intended to be used for dispatcher 2 (USDC mints).\n3. Owner sets nudgePaymentToken = phUSD (intends to incentivize USDC-mint batches with phUSD nudges).\n4. The existing distinctness guard passes: paymentToken (USDC) != nudgePaymentToken (phUSD). Setter succeeds.\n5. Yield funnel routes phUSD into BatchNFTMinter. (Or phUSD is otherwise donated/sent.)\n6. Searchers drain phUSD via batchMint(USDC dispatcher).\n\nDirect-from-staker scenario:\n1. As above with dispatcher 2 in USDC.\n2. Operator (mistakenly or maliciously) configures the BalancerPoolerMintDebtHook recipient = BatchNFTMinter instead of NFTStaker.\n3. Dispatcher mint-debt accumulates as phUSD owed to BatchNFTMinter.\n4. Anyone calls hook.pull() → phUSD lands in BatchNFTMinter.\n5. Searcher batchMints to claim the entire phUSD pool that was supposed to fund NFTStaker emissions.\n\nNFTStaker stakers see runway collapse to zero as their funding is rerouted.",
+  "profitability": "Same as ECON-001/003 but with the consequence of directly draining staker funding rather than just yield-funnel funding.",
+  "affectedParties": ["NFTStaker stakers (catastrophic — their reward source diverted)", "protocol overall (worst-case insolvency on staker payout)"],
+  "recommendedMitigation": "- In `setNudgePaymentToken`, add a constructor-set or owner-set immutable list of FORBIDDEN nudge tokens (at minimum, NFTStaker.rewardToken).\n- Better: pass the NFTStaker's rewardToken into BatchNFTMinter at construction and revert in setter if newToken equals it.\n- Document explicitly in NatSpec that the nudge token MUST be a token the protocol does not consume elsewhere (e.g. an external incentive token).",
+  "confidence": "medium",
+  "intentReference": "Existing guard at 121-126 is named `BatchMint__NudgeTokenMatchesPaymentToken` — it explicitly addresses one collision but not the analogous one. Asymmetry is the finding."
+}

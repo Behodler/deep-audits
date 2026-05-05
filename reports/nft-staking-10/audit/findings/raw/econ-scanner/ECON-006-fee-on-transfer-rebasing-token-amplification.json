@@ -1,0 +1,20 @@
+{
+  "id": "ECON-006",
+  "title": "Use of `balanceOf(this)` for nudge payout exposes the protocol to fee-on-transfer / rebasing / ERC777 tokens if owner ever picks one as `nudgePaymentToken`",
+  "severity_hint": "low",
+  "nudge_related": true,
+  "location": {
+    "file": "src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 144,
+    "lineEnd": 154
+  },
+  "scope": "BatchNFTMinter.sol",
+  "economicDescription": "The nudge payout uses `IERC20(_nudgeTokenEntry).balanceOf(address(this))` and `safeTransfer(recipient, nudgeAmount)`. This means any token whose `balanceOf` does not behave like a standard ERC20 ledger creates inconsistency:\n\n(A) REBASING TOKENS (e.g. stETH, AMPL): `balanceOf` is dynamic — it grows or shrinks between calls. Searchers can time `batchMint` to maximize balance at the call site (e.g. immediately after a positive rebase on stETH). The owner gets no control over actual payout magnitude.\n\n(B) FEE-ON-TRANSFER TOKENS (e.g. PAXG, some niche tokens): the `safeTransfer` to `recipient` will deliver less than `nudgeAmount` due to fee deduction; subsequent dust calculation is unaffected (uses paymentToken not nudgeToken), but the protocol over-reports the payout in `NudgePaid` event vs what was actually delivered. Minor accounting issue.\n\n(C) ERC777 / TOKENS WITH HOOKS: `safeTransfer` to a contract `recipient` that has an ERC777 `tokensReceived` hook can re-enter `batchMint`. There is NO `nonReentrant` modifier on `batchMint`. While the inner call would face an empty contract balance (already swept), the re-entrant call could observe state mid-loop if it occurred earlier — but the nudge sweep happens after the loop and after `forceApprove(0)`, and re-entry into batchMint at this point would: (i) re-pull `paymentAmount` from msg.sender (potentially attacker contract — fine for attacker), (ii) loop mints, (iii) try the nudge — but the balance is 0 since outer call just swept it. So re-entry is not directly exploitable into double-payout. The safer practice is still `nonReentrant` on `batchMint`.\n\n(D) DOUBLE-ENTRY-POINT TOKENS (e.g. legacy SNX): `balanceOf` may return a different value than the canonical accounting; less common but possible.\n\nNote: `paymentToken == nudgePaymentToken` is explicitly forbidden (line 121-126) so the dust-vs-nudge confusion is avoided. But the `balanceOf` issues above stand for the nudge token specifically.",
+  "attackScenario": "Rebasing-token timing: owner sets nudgePaymentToken = stETH. Searchers track stETH rebase events (publicly known schedule for Lido) and batch their qualifying batchMint calls right after a rebase to maximize balance. Effect is small (rebase ~0.01-0.05% per day) but compounding over many cycles.\n\nERC777 reentrancy: low practical risk given the sweep ordering, but defense-in-depth dictates `nonReentrant`.",
+  "profitability": "Marginal for rebasing; structural for ERC777 (no current exploit but no defense).",
+  "affectedParties": ["protocol if owner picks an exotic token", "potentially a future maintainer who introduces such a token"],
+  "recommendedMitigation": "- Document explicitly that `nudgePaymentToken` MUST be a standard non-rebasing, non-fee-on-transfer ERC20.\n- Add `nonReentrant` to `batchMint` (cheap insurance, OZ's `ReentrancyGuard` is already a transitively-imported pattern).\n- For full robustness, snapshot intended payout amount via a fixed config rather than `balanceOf` (relates to ECON-001's mitigation).",
+  "confidence": "medium",
+  "intentReference": "No documentation. The 'Known Invalid Findings' in the parent CLAUDE.md excludes 'Non-standard/weird ERC-20 tokens (except USDT)' and 'Fee-on-transfer tokens (unless explicitly in scope)' — so this finding is NOT severity-eligible under the project's own filtering rules. Listing for completeness; would not promote without evidence the owner intends to use such a token. Reentrancy point stands independently as defense-in-depth."
+}

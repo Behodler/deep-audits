@@ -1,0 +1,21 @@
+{
+  "id": "ECON-002",
+  "title": "Nudge paid to `recipient` (not `msg.sender`) enables payer/receiver decoupling for griefing and gift-extraction",
+  "severity_hint": "medium",
+  "nudge_related": true,
+  "location": {
+    "file": "src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 109,
+    "lineEnd": 155,
+    "criticalLines": "148 (safeTransfer to recipient)"
+  },
+  "scope": "BatchNFTMinter.sol",
+  "economicDescription": "The nudge transfer goes to `recipient` (line 148), but `paymentAmount` is pulled from `msg.sender` (line 128) and the dust refund returns to `msg.sender` (line 159). `recipient` is freely chosen by the caller and is unrelated to who funds the mint. This asymmetry creates two distinct economic problems:\n\n(A) GIFT/SOCIAL-ENGINEERING: A naive user batch-minting on behalf of someone else (e.g. via a frontend that pre-fills `recipient` to a partner address) silently donates the nudge to `recipient` even though the user is the one doing the protocol-incentivized work. A malicious frontend or smart-contract router can hard-code its own address as `recipient`-for-the-nudge while still routing NFTs correctly via a wrapping contract that re-forwards the NFTs.\n\n(B) DOS-VIA-DONATION / FRONTRUN HIJACK: An MEV searcher who sees a victim's pending `batchMint(count >= nudgeSize)` tx in the mempool can frontrun with their own `batchMint(count == nudgeSize, recipient = attacker, paymentAmount = mintCost(nudgeSize))`. Attacker pays the (small) cost of `nudgeSize` mints and drains the entire nudge pool, leaving the victim's larger batch-mint to land with an empty nudge pool. Victim still pays for their `count > nudgeSize` mints but gets zero nudge.\n\nThe contract makes no attempt to require `recipient == msg.sender` or to record/lock the nudge to the payer.",
+  "attackScenario": "Frontrun scenario:\n1. Victim submits batchMint(count=20, recipient=victim, paymentAmount=20*P) — willing to do a large batch.\n2. Searcher observes pending tx, computes minimal qualifying nudge call: batchMint(count=nudgeSize=5, recipient=attacker, paymentAmount=5*P).\n3. Searcher submits with higher gas / via Flashbots; lands first.\n4. Searcher pays 5*P phUSD, receives the entire nudge pool to attacker EOA.\n5. Victim's tx lands with empty nudge pool — receives only 20 NFTs for 20*P, no nudge.\n6. Searcher's net profit: nudge_pool - 5*P (then can sell 5 NFTs back).\n\nGift extraction:\n1. Frontend dApp UI lets users specify recipient.\n2. Malicious frontend silently injects recipient = dApp_treasury for any qualifying batch.\n3. Users pay full mint cost; nudge silently routes to dApp.\n4. Indistinguishable from intended behavior unless user reads transaction calldata.",
+  "profitability": "Frontrun: profitable whenever (nudge_pool - mintCost(nudgeSize)) > gas + flashbot_priority_fee. Effectively always profitable for any non-trivial nudge pool.\nGift extraction: zero-cost to malicious frontend operator.",
+  "affectedParties": ["batch-minters who specify a different recipient", "victim of frontrun (pays mint cost, loses nudge)", "users of malicious frontends"],
+  "recommendedMitigation": "Choose one based on intent:\n- If intent is to reward the BATCHER (the entity bearing gas/UX cost): change line 148 to `safeTransfer(msg.sender, ...)` instead of `recipient`.\n- If intent is to reward the RECIPIENT (the entity bearing capital cost), require `recipient == msg.sender` or `recipient == tx.origin` (with EIP-3074 caveat) at the boundary.\n- Independent of the above, mitigate frontrun by requiring a commit-reveal scheme, by paying a fraction-per-batch instead of full balance (see ECON-001), or by gating the nudge on a minimum `paymentAmount` (so a min-qualifying frontrun is more expensive than the trivial `nudgeSize * minPrice`).",
+  "confidence": "high",
+  "intentReference": "Code comment lines 19-22 does not specify whether the nudge is intended for the batcher or the recipient. NatSpec line 91-93 just says 'transfers ... to recipient'. The lack of a documented intent here is itself a finding — at minimum the mismatch needs explicit justification."
+}

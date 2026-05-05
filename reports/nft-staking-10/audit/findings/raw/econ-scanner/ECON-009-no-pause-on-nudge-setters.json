@@ -1,0 +1,20 @@
+{
+  "id": "ECON-009",
+  "title": "BatchNFTMinter is not Pausable; no kill-switch if nudge mechanism is being exploited",
+  "severity_hint": "medium",
+  "nudge_related": true,
+  "location": {
+    "file": "src/BatchNFTMinter.sol",
+    "function": "(contract-level)",
+    "lineStart": 36,
+    "lineEnd": 167
+  },
+  "scope": "BatchNFTMinter.sol",
+  "economicDescription": "BatchNFTMinter inherits only `Ownable` — it does NOT inherit `Pausable` or wire to the global `pauser` (unlike sibling NFTStaker which implements `IPausable`). If any of ECON-001 through ECON-008 are triggered live, the only way the owner can stop the bleed is to call `setNudgeSize(0)` or `setNudgePaymentToken(address(0))`. Both are owner-only actions, both require a separate transaction, and both are visible in mempool — meaning a final 'last-call drain' tx can be racing with the owner's disable tx (and likely wins because the attacker bot is faster than human reaction).\n\nFurther, neither setter is gated on a 'pool empty' check, so the disable transaction itself does NOT atomically protect the pool — a searcher seeing `setNudgeSize(0)` in the mempool will (a) see that no batchMint can win after this lands, but (b) can frontrun with their own batchMint at the current state to drain the pool one last time.\n\nThe lack of a pauser also means: if an upstream contract (e.g. ITokenMinterV2) is paused or compromised and `mint` reverts, all batchMint calls revert, but the nudge balance is still stranded in the contract with no rescue path other than re-enabling and successful mint (chicken-and-egg if the underlying minter is broken).",
+  "attackScenario": "1. Owner notices pool is being drained at every refill cycle (ECON-003).\n2. Owner submits setNudgeSize(0) to disable.\n3. Searcher bot sees tx in mempool, frontruns with batchMint(nudgeSize, recipient=attacker) at higher gas.\n4. Attacker drains pool one last time. Owner's disable tx then lands but is too late.\n5. To resume normal operation, owner must refill (back to step 1 in a future cycle).\n\nVariant: ITokenMinterV2 is paused. Owner cannot rescue stranded nudge balance because every batchMint reverts in the inner mint loop.",
+  "profitability": "Captures one final pool drain on every disable attempt.",
+  "affectedParties": ["protocol owner trying to react to an attack", "operations team"],
+  "recommendedMitigation": "- Inherit `Pausable` and gate `batchMint` with `whenNotPaused`. Wire `pause()` / `unpause()` to the global pauser used by NFTStaker.\n- Add an emergency `sweep(address token, address to, uint256 amount)` admin function for stranded balances.\n- Make `setNudgeSize` / `setNudgePaymentToken` atomic with a sweep: e.g. `disable_and_sweep(address to)` that zeros both knobs and transfers all balances to `to` in a single tx, leaving no exploit window.",
+  "confidence": "high",
+  "intentReference": "NFTStaker.sol implements `IPausable` (line 12, 31) and pause/unpause (line 214-220), and the project's CLAUDE.md (top-level) lists `Pausable` as an expected dependency (line 22). Asymmetry: BatchNFTMinter does not."
+}

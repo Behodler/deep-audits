@@ -1,0 +1,20 @@
+{
+  "id": "ECON-004",
+  "title": "Threshold gaming: split a large batch into N batches of `nudgeSize` to claim the nudge multiple times (only effective if pool refills between calls — see notes)",
+  "severity_hint": "low",
+  "nudge_related": true,
+  "location": {
+    "file": "src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 138,
+    "lineEnd": 155
+  },
+  "scope": "BatchNFTMinter.sol",
+  "economicDescription": "The threshold check is `count >= nudgeSize` and the payout is `balanceOf(this)`. After a successful nudge, the contract balance of `nudgePaymentToken` is zero (line 148 sweeps the full balance). A naive 'split batch into chunks' attack therefore yields exactly one nudge regardless of how the user chunks: chunk 1 drains the pool, chunks 2..N see zero balance and pay zero nudge.\n\nHOWEVER, two situations enable repeated nudge collection:\n\n(A) Multi-block: if the funnel/owner refills the pool between blocks (or transactions), an attacker can call batchMint once per refill — combined with ECON-003 (refill frontrun) this is the dominant attack pattern.\n\n(B) Cross-tx donation race: any party (the owner, the yield funnel, or any third party) can `IERC20.transfer(batchMinter, X)` between two of the attacker's qualifying batchMint calls in the SAME block (e.g. via interleaving). A searcher who controls bundle ordering can construct: [batchMint, donation, batchMint, donation, batchMint, ...] and collect the nudge each iteration.\n\n(C) The check `count >= nudgeSize` does not require count > nudgeSize; using count = nudgeSize is the cheapest qualifying batch. There is no diminishing return for larger batches and no bonus for batching well above threshold — so a sophisticated user always picks count = nudgeSize, defeating the spirit of the incentive (which presumably is to encourage LARGE batches).",
+  "attackScenario": "Variant (B) exploitation: \n1. Attacker has access to a yield-funnel-style refill pattern (e.g. a public claim/distribute function that anyone can trigger and that routes some tokens into batchMinter).\n2. Bundle: [trigger funnel] -> [batchMint(nudgeSize)] -> [trigger funnel] -> [batchMint(nudgeSize)] -> ...\n3. Each iteration drains the freshly-deposited pool to attacker-controlled recipient.\n\nDesign-intent variant (C):\n- Even a 'legitimate' batcher who would have minted 100 NFTs gets the same nudge as one who mints exactly nudgeSize=5. The protocol pays the same incentive for 5 mints as for 100, so users converge to count=nudgeSize.",
+  "profitability": "Variant (B): profitable when refill rate is non-trivial and the funnel can be triggered cheaply. Variant (C) is more of an incentive-misalignment concern: the protocol fails to get the larger batches it intended to incentivize.",
+  "affectedParties": ["protocol (nudge pool drained more efficiently than intended)", "honest large-batchers (no incremental reward for going above threshold)"],
+  "recommendedMitigation": "Two distinct fixes:\n- For (B): implement a per-block or per-tx cooldown on the nudge payout (e.g. `lastNudgeBlock` storage, require `block.number > lastNudgeBlock`).\n- For (C): make the nudge proportional to count, e.g. `payout = perBatchAmount * count / nudgeSize` capped at balance. Or use tiered thresholds (nudgeSize=5 → small bonus, nudgeSize=20 → bigger bonus, etc.). Or simply pay 1/N of the pool per qualifying batch, leaving 1-1/N for subsequent batches.",
+  "confidence": "medium",
+  "intentReference": "The 'pay full balance on first qualifying call' design is consistent with the implementation but mismatched with the typical-design-intent of a 'batch-size incentive'. The known-issues CLAUDE.md does not document the design rationale here."
+}

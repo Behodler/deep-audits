@@ -1,0 +1,30 @@
+{
+  "id": "DEDUP-004",
+  "source_ids": ["CODE-001"],
+  "title": "ERC1155 onReceived hook in mint loop drains BatchNFTMinter via live max-approval (no nonReentrant)",
+  "severity_hint": "high",
+  "nudge_related": false,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 128,
+    "lineEnd": 135,
+    "criticalLines": "131-133 (mint loop while approval is live)"
+  },
+  "rootCause": "`batchMint` pulls `paymentAmount` of `paymentToken` and grants `nftMinter` an unbounded approval (`type(uint256).max`) for the duration of the mint loop, with no `nonReentrant` modifier. Each inner `nftMinter.mint(...)` may invoke `onERC1155Received` on a contract recipient (per ERC1155 if `_safeMint` is used), executing arbitrary code while BatchNFTMinter holds (a) the full `paymentAmount` and (b) an active maxed-out allowance to `nftMinter`.",
+  "consolidatedDescription": "Inside the receiver hook, a malicious recipient can call `nftMinter.mint(dispatcherIndex, attackerAddress)` directly — bypassing this contract's loop bookkeeping while billing this contract's allowance and balance for additional mints, and routing the NFTs to any address. The original caller still pays for `count` mints, but additional mints are stolen on top.\n\nNote: this is a different reentrancy entrypoint from DEDUP-002. DEDUP-002 covers reentry via the nudge-payout `safeTransfer` to an ERC777-hooked recipient. This finding covers reentry via the ERC1155 receiver hook fired during the inner mint loop. The two share the same root-cause class (missing `nonReentrant` + state-exposing intermediate state) but operate on different state and exploit different surfaces. Both are fixed by adding `nonReentrant` to `batchMint`.\n\nSeverity hinges on whether `nftMinter.mint` ultimately calls `_safeMint` on the ERC1155 (the production NFTMinterV2 inherits OpenZeppelin ERC1155Supply, which uses `_doSafeTransferAcceptanceCheck` on receivers). If `_mint` rather than `_safeMint` is used the receiver hook does not fire and this is moot. PoC must verify against the deployed NFTMinterV2 implementation before promotion.",
+  "exploitScenarioCanonical": "1. Mallory deploys contract `M` implementing `onERC1155Received`. Inside the hook, `M` calls `nftMinter.mint(dispatcherIndex, mallory)` k extra times.\n2. Alice (a normal user, possibly via a frontend that lets her specify `recipient`) calls `batchMint(nftMinter, paymentToken, dispatcherIndex, count=1, recipient=address(M), paymentAmount=X)` where `paymentAmount` covers Alice's intended single mint plus surplus.\n3. During the inner `mint`, the ERC1155 transfer-receive hook fires on `M`. `M` calls `nftMinter.mint(...)` k extra times — each call charges the BatchNFTMinter (which holds Alice's full `paymentAmount` and has granted max approval) and mints NFTs to Mallory.\n4. Loop exits, allowance is revoked, dust refund returns whatever is left, but Alice has already paid for k extra mints she did not authorise.",
+  "impactSummary": "Direct theft of caller's funds (via the live approval) and direct minting of unauthorized NFTs to an attacker, in a single transaction. The caller pays for and receives only the NFTs they requested; everything additional minted within the receiver hook is stolen from their `paymentAmount`.",
+  "unionOfMitigations": [
+    "Add OpenZeppelin `ReentrancyGuard` and tag `batchMint` with `nonReentrant` (also fixes DEDUP-002).",
+    "Scope the approval to the exact `paymentAmount` (or, after the loop, the per-iteration cost) rather than `type(uint256).max` so any reentrant call attempting to drain through the approval at minimum hits the per-call budget.",
+    "Defense-in-depth: snapshot `paymentToken.balanceOf(address(this))` before and after the loop and revert if it diverged by more than the dispatcher's expected charge for `count` mints.",
+    "Verify `nftMinter.mint` semantics: confirm whether the production NFTMinterV2 uses `_safeMint` (which fires the hook) or `_mint` (which does not). If `_mint`, this finding is moot; if `_safeMint`, the mitigations above are required."
+  ],
+  "instances": [
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 132, "vector": "ERC1155 onERC1155Received during mint loop with live max approval"}
+  ],
+  "preservedDetails": "CODE-001 has the complete exploit walkthrough and the verification note about `_safeMint` vs `_mint` — must be checked against the deployed NFTMinterV2 before promoting severity.",
+  "confidence": "medium-high",
+  "notes": "PoC requirement: verify against the deployed NFTMinterV2 implementation that `mint` uses `_safeMint` (or otherwise triggers the receiver hook). If it uses `_mint`, this finding becomes informational. Recommend including the verification step in the PoC."
+}

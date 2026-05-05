@@ -1,0 +1,36 @@
+{
+  "id": "DEDUP-005",
+  "source_ids": ["ECON-011"],
+  "title": "No guard preventing nudgePaymentToken == NFTStaker.rewardToken (phUSD); misconfiguration siphons staker rewards into nudges",
+  "severity_hint": "medium",
+  "nudge_related": true,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "function": "setNudgePaymentToken / batchMint",
+    "lineStart": 76,
+    "lineEnd": 79,
+    "criticalLines": "121-126 (only paymentToken-equality guard, no rewardToken guard)"
+  },
+  "rootCause": "The contract enforces `nudgePaymentToken != paymentToken` at line 121-126 (an accounting guard so the dust refund and the nudge payout don't share a token). It does NOT enforce `nudgePaymentToken != rewardToken`, where `rewardToken` is the NFTStaker's emission asset (phUSD in the production wiring per CLAUDE.md). The asymmetry of guards is the root cause: one collision is forbidden, the structurally analogous one is allowed.",
+  "consolidatedDescription": "In single-dispatcher production wiring, `paymentToken == phUSD == rewardToken`, so the existing equality guard incidentally also blocks `nudgePaymentToken == phUSD`. The protection is a side effect, not a design.\n\nIn any multi-dispatcher deployment where one dispatcher uses a non-phUSD prime token (say, USDC), `paymentToken == USDC` and the existing distinctness guard then ALLOWS `nudgePaymentToken == phUSD`. Once that ships, every qualifying batchMint pays the contract's phUSD balance to `recipient`. If anyone (the yield funnel, a stray transfer, or a misconfigured BalancerPoolerMintDebtHook recipient) ever sends phUSD to BatchNFTMinter, that phUSD is now claimable as a nudge instead of flowing to NFTStaker — where the same phUSD funds staker emissions.\n\nWorst-case scenario: if a `BalancerPoolerMintDebtHook` recipient is ever (mistakenly or maliciously) configured to BatchNFTMinter while `nudgePaymentToken == phUSD`, all the phUSD that should have funded NFTStaker emissions is paid out as nudges instead via DEDUP-001's frontrun mechanic. Catastrophic for staker APY: the runway collapses to zero as the funding source is rerouted to MEV searchers.",
+  "exploitScenarioCanonical": "Misconfiguration scenario:\n1. Multi-dispatcher deployment: dispatcherIndex 1 mints in phUSD, dispatcherIndex 2 mints in USDC.\n2. BatchNFTMinter is intended for dispatcher 2 (USDC mints). Owner sets `nudgePaymentToken = phUSD` to incentivize USDC-mint batches with phUSD nudges.\n3. The existing distinctness guard passes: `paymentToken (USDC) != nudgePaymentToken (phUSD)`. Setter succeeds.\n4. Yield funnel (or any process producing phUSD) routes phUSD into BatchNFTMinter.\n5. Searcher monitors balance, calls `batchMint(USDC dispatcher, count=nudgeSize, recipient=searcher)` per DEDUP-001 mechanic, draining phUSD.\n\nDirect-from-staker scenario:\n1. As above with dispatcher 2 in USDC.\n2. Operator (mistakenly or maliciously) configures the BalancerPoolerMintDebtHook recipient = BatchNFTMinter instead of NFTStaker.\n3. Dispatcher mint-debt accumulates as phUSD owed to BatchNFTMinter.\n4. Anyone calls `hook.pull()` → phUSD lands in BatchNFTMinter.\n5. Searcher batchMints to claim the entire phUSD pool that was supposed to fund NFTStaker emissions. NFTStaker stakers see runway collapse to zero.",
+  "impactSummary": "Direct draining of NFTStaker reward funding, with downstream impact of staker insolvency on emissions. Distinct from DEDUP-001's yield-funnel-budget drain because the funds being drained are the staker reward source, not just the discretionary incentive budget.",
+  "unionOfMitigations": [
+    "In `setNudgePaymentToken`, add a forbidden-tokens check. Pass NFTStaker's `rewardToken` into BatchNFTMinter at construction (immutable) and revert in the setter if `newToken` equals it.",
+    "Maintain an owner-configurable forbidden-tokens list for additional protocol-internal tokens (e.g. the staker reward, phUSD, any other dispatcher prime token).",
+    "Document explicitly in NatSpec that the nudge token MUST be a token the protocol does not consume elsewhere (an external incentive token, e.g. USDC sourced from a yield funnel).",
+    "Independent of the above, consider DEDUP-001's mitigations (proportional payout, drip schedule, recipient == msg.sender). A correctly-implemented per-batch cap would reduce the catastrophic blast radius of this misconfiguration even if the guard itself is missed."
+  ],
+  "instances": [
+    {"contract": "BatchNFTMinter.sol", "function": "setNudgePaymentToken", "line": 76, "vector": "no guard against rewardToken collision"}
+  ],
+  "preservedDetails": "ECON-011 has the multi-dispatcher misconfiguration scenario and the BalancerPoolerMintDebtHook recipient-rotation worst-case.",
+  "confidence": "medium",
+  "notes": "Severity depends on the multi-dispatcher likelihood. In the current single-dispatcher wiring, the existing guard incidentally protects against this. Promote to high if the multi-dispatcher deployment is confirmed in scope; demote to QA if the scope is fixed to single-dispatcher phUSD-only mints. The fix is cheap regardless (one immutable + one require).",
+  "sanitization": {
+    "decision": "downgrade",
+    "rationale": "In the documented production wiring (single dispatcher, paymentToken == phUSD == rewardToken), the existing nudgePaymentToken != paymentToken guard incidentally protects against the rewardToken collision — so the finding has no impact on the actually-deployed configuration. The 'misconfigured BalancerPoolerMintDebtHook recipient' worst-case is a 'reckless admin mistake' pattern and is C4 known-invalid. The 'multi-dispatcher with non-phUSD prime token' scenario is forward-looking speculation about future code, which is also discouraged per project guidelines (no demonstrated root cause in current scope). Surviving substance: a cheap defensive hardening (forbidden-tokens guard) worth recording as QA. Downgrade to QA/Low.",
+    "applied_filters": ["c4_known_invalid:reckless_admin_mistake", "speculation_about_future_code"],
+    "surviving_scope": "Add forbidden-tokens guard (immutable rewardToken passed at construction) as cheap defensive hardening (QA)."
+  }
+}

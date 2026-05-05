@@ -1,0 +1,19 @@
+{
+  "id": "CODE-001",
+  "title": "ERC1155 onReceived hook in mint loop can drain BatchNFTMinter via live max-approval",
+  "severity_hint": "potential-high",
+  "nudge_related": false,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "line": 132,
+    "lineStart": 128,
+    "lineEnd": 135,
+    "function": "batchMint"
+  },
+  "code_snippet": "paymentToken.safeTransferFrom(msg.sender, address(this), paymentAmount);\npaymentToken.forceApprove(address(nftMinter), type(uint256).max);\n\nfor (uint256 i; i < count; ++i) {\n    nftMinter.mint(dispatcherIndex, recipient);\n}\n\npaymentToken.forceApprove(address(nftMinter), 0);",
+  "description": "The contract pulls `paymentAmount` of `paymentToken` and grants `nftMinter` an unbounded approval (`type(uint256).max`) for the duration of the mint loop. There is no `ReentrancyGuard` (`nonReentrant`) on `batchMint`, and `nftMinter.mint(...)` produces ERC1155 tokens that are sent to the user-supplied `recipient`. Per the ERC1155 standard the inner mint will invoke `onERC1155Received` on the recipient if it is a contract. The recipient hook executes while the BatchNFTMinter is sitting on (a) the entire `paymentAmount` it just pulled and (b) a maxed-out allowance to `nftMinter`. From inside the hook the malicious recipient can call `nftMinter.mint(dispatcherIndex, attackerAddress)` directly — bypassing this contract's loop bookkeeping while billing this contract's allowance and balance for additional mints, and routing the NFTs to any address. The original caller still pays for `count` mints, but additional mints are stolen on top.",
+  "exploit_scenario": "1) Mallory deploys a contract `M` implementing `onERC1155Received`. Inside the hook, `M` calls `nftMinter.mint(dispatcherIndex, mallory)` k extra times. 2) Alice (a normal user) calls `batchMint(nftMinter, paymentToken, dispatcherIndex, 1, address(M), paymentAmount)` where `paymentAmount` covers Alice's intended single mint plus surplus. 3) During the inner `mint`, the ERC1155 transfer-receive hook fires on `M`. `M` calls `nftMinter.mint(...)` k extra times — each call charges the BatchNFTMinter (which holds Alice's full `paymentAmount` and has granted max approval) and mints NFTs to Mallory. 4) Loop exits, allowance is revoked, dust refund returns whatever is left, but Alice has already paid for k extra mints she did not authorise.",
+  "recommended_mitigation": "Add OpenZeppelin `ReentrancyGuard` and tag `batchMint` with `nonReentrant`. Also consider scoping the approval to the exact `paymentAmount` (or, after the loop, the per-iteration cost) rather than `type(uint256).max` so any reentrant call attempting to drain through the approval at minimum hits the per-call budget. As a defense-in-depth measure, snapshot `paymentToken.balanceOf(address(this))` before and after the loop and revert if it diverged by more than the dispatcher's expected charge.",
+  "confidence": "medium-high",
+  "notes": "Severity hinges on whether `nftMinter.mint` ultimately calls `_safeMint` on the ERC1155 (the production NFTMinterV2 inherits OpenZeppelin ERC1155Supply, which uses `_doSafeTransferAcceptanceCheck` on receivers). If `_mint` rather than `_safeMint` is used the receiver hook does not fire and this is moot. Recommend verifying against the deployed NFTMinterV2 implementation."
+}

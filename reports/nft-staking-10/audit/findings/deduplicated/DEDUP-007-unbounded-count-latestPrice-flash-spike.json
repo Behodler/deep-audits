@@ -1,0 +1,29 @@
+{
+  "id": "DEDUP-007",
+  "source_ids": ["ECON-012"],
+  "title": "Unbounded `count` allows single-tx latestPrice flash spike, transient runway collapse in NFTStaker",
+  "severity_hint": "low",
+  "nudge_related": false,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 131,
+    "lineEnd": 134,
+    "criticalLines": "131-133 (loop has no MAX_BATCH_SIZE)"
+  },
+  "rootCause": "`count` is unbounded by the contract — any caller can pass arbitrarily large `count` (subject only to gas limits and `paymentAmount` coverage). A single tx can mint thousands of NFTs and compound `latestPrice` by `r^count`, where `r = 1 + growthBasisPoints/10_000`. The next NFTStaker `_recomputeSchedule` reads the new latestPrice and recomputes `R = totalStaked * latestPrice * targetAPY / SECONDS_PER_YEAR`, which can collapse runway to near-zero in a single block.",
+  "consolidatedDescription": "Distinct from DEDUP-006 in that this finding does NOT depend on the nudge feature being active or attractive — it applies to any large-count batchMint regardless of the nudge balance. The mechanic:\n\n1. After a count=200 batch at growth_bps=250: `r^200 ≈ 138x` price jump in one tx.\n2. NFTStaker reads this `latestPrice` on its next interaction (line 385-425).\n3. New `R` is 138x larger; new runway is ~138x smaller.\n4. Stakers' `_updatePool` accrues at the new (huge) rate against the old budget, potentially exhausting it within a single block. Once the budget drains, further accrual is clamped at zero (line 329).\n\nNot a clean theft path:\n- The attacker's existing stake doesn't retroactively accrue at the new rate (`pendingReward` is computed from accumulated `acc`, not from `latestPrice` directly), so the flash spike does not retroactively pay the attacker more for past time.\n- The mint payment partly funds the staker budget (50% of mint-debt feeds NFTStaker via the dispatcher hook), so the attacker actually CONTRIBUTES to V even as they raise R.\n- Net: a counterintuitive equilibrium-dependent transient that mostly grieves honest stakers via runway collapse, rather than directly stealing.\n\nThe attack is therefore primarily a tail-risk / griefing concern, not a profit path. Filed as low/QA, but kept distinct from DEDUP-006 because:\n- DEDUP-006's exploit path requires the nudge feature to be funded and triggers the latestPrice ladder via uneconomic mints (small count, high frequency).\n- DEDUP-007's exploit path triggers the latestPrice ladder via a single very-high-count mint, potentially without any nudge interaction at all.\n- Mitigations differ: DEDUP-006 is fixed by changing the nudge incentive; DEDUP-007 is fixed by capping `count`.\n\nA correctly-bounded `count` mitigation also reduces DEDUP-006's per-cycle damage as a side effect, so the two findings reinforce each other but should be addressed independently.",
+  "exploitScenarioCanonical": "1. Attacker accumulates payment for 500 mints.\n2. Submits `batchMint(count=500)`. Pays a large amount of phUSD; dispatcher absorbs 50% as mint-debt destined for NFTStaker.\n3. After tx: `latestPrice` has scaled by `r^500 ≈ huge factor` (potentially 250 trillion x at growth_bps=250).\n4. On next NFTStaker interaction: `rewardRate` explodes; `rewardBudget` consumed in a single block.\n5. Stakers' near-term claim values look briefly inflated (pendingReward at the new acc) but are clamped by `reward > rewardBudget`.\n6. Net effect: rapid budget depletion + price ladder pushed beyond reasonable demand.",
+  "impactSummary": "Transient NFTStaker runway collapse and permanent NFT-price-ladder inflation in a single tx. Not a clean theft, but a tail-risk griefing path with bounded attacker cost (the mint payment, partly recovered as mint-debt to V).",
+  "unionOfMitigations": [
+    "Cap `count` to a reasonable maximum (e.g. `MAX_BATCH_SIZE = 100`) via `require(count <= MAX_BATCH_SIZE, ...)` — analogous to NFTStaker's `MAX_TARGET_APY` bound. Cheapest and most direct.",
+    "Document the relationship between batch size and NFTStaker schedule recompute behavior so off-chain monitoring can flag suspicious large batches.",
+    "Alternative (invasive): in NFTStaker, cap the per-recompute `latestPrice` jump (require `new_latestPrice <= old_latestPrice * MAX_FACTOR`) to dampen flash spikes. More complex and may interact with legitimate price growth."
+  ],
+  "instances": [
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 131, "vector": "unbounded count → r^count latestPrice multiplier"}
+  ],
+  "preservedDetails": "ECON-012 has the full math of the price spike, the analysis of why this is not a clean theft, and the explicit acknowledgment that the attacker partly funds V even as they spike R.",
+  "confidence": "medium",
+  "notes": "Filed as low because the profit path is muddled by mint-debt feedback into V, and because the steal-vector analysis suggests griefing rather than theft. Promote to medium if equilibrium analysis (per runway-dynamics-and-apy-as-policy.md) demonstrates a clean profit path; otherwise QA-grade with a recommended cap on `count`."
+}

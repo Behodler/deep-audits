@@ -1,0 +1,53 @@
+{
+  "c4_id": "H-01",
+  "originalId": "DEDUP-001",
+  "source_ids": ["CODE-003", "ECON-001", "ECON-002", "ECON-003", "ECON-004", "ECON-010"],
+  "title": "Nudge payout sweeps full balance to caller-supplied recipient: deterministic frontrun, refill arbitrage, recipient asymmetry, and threshold gaming",
+  "severity_hint": "high",
+  "nudge_related": true,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 109,
+    "lineEnd": 166,
+    "criticalLines": "138-155 (nudge payout block)"
+  },
+  "rootCause": "The nudge payout is computed as `IERC20(nudgePaymentToken).balanceOf(address(this))` and transferred to a caller-supplied `recipient` whenever `count >= nudgeSize`. Three structural decisions compound: (1) the payout is the entire current contract balance rather than a per-batch cap, (2) the qualifying threshold is a simple inequality with no proportional scaling, and (3) the recipient is decoupled from `msg.sender`. Together these turn every refill of the nudge pool into a deterministic public-mempool race won by whoever pays for the cheapest qualifying batch (`count == nudgeSize`) with the highest priority fee.",
+  "consolidatedDescription": "All raw findings in this cluster are surface manifestations of the same broken invariant: the nudge pool has no per-claim limit, no commit-reveal gating, no claimer/payer link, and no scaling with batch size. Specifically:\n\n(A) FRONTRUN A FUNDED BALANCE (CODE-003 / ECON-002 frontrun variant) - Once the yield funnel deposits NUDGE into the contract, any MEV searcher can submit a `batchMint` with the minimum qualifying `count` and `recipient = themselves`, sweeping the entire pool ahead of the legitimate large-batch user the funnel was meant to incentivize.\n\n(B) MEMPOOL-OBSERVABLE REFILL ARBITRAGE (ECON-001 / ECON-003) - Every owner refill (`IERC20.transfer(batchMinter, X)`) is publicly visible. Searchers bundle a `batchMint(count == nudgeSize, recipient = searcher)` immediately behind every refill via Flashbots, draining the freshly-funded pool atomically.\n\n(C) RECIPIENT != msg.sender ASYMMETRY (ECON-002 / CODE-003) - `paymentAmount` is pulled from `msg.sender` and the dust refund is returned to `msg.sender`, but the nudge transfer goes to `recipient`. A malicious frontend can silently inject its own address as `recipient` while still routing the NFTs through a wrapper, capturing nudges from naive users. Independently, the asymmetry is what makes the frontrun in (A) cheap.\n\n(D) THRESHOLD GAMING (ECON-004) - The check is `count >= nudgeSize`, with full-balance payout. This dis-incentivizes batches above the threshold (a batch of 1000 earns the same nudge as a batch of `nudgeSize`), so rational actors converge on the cheapest qualifying batch.\n\n(E) RECIPIENT-AS-PROTOCOL-CONTRACT GRIEFING (ECON-010) - The same recipient-asymmetry lets anyone set `recipient = NFTStaker` (or any protocol contract), permanently stranding both the minted NFTs and the nudge tokens in a contract with no rescue path.",
+  "exploitScenarioCanonical": "1. Yield funnel transfers 50,000 USDC to BatchNFTMinter (nudgeSize=5, paymentToken=phUSD).\n2. Searcher monitors mempool, detects the inbound transfer.\n3. Searcher constructs Flashbots bundle: [funnel_transfer (already pending), batchMint(count=5, recipient=searcher, paymentAmount=cost(5)_phUSD)].\n4. Bundle lands. Searcher pays ~5,000 phUSD (recoverable in part as NFT value or by re-selling), receives 50,000 USDC + 5 NFTs. Net profit ~45,000 USDC per cycle.\n5. Legitimate large-batch user (Alice, count=1000) submits her tx after the searcher's bundle lands. Her batch sees `balanceOf(batchMinter) == 0` and pays no nudge. She has paid for 1000 mints with no incentive - exactly the scenario the funnel was trying to prevent.\n6. Repeats every refill.",
+  "impactSummary": "Direct theft of all owner-funded incentive budget on every refill cycle. Legitimate batch-minters, who are the intended beneficiaries, structurally cannot win the race against a searcher bot. The yield funnel becomes a one-way faucet to MEV searchers.",
+  "unionOfMitigations": [
+    "Pay a fixed owner-configured `nudgePerBatch` amount per qualifying batch rather than the full balance, so the pool drains over many batches and a single frontrun captures only one batch's worth.",
+    "Make the payout proportional to count: `nudgePerBatch * count / nudgeSize` capped at balance - aligns the incentive with batch size and removes the threshold-gaming cliff.",
+    "Require `recipient == msg.sender` so the nudge accrues to the actual payer; closes the malicious-frontend gift-extraction vector and the recipient-as-protocol-contract grief.",
+    "Implement a drip schedule: track `lastNudgeBlock` and only allow nudges up to a per-block dripped amount.",
+    "Allowlist a known yield-funnel-controlled distributor as the only address authorized to claim nudges.",
+    "Combine refill with distribution atomically: have the funnel call a single `refillAndDistribute(...)` entrypoint that funds the pool and pays out to a deterministic set of recipients in the same tx (or via commit-reveal), eliminating the mempool reaction window."
+  ],
+  "instances": [
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 144, "vector": "balanceOf-as-payout"},
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 148, "vector": "transfer-to-recipient (not msg.sender)"},
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 139, "vector": "count >= nudgeSize threshold (no scaling)"}
+  ],
+  "preservedDetails": "ECON-001 has the strongest economic profitability calculation. CODE-003 has the cleanest frontrun walkthrough. ECON-002 has the recipient-asymmetry analysis. ECON-003 has the Flashbots bundle construction. ECON-004 has the threshold-gaming variants. ECON-010 has the cross-contract griefing into NFTStaker.",
+  "confidence": "high",
+  "classification": {
+    "severity": "High",
+    "c4_id": "H-01",
+    "plausibility": "plausible",
+    "mode_correlation": "regular_audit",
+    "justification": "Meets C4 High criteria: 'Assets can be stolen/lost/compromised directly or via a valid attack path that does not have hand-wavy hypotheticals.' The owner-funded nudge pool is a real asset (USDC/external incentive budget). The attack path is concrete: (i) refill is publicly visible in mempool, (ii) Flashbots bundle construction is standard MEV infrastructure, (iii) `count == nudgeSize` minimizes attacker cost, (iv) caller-supplied `recipient` lets the attacker keep the NFTs. No hypothetical conditions: any externally-funded refill on mainnet is structurally exposed. Independently, ECON-010 (recipient = NFTStaker) is a clean permanent-loss path on misuse. The protocol's stated intent (NatSpec lines 19-22, 'incentivize batch-minting via an externally-funded pool') is unreachable in adversarial conditions, so 'first qualifying caller wins' is NOT the intended design - the nudge is meant to subsidize legitimate large-batch users, who are structurally outraced by searchers.",
+    "preconditions": [
+      "Owner has configured nudgeSize > 0 and nudgePaymentToken != address(0).",
+      "An external funder (yield funnel, owner) has transferred nudgePaymentToken into BatchNFTMinter.",
+      "Attacker has phUSD (or whatever paymentToken the dispatcher requires) in an amount sufficient for cost(nudgeSize) mints. For nudgeSize=5 at startPrice=1000 phUSD this is ~5K phUSD - a trivially small capital requirement relative to nudge sizes large enough to actually nudge behaviour."
+    ],
+    "guardrails_observed": [
+      "Up-front guard `nudgePaymentToken != paymentToken` prevents the dust refund and the nudge from sharing a token (incidentally protects the single-dispatcher production wiring against rewardToken collision; see L-04).",
+      "DUST_THRESHOLD sweep returns surplus payment to msg.sender (caller is not griefed on payment surplus).",
+      "Approval is revoked at end of mint loop (line 135), reducing residual allowance attack surface for non-reentrant exits."
+    ],
+    "guardrails_insufficient_because": "None of the existing guardrails address the fundamental issues: balance-sweep payout, recipient != msg.sender, threshold-gaming. The mempool race exists for any mainnet deployment regardless of owner trust assumptions.",
+    "asset_at_risk": "The full nudgePaymentToken balance held by BatchNFTMinter at any time. In production this is owner- or yield-funnel-supplied USDC (or analogous external incentive token). Any refill is fully drainable."
+  }
+}

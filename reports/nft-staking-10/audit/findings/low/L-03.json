@@ -1,0 +1,46 @@
+{
+  "c4_id": "L-03",
+  "originalId": "DEDUP-004",
+  "source_ids": ["CODE-001"],
+  "title": "ERC1155 onReceived hook in mint loop drains BatchNFTMinter via live max-approval (no nonReentrant) - vector closed at production wiring",
+  "severity_hint": "qa",
+  "status": "pending_qa_bundle",
+  "created_at": "2026-05-06",
+  "nudge_related": false,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 128,
+    "lineEnd": 135,
+    "criticalLines": "131-133 (mint loop while approval is live)"
+  },
+  "rootCause": "`batchMint` pulls `paymentAmount` of `paymentToken` and grants `nftMinter` an unbounded approval (`type(uint256).max`) for the duration of the mint loop, with no `nonReentrant` modifier. The theoretical reentrancy vector requires `nftMinter.mint` to use OpenZeppelin's `_safeMint` (which fires `onERC1155Received` on contract recipients).",
+  "consolidatedDescription": "VERIFIED AGAINST PRODUCTION WIRING (yield-claim-nft/src/V2/NFTMinterV2.sol):\n\n- `NFTMinterV2.mint(uint256 index, address recipient)` at line 159-161 calls `_executeMint(...)`.\n- `_executeMint` at line 196 calls `_mint(recipient, resolvedTokenId, 1, \"\")` - the OpenZeppelin ERC1155 `_mint`, NOT `_safeMint`.\n- OpenZeppelin's `ERC1155._mint` does NOT call `_doSafeTransferAcceptanceCheck` - the receiver hook is only fired by `_safeMint` and `_safeTransferFrom`.\n\nTherefore the receiver-hook reentrancy vector does NOT fire in the production wiring. The theoretical attack scenario described in CODE-001 is closed at the deployed configuration. This finding becomes informational only - a defense-in-depth recommendation for a vector that is not currently exploitable.\n\nThe `nonReentrant` recommendation overlaps with L-01's defense-in-depth recommendation; both can be addressed by a single `ReentrancyGuard` import. Independently, scoping the approval to `paymentAmount` (rather than `type(uint256).max`) is a low-cost hardening that limits worst-case approval drain even if a future change to `NFTMinterV2` introduces `_safeMint`.",
+  "exploitScenarioCanonical": "Not applicable at production wiring. NFTMinterV2._executeMint uses _mint (not _safeMint), so onERC1155Received does not fire and the reentrancy entrypoint does not exist.\n\nIf NFTMinterV2 were modified in the future to use _safeMint (or to call any external contract that could re-enter BatchNFTMinter), the attack would become live: a malicious recipient implementing onERC1155Received could call `nftMinter.mint(dispatcherIndex, attackerAddress)` from within the hook, billing BatchNFTMinter's allowance for unauthorized mints to the attacker.",
+  "unionOfMitigations": [
+    "Add OpenZeppelin `ReentrancyGuard` and tag `batchMint` with `nonReentrant` (overlaps with L-01).",
+    "Scope the approval to the exact `paymentAmount` rather than `type(uint256).max` so any reentrant call attempting to drain through the approval at minimum hits the per-call budget.",
+    "Defense-in-depth: snapshot `paymentToken.balanceOf(address(this))` before and after the loop and revert if it diverged by more than the dispatcher's expected charge for `count` mints.",
+    "If NFTMinterV2 is ever migrated to `_safeMint`, the mitigations above become required. Track this dependency in cross-submodule change-request flow."
+  ],
+  "instances": [
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 132, "vector": "ERC1155 onERC1155Received during mint loop with live max approval (currently NOT triggered because NFTMinterV2 uses _mint not _safeMint)"}
+  ],
+  "preservedDetails": "CODE-001 has the complete exploit walkthrough.",
+  "confidence": "high (vector verified closed)",
+  "verification_note": "Verified against /home/justin/code/C4/solidity-audit/lib/yield-claim-nft/src/V2/NFTMinterV2.sol line 196: `_mint(recipient, resolvedTokenId, 1, \"\");` - production uses non-safe variant. OpenZeppelin's ERC1155._mint internal function does not invoke _doSafeTransferAcceptanceCheck, so onERC1155Received never fires from this call path.",
+  "classification": {
+    "severity": "Low",
+    "c4_id": "L-03",
+    "mode_correlation": "regular_audit",
+    "justification": "QA-grade defense-in-depth recommendation. The attack vector described in the original raw finding (CODE-001) does NOT materialize at the production wiring: NFTMinterV2._executeMint calls OpenZeppelin's `_mint` (not `_safeMint`) at line 196, so the ERC1155 receiver hook never fires during the BatchNFTMinter mint loop. Without the hook firing, there is no reentrancy entrypoint and the live max-approval cannot be abused via this path. The recommendation to add `nonReentrant` (overlapping with L-01) and scope the approval to `paymentAmount` is forward-looking hardening - if NFTMinterV2 is ever migrated to `_safeMint`, the vector becomes live, so the cross-submodule dependency should be tracked.",
+    "preconditions": ["NFTMinterV2 (or future replacement) would need to use `_safeMint` or otherwise invoke arbitrary recipient code during the mint - currently NOT the case."],
+    "guardrails_observed": [
+      "NFTMinterV2._executeMint uses `_mint`, not `_safeMint` (verified at yield-claim-nft/src/V2/NFTMinterV2.sol:196). OpenZeppelin's ERC1155._mint does not invoke _doSafeTransferAcceptanceCheck.",
+      "Approval is revoked at end of mint loop (BatchNFTMinter.sol:135).",
+      "Cross-submodule interface boundary: yield-claim-nft is a mutable dependency exposing only ITokenMinterV2 - any change from `_mint` to `_safeMint` would need to flow through the change-request process per CLAUDE.md."
+    ],
+    "guardrails_insufficient_because": "If NFTMinterV2 is ever modified to use `_safeMint`, the vector becomes live. The defense-in-depth `nonReentrant` recommendation is cheap forward-looking hardening.",
+    "asset_at_risk": "None at the production wiring. Theoretical: caller's `paymentAmount` and unauthorized NFT mints if NFTMinterV2 ever switched to `_safeMint`."
+  }
+}

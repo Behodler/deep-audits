@@ -1,0 +1,54 @@
+{
+  "c4_id": "L-02",
+  "originalId": "DEDUP-003",
+  "source_ids": ["CODE-007", "ECON-005", "ECON-009"],
+  "title": "Nudge setters apply atomically without sweep or pause; token rotation strands balances and creates jackpot windows, and no kill-switch exists to stop active drains",
+  "severity_hint": "qa",
+  "status": "pending_qa_bundle",
+  "created_at": "2026-05-06",
+  "nudge_related": true,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "function": "setNudgeSize / setNudgePaymentToken / (contract-level)",
+    "lineStart": 36,
+    "lineEnd": 167,
+    "criticalLines": "69-79 (setters), entire contract (no Pausable)"
+  },
+  "rootCause": "Both nudge setters (`setNudgeSize`, `setNudgePaymentToken`) take effect immediately with no atomic-sweep, no balance check, no timelock, and no pause path. The contract does not inherit `Pausable` (in contrast to NFTStaker, which does). When the owner needs to react to an attack, change configuration, or rotate tokens, every administrative path leaves an exploitable window open in the mempool because the active nudge balance is not atomically protected during the transition.",
+  "consolidatedDescription": "Surviving substance after sanitization (owner-frontrun and config-driven DOS dropped per centralization filter):\n\n(A) STRANDED FUNDS ON ROTATION - `setNudgePaymentToken` overwrites the token without checking `balanceOf(currentToken) == 0`. After rotation, the previous token sits on the contract with no rescue path. NFTStaker has the analogous-pattern guard (`totalStaked == 0` for `setStakedId` at line 231-235) - its absence here is asymmetric.\n\n(B) ROTATION-BACK JACKPOT - When the owner eventually rotates back to recover the stranded balance, the rotation tx is publicly visible. Searchers bundle a `batchMint(nudgeSize, recipient=searcher)` immediately after, draining the entire stranded balance in a single block. Structurally the same as H-01's mempool race.\n\n(C) NO KILL-SWITCH UNDER ATTACK - When H-01's drain is observed live, the owner's only recourse is `setNudgeSize(0)` or `setNudgePaymentToken(address(0))`. Both are visible in mempool and a searcher will frontrun the disable tx with one final `batchMint`. The disable does not atomically protect the pool - it just disables future qualifying calls.\n\nAll three sub-issues collapse to one architectural gap: there is no atomic operation that simultaneously (i) updates the configuration knob, (ii) sweeps any current balance to a designated recipient, and (iii) blocks new claims during the transition.",
+  "exploitScenarioCanonical": "Rotation-back jackpot:\n1. Owner sets nudgePaymentToken=USDC; pool accumulates 500,000 USDC over a quarter.\n2. Owner pivots to USDT for a partner program: `setNudgePaymentToken(USDT)`. 500,000 USDC stranded.\n3. Three months later, owner rotates back to USDC for a planned promotion.\n4. Searcher observes the `setNudgePaymentToken(USDC)` tx, computes the stranded balance, bundles `batchMint(nudgeSize, recipient=searcher)` immediately after.\n5. Searcher receives 500,000 USDC for cost(nudgeSize) phUSD.",
+  "impactSummary": "Compounding administrative hazard: every legitimate operational action (token rotation, kill-switch, parameter retune) creates an exploitable mempool window. Bounded by H-01's underlying mechanic - if H-01 is fixed, the rotation-back and kill-switch races become moot.",
+  "unionOfMitigations": [
+    "Replace independent setters with an atomic `disableAndSweep(address to)` that zeros both knobs and transfers all current `nudgePaymentToken` and any stranded balances to `to` in a single tx, leaving no exploit window. Combined with a `setNudgePaymentTokenAndSweep(address newToken, address sweepTo)` for rotation that transfers the old balance atomically.",
+    "Require `IERC20(currentToken).balanceOf(this) == 0` before `setNudgePaymentToken` is allowed to change the token (mirroring NFTStaker's `setStakedId` guard pattern at line 231-235).",
+    "Inherit `Pausable` and gate `batchMint` with `whenNotPaused`. Wire `pause()` / `unpause()` to the global pauser already used by NFTStaker. This gives the owner an atomic kill-switch that does not depend on a setter race.",
+    "Add a generic `sweep(address token, address to, uint256 amount)` admin function for stranded balances of any token (paired with the Pausable kill-switch so funds can be rescued during a paused state)."
+  ],
+  "instances": [
+    {"contract": "BatchNFTMinter.sol", "function": "setNudgePaymentToken", "line": 76, "vector": "no balance guard, immediate effect"},
+    {"contract": "BatchNFTMinter.sol", "function": "setNudgeSize", "line": 69, "vector": "immediate effect, no timelock"},
+    {"contract": "BatchNFTMinter.sol", "function": "(contract-level)", "line": 36, "vector": "no Pausable inheritance"},
+    {"contract": "BatchNFTMinter.sol", "function": "(contract-level)", "line": 36, "vector": "no rescue/sweep function"}
+  ],
+  "preservedDetails": "ECON-005 has the rotation-back jackpot scenario. ECON-009 has the kill-switch race.",
+  "confidence": "high",
+  "sanitization": {
+    "decision": "downgrade",
+    "rationale": "Sub-issue (C) 'OWNER FRONT-RUNS USER' (CODE-007) and (E) 'CONFIGURATION-DRIVEN DOS' are pure centralization / 'reckless admin mistake' patterns and are DROPPED per C4 known-invalid. Sub-issue (B) 'ROTATION-BACK JACKPOT' is genuine but contingent on H-01's underlying mechanic remaining unmitigated. Best framed as defense-in-depth operational hardening tied to H-01's mitigation surface.",
+    "applied_filters": ["known_intentional:owner_centralization", "c4_known_invalid:reckless_admin_mistake"],
+    "surviving_scope": "Stranded balance on token rotation (no atomic sweep), rotation-back jackpot mempool race, missing Pausable kill-switch on BatchNFTMinter."
+  },
+  "classification": {
+    "severity": "Low",
+    "c4_id": "L-02",
+    "mode_correlation": "regular_audit",
+    "justification": "QA-grade operational hardening recommendation. Stranded balance has no on-chain rescue path, but: (a) requires owner action to occur (rotation or disable), (b) the rotation-back jackpot is contingent on H-01's mechanic - if H-01 is fixed (per-batch cap or recipient == msg.sender), the jackpot mempool race is no longer profitable, (c) the kill-switch race is only relevant if H-01 is left unmitigated. None of the surviving sub-issues constitute a direct asset loss outside of H-01's mechanic. Best documented as 'admin response surface' QA paired with H-01's fix.",
+    "preconditions": ["Owner performs token rotation OR attempts to disable the nudge feature while H-01's mechanic is active."],
+    "guardrails_observed": [
+      "Only the owner can trigger setNudgePaymentToken / setNudgeSize.",
+      "Project's CLAUDE.md documents owner trust as intentional - reckless admin mistakes are filtered."
+    ],
+    "guardrails_insufficient_because": "The mempool race exists even with an honest owner because every administrative tx is publicly visible.",
+    "asset_at_risk": "Stranded nudgePaymentToken balance during rotation. Bounded by H-01's blast radius."
+  }
+}

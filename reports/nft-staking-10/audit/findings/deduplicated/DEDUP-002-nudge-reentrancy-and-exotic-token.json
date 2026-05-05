@@ -1,0 +1,33 @@
+{
+  "id": "DEDUP-002",
+  "source_ids": ["CODE-002", "ECON-006", "CODE-005"],
+  "title": "Missing nonReentrant on batchMint combined with balanceOf-driven nudge payout exposes the contract to ERC777/rebasing/fee-on-transfer hazards",
+  "severity_hint": "medium",
+  "nudge_related": true,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 109,
+    "lineEnd": 166,
+    "criticalLines": "144-154 (balanceOf, safeTransfer to recipient, NudgePaid event)"
+  },
+  "rootCause": "`batchMint` is not protected by a `nonReentrant` modifier, and the nudge payout pattern `safeTransfer(recipient, IERC20(nudgePaymentToken).balanceOf(address(this)))` makes three independent assumptions about the nudge token: (1) it has no transfer hooks, (2) `balanceOf` reflects a stable ledger between calls, and (3) `safeTransfer` delivers exactly the requested amount. None of these are enforced or documented, and any deviation creates a different failure mode.",
+  "consolidatedDescription": "Three related issues stem from the same combination of unguarded reentrancy + balance-driven payout:\n\n(A) ERC777 / TRANSFER-HOOK REENTRANCY (CODE-002, ECON-006(C)) — `safeTransfer(recipient, nudgeAmount)` invokes `tokensReceived` on a contract recipient if `nudgePaymentToken` is ERC777 or has analogous hooks. From within the hook, the recipient can re-enter `batchMint`. Sweep ordering means the immediate re-entry sees `balanceOf == 0` for the nudge — but a colluding contract can synchronously transfer fresh nudge tokens INTO BatchNFTMinter from a sibling address during the hook, then re-enter `batchMint` to claim a SECOND nudge from a single funding round (CODE-002 attack scenario). Even without collusion, the unprotected re-entry violates the contract's expected single-execution call pattern; combined with DEDUP-001's frontrun mechanic, a hooked-token recipient becomes a multi-claim attack surface.\n\n(B) REBASING TOKENS (ECON-006(A)) — If `nudgePaymentToken` is set to stETH or AMPL, `balanceOf` is dynamic. Searchers can time `batchMint` calls around publicly-known rebase events to maximize payout. The owner has no on-chain control over actual payout magnitude; the payout drifts with rebase schedule.\n\n(C) FEE-ON-TRANSFER / EVENT MISMATCH (CODE-005, ECON-006(B)) — `safeTransfer(recipient, nudgeAmount)` for a fee-bearing token delivers `nudgeAmount * (1 - fee)` while the `NudgePaid(recipient, token, nudgeAmount)` event records the pre-transfer snapshot. Off-chain accounting, dashboards, and yield-funnel reconciliation all read the event and overstate the delivered amount. While individual transfer fees are small, repeated misreports compound and break reconciliation against on-chain balances.\n\n(D) DOUBLE-ENTRY-POINT TOKENS (ECON-006(D)) — Tokens like legacy SNX expose multiple entry points whose `balanceOf` may diverge. Less common but listed for completeness.\n\nThe project's known-invalid list excludes most exotic ERC20 tokens by default, so the defense should focus on (i) ensuring the contract is robust regardless of which standard ERC20 the owner picks, and (ii) closing the reentrancy hole as defense-in-depth even if no current exotic token is planned.",
+  "exploitScenarioCanonical": "ERC777 multi-claim (CODE-002):\n1. Owner sets `nudgePaymentToken` to an ERC777-style token. Funder deposits 1000 NUDGE into BatchNFTMinter.\n2. Mallory deploys contract `M` (also holds NUDGE at sibling address `H`). `M` implements `tokensReceived`.\n3. Inside the hook: (a) trigger `H` to transfer fresh NUDGE into BatchNFTMinter, (b) re-enter `batchMint` with `recipient = M, count >= nudgeSize`, claim the refilled balance.\n4. Outer batchMint completes; Mallory has redeemed two nudges from one outer caller's mint cost.\n\nFee-on-transfer reconciliation drift (CODE-005):\n1. Owner sets nudgePaymentToken to a 1% FoT token. Pool holds 100. batchMint sweeps 100, recipient receives 99, event emits 100.\n2. Off-chain reconciler reads NudgePaid → 100. Compares against recipient balance → 99. Persistent 1-token discrepancy per claim.",
+  "unionOfMitigations": [
+    "Add OpenZeppelin `ReentrancyGuard` and apply `nonReentrant` to `batchMint`. This alone closes the ERC777 reentrancy and is cheap defense-in-depth even if no hooked token is currently used.",
+    "Document explicitly in NatSpec that `nudgePaymentToken` MUST be a standard non-rebasing, non-fee-on-transfer, non-hooked ERC20 (USDC, DAI, etc.).",
+    "In `setNudgePaymentToken`, validate against ERC1820 registry: `require(IERC1820Registry(0x1820...).getInterfaceImplementer(token, ERC777_TOKEN_INTERFACE_HASH) == address(0));`.",
+    "For the event-mismatch issue, snapshot the recipient's balance (or this contract's balance) before and after the transfer and emit the actual delivered delta — option (c) from CODE-005 (cheapest) snapshots `balanceOf(this)` pre/post.",
+    "Switch from `balanceOf`-driven payout to a fixed owner-configured `nudgePerBatch` amount (also recommended in DEDUP-001) — this dual-purposes the fix: closes rebasing-timing arbitrage, removes balance-dependent reasoning, and aligns with the proportional-payout fix from DEDUP-001."
+  ],
+  "instances": [
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 109, "vector": "missing nonReentrant"},
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 148, "vector": "safeTransfer triggers tokensReceived hook"},
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 144, "vector": "balanceOf snapshot ignores rebase / fee deduction"},
+    {"contract": "BatchNFTMinter.sol", "function": "batchMint", "line": 152, "vector": "NudgePaid event reports pre-transfer amount"}
+  ],
+  "preservedDetails": "CODE-002 has the ERC777 + colluding-refill multi-claim narrative. ECON-006 has the rebasing/FoT/double-entry token analysis and the explicit acknowledgment that exotic ERC20s are filtered by the project's known-invalid list. CODE-005 has the cleanest event-mismatch reconciliation example.",
+  "confidence": "medium",
+  "notes": "Per project's known-invalid list, exotic ERC20 tokens (FoT, rebasing, ERC777, double-entry-point) are typically out of scope unless explicitly supported. The reentrancy concern stands independently as defense-in-depth. The event-mismatch concern is QA-grade. Severity hint of 'medium' is driven by the reentrancy + colluding-refill multi-claim path; if reviewer concludes the project's exotic-token exclusion fully filters this finding, demote to QA."
+}

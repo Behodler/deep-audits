@@ -1,0 +1,20 @@
+{
+  "id": "ECON-003",
+  "title": "Owner refill of nudge pool is observable; searchers will sandwich-frontrun every refill to drain pool atomically",
+  "severity_hint": "high",
+  "nudge_related": true,
+  "location": {
+    "file": "src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 138,
+    "lineEnd": 155
+  },
+  "scope": "BatchNFTMinter.sol",
+  "economicDescription": "The nudge payout is `IERC20(nudgePaymentToken).balanceOf(address(this))` at the moment of the qualifying batchMint call. The owner (or yield funnel) refills this balance via plain `IERC20.transfer(batchMinter, X)` — visible in the mempool as soon as the funnel tx is broadcast. There is no commit-reveal, no time-lock, no minimum dwell time before the freshly-deposited tokens become eligible for nudge. A searcher can observe the inbound transfer, compute the exact post-refill balance, and submit a `batchMint(count = nudgeSize, recipient = searcher)` tx in the same block (or even bundled, via Flashbots) that drains the entire newly-funded pool. The searcher's only cost is the mint cost of `nudgeSize` NFTs, which is bounded and known a priori. The protocol's nudge pool is therefore drained ATOMICALLY at every refill — no legitimate user ever sees a non-empty nudge pool unless they happen to win the priority fee race against searcher bots.\n\nNote: this is structurally different from ECON-001 in that ECON-001 describes the strategic pattern of arbitrage; this finding is specifically about the temporal observability of refills creating a deterministic mempool game.",
+  "attackScenario": "1. Yield funnel periodically calls IERC20(USDC).transfer(batchMinter, 50000e6).\n2. Searcher monitors mempool for transfer tx with `to == batchMinter`.\n3. On detection, searcher constructs bundle:\n   - tx0 = funnel's transfer (already pending)\n   - tx1 = batchMint(count=nudgeSize, recipient=searcher, paymentAmount=cost(nudgeSize))\n4. Bundle submitted via Flashbots; tx1 lands immediately after tx0.\n5. Searcher receives 50,000 USDC + nudgeSize NFTs for cost(nudgeSize) phUSD.\n6. Net profit on every refill cycle.\n\nVariant: if the funnel uses a contract that calls some `flush()` method on a third party which forwards to batchMinter, the searcher can simulate the funnel call to compute final balance without even waiting for confirmation.",
+  "profitability": "Per refill: profit ≈ refill_amount - mintCost(nudgeSize) - flashbots_priority_fee. With refill_amount sized to incentivize batch behavior, this dominates the costs.",
+  "affectedParties": ["protocol", "owner-funded budget", "ALL legitimate batch-minters (they will never realistically receive a nudge)"],
+  "recommendedMitigation": "Refill-resistant designs:\n- Drip refill: owner sets a max-claimable-per-block or per-day rate; the contract tracks cumulative claimed and only allows nudges up to the dripped amount. Searchers can drain only the dripped portion per block, which can be tuned to be smaller than mintCost(nudgeSize) → unprofitable.\n- Commit-reveal nudge: caller must commit to a batchMint at block N, reveal at block N+k. Searcher cannot react to a refill in the gap.\n- Allowlist: only specific minter contracts (e.g. a fairness-distributing router) can collect nudges.\n- Pay nudge as a discount on `paymentAmount` rather than a separate token — couples the incentive to actually paying for a batch rather than a flash-collected payout.\n- Move refill into the same tx as a planned distribution (atomic refill+distribution).",
+  "confidence": "high",
+  "intentReference": "No documentation addresses refill mechanics. The CLAUDE.md / comment lines 19-22 mention the 'yield funnel' as an external funder without acknowledging the public observability of those funding transactions."
+}

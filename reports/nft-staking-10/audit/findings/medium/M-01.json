@@ -1,0 +1,58 @@
+{
+  "c4_id": "M-01",
+  "originalId": "DEDUP-006",
+  "source_ids": ["ECON-007"],
+  "title": "Nudge incentive structurally subsidizes uneconomic minting; inflates ERC1155 supply and degrades NFTStaker runway via latestPrice ladder",
+  "severity_hint": "medium",
+  "status": "pending_poc",
+  "created_at": "2026-05-06",
+  "nudge_related": true,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "function": "batchMint",
+    "lineStart": 109,
+    "lineEnd": 166,
+    "criticalLines": "131-133 (mint loop), 138-155 (nudge)"
+  },
+  "rootCause": "Each call to `batchMint` mints `count` ERC1155 NFT units regardless of whether minting them was economically rational for the protocol. When the nudge payout exceeds `count * mintPrice` (in dollar terms - which is the default state under H-01's mechanic), an attacker is willing to mint NFTs they don't otherwise want, purely to capture the nudge. Each such uneconomic mint compounds `latestPrice` upward via the dispatcher's `r = 1 + growthBasisPoints/10000` price ladder, which directly drives NFTStaker's emission rate and runway calculation.",
+  "consolidatedDescription": "Cross-contract interaction (per CLAUDE.md and design.md):\n- NFTStaker computes its emission rate as `R = totalStaked * latestPrice * targetAPY / SECONDS_PER_YEAR` (NFTStaker.sol line 401, 416-417).\n- `latestPrice` is read from `nftMinter.configs(dispatcherIndex).price` divided by `r`.\n- Each mint INCREMENTS price by factor `r` (per INFTSupply.sol line 31-32 NatSpec: 'price ... incremented after every mint by `price + price * growthBasisPoints / 10_000`').\n\nConsequence chain: every nudge-driven uneconomic batch raises `latestPrice` for the next mint AND for the staker's APY calculation. A nudge attacker who batch-mints `nudgeSize=5` NFTs at growth_bps=250 raises price by ~1.025^5 ~= 13%. Multiple cycles compound geometrically. This:\n\n(i) Pushes NEW mint prices higher than market demand justifies, degrading the NFT economics: organic minters arriving later pay artificially inflated prices set by nudge-arbitrageurs.\n\n(ii) Raises NFTStaker's `latestPrice`, which raises `S = totalStaked * latestPrice`, which raises emission rate `R`, which DRAINS the runway faster (`runway = budget / R`). Honest stakers see runway shrink due to attacker-driven price inflation, even though no honest demand changed.\n\n(iii) The NFT supply (which is what stakers can stake) inflates faster than honest demand, so the per-NFT 'targetAPY' floor is the same in nominal terms but stakers face a less liquid secondary market and degraded NFT-as-asset economics.\n\n(iv) Cross-contract amplifier: an attacker who repeatedly captures nudges at the cost of `nudgeSize` mints accumulates NFTs they can themselves stake into NFTStaker - capturing the inflated emission rate they personally created against honest stakers' share. This re-stages M-03's participation-multiplier exploit (which the project explicitly fixed in NFTStaker per CLAUDE.md NFTStaker section line 39) via a DIFFERENT entrypoint that the M-03 fix does not cover.\n\nThe project's M-03 fix sized `R` against the staked subset specifically to prevent participation-multiplier exploits. The nudge feature reintroduces a related-but-distinct attack: instead of manipulating the staker side (which M-03 fixed), the attacker manipulates the price input to the staker via uneconomic mints on the BatchNFTMinter side. This is a regression of M-03's intent achieved through a back door.",
+  "exploitScenarioCanonical": "1. Owner funds nudge pool to 50,000 USDC. growth_bps=250, startPrice=1000 phUSD, nudgeSize=5.\n2. Attacker calls `batchMint(count=5, recipient=attacker)`. Pays ~5_125 phUSD (geometric series), receives 5 NFTs + 50,000 USDC.\n3. After call: `nftMinter.configs.price` has grown by factor 1.025^5 ~= 1.131. New mint price ~1131 phUSD.\n4. Attacker repeats next refill: `cost(5) ~= 5*1131 + ... ~= 5790 phUSD`. Still receives full 50,000 USDC.\n5. After 10 such cycles: price has compounded by 1.025^50 ~= 3.43x. Honest minters now face 3.43x prices.\n6. Meanwhile NFTStaker's `latestPrice` has tripled, `R` has tripled, runway has shrunk to 1/3 of the original at constant `V` (reward budget).\n7. Attacker can now stake the 50 acquired NFTs into NFTStaker to capture the inflated `R` against honest stakers, re-creating an M-03-class participation exploit via the price-ladder back door.",
+  "impactSummary": "Cross-contract economic damage: nudge incentive subsidizes price-ladder inflation, which (a) prices out honest minters, (b) collapses NFTStaker runway by an attacker-controlled factor, and (c) reopens the M-03 participation-multiplier exploit through a different entrypoint. Compounds with H-01 - every drained refill cycle is also a price-inflation cycle.",
+  "unionOfMitigations": [
+    "The cross-contract impact dictates that the nudge feature MUST NOT be triggerable in a way that incentivizes uneconomic mints. The cleanest fix is to bound nudge per batch such that `nudgePayout(count) <= cost(count)` - but this defeats the purpose of a 'nudge'. Practical mitigations follow:",
+    "Require recipient to hold the NFTs for some period before the nudge is claimable (deferred / vesting payout). This breaks the 'mint-and-dump for the nudge' arbitrage by forcing the attacker to bear NFT-holding risk during the period.",
+    "Couple the nudge to actual staking: allow nudge claim only when recipient demonstrates current staked balance in NFTStaker (e.g. require `NFTStaker.users[recipient].amount >= count` post-batch). Aligns the incentive with the protocol's actual goal (stakers).",
+    "Gate nudge eligibility on a minimum `paymentAmount` floor that scales with `count` AND `latestPrice`, so an attacker must pay near-fair-value to qualify (closes the 'underpay and capture nudge' arbitrage).",
+    "Combined with H-01's proportional-payout fix, the per-batch cap reduces the per-cycle profit and therefore the per-cycle latestPrice inflation."
+  ],
+  "instances": [
+    {"contract": "BatchNFTMinter.sol + NFTMinterV2 + NFTStaker.sol", "function": "batchMint -> nftMinter.mint -> NFTStaker._recomputeSchedule", "line": 131, "vector": "uneconomic mints inflate latestPrice; cross-contract"}
+  ],
+  "preservedDetails": "ECON-007 has the full geometric-series math, the cross-contract latestPrice -> R -> runway chain, and the explicit reference to M-03's participation-multiplier intent.",
+  "confidence": "high",
+  "notes": "This is the most distinctive cross-contract economic finding in the cluster. The project's CLAUDE.md explicitly references M-03's design as preventing participation-multiplier exploits; the nudge feature's interaction with `latestPrice` reopens that class of exploit through a different entrypoint.",
+  "classification": {
+    "severity": "Medium",
+    "c4_id": "M-01",
+    "plausibility": "plausible",
+    "mode_correlation": "regular_audit",
+    "justification": "Meets C4 Medium criteria: 'Assets not at direct risk, but the function of the protocol or its availability could be impacted, or leak value with a hypothetical attack path with stated assumptions, but external requirements.' Stakers' principal is not stolen and accrued rewards are still paid, but: (a) NFTStaker's emission rate is artificially inflated by attacker-controlled mints, (b) runway compresses against honest stakers' budget, (c) the M-03 participation-multiplier protection is partially bypassed via the BatchNFTMinter side. This is a clear protocol-function impact (emission schedule no longer reflects organic demand) with stated assumptions (nudge feature funded; growth_bps > 0; attacker captures nudges per H-01). The attacker contributes to V via mint-debt (50% mint payment routes to NFTStaker), which is a partial self-fund - this dilutes the per-cycle damage but does not eliminate it because the runway compression effect dominates the V contribution at typical growth_bps values. Not High because no direct theft of staker principal or accrued rewards.",
+    "preconditions": [
+      "growthBasisPoints > 0 on the dispatcher (default in production wiring per design notes).",
+      "Nudge feature is funded and nudgePerBatch profitable (i.e. H-01's mechanic active).",
+      "NFTStaker has stakers (totalStaked > 0); otherwise R == 0 and the rate inflation has no immediate runway impact."
+    ],
+    "external_requirements": [
+      "Attacker has phUSD to fund nudgeSize mints per cycle.",
+      "Attacker has Flashbots access OR willingness to public-mempool race for the nudge.",
+      "Refills occur with sufficient frequency for the multi-cycle compounding to materialize."
+    ],
+    "guardrails_observed": [
+      "M-03 fix sizes R against the staked subset (not aggregate minted) - this prevents direct participation-multiplier exploits on the staker side.",
+      "rewardBudget is bounded by V = balance + mintDebt; emissions can't exceed V (solvency invariant).",
+      "windowEnd cap prevents emission accrual beyond runway."
+    ],
+    "guardrails_insufficient_because": "M-03 fix protects the staker side but does not bound attacker-driven price-ladder inflation from the BatchNFTMinter side. Solvency invariant ensures stakers can't claim more than V, but the runway compression still hurts honest stakers who experience accelerated budget depletion before their accruals materialize.",
+    "asset_at_risk": "Honest stakers' future emission accrual (runway compression). NFT pricing market integrity (organic minters pay attacker-inflated prices). Not direct theft."
+  }
+}

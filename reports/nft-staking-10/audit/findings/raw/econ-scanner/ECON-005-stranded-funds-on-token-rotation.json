@@ -1,0 +1,20 @@
+{
+  "id": "ECON-005",
+  "title": "`setNudgePaymentToken` has no empty-pool guard; rotating the token strands the previous balance and creates a free-money window for an arbitrary recipient",
+  "severity_hint": "medium",
+  "nudge_related": true,
+  "location": {
+    "file": "src/BatchNFTMinter.sol",
+    "function": "setNudgePaymentToken",
+    "lineStart": 76,
+    "lineEnd": 79
+  },
+  "scope": "BatchNFTMinter.sol",
+  "economicDescription": "`setNudgePaymentToken` (line 76) immediately overwrites `nudgePaymentToken` without checking whether the contract still holds a balance of the previous token. Two problems flow from this:\n\n(A) STRANDED FUNDS: If the owner sets `nudgePaymentToken = USDC`, the contract accumulates USDC, and then the owner sets `nudgePaymentToken = USDT`, the existing USDC balance is no longer the nudge token and will be ignored by `batchMint`. There is no `rescue`/`sweep` function for arbitrary tokens, so the USDC is stranded until the owner sets the token back to USDC. CLAUDE.md / NatSpec acknowledges this implicitly ('Setting either knob to zero disables') but does not flag the operational risk.\n\n(B) RE-ENABLE WINDOW EXPLOIT: If the owner ever sets back to USDC (e.g. for a planned distribution of the stranded balance), the entire stranded balance becomes claimable on the very next qualifying batchMint. Combined with ECON-003 (mempool monitoring), the rotation tx itself signals 'pool of size X is now claimable' to searchers; the next-block batchMint can drain it. This is structurally identical to the refill-frontrun problem but with a much larger payout because the stranded balance has been accumulating.\n\n(C) GRIEFING VIA DONATION: Anyone can `IERC20(targetToken).transfer(batchMinter, X)` to inflate the pool. If the owner rotates the token to a value the donor anticipates and the donor pre-positions a large transfer, they can engineer ECON-003-style frontruns at will.",
+  "attackScenario": "1. Owner sets nudgePaymentToken = USDC; pool accumulates 500,000 USDC over a quarter (with periodic refill-frontrun draining only fractions, leaving a large idle balance during low-activity periods).\n2. Phoenix launches a partner program that prefers nudges denominated in USDT.\n3. Owner sets nudgePaymentToken = USDT — 500,000 USDC stranded.\n4. Three months later, owner sets back to USDC for a planned promotion.\n5. Searcher observes the setNudgePaymentToken(USDC) tx, computes the stranded balance, and submits batchMint(nudgeSize) bundled after the rotation.\n6. Searcher receives 500,000 USDC for cost(nudgeSize) phUSD.",
+  "profitability": "Massive in the rotation-back scenario; the stranded balance can accumulate without being touched and creates a 'jackpot' for whoever is first.",
+  "affectedParties": ["protocol (stranded funds + jackpot drain on rotation)", "owner-funded budget"],
+  "recommendedMitigation": "- Require `IERC20(currentToken).balanceOf(this) == 0` before allowing `setNudgePaymentToken` to change the token (mirroring `setStakedId`'s `totalStaked == 0` guard in NFTStaker — same design pattern).\n- OR: add a `sweep(address token, uint256 amount, address to)` admin function so the owner can manually rescue stranded balances under explicit control.\n- OR: pair token rotation with an atomic owner-side withdrawal: rotation function takes both newToken and a recipient for the old balance.\n- Consider also pausing nudge eligibility for a few blocks after rotation to prevent atomic drain by searchers.",
+  "confidence": "high",
+  "intentReference": "NatSpec line 75-78 says only 'Owner-gated update of the nudge payout token. Setting `address(0)` disables the feature.' — silent on stranded-balance behavior. NFTStaker.sol uses the `totalStaked == 0` guard pattern for its analogous `setStakedId` (line 231-235), so a comparable guard pattern is the natural design choice; its absence here is asymmetric."
+}

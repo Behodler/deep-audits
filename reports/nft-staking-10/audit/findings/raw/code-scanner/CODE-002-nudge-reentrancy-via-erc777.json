@@ -1,0 +1,19 @@
+{
+  "id": "CODE-002",
+  "title": "Nudge payout via ERC777/hooked token enables reentrant batchMint with no guard",
+  "severity_hint": "potential-medium",
+  "nudge_related": true,
+  "location": {
+    "file": "/home/justin/code/C4/solidity-audit/lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+    "line": 148,
+    "lineStart": 137,
+    "lineEnd": 155,
+    "function": "batchMint"
+  },
+  "code_snippet": "uint256 _nudgeSize = nudgeSize;\nif (_nudgeSize != 0 && count >= _nudgeSize) {\n    if (_nudgeTokenEntry != address(0)) {\n        uint256 nudgeAmount = IERC20(_nudgeTokenEntry).balanceOf(address(this));\n        if (nudgeAmount != 0) {\n            IERC20(_nudgeTokenEntry).safeTransfer(recipient, nudgeAmount);\n            emit NudgePaid(recipient, _nudgeTokenEntry, nudgeAmount);\n        }\n    }\n}\n\nuint256 remaining = paymentToken.balanceOf(address(this));\nif (remaining / DUST_THRESHOLD != 0) {\n    paymentToken.safeTransfer(msg.sender, remaining);\n    ...",
+  "description": "`batchMint` is not protected by `nonReentrant`. The new nudge payout calls `IERC20(_nudgeTokenEntry).safeTransfer(recipient, nudgeAmount)`. If `nudgePaymentToken` is an ERC777 token (or any ERC20 with a `_beforeTokenTransfer`/`_afterTokenTransfer` hook that calls into the recipient), the attacker-controlled `recipient` receives a hook callback. From within that callback the recipient can re-enter `batchMint`. The contract's nudge balance has just dropped to zero, so the immediate re-entry yields `nudgeAmount == 0` (and the inner `if (nudgeAmount != 0)` short-circuits). However, the reentrancy still creates a state in which the ORIGINAL call's dust refund (lines 157-165) executes after a fully nested batch has already pulled and refunded its own `paymentToken`. Worse: a colluding contract can synchronously transfer fresh nudge tokens INTO the BatchNFTMinter from a sibling address during the hook, causing the nested re-entry to claim a second nudge from a single funding round. Combined with the recipient/msg.sender mismatch (CODE-003), this lets an attacker claim multiple nudge payouts atomically against a single funded balance.",
+  "exploit_scenario": "1) Owner sets `nudgePaymentToken` to an ERC777-style token (or sets it to a token that later upgrades to a hook-bearing implementation). 2) Funder deposits 1000 NUDGE into BatchNFTMinter. 3) Mallory deploys contract `M` holding additional NUDGE (or controlling another holder address `H`). `M` implements `tokensReceived`. Inside the hook, `M` (a) makes `H` transfer fresh NUDGE into BatchNFTMinter to refill the balance, (b) calls `batchMint(...)` again with `recipient = M` and `count >= nudgeSize`, claiming the refilled balance as a second nudge in the same outer transaction. 4) The outer batchMint completes; Mallory has redeemed two nudges with one outer caller's mint cost.",
+  "recommended_mitigation": "Add OpenZeppelin `ReentrancyGuard` and apply `nonReentrant` to `batchMint`. Document explicitly that `nudgePaymentToken` MUST be a hook-free ERC20 (USDC, DAI, etc.) — and consider validating in `setNudgePaymentToken` against a known-bad list, or reverting if `IERC1820Registry.getInterfaceImplementer(token, ERC777_TOKEN_INTERFACE_HASH) != address(0)`.",
+  "confidence": "medium",
+  "notes": "Cross-contract reentrancy specifically — the call leaves BatchNFTMinter and re-enters via the ERC777 hook. Even without a colluding refill, the unprotected reentry violates the contract's expected single-execution call pattern."
+}
