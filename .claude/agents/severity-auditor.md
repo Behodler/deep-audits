@@ -144,34 +144,10 @@ mkdir -p reports/<project>
 - Medium claimed but direct theft possible
 - Impact understated
 
-## INTERFACE METHODS
-
-### audit_severity(finding)
-Independent severity assessment
-- Returns: Severity audit report
-
-### compare_severity(claimed, assessed)
-Compare claimed vs. assessed with reasoning
-
-### validate_attack_path(finding)
-Check attack path for hypotheticals
-
-### assess_conditions(finding)
-Identify external conditions/requirements
-
-### check_impact_accuracy(finding)
-Verify stated impact matches reality
-
 ## ERROR HANDLING
 - **Insufficient Detail**: Request more finding information
 - **Ambiguous Impact**: Flag for human review
 - **Borderline Cases**: Document reasoning clearly
-
-## COORDINATION
-Work with other agents:
-- **severity-classifier**: Compare assessments
-- **report-validator**: Flag severity concerns
-- **finding-manager**: May update severity
 
 ## JUDGMENT FRAMEWORK
 

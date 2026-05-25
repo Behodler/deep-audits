@@ -21,9 +21,11 @@ Invoke **project-manager**: "Resolve friendly name to get project details"
 - Confirm project exists in lib/ directory
 
 ## 3. Confirm Removal
-Present to user what will be removed:
-- Submodule path: lib/<submodule-name>
-- Reports directory: reports/<friendly-name>/
+Present to user what will be removed (resolve the actual paths first):
+- Submodule path: `lib/<submodule-name>`
+- All versioned report dirs: `reports/<friendly-name>/` and `reports/<friendly-name>-NN/`
+- Persistent ledger: `reports/ledgers/<friendly-name>.json`
+- Workspace clone: `workspace/<friendly-name>/`
 - Registration entry in registered-projects.json
 - Ask for confirmation before proceeding (this is destructive)
 
@@ -35,14 +37,11 @@ Steps to execute:
 3. Remove `.git/modules/<submodule-name>` if it exists
 - Report any errors during removal
 
-## 5. Remove Reports Directory
-Invoke **project-manager**: "Remove all reports for project"
-- Delete entire `reports/<friendly-name>/` directory tree
-- This includes:
-  - findings/ (high/, medium/, low/ subdirectories)
-  - submissions/
-  - pocs/
-  - Any generated report files (*.md, *.json)
+## 5. Remove Reports, Ledger, and Workspace
+Invoke **project-manager**: "Remove all run artifacts for project"
+- Delete every versioned report dir: `reports/<friendly-name>/` and `reports/<friendly-name>-NN/` (findings/, submissions/, pocs/, *.json).
+- Delete the persistent ledger: `reports/ledgers/<friendly-name>.json`.
+- Delete the workspace clone: `workspace/<friendly-name>/`.
 
 ## 6. Unregister Project
 Invoke **project-manager**: "Remove project from registered-projects.json"
@@ -52,8 +51,8 @@ Invoke **project-manager**: "Remove project from registered-projects.json"
 
 ## 7. Verify Clean State
 Invoke **project-manager**: "Verify project has been completely removed"
-- Confirm lib/<submodule-name> no longer exists
-- Confirm reports/<friendly-name> no longer exists
+- Confirm `lib/<submodule-name>` no longer exists
+- Confirm no `reports/<friendly-name>*` dirs, no `reports/ledgers/<friendly-name>.json`, no `workspace/<friendly-name>/`
 - Confirm project not in registered-projects.json
 - Check .gitmodules no longer references the submodule
 
@@ -82,7 +81,7 @@ All file operations, git operations, and directory deletion MUST be performed by
 |------|-------|----------------|
 | Resolve project | project-manager | "Resolve friendly name '{name}' to get submodule path and project details" |
 | Remove submodule | project-manager | "Remove git submodule at lib/{submodule} completely (deinit, rm, clean modules)" |
-| Remove reports | project-manager | "Remove all reports and findings at reports/{name}/" |
+| Remove artifacts | project-manager | "Remove reports/{name}*, reports/ledgers/{name}.json, and workspace/{name}/" |
 | Unregister | project-manager | "Remove project '{name}' from registered-projects.json" |
 | Verify removal | project-manager | "Verify project '{name}' has been completely expunged" |
 
@@ -94,11 +93,9 @@ All file operations, git operations, and directory deletion MUST be performed by
 
 # Examples
 ```
-/expunge pooltogether
-# Removes lib/pooltogether-c4-audit, reports/pooltogether/, and registration
-
-/expunge brix
-# Removes lib/2025-11-brix-money-c4-audit, reports/brix/, and registration
+/expunge nft-staking
+# Removes lib/phoenix-nft-staking, all reports/nft-staking* dirs,
+# reports/ledgers/nft-staking.json, workspace/nft-staking/, and registration
 ```
 
 # Critical Rules

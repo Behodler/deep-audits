@@ -33,9 +33,9 @@ Or simple array:
 - Warn if exceeding 10 findings (C4 limit per warden)
 
 ## 2. Resolve Project
-Invoke **project-manager**: "Resolve friendly name"
-- Look up in registered-projects.json
-- If not found: List registered projects
+Invoke **project-manager**: "Resolve friendly name and get the latest versioned report dir"
+- Look up in registered-projects.json; if not found, list registered projects.
+- Get `<report-dir>` (latest `reports/<project>-XX/`) for locating submission files.
 
 ## 3. Load Selected Findings
 Invoke **finding-manager**: "Get findings by labels"
@@ -46,7 +46,7 @@ Invoke **finding-manager**: "Get findings by labels"
 
 ## 4. Load Submission Reports
 For each finding with status "submitted":
-- Read from `reports/<project>/submissions/<label>-submission.md`
+- Read from `<report-dir>/submissions/<label>-submission.md`
 - Note which findings don't have submission reports yet
 
 ## 5. Display Summary View
@@ -97,7 +97,7 @@ Combined Selection Report: pooltogether
 ... (continues for each finding)
 ```
 
-Save to: `reports/<project>/submissions/selection-view-<timestamp>.md`
+Save to: `<report-dir>/submissions/selection-view-<timestamp>.md`
 
 # Agent Delegation
 This command orchestrates report extraction without implementing storage logic:

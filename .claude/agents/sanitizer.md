@@ -97,39 +97,22 @@ Per C4 rules, these are typically OOS:
 - Reckless admin mistakes
 - Issues in parent/forked contracts where root cause is OOS
 
-## INTERFACE METHODS
+## LEDGER RECONCILIATION (run after known-issue filtering)
 
-### sanitize_findings(findings, known_issues, scope)
-Main entry point - filter findings against known issues and scope
-- Returns: Filtered findings + removal report
+After removing known/OOS issues, reconcile each surviving finding against the persistent ledger `reports/ledgers/<project>.json` (provided by project-manager). Compute a stable `fingerprint = sha256(contract:function:rootCauseClass)` for each finding and compare:
 
-### match_known_issue(finding, known_issues)
-Check if finding matches any known issue
-- Returns: { matched: bool, confidence: string, matchedIssue: string }
+- Matches an **`open`** entry → mark `origin: "still-open"`, bump `lastSeenRun`; **do not** regenerate a report this run.
+- Matches **`acknowledged` / `wont-fix` / `false-positive`** → suppress (treat like a known issue); record the suppression.
+- Matches a **`fixed`** entry that has reappeared → mark `origin: "regression"`, set `regressionOf` = the run it was fixed in, and **flag prominently** (highest signal).
+- **No match** → `origin: "new"`.
 
-### check_scope(finding, scope)
-Verify finding is in scope
-- Returns: { inScope: bool, reason: string }
-
-### is_oos_pattern(finding)
-Check if finding matches known OOS patterns (fee-on-transfer, etc.)
-
-### generate_removal_report(removals)
-Create detailed report of all filtered findings
-
-### flag_for_review(finding, possible_match)
-Mark uncertain matches for human review
+Only `new` and `regression` findings proceed to classification/reporting; `still-open` and suppressed findings are logged for the audit trail and passed to finding-manager for ledger bookkeeping. In a `--full` cold run, still treat human statuses (`acknowledged`/`wont-fix`/`false-positive`) as suppressions.
 
 ## ERROR HANDLING
 - **Missing Known Issues**: Warn and proceed without filtering
+- **Missing Ledger**: Treat all findings as `new` (first audit of the project)
 - **Ambiguous Scope**: Flag for human clarification
 - **Parse Errors**: Report and continue with available data
-
-## COORDINATION
-Work with other agents:
-- **project-manager**: Get known issues and scope
-- **deduplicator**: Receive deduplicated findings
-- **severity-classifier**: Pass sanitized findings for classification
 
 ## CRITICAL RULES
 1. **When in doubt, keep the finding** - Let human decide

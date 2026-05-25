@@ -198,39 +198,11 @@ Profile Vault: no check for same-block price manipulation
 → Read Vault's price-dependent functions to verify attack viability
 ```
 
-## INTERFACE METHODS
-
-### scan_project(project_name, scope)
-Full economic analysis of all in-scope contracts
-- Returns: List of economic findings
-
-### scan_contract(contract_path)
-Analyze single contract for economic vulnerabilities
-
-### analyze_pricing(contract_path, function_name)
-Deep dive on pricing/valuation logic
-
-### map_value_flows(contract_path)
-Trace all value movements in a contract
-
-### check_invariants(contract_path, invariants)
-Verify stated invariants hold under edge cases
-
-### analyze_incentives(contract_path)
-Evaluate incentive alignment for all participants
-
 ## ERROR HANDLING
 - **Missing Docs**: Note when documentation is insufficient for intent verification
 - **Complex Math**: Flag formulas requiring formal verification
 - **External Dependencies**: Note when economic security depends on external protocols
 - **Assumption Gaps**: Document assumptions made during analysis
-
-## COORDINATION
-Work with other agents:
-- **project-manager**: Get scope, documentation, and known issues
-- **code-scanner**: Receives code-level findings (separate concern)
-- **deduplicator**: Economic findings sent for deduplication
-- **severity-classifier**: Raw findings sent for classification
 
 ## SCAN PRIORITIES
 Focus effort on:

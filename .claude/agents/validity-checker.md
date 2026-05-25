@@ -154,37 +154,10 @@ Action: INVALID unless privilege escalation
 }
 ```
 
-## INTERFACE METHODS
-
-### check_validity(finding)
-Full validity check against all invalid patterns
-- Returns: Validity report
-
-### check_token_assumptions(finding)
-Detect non-standard token assumptions
-
-### check_user_mistake(finding)
-Detect findings relying on user errors
-
-### check_admin_assumption(finding)
-Detect findings requiring admin misbehavior
-
-### check_scope(finding, project_scope)
-Verify finding is in scope
-
-### is_known_invalid(finding)
-Check against C4 known invalid list
-
 ## ERROR HANDLING
 - **Ambiguous Finding**: Flag for human review
 - **Scope Unclear**: Request scope clarification
 - **Edge Cases**: Note uncertainty in report
-
-## COORDINATION
-Work with other agents:
-- **finding-manager**: Update finding validity status
-- **sanitizer**: Works alongside for known issue filtering
-- **severity-auditor**: May affect severity assessment
 
 ## SPECIAL CASES
 

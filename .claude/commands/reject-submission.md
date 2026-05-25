@@ -15,23 +15,24 @@ Extract project name and finding ID from $ARGUMENTS:
 - Validate finding ID format (H-XX, M-XX, or L-XX)
 
 ## 2. Locate Submission
+Invoke **project-manager**: "Get the latest versioned report dir" → `<report-dir>` (e.g. `reports/nft-staking-12/`).
 Invoke **finding-manager**: "Locate submission file for finding"
-- Search in `reports/<project-name>/submissions/` for matching file
+- Search in `<report-dir>/submissions/` for matching file
 - Expected pattern: `<finding-id>-submission.md`
 - If not found: Report error and list available submissions
 
 ## 3. Ensure Rejected Directory
 Invoke **finding-manager**: "Ensure rejected directory exists"
-- Create `reports/<project-name>/submissions/rejected/` if not exists
+- Create `<report-dir>/submissions/rejected/` if not exists
 
 ## 4. Move Submission
 Invoke **finding-manager**: "Move submission to rejected folder"
-- Move file from `reports/<project-name>/submissions/<finding-id>-submission.md`
-- To `reports/<project-name>/submissions/rejected/<finding-id>-submission.md`
+- Move file from `<report-dir>/submissions/<finding-id>-submission.md`
+- To `<report-dir>/submissions/rejected/<finding-id>-submission.md`
 
 ## 5. Update Finding Status (Optional)
 Invoke **finding-manager**: "Update finding status to rejected"
-- If finding JSON exists in `reports/<project-name>/findings/`, update status field
+- If finding JSON exists in `<report-dir>/findings/`, update status field
 
 ## 6. Completion Report
 Present to user:
@@ -54,7 +55,7 @@ All file operations MUST be performed by the finding-manager agent.
 | Task | Agent | Prompt Pattern |
 |------|-------|----------------|
 | Locate submission | finding-manager | "Find submission file for {finding-id} in project {project}" |
-| Ensure directory | finding-manager | "Create rejected directory in reports/{project}/submissions/ if not exists" |
+| Ensure directory | finding-manager | "Create rejected directory in <report-dir>/submissions/ if not exists" |
 | Move file | finding-manager | "Move {finding-id}-submission.md to rejected folder for project {project}" |
 | Update status | finding-manager | "Update status of {finding-id} to rejected in project {project}" |
 
@@ -66,14 +67,14 @@ All file operations MUST be performed by the finding-manager agent.
 # Examples
 ```
 /reject-submission panoptic M-01
-# Moves M-01-submission.md to reports/panoptic/submissions/rejected/
+# Moves M-01-submission.md to <latest report dir>/submissions/rejected/
 
 /reject-submission aave-v4 H-02
-# Moves H-02-submission.md to reports/aave-v4/submissions/rejected/
+# Moves H-02-submission.md to <latest report dir>/submissions/rejected/
 ```
 
 # Recovery
 To restore a rejected submission, manually move it back:
 ```bash
-mv reports/<project>/submissions/rejected/<finding-id>-submission.md reports/<project>/submissions/
+mv <report-dir>/submissions/rejected/<finding-id>-submission.md <report-dir>/submissions/
 ```

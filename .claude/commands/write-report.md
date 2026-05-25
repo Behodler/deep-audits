@@ -14,11 +14,12 @@ The C4 form has these separate fields that we generate content for:
 | **Title** | `[H-01] Clear vulnerability description` |
 | **Link to root cause** | GitHub URL to vulnerable code |
 | **Details** | Report body (see structure below) |
-| **PoC** | Standalone Foundry test code |
+| **PoC** | Foundry test code (workspace-integrated, or standalone) |
 
 # Orchestration Flow
 
-## 1. Load Finding with PoC
+## 1. Resolve report dir and load finding
+Invoke **project-manager**: "Get the latest versioned report dir for the project" → `<report-dir>` (e.g. `reports/nft-staking-12/`).
 Invoke **finding-manager**: "Get finding with PoC details"
 - Look up finding by project and label
 - Verify finding exists and has status "ready"
@@ -26,13 +27,10 @@ Invoke **finding-manager**: "Get finding with PoC details"
 - If status is "draft": Warn that PoC is required for H/M
 - Load full finding details including attached PoC path
 
-## 2. Validate PoC is Standalone
-Invoke **poc-validator**: "Verify PoC is standalone and passes"
-- **CRITICAL**: Check PoC only imports `forge-std/Test.sol`
-- Run isolation test in fresh forge environment
-- Ensure all tests pass
-- If PoC has external imports: FAIL and suggest regeneration with `/generate-poc`
-- If PoC fails tests: Report issue and suggest fix
+## 2. Validate PoC passes
+Invoke **poc-validator**: "Verify the PoC compiles and passes"
+- Run the PoC (workspace: `forge test --match-path test/poc-<label>.t.sol`; standalone: fresh forge env).
+- Ensure all tests pass. If it fails: report the issue and suggest `/generate-poc` to regenerate.
 
 ## 3. Generate Report (Details Field)
 Invoke **report-writer**: "Generate C4-compliant report"
@@ -55,8 +53,8 @@ Invoke **report-validator**: "Check report meets C4 standards"
 
 ## 5. Handle Validation Result
 **If validation passes**:
-- Save report to `reports/<project>/submissions/<label>-submission.md`
-- Verify PoC exists at `reports/<project>/pocs/<label>-poc.t.sol`
+- Save report to `<report-dir>/submissions/<label>-submission.md`
+- Verify the PoC exists (workspace `workspace/<project>/test/poc-<label>.t.sol`, or standalone `<report-dir>/pocs/<label>-poc.t.sol`)
 - Invoke **finding-manager**: "Update finding status to submitted"
 - Present summary for final review
 

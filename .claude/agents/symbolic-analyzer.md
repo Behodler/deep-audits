@@ -200,24 +200,23 @@ function check_depositWithdrawRoundTrip(uint256 assets) public {
 
 ```json
 {
-  "project": "legion",
-  "mode": "bounty",
+  "project": "nft-staking",
+  "reportDir": "reports/nft-staking-12",
   "criticalFunctions": [
-    {"contract": "Vault", "function": "deposit"},
-    {"contract": "Vault", "function": "calculateShares"}
+    {"contract": "RewardVault", "function": "deposit"},
+    {"contract": "RewardVault", "function": "calculateShares"}
   ]
 }
 ```
 
 ## OUTPUT FORMAT
 
-Write to: `reports/<project>/<mode>/symbolic-results.json`
+Write to: `<reportDir>/symbolic-results.json` (symbolic tests live in `workspace/<project>/test/Symbolic.t.sol`).
 
 ```json
 {
-  "project": "legion",
-  "mode": "bounty",
-  "runTimestamp": "2026-01-05T10:00:00Z",
+  "project": "nft-staking",
+  "runTimestamp": "2026-05-24T10:00:00Z",
   "tool": "halmos",
   "toolVersion": "0.3.3",
   "testsGenerated": 8,

@@ -190,48 +190,12 @@ Watch for these AI-generated patterns:
 - No direct asset loss for High claim
 - Hypotheticals presented as certainties
 
-## INTERFACE METHODS
-
-### validate_report(report, finding)
-Full validation of submission report
-- Returns: Validation report with pass/fail and notes
-
-### check_c4_form_format(report)
-Verify format matches C4 form fields
-- Check heading structure
-- Check no inline PoC
-- Check metadata comment
-
-### check_poc_standalone(poc_path)
-Verify PoC is standalone
-- Check imports
-- Run isolation test
-
-### assess_quality(report)
-Evaluate professional quality
-
-### check_compliance(report, finding)
-Verify C4 guideline compliance
-
-### detect_red_flags(report, finding)
-Identify potential issues
-
-### suggest_improvements(report)
-Provide actionable improvement suggestions
-
 ## ERROR HANDLING
 - **Parse Errors**: Report malformed markdown
 - **Format Errors**: List specific format violations
 - **Missing Sections**: List all missing sections
 - **Invalid Links**: Identify broken links
 - **PoC Issues**: Report standalone/test failures
-
-## COORDINATION
-Work with other agents:
-- **report-writer**: Receives reports for validation
-- **poc-validator**: Delegates standalone PoC checks
-- **finding-manager**: Update finding status based on validation
-- **severity-auditor**: May flag for severity review
 
 ## VALIDATION RULES
 

@@ -171,39 +171,11 @@ Profile B: externalCalls includes "msg.sender.call()"
 → Read A.foo() source to verify state changes after B.withdraw() call
 ```
 
-## INTERFACE METHODS
-
-### scan_project(project_name, scope)
-Full vulnerability scan of all in-scope contracts
-- Returns: List of potential findings
-
-### scan_contract(contract_path)
-Analyze single contract for vulnerabilities
-
-### scan_function(contract_path, function_name)
-Deep dive on specific function
-
-### get_vulnerability_patterns()
-Return list of patterns being checked
-
-### analyze_external_calls(contract_path)
-Map all external interactions in a contract
-
-### trace_data_flow(contract_path, function_name)
-Track how data moves through function
-
 ## ERROR HANDLING
 - **Parse Errors**: Report unparseable contracts, continue with others
 - **Import Failures**: Note missing dependencies
 - **Compiler Version**: Adapt analysis to Solidity version
 - **Large Contracts**: Handle gas-heavy contracts appropriately
-
-## COORDINATION
-Work with other agents:
-- **project-manager**: Get scope and contract paths
-- **econ-scanner**: Handles economic/game-theoretic vulnerabilities (separate concern)
-- **deduplicator**: Findings sent for deduplication
-- **severity-classifier**: Raw findings sent for classification
 
 ## SCAN PRIORITIES
 Focus effort on:

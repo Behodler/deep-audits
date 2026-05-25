@@ -1,420 +1,130 @@
 Run complete audit pipeline from analysis to submission-ready reports
 # Purpose
-Orchestrate the full audit workflow: analyze, generate PoCs, write reports, and compile QA.
+Orchestrate the full self-audit workflow end to end: analyze, generate PoCs, write reports, and compile QA. Output follows C4 conventions as a quality spec.
 
 # Arguments
-- `$ARGUMENTS` format: `<project-name> [bounty]`
-- Example: `pooltogether` (regular audit)
-- Example: `pooltogether bounty` (bounty mode)
-
-# Mode Detection
-Parse `$ARGUMENTS` to detect mode:
-- If "bounty" present → **Bounty Mode**
-- Otherwise → **Regular Audit Mode**
-
-## Bounty Mode Differences
-Per C4 bounty guidelines (`documentation/Bounties-*.md`):
-- **Only Critical and High severity accepted** (no Medium, no QA/Low)
-- **Coded runnable PoCs are mandatory** for all findings
-- **No QA report** - Low/Centralization findings are discarded
-- **$25 USDC deposit required** per submission (inform user)
+- `$ARGUMENTS` format: `<project-name> [--full]`
+- Project name is the friendly name from registration (case-insensitive).
+- `--full` forces a cold scan; otherwise re-runs are regression scans against the ledger (see `/analyze`).
 
 # Orchestration Flow
 
 ## 1. Confirm Project
 Invoke **project-manager**: "Resolve and validate project"
-- Verify project is registered
-- Get scope and known issues
-- Confirm ready for full audit
+- Verify the project is registered; get scope, known issues, and the current submodule commit.
 
 ## 1.2. Create Versioned Report Directory
 Invoke **project-manager**: "Create versioned report directory for this audit run"
-- Creates `reports/<project>-XX/` where XX is the next sequential version
-- If unversioned `reports/<project>/` exists (legacy), treat as version 0
-- First run (no existing directories) creates `reports/<project>-01/`
-- Store the versioned path for use in all subsequent steps
-- **All findings, PoCs, and submissions go under this versioned directory**
+- Creates `reports/<project>-XX/` (next sequential version). Store the path for all steps.
 
 ## 1.3. Setup Workspace (If Not Exists)
 Invoke **project-manager**: "Check if workspace exists, create if needed"
-- Check if `workspace/<project>/` already exists
-- If not exists: Create workspace via shallow clone from submodule URL
-- Remove remote to prevent accidental pushes
-- **PoCs will be written to `workspace/<project>/test/poc-*.t.sol`**
+- If `workspace/<project>/` is absent: shallow-clone from the submodule URL and remove the remote.
+- **Why**: source repos in `lib/` are read-only, but PoCs and Tier-3 tests need project infrastructure (harnesses, mocks, fork config). PoCs/tests are written to `workspace/<project>/test/`.
 
-**Why Workspace?**
-- Source repos in `lib/` are strictly read-only
-- PoCs often need project test infrastructure (harnesses, mocks, fork config)
-- C4 expects PoCs that can be dropped into project's `test/` directory
-- Workspace enables full project-integrated PoC development
-
+Present a summary and confirm:
 ```
-Workspace Setup
-───────────────
-Checking workspace... not found
-Cloning from https://github.com/code-423n4/2025-12-panoptic...
-Removing remote (safety measure)...
-Workspace ready: workspace/panoptic/
+Full Audit: nft-staking
+━━━━━━━━━━━━━━━━━━━━━━━
+Submodule:   lib/phoenix-nft-staking
+Report dir:  reports/nft-staking-12/
+Workspace:   workspace/nft-staking/
+Scope:       6 contracts        Known issues: 5
+Ledger:      3 open · 7 fixed · 2 acknowledged
+Run mode:    REGRESSION (2 files changed) — pass --full for a cold scan
 
-PoCs will be written to: workspace/panoptic/test/poc-*.t.sol
-```
-
-**If workspace already exists:**
-```
-Workspace Setup
-───────────────
-Workspace exists: workspace/panoptic/
-PoCs will be written to: workspace/panoptic/test/poc-*.t.sol
-```
-
-Present summary and confirm:
-```
-Full Audit: pooltogether
-━━━━━━━━━━━━━━━━━━━━━━━━
-
-Project: pooltogether
-Submodule: lib/2025-01-pooltogether
-Report Directory: reports/pooltogether-01/
-Workspace: workspace/pooltogether/
-Contracts in scope: 12
-Known issues: 5
-Mode: Regular Audit
-
-This will:
-  1. Run full vulnerability analysis
-  2. Generate PoCs for High/Medium findings
-  3. Write submission reports
-  4. Compile QA report for Low findings
-  5. Review all findings before completion
-
+This will: analyze → generate PoCs (High/Medium) → write reports → compile QA → final review.
 Proceed? (Invoke to continue, or provide feedback)
 ```
-
-**If Bounty Mode:**
-```
-Full Audit: pooltogether (BOUNTY)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Project: pooltogether
-Submodule: lib/2025-01-pooltogether
-Report Directory: reports/pooltogether-01/
-Workspace: workspace/pooltogether/
-Contracts in scope: 12
-Known issues: 5
-Mode: BOUNTY
-
-⚠️  BOUNTY MODE ACTIVE:
-  • Only Critical/High severity findings accepted
-  • All findings require runnable PoC (mandatory)
-  • No QA report will be generated
-  • Each submission requires $25 USDC deposit
-
-This will:
-  1. Run full vulnerability analysis (Critical/High only)
-  2. Generate PoCs for ALL findings (mandatory)
-  3. Write submission reports
-  4. Review all findings before completion
-
-Proceed? (Invoke to continue, or provide feedback)
-```
-
-## 1.5. Check for Cross-Mode Optimization
-Invoke **finding-manager**: "Check if other mode has existing findings in this versioned directory"
-
-**IMPORTANT**: Cross-mode import only looks **within the same versioned directory**.
-- If running in `reports/pooltogether-01/`, only checks for other mode in `reports/pooltogether-01/`
-- Does NOT import from previous versions (`reports/pooltogether/`, `reports/pooltogether-02/`, etc.)
-- This ensures each audit run is isolated
-
-**If cross-mode findings exist in same version:**
-```
-Cross-Mode Optimization Available
-─────────────────────────────────
-Existing bounty analysis found in reports/pooltogether-01/bounty/ with 3 findings.
-These will seed your audit analysis (still running full scan).
-
-Imported findings will be re-classified under audit criteria.
-```
-
-**Decision Tree:**
-- Running **bounty** + **audit** exists in same version → Import audit High findings as candidates
-- Running **audit** + **bounty** exists in same version → Import bounty Critical/High as candidates
-- Neither exists in this version → Fresh analysis
-
-This optimization saves time by not re-discovering issues the other mode already found,
-while still running the full scan to catch mode-specific issues.
 
 ## 2. Run Analysis
-Execute `/analyze` orchestration:
-- Invoke **code-scanner**: Scan for code-level vulnerabilities
-- Invoke **econ-scanner**: Scan for economic vulnerabilities
-- Invoke **deduplicator**: Filter duplicates
-- Invoke **sanitizer**: Remove known issues
-- Invoke **severity-classifier**: Classify findings (pass `mode: bounty` if bounty mode)
-- Invoke **finding-manager**: Store findings
+Execute the `/analyze` orchestration (Tier 1 → Tier 3 → dedup → sanitize+ledger → classify → store). See `analyze.md` for the full step list.
 
-Report progress (Regular Audit):
 ```
 Analysis Phase
 ──────────────
-Scanning contracts... done
-Raw findings: 47
-After deduplication: 23
-After sanitization: 18
-
-Classified:
-  High: 3
-  Medium: 7
-  Low: 8
+Mode: REGRESSION (changed: src/Staking.sol, src/RewardVault.sol)
+Raw 74 → dedup 30 → known-issues 24 → ledger: 18 still-open, 2 suppressed, 1 REGRESSION, 3 new
+Classified (new + regressed): High 1 · Medium 2 · Low 1
 ```
 
-Report progress (Bounty Mode):
-```
-Analysis Phase (BOUNTY)
-───────────────────────
-Scanning contracts... done
-Raw findings: 47
-After deduplication: 23
-After sanitization: 18
+## 3. Generate PoCs for High Findings
+For each High finding (new or regressed):
+- Invoke **poc-generator**: create PoC (workspace-first).
+- Invoke **poc-validator**: validate it compiles and passes.
+- Invoke **finding-manager**: update status.
 
-Classified (Critical/High only):
-  Critical: 1
-  High: 2
-  ⚠️ Discarded: 15 (Medium/Low not accepted in bounties)
+```
+PoC Generation: High
+────────────────────
+H-01 Reward debt drain (REGRESSION) ... ✓ PASS
 ```
 
-## 3. Generate PoCs for Critical Findings (Bounty Mode Only)
-**Skip this step in Regular Audit mode.**
+## 4. Generate PoCs for Medium Findings
+For each Medium finding: poc-generator → poc-validator → finding-manager (as above).
 
-For each Critical finding (bounty mode):
-- Invoke **poc-generator**: Create PoC
-- Invoke **poc-validator**: Validate PoC
-- Invoke **finding-manager**: Update status
-- **CRITICAL**: PoC is mandatory - finding cannot be submitted without passing PoC
+## 5. Write Reports for High/Medium
+For each finding with a passing PoC:
+- Invoke **report-writer**: generate the submission report.
+- Invoke **report-validator**: validate quality.
+- Invoke **finding-manager**: update to submitted.
 
-Report progress:
-```
-PoC Generation: Critical Severity (MANDATORY)
-─────────────────────────────────────────────
-CRIT-01 Protocol insolvency via....... ✓ PASS
-```
-
-## 4. Generate PoCs for High Findings
-For each High finding:
-- Invoke **poc-generator**: Create PoC
-- Invoke **poc-validator**: Validate PoC
-- Invoke **finding-manager**: Update status
-- **BOUNTY MODE**: PoC is mandatory - finding cannot be submitted without passing PoC
-
-Report progress:
-```
-PoC Generation: High Severity
-─────────────────────────────
-H-01 Reentrancy in claimPrize........... ✓ PASS
-H-02 Flash loan manipulation............ ✓ PASS
-H-03 Access control bypass.............. ⚠ FAILED (needs manual review)
-```
-
-## 5. Generate PoCs for Medium Findings (Regular Audit Only)
-**Skip this step in Bounty Mode** - Medium severity not accepted.
-
-For each Medium finding:
-- Invoke **poc-generator**: Create PoC
-- Invoke **poc-validator**: Validate PoC
-- Invoke **finding-manager**: Update status
-
-Report progress:
-```
-PoC Generation: Medium Severity
-───────────────────────────────
-M-01 Missing slippage protection........ ✓ PASS
-M-02 Oracle staleness................... ✓ PASS
-M-03 Unbounded loop.................... ✓ PASS
-M-04 Front-running vulnerability........ ✓ PASS
-M-05 Timestamp dependence............... ⚠ FAILED
-M-06 Unsafe downcast................... ✓ PASS
-M-07 Missing access control............. ✓ PASS
-```
-
-## 6. Write Reports for Critical/High (Bounty) or High/Medium (Audit)
-For each finding with passing PoC:
-- Invoke **report-writer**: Generate report
-- Invoke **report-validator**: Validate quality
-- Invoke **finding-manager**: Update to submitted
-
-Report progress (Regular Audit):
 ```
 Report Generation
 ─────────────────
-H-01 Submission report.................. ✓ VALID
-H-02 Submission report.................. ✓ VALID
-M-01 Submission report.................. ✓ VALID
-M-02 Submission report.................. ✓ VALID
-M-03 Submission report.................. ✓ VALID
-M-04 Submission report.................. ✓ VALID
-M-06 Submission report.................. ✓ VALID
-M-07 Submission report.................. ✓ VALID
+H-01 ✓ VALID   M-01 ✓ VALID   M-02 ✓ VALID
 ```
 
-Report progress (Bounty Mode):
-```
-Report Generation (BOUNTY)
-──────────────────────────
-CRIT-01 Submission report............... ✓ VALID
-H-01 Submission report.................. ✓ VALID
-H-02 Submission report.................. ✓ VALID
-
-⚠️ Reminder: Each submission requires $25 USDC deposit
-```
-
-## 7. Compile QA Report (Regular Audit Only)
-**Skip this step in Bounty Mode** - QA/Low findings not accepted.
-
+## 6. Compile QA Report
 Invoke **qa-bundler**: "Compile Low and Centralization findings"
-- Bundle all Low severity findings
-- Include all Centralization risks
-- Format as single QA report
-- Save to submissions directory
+- Bundle Low + Centralization findings into a single QA report.
+- Run **4naly3er** and attach its automated QA/gas markdown to the bundle.
+- Save to `<report-dir>/submissions/qa-report.md`.
 
-```
-QA Report Generation
-────────────────────
-Low findings included: 5
-Centralization findings: 3
-QA report saved: reports/pooltogether-01/audit/submissions/qa-report.md
-```
-
-## 8. Review All Findings
-For each finding:
-- Invoke **validity-checker**: Check for invalid patterns
-- Invoke **severity-auditor**: Validate severity (use bounty criteria if bounty mode)
-- Flag any concerns
+## 7. Final Review
+For each finding: invoke **validity-checker** (invalid patterns) and **severity-auditor** (severity sanity). Flag concerns.
 
 ```
 Final Review
 ────────────
-H-01 ✓ Valid, severity confirmed
-H-02 ✓ Valid, severity confirmed
-M-01 ✓ Valid, severity confirmed
-M-02 ⚠ Severity questioned (might be Low)
-...
+H-01 ✓ valid, severity confirmed (regression — was fixed in nft-staking-08)
+M-02 ⚠ severity questioned (might be Low)
 ```
 
-## 9. Final Summary
-Present complete audit results:
-
-**Regular Audit:**
+## 8. Final Summary
 ```
-Full Audit Complete: pooltogether
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Full Audit Complete: nft-staking
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Run: reports/nft-staking-12/   Mode: REGRESSION
 
-Submissions Ready:
-  High:   2 reports (H-03 needs manual PoC)
-  Medium: 6 reports (M-05 needs manual PoC)
-  QA:     1 report (8 findings)
+Submissions ready:
+  High:   1 report (1 regression)
+  Medium: 2 reports
+  QA:     1 report (Low + Centralization + 4naly3er output)
 
-Output Directory: reports/pooltogether-01/audit/
+Reports:  reports/nft-staking-12/submissions/*.md
+PoCs:     workspace/nft-staking/test/poc-*.t.sol
+Ledger:   reports/ledgers/nft-staking.json (updated)
 
-C4 Form Mapping:
-┌──────────────────────────────────────────────────────────────────────────┐
-│ For each H/M finding, copy content to C4 form fields:                    │
-│   Title          → from metadata comment in submission.md                │
-│   Root Cause Link→ from metadata comment in submission.md                │
-│   Details        → paste submission.md content (without metadata)        │
-│   PoC            → paste from workspace/*/test/poc-*.t.sol               │
-│                    (project-integrated, drop into test/ to run)          │
-└──────────────────────────────────────────────────────────────────────────┘
+Action items:
+  ⚠ M-02: review severity classification
+  ⚠ H-01: REGRESSION of a finding marked fixed in nft-staking-08 — confirm the fix regressed
 
-Files:
-  Submissions (Details field):
-    reports/pooltogether-01/audit/submissions/H-01-submission.md
-    reports/pooltogether-01/audit/submissions/H-02-submission.md
-    reports/pooltogether-01/audit/submissions/M-01-submission.md
-    ...
-    reports/pooltogether-01/audit/submissions/qa-report.md
-
-  PoCs (in workspace - drop into project test/):
-    workspace/pooltogether/test/poc-H-01.t.sol
-    workspace/pooltogether/test/poc-H-02.t.sol
-    workspace/pooltogether/test/poc-M-01.t.sol
-    ...
-
-Action Items:
-  ⚠ H-03: Manual PoC needed - check reports/pooltogether-01/audit/findings/high/H-03.json
-  ⚠ M-05: Manual PoC needed - check reports/pooltogether-01/audit/findings/medium/M-05.json
-  ⚠ M-02: Review severity classification
-
-Review all submissions before C4 submission deadline.
-```
-
-**Bounty Mode:**
-```
-Full Audit Complete: pooltogether (BOUNTY)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Submissions Ready:
-  Critical: 1 report
-  High:     2 reports
-
-Output Directory: reports/pooltogether-01/bounty/
-
-C4 Form Mapping:
-┌──────────────────────────────────────────────────────────────────────────┐
-│ For each finding, copy content to C4 bounty form fields:                 │
-│   Title          → from metadata comment in submission.md                │
-│   Root Cause Link→ from metadata comment in submission.md                │
-│   Details        → paste submission.md content (without metadata)        │
-│   PoC            → paste from workspace/*/test/poc-*.t.sol               │
-│                    (project-integrated, drop into test/ to run)          │
-└──────────────────────────────────────────────────────────────────────────┘
-
-⚠️ BOUNTY SUBMISSION REQUIREMENTS:
-  • $25 USDC deposit per finding to 0xB592d203fd9f55CC4746172A92E35baBA1046a14
-  • Submit via bounty form at code4rena.com/bounties
-  • Cannot edit after submission
-  • Results announced in #c4-bounties Discord channel
-
-Files:
-  Submissions (Details field):
-    reports/pooltogether-01/bounty/submissions/CRIT-01-submission.md
-    reports/pooltogether-01/bounty/submissions/H-01-submission.md
-    reports/pooltogether-01/bounty/submissions/H-02-submission.md
-
-  PoCs (in workspace - drop into project test/, mandatory):
-    workspace/pooltogether/test/poc-CRIT-01.t.sol
-    workspace/pooltogether/test/poc-H-01.t.sol
-    workspace/pooltogether/test/poc-H-02.t.sol
-
-Total deposit required: $75 USDC (3 findings × $25)
-
-Review all submissions before submitting - deposits are non-refundable if judged unsatisfactory.
+Triage: record decisions with /ledger nft-staking (ack / fixed / reopen).
 ```
 
 # Agent Delegation
-This command orchestrates the full pipeline:
-- **project-manager**: Project validation
-- **code-scanner**: Code-level vulnerability analysis
-- **econ-scanner**: Economic vulnerability analysis
-- **deduplicator**: Duplicate filtering
-- **sanitizer**: Known issue removal
-- **severity-classifier**: Severity assignment
-- **finding-manager**: Finding storage
-- **poc-generator**: PoC creation
-- **poc-validator**: PoC validation
-- **report-writer**: Report generation
-- **report-validator**: Quality assurance
-- **validity-checker**: Invalid pattern detection
-- **severity-auditor**: Severity validation
-- **qa-bundler**: QA report compilation
+project-manager · contract-profiler · static-analyzer · pattern-matcher · code-scanner · econ-scanner · invariant-generator · symbolic-analyzer · deduplicator · sanitizer · severity-classifier · finding-manager · poc-generator · poc-validator · report-writer · report-validator · qa-bundler · validity-checker · severity-auditor
 
 # Error Handling
-- **Analysis failures**: Continue with partial results
-- **PoC failures**: Flag for manual review, continue
-- **Report issues**: Flag for review, continue
-- **Keep going**: Don't stop on individual failures
+- **Analysis failures**: continue with partial results.
+- **PoC failures**: flag for manual review, continue.
+- **Report issues**: flag for review, continue.
+- **Missing tools**: note the gap, continue with what's available.
+- **Keep going**: don't stop on individual failures.
 
 # Critical Rules
-1. **Complete the pipeline** - Don't stop on failures
-2. **Flag issues clearly** - User can address manually
-3. **Preserve all work** - Even partial results
-4. **Final review** - Catch issues before submission
+1. **Complete the pipeline** — don't stop on failures.
+2. **Flag issues clearly** — the user can address them manually.
+3. **Preserve all work** — even partial results.
+4. **Surface regressions prominently** — a reappearing fixed bug is the highest-signal finding.

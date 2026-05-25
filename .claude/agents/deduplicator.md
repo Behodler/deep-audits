@@ -82,38 +82,10 @@ These are typically noise unless there's a novel exploit path:
 | Low | High | Keep - Verify not already known |
 | Low | Low | Filter - Tool noise |
 
-## INTERFACE METHODS
-
-### deduplicate_findings(findings_list)
-Main entry point - remove duplicates and consolidate
-- Returns: Deduplicated findings list with consolidation notes
-
-### find_duplicates(finding, existing_findings)
-Check if finding duplicates any existing ones
-
-### consolidate_related(findings_group)
-Merge related findings into single consolidated finding
-
-### calculate_uniqueness(finding)
-Score how unique/novel a finding is
-
-### filter_common_issues(findings)
-Remove well-known, low-value findings
-
-### prioritize_findings(findings)
-Rank findings by value for submission
-
 ## ERROR HANDLING
 - **Missing Context**: Request additional finding details
 - **Ambiguous Duplicates**: Flag for human review
 - **Conflicting Severity**: Preserve highest severity instance
-
-## COORDINATION
-Work with other agents:
-- **code-scanner**: Receives raw code-level vulnerability findings
-- **econ-scanner**: Receives raw economic vulnerability findings
-- **sanitizer**: Passes deduplicated findings for known-issue filtering
-- **finding-manager**: Consolidated findings stored
 
 ## DEDUPLICATION STRATEGY
 

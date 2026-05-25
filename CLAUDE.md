@@ -19,17 +19,27 @@ This repository contains the audit tooling used to review the Phoenix/Behodler s
 ## Architecture
 
 ### Directory Structure
-- `lib/` - Git submodules containing auditable Solidity projects (Foundry convention)
-- `reports/<project-name>/` - Generated audit reports with datetime-stamped filenames
+- `lib/` - Git submodules containing auditable Solidity projects (read-only audit references)
+- `workspace/<project>/` - Writable clones for PoC/test development (gitignored; PoCs and Tier-3 tests live here)
+- `reports/<project>-XX/` - Per-run audit output, sequentially versioned
+- `reports/ledgers/<project>.json` - Persistent findings ledger (open/fixed/triaged across runs)
+- `patterns/` - Vulnerability pattern database
+- `tools/` - Cloned auditing tools (e.g. 4naly3er)
 - `documentation/` - C4 official documentation for reference
 
+### Tooling
+The `.claude/hooks/session-start.sh` SessionStart hook provisions the deterministic toolchain (idempotent, network-failure-safe): Foundry, Slither, Halmos, Aderyn, Medusa, Semgrep, and 4naly3er, plus `git submodule update --init`. The pipeline degrades gracefully when a tool is missing.
+
 ### Multi-Agent Workflow
-Custom Claude Code commands orchestrate specialized agents:
-1. **Analysis agents** - Scan for vulnerabilities in target contracts
-2. **Deduplication agents** - Filter common/obvious issues found by tools like Mythril
-3. **Sanitation agents** - Remove issues already documented in project's known issues
-4. **POC agents** - Generate runnable Foundry unit tests proving vulnerabilities
-5. **Report agents** - Compile findings in C4-compliant format
+Custom Claude Code commands orchestrate specialized agents in tiers:
+1. **Tier 1 (local + deterministic)** - contract-profiler, static-analyzer (Slither + Aderyn + Semgrep), pattern-matcher
+2. **Tier 2 (interaction)** - code-scanner, econ-scanner (LLM reasoning over profiles)
+3. **Tier 3 (verification)** - invariant-generator (forge + Medusa/Echidna), symbolic-analyzer (Halmos)
+4. **Filtering** - deduplicator, then sanitizer (known issues + ledger reconciliation)
+5. **Output** - severity-classifier, finding-manager (writes run dir + upserts ledger), poc-generator, report-writer, qa-bundler
+
+### Re-running an audit (regression mode)
+Re-running `/analyze <project>` or `/full-audit <project>` defaults to a **regression scan** when a ledger exists: it focuses on files changed since the last audited commit and reconciles findings against the ledger, so previously-seen issues are not re-reported. A finding that reappears after being marked `fixed` is flagged as a **REGRESSION**. Pass `--full` to force a cold scan. Triage findings (acknowledge / wont-fix / fixed / reopen) with `/ledger <project>`; those statuses are authoritative and never auto-overwritten.
 
 ### Agent Delegation Policy (MANDATORY)
 
@@ -82,43 +92,6 @@ git submodule add <repo-url> lib/<project-name>
 ### Plausibility Sub-Categories for High Severity
 - **Plausible High** - Realistic attack scenarios
 - **Implausible High** - Requires extraordinary circumstances (validator collusion, economic black swans)
-
-## C4 Bounty Severity Classifications
-
-Bounties use different severity criteria. See `documentation/Bounties-*.md` for full details.
-
-**Critical**: High impact + high likelihood. Impact includes:
-- Direct theft of user funds (except unclaimed yield)
-- Permanent freezing of funds/NFTs
-- Protocol insolvency
-- Governance manipulation
-
-**High**: High impact, any likelihood. Impact includes:
-- Theft of unclaimed yield/royalties
-- Temporary freezing of funds/NFTs
-
-### Bounty Mode Differences
-- Only Critical and High severity accepted (no Medium, no QA/Low)
-- Coded runnable PoC is **mandatory** for all findings
-- $25 USDC deposit required per submission
-- No QA report generated
-- Use `/full-audit <project> bounty` or `/analyze <project> bounty`
-
-### High Likelihood Definition (Required for Critical)
-A vulnerability is "high likelihood" when:
-1. Attacker controls creating requisite circumstances; AND
-2. External circumstances can be reasonably expected and predicted using public info
-
-Note: Exploit complexity/sophistication is NOT a factor in likelihood.
-
-### Bounty Out of Scope
-- Attacks requiring leaked keys/credentials
-- Privileged address attacks (unless unintended privilege)
-- External stablecoin depegging not caused by code bug
-- Third-party oracle data issues
-- Economic/governance attacks (51% attack)
-- Centralization risks
-- Best practice recommendations
 
 ## Report Requirements
 

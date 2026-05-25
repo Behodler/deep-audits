@@ -4,166 +4,77 @@ Orchestrate creation and validation of a coded PoC that proves a vulnerability.
 
 # Arguments
 - `$ARGUMENTS` format: `<project-name> <finding-label>`
-- Example: `pooltogether H-01`
+- Example: `nft-staking H-01`
 
 # Critical Path Rules
 
-## Source Repos Are Read-Only
-**CRITICAL: The `lib/` directory contains git submodules of source repos that are STRICTLY READ-ONLY.**
-- NEVER write files to `lib/<project>/`
-- NEVER modify any files in source repos
-- Source repos must remain exactly as cloned from C4
+## Source repos are read-only
+The `lib/` submodules are STRICTLY READ-ONLY. Never write into `lib/<project>/`, the repo root, or repo-root `test/`.
 
-## File Location
-PoC files MUST be saved to the reports directory:
-```
-reports/<project-name>/pocs/<label>-poc.t.sol
-```
+## PoC location (workspace-first)
+- **Preferred**: `workspace/<project>/test/poc-<label>.t.sol` — imports the project's real contracts/harnesses and runs with its own forge config (drop-in runnable).
+- **Fallback** (only if a workspace cannot be created): standalone `<latest-report-dir>/pocs/<label>-poc.t.sol`, importing only `forge-std/Test.sol` with all dependencies inlined.
 
-Example for "brix" project:
-```
-reports/brix/pocs/H-01-poc.t.sol
-```
-
-**NEVER save to:**
-- `lib/<project>/test/` (source repo is READ-ONLY)
-- Root directory
-- `test/` at repository root
-- Any location inside `lib/`
-
-## Mandatory Validation
-Every PoC MUST be validated with `forge test` BEFORE reporting success.
-If validation fails, fix and retry until it passes.
+## Mandatory validation
+Every PoC MUST pass `forge test` before reporting success. If validation fails, fix and retry until it passes.
 
 # Orchestration Flow
 
-## 1. Resolve Project
-Invoke **project-manager**: "Resolve project and get submodule path"
-- Get the submodule path (e.g., `lib/2025-11-brix-money-c4-audit`)
-- Verify project exists
-- Get Foundry configuration (Solidity version)
+## 1. Resolve Project & Workspace
+Invoke **project-manager**: "Resolve project, ensure workspace exists, get latest report dir"
+- Get submodule path and Solidity version (`grep solidity lib/<submodule>/foundry.toml`).
+- Ensure `workspace/<project>/` exists (create via `create_workspace` if not).
+- Get the latest versioned report dir for the standalone fallback path.
 
 ## 2. Load Finding
 Invoke **finding-manager**: "Get finding details"
-- Look up finding by project and label
-- Verify finding exists
-- Check current status (should be "draft" or "needs-poc")
-- Load full finding details: contract, function, line, description, attack path
+- Look up by project + label; verify it exists; status should be `draft` or `needs-poc`.
+- Load contract, function, lineStart/lineEnd, description, attack path.
 
-## 3. Analyze Project Structure
-Before generating, the poc-generator MUST:
+## 3. Generate PoC
+Invoke **poc-generator**: "Create Foundry test proving the vulnerability"
+- Workspace-first; standalone fallback only if no workspace.
+- Use the project's Solidity version; mirror existing test patterns; include setUp, exploit test, and clear assertions on the exploited state.
+
+## 4. Validate PoC (MANDATORY)
+Invoke **poc-validator**: "Validate PoC compiles and passes"
 ```bash
-# Get Solidity version
-grep "solidity" lib/<project>/foundry.toml
-
-# Check existing test patterns
-ls lib/<project>/test/*.t.sol | head -5
-
-# Read target contract interfaces
-cat lib/<project>/src/<contract>.sol | head -100
+# Workspace:
+cd workspace/<project> && forge test --match-path test/poc-<label>.t.sol -vvv
+# Standalone fallback:
+mkdir -p /tmp/poc && cd /tmp/poc && forge init --no-commit && cp <poc> test/ && forge test -vvv
 ```
+On failure: analyze the error, fix (usually a missing inline dependency, wrong interface, or unrealistic setup), re-save, re-run. Only proceed once it passes.
 
-## 4. Generate PoC
-Invoke **poc-generator**: "Create Foundry test proving vulnerability"
-- Use EXACT Solidity version from project's foundry.toml
-- Use relative imports from `lib/<project>/test/`
-- Match project's existing test patterns
-- Include:
-  - Proper imports
-  - setUp() matching project style
-  - Test function demonstrating exploit
-  - Clear assertions proving impact
-  - Comments explaining attack steps
-
-## 5. Save PoC
-Save to: `reports/<project-name>/pocs/<label>-poc.t.sol`
-
-Example:
-```
-reports/brix/pocs/H-01-poc.t.sol
-```
-
-**REMINDER: NEVER save to lib/ - source repos are read-only.**
-
-## 6. Validate PoC (MANDATORY)
-Invoke **poc-validator**: "Validate PoC compiles and runs"
-
-The PoC must be validated by running forge test from the project submodule with the PoC path:
-```bash
-cd lib/<project> && forge test --match-path ../../reports/<project-name>/pocs/<label>-poc.t.sol -vv
-```
-
-Alternatively, copy the PoC temporarily to run tests, then remove the copy.
-
-**If validation fails:**
-1. Analyze the error (compilation, runtime, assertion)
-2. Fix the issue
-3. Re-save the file
-4. Re-run validation
-5. Repeat until passing
-
-**Only proceed to step 7 after validation passes.**
-
-## 7. Update Finding Status
+## 5. Update Finding Status
 Invoke **finding-manager**: "Attach PoC to finding and update status"
-- Attach PoC file path
-- Update finding status to "ready"
+- Attach the PoC path and set status to `ready`.
 
-## 8. Completion Report
-**On Success**:
+## 6. Completion Report
+**On success**:
 ```
-PoC Generated: <project> <label>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Status: ✓ PASSING
-File: reports/<project-name>/pocs/<label>-poc.t.sol
-
-Validation:
-  forge build: ✓ PASS
-  forge test:  ✓ PASS
-
-Run with:
-  cd lib/<project> && forge test --match-path ../../reports/<project-name>/pocs/<label>-poc.t.sol -vvvv
-
-Finding status updated: needs-poc → ready
-
-Next Steps:
-  /write-report <project> <label>
+PoC Generated: <project> <label>   ✓ PASSING
+File: workspace/<project>/test/poc-<label>.t.sol
+Run:  cd workspace/<project> && forge test --match-path test/poc-<label>.t.sol -vvvv
+Status: needs-poc → ready
+Next:  /write-report <project> <label>
 ```
-
-**On Failure (after retries exhausted)**:
-```
-PoC Generation Failed: <project> <label>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Error: <error type>
-
-Details:
-  <specific error message>
-
-Attempted fixes:
-  1. <fix attempt 1>
-  2. <fix attempt 2>
-
-Manual intervention required.
-```
+**On failure (retries exhausted)**: report the error type, message, and attempted fixes; flag for manual intervention.
 
 # Agent Delegation
-This command orchestrates PoC creation:
-- **project-manager**: Resolve project path and config
-- **finding-manager**: Get finding details, update status
-- **poc-generator**: Create test code (with built-in validation)
-- **poc-validator**: Final validation before success report
+- **project-manager**: resolve project, ensure workspace, latest report dir
+- **finding-manager**: load finding, update status
+- **poc-generator**: create the test (with built-in validation)
+- **poc-validator**: final validation before success
 
 # Error Handling
-- **Finding not found**: List available findings
-- **Wrong status**: Warn if already has PoC or is submitted
-- **Compilation errors**: Fix imports, version, syntax - retry
-- **Test failures**: Analyze assertion, fix logic - retry
-- **Import issues**: Check project structure - fix paths
+- **Finding not found**: list available findings.
+- **Wrong status**: warn if already has a PoC or is submitted.
+- **Compilation/test failures**: fix imports/version/logic and retry.
 
 # Critical Rules
-1. **NEVER write to lib/** - Source repos are strictly read-only
-2. **File MUST be in reports/<project>/pocs/** - Nowhere else
-3. **MUST use project Solidity version** - Check foundry.toml
-4. **MUST pass forge test** - Validate before reporting success
-5. **MUST retry on failure** - Don't give up after first error
-6. **NEVER report success without validation** - Always run forge test
+1. **NEVER write to `lib/`** — read-only.
+2. **Workspace-first**, standalone only when no workspace is possible.
+3. **MUST use the project Solidity version.**
+4. **MUST pass `forge test`** before reporting success — never report success without validation.
+5. **MUST retry on failure** — don't give up after the first error.

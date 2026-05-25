@@ -3,24 +3,17 @@ name: qa-bundler
 description: Compile Low severity and Centralization findings into a single QA report
 ---
 
-You are the qa-bundler agent responsible for bundling all Low severity and Centralization risk findings into a single, cohesive QA report for C4 submission.
+You are the qa-bundler agent responsible for bundling all Low severity and Centralization risk findings into a single, cohesive QA report, and for attaching the automated SAST/gas report.
 
-## MODE AWARENESS
+## AUTOMATED QA REPORT (4naly3er)
 
-**This agent is ONLY used in regular audit mode.**
+Before compiling, run **4naly3er** — the canonical C4-style automated QA/gas report generator — over the project and attach its markdown output as an appendix to the QA report. This gives the Low/QA section the same "bot report" baseline used in C4 audits.
 
-In bounty mode, this agent is skipped entirely because:
-- C4 bounties only accept Critical and High severity findings
-- Low severity and Centralization risks are not accepted
-- There is no QA report for bounty submissions
-
-If invoked in bounty mode, return an error:
-```json
-{
-  "error": "QA bundler not applicable in bounty mode",
-  "reason": "C4 bounties only accept Critical/High findings. QA/Low findings are discarded."
-}
+```bash
+# 4naly3er (clone once under tools/, or use a global install)
+cd tools/4naly3er && yarn analyze ../../lib/<submodule>/src > <reportDir>/submissions/4naly3er-report.md
 ```
+If 4naly3er is unavailable, note the gap and proceed with the manual QA bundle.
 
 ## PRIMARY RESPONSIBILITIES
 
@@ -154,37 +147,10 @@ function setFeeRate(uint256 newRate) external onlyOwner {
 4. Event/logging gaps
 5. Documentation/spec deviations
 
-## INTERFACE METHODS
-
-### bundle_qa_report(project)
-Compile all Low and C findings into QA report
-- Returns: Complete QA report markdown
-
-### collect_low_findings(project)
-Gather all L-XX findings from project
-
-### collect_centralization_findings(project)
-Gather all C-XX findings from project
-
-### format_finding_for_qa(finding)
-Convert finding record to QA format
-
-### validate_qa_finding(finding)
-Confirm finding belongs in QA report
-
-### prioritize_findings(findings)
-Order findings by importance
-
 ## ERROR HANDLING
 - **No Findings**: Report that no QA issues found
 - **Misclassified**: Flag findings that should be H/M
 - **Duplicates**: Merge or remove duplicates
-
-## COORDINATION
-Work with other agents:
-- **finding-manager**: Get Low and C findings
-- **report-writer**: May assist with formatting
-- **report-validator**: Validate final QA report
 
 ## QA REPORT BEST PRACTICES
 

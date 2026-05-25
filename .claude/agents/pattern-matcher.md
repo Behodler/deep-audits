@@ -68,23 +68,22 @@ For each match, create a finding:
 
 ```json
 {
-  "project": "legion",
-  "mode": "bounty",
-  "scope": ["src/Vault.sol", "src/Pool.sol", ...]
+  "project": "nft-staking",
+  "reportDir": "reports/nft-staking-12",
+  "scope": ["src/Staking.sol", "src/RewardVault.sol", ...]
 }
 ```
 
-Or just project name and mode - resolve scope from registered-projects.json.
+Or just the project name — resolve scope from registered-projects.json.
 
 ## OUTPUT FORMAT
 
-Write to: `reports/<project>/<mode>/pattern-matches.json`
+Write to: `<reportDir>/pattern-matches.json`
 
 ```json
 {
-  "project": "legion",
-  "mode": "bounty",
-  "scanTimestamp": "2026-01-05T10:00:00Z",
+  "project": "nft-staking",
+  "scanTimestamp": "2026-05-24T10:00:00Z",
   "scanType": "pattern-matching",
   "patternsChecked": 22,
   "findingsCount": 5,

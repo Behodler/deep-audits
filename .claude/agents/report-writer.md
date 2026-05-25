@@ -189,40 +189,11 @@ reports/<project>/submissions/<label>-submission.md
 ### Step 4: Verify
 Confirm file is in correct location and PoC file exists.
 
-## INTERFACE METHODS
-
-### write_report(finding, project)
-Generate full report for High/Medium finding
-- Creates `reports/<project>/submissions/<label>-submission.md`
-- Ensures PoC file exists at `reports/<project>/pocs/<label>-poc.t.sol`
-- Returns: File path
-
-### write_qa_report(findings, project)
-Compile Low/Centralization findings into QA report
-- Creates `reports/<project>/submissions/qa-report.md`
-- Returns: File path
-
-### generate_code_links(finding, project)
-Create GitHub-style code location links with line ranges
-1. Fetch project metadata from project-manager: `repoUrl`, `defaultBranch`
-2. Extract location from finding: `contract`, `lineStart`, `lineEnd`
-3. Construct URL: `{repoUrl}/blob/{defaultBranch}/{contract}#L{lineStart}-L{lineEnd}`
-4. Return markdown link: `[{contract}#L{lineStart}-L{lineEnd}](url)`
-5. If `lineEnd` is absent, use single line format: `#L{lineStart}`
-
 ## ERROR HANDLING
 - **Missing PoC**: Error - PoC is required for H/M findings
 - **Invalid Links**: Flag broken code references
 - **Format Errors**: Report specific formatting issues
 - **Directory Missing**: Create it
-
-## COORDINATION
-Work with other agents:
-- **project-manager**: Get `repoUrl` and `defaultBranch` for GitHub links
-- **finding-manager**: Get finding details
-- **poc-generator**: Ensure standalone PoC exists
-- **report-validator**: Pass report for quality check
-- **qa-bundler**: Provide Low findings for bundling
 
 ## QUALITY STANDARDS
 

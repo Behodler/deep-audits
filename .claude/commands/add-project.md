@@ -1,22 +1,19 @@
-Add a new C4 audit project as a git submodule with friendly name mapping
+Add an auditable project as a git submodule with friendly name mapping
 # Purpose
 Orchestrate adding a new auditable project to the repository with a friendly name alias.
 
 # Arguments
-- `$ARGUMENTS` format: `<repo-url> [friendly-name] [bounty]`
-- Example: `https://github.com/code-423n4/2025-01-pooltogether pooltogether` (audit mode)
-- Example: `https://github.com/code-423n4/2025-01-pooltogether pooltogether bounty` (bounty mode)
-- If friendly-name omitted, derive from repo name
-- If "bounty" present, register project in bounty mode
+- `$ARGUMENTS` format: `<repo-url> [friendly-name]`
+- Example: `https://github.com/Behodler/phoenix-nft-staking nft-staking`
+- If friendly-name omitted, derive from repo name.
 
 # Orchestration Flow
 
 ## 1. Parse Arguments
-Extract repo URL, friendly name, and mode from $ARGUMENTS:
-- Validate URL format (must be valid git URL)
-- If no friendly name provided: derive from repo name (strip dates, "-c4", "-audit", etc.)
-- Validate friendly name is alphanumeric with hyphens only
-- If "bounty" keyword present: set mode to "bounty", otherwise "audit"
+Extract repo URL and friendly name from $ARGUMENTS:
+- Validate URL format (must be valid git URL).
+- If no friendly name provided: derive from repo name (strip dates, "-c4", "-audit", etc.).
+- **Normalize the friendly name to lowercase-kebab** (lowercase, spaces/underscores → `-`). This prevents divergent report trees.
 
 ## 2. Check for Conflicts
 Invoke **project-manager**: "Check if friendly name already registered"
@@ -31,7 +28,7 @@ Invoke **project-manager**: "Add submodule without recursive flag"
 - Report any errors (repo not found, permission denied, etc.)
 
 ## 4. Register Project
-Invoke **project-manager**: "Register project with friendly name and mode"
+Invoke **project-manager**: "Register project with friendly name"
 - Update registered-projects.json:
   ```json
   {
@@ -39,8 +36,8 @@ Invoke **project-manager**: "Register project with friendly name and mode"
       "<friendly-name>": {
         "submodule": "<repo-directory-name>",
         "repoUrl": "<repo-url>",
-        "addedAt": "<ISO-timestamp>",
-        "mode": "audit" | "bounty"
+        "defaultBranch": "main",
+        "addedAt": "<ISO-timestamp>"
       }
     }
   }
@@ -60,35 +57,20 @@ Invoke **project-manager**: "Extract known issues from project documentation"
 - Check for bot-report.md if present
 - Store known issues path in registration
 
-## 7. Create Reports Directory
-Ensure reports structure exists (both modes created regardless of initial mode):
+## 7. Initialize Ledger
+Create an empty persistent ledger so the first run is treated as a full cold scan:
 ```
-reports/<friendly-name>/
-├── audit/
-│   ├── findings/
-│   │   ├── high/
-│   │   ├── medium/
-│   │   └── low/
-│   ├── pocs/
-│   └── submissions/
-│       └── rejected/
-└── bounty/
-    ├── findings/
-    │   ├── critical/
-    │   └── high/
-    ├── pocs/
-    └── submissions/
-        └── rejected/
+reports/ledgers/<friendly-name>.json   →  { "project": "<name>", "lastAuditedCommit": null, "findings": [] }
 ```
+Run directories (`reports/<friendly-name>-XX/`) are created per-run by `/analyze`, not here.
 
 ## 8. Completion Report
 Present to user:
-- Friendly name registered
-- Mode (audit or bounty)
+- Friendly name registered (lowercase-kebab)
 - Submodule location
 - Number of contracts in scope
 - Number of known issues found
-- Next steps: suggest `/analyze <friendly-name>` (or `/analyze <friendly-name> bounty` if bounty mode)
+- Next step: suggest `/analyze <friendly-name>`
 
 # Agent Delegation (MANDATORY)
 
@@ -111,7 +93,7 @@ All file operations, git operations, and data extraction MUST be performed by th
 | Register project | project-manager | "Register project '{name}' with submodule '{dirname}' and URL '{url}'" |
 | Discover scope | project-manager | "Discover contracts and scope for project in lib/{dirname}" |
 | Extract known issues | project-manager | "Extract known issues from documentation in lib/{dirname}" |
-| Create directories | project-manager | "Create reports directory structure for '{name}'" |
+| Initialize ledger | project-manager | "Initialize empty ledger for '{name}'" |
 
 # Error Handling
 - **Invalid URL**: Report and ask for correction
@@ -121,15 +103,11 @@ All file operations, git operations, and data extraction MUST be performed by th
 
 # Examples
 ```
-/add-project https://github.com/code-423n4/2025-01-pooltogether pooltogether
-# Adds pooltogether-c4-audit as submodule, registers as "pooltogether" (audit mode)
+/add-project https://github.com/Behodler/phoenix-nft-staking nft-staking
+# Adds phoenix-nft-staking as submodule, registers as "nft-staking"
 
-/add-project https://github.com/code-423n4/2025-02-aave-v4
-# Adds repo, derives friendly name "aave-v4" (audit mode)
-
-/add-project https://github.com/code-423n4/2025-01-pooltogether pooltogether bounty
-# Adds pooltogether as submodule, registers in BOUNTY mode
-# Bounty mode: Only Critical/High severities, PoC mandatory, no QA report
+/add-project https://github.com/Behodler/reflax-yield-vault
+# Adds repo, derives friendly name "reflax-yield-vault"
 ```
 
 # Critical Rules

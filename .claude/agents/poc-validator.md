@@ -183,34 +183,6 @@ Note: This may pass even with project imports due to remappings. Use isolation t
 - Attack not actually exploitable
 - Assertions too weak
 
-## INTERFACE METHODS
-
-### validate_poc(finding, poc_path)
-Full validation of PoC for a finding
-- Returns: Validation report with standalone check
-
-### check_standalone(poc_path)
-Verify PoC has no external dependencies
-- Check imports
-- Run isolation test
-- Returns: Standalone status
-
-### check_compilation(poc_path)
-Verify PoC compiles
-- Returns: Compilation status
-
-### run_poc(poc_path, test_name)
-Execute PoC and capture output
-- Returns: Test results
-
-### verify_demonstration(poc_output, finding)
-Check that output demonstrates claimed vulnerability
-- Returns: Demonstration status
-
-### generate_validation_report(results)
-Create comprehensive validation report
-- Returns: Full report
-
 ## EXECUTION COMMANDS
 
 ### Standalone Check (CRITICAL - DO THIS FIRST)
@@ -259,12 +231,6 @@ forge test --match-contract <ContractName> --gas-report
 - **Setup failures**: Analyze setUp() function issues
 - **Assertion failures**: Explain why assertions failed
 - **Reverts**: Identify cause of unexpected reverts
-
-## COORDINATION
-Work with other agents:
-- **poc-generator**: Receives PoCs for validation, returns issues for fixing
-- **finding-manager**: Update finding with PoC validation status
-- **report-writer**: Only proceed with reports for validated PoCs
 
 ## COMMON ISSUES
 
