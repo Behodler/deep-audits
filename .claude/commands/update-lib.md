@@ -9,7 +9,7 @@ Update <submodule-dirname> to latest (<short-sha>)
 # Arguments
 - `$ARGUMENTS` format: `[name]` (optional)
 - `name` may be either:
-  - a friendly name from `registered-projects.json` (e.g., `yield-claim-NFT`, `phoenix-vault`), resolved to its `submodule` field, OR
+  - a friendly name from `registered-projects.json` (e.g., `yield-claim-nft`, `phoenix-vault`), resolved to its `submodule` field, OR
   - a raw submodule directory under `lib/` (e.g., `yield-claim-nft`, `reflax-yield-vault`)
 - If omitted, the orchestrator MUST prompt the user to either:
   1. pick a specific submodule, or
@@ -103,7 +103,7 @@ All git operations (fetch, checkout, pull, add, commit), filesystem inspection o
 # Fetches lib/yield-claim-nft to latest on its tracked branch
 # Commits at root: "Update yield-claim-nft to latest (<new-short-sha>)"
 
-/update-lib yield-claim-NFT
+/update-lib yield-claim-nft
 # Same as above — friendly name resolved via registered-projects.json -> submodule "yield-claim-nft"
 
 /update-lib phoenix-vault
