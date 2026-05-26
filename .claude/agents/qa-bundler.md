@@ -52,7 +52,7 @@ If 4naly3er is unavailable, note the gap and proceed with the manual QA bundle.
 
 ## Low Risk Findings
 
-### [L-01] Missing zero-address validation in constructor
+### [L-01] Missing zero-address validation in constructor <!-- id: ya9l1 -->
 
 **Location**: [Contract.sol#L25](link)
 
@@ -67,7 +67,7 @@ require(_treasury != address(0), "Invalid treasury");
 
 ---
 
-### [L-02] Event not emitted for critical state change
+### [L-02] Event not emitted for critical state change <!-- id: ya9l2 -->
 
 **Location**: [Pool.sol#L100](link)
 
@@ -89,7 +89,7 @@ function setFeeRate(uint256 newRate) external onlyOwner {
 
 ## Centralization Risks
 
-### [C-01] Single owner can pause protocol indefinitely
+### [C-01] Single owner can pause protocol indefinitely <!-- id: ya9c1 -->
 
 **Location**: [Pool.sol#L50](link)
 
@@ -101,7 +101,7 @@ function setFeeRate(uint256 newRate) external onlyOwner {
 
 ---
 
-### [C-02] Owner can change critical parameters without timelock
+### [C-02] Owner can change critical parameters without timelock <!-- id: ya9c2 -->
 
 **Location**: [Config.sol#L30](link)
 
@@ -119,6 +119,20 @@ function setFeeRate(uint256 newRate) external onlyOwner {
 - **C-XX**: Sequential from C-01, C-02, etc.
 - **Never skip numbers**: Use all sequential labels
 - **Don't renumber**: If removing finding, leave gap
+
+### Global Issue ID stamp
+Every L/C section header carries an inline `<!-- id: ... -->` comment with the finding's
+globally-unique ID: `<project-acronym><report#><type><issue#>` (e.g. `ya9c1` = yield-accumulator,
+report 09, C-01). Derive it from the run-dir name and the label:
+1. **project-acronym** — strip trailing `-<NN>` from the run-dir name to get the family, then
+   take the first letter of each hyphen word, **dropping pure-numeric words**
+   (`phoenix-phase-2` → `pp`). Keyed off the report-dir family name, not the repo name.
+2. **report#** — the `NN` with leading zeros removed (`09` → `9`; bare family dir = `0`).
+3. **type** — `l` for Low, `c` for Centralization.
+4. **issue#** — the label number with leading zeros removed (`C-01` → `1`).
+
+Full spec, acronym table, and collision handling: `docs/issue-id-scheme.md` (append any new
+acronym there).
 
 ### Content Guidelines
 
@@ -169,6 +183,7 @@ function setFeeRate(uint256 newRate) external onlyOwner {
 - Overstate Low impact
 
 ## CRITICAL RULES
+0. **Stamp the global issue ID** - inline `<!-- id: ... -->` on every L/C section header (spec in `docs/issue-id-scheme.md`)
 1. **Single report only** - All Low/C in one document
 2. **Standard labels only** - L-XX and C-XX format
 3. **No non-critical** - C4 discourages them

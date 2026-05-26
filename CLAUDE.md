@@ -41,6 +41,11 @@ Custom Claude Code commands orchestrate specialized agents in tiers:
 ### Re-running an audit (regression mode)
 Re-running `/analyze <project>` or `/full-audit <project>` defaults to a **regression scan** when a ledger exists: it focuses on files changed since the last audited commit and reconciles findings against the ledger, so previously-seen issues are not re-reported. A finding that reappears after being marked `fixed` is flagged as a **REGRESSION**. Pass `--full` to force a cold scan. Triage findings (acknowledge / wont-fix / fixed / reopen) with `/ledger <project>`; those statuses are authoritative and never auto-overwritten.
 
+### Re-verifying a single finding (`/recheck`)
+`/recheck <project> <label-or-fingerprint>` re-proves **one** finding against the current submodule HEAD without running discovery. It is **PoC-replay first**: it syncs the writable `workspace/` source to the target commit (preserving the PoC), re-runs the finding's PoC, and classifies the result as **STILL-LIVE** / **LIKELY-FIXED** / **INCONCLUSIVE** (a PoC that no longer *compiles* is inconclusive bit-rot, not a fix). Use it for a localized post-fix re-check; the command itself bounces you to `/full-audit` when the change is broader than the finding's contract.
+
+`/recheck` is deliberately **baseline-preserving and single-entry**: it never writes `lastAuditedCommit`, never bumps `lastSeenRun`, never moves `lastRun`, and never auto-flips a status — it records its outcome in recheck-only fields (`lastRecheckedCommit`/`lastRecheckedAt`/`recheckResult`) on the one entry and *proposes* the `/ledger` command for any status change. Pick `/recheck` to answer "is this specific finding still real?"; pick the regression `/full-audit` to also catch issues the fix may have introduced — `/recheck` is blind to new bugs by design.
+
 ### Agent Delegation Policy (MANDATORY)
 
 **Commands that specify agent delegation MUST use agents. Direct tool execution by the orchestrating agent is forbidden.**
