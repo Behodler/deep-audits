@@ -1,0 +1,681 @@
+{
+  "project": "phoenix-vault",
+  "submodule": "lib/reflax-yield-vault",
+  "profileTimestamp": "2026-05-28T00:00:00Z",
+  "targetCommit": "5f9abdd",
+  "baselineCommit": "043ff2c",
+  "baselineRun": "phoenix-vault-06",
+  "mode": "regression",
+  "story": "story-042 — per-client setAsideBuffer added to skimSurplus; _skimSurplus now returns underlyingReceived and distributes per-client buffer slices",
+  "scope": [
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+    "src/AMMAdapters/CurveAMMAdapter.sol",
+    "src/AMMAdapters/IAMMAdapter.sol",
+    "src/AMMAdapters/ICurveRouterNG.sol",
+    "AMMRoutes.json"
+  ],
+  "outOfScopeButRelevant": [
+    "src/AYieldStrategy.sol (parent — new setAsideBufferSize storage, setSetAsideBuffer owner setter, skimSurplus now returns uint256, _skimSurplus signature now returns underlyingReceived)",
+    "src/interfaces/IYieldStrategy.sol (parent interface — skimSurplus return value, new setSetAsideBuffer/setAsideBufferSize)"
+  ],
+  "contracts": [
+    {
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "solidityVersion": "^0.8.13",
+      "inheritanceChain": [
+        "AYieldStrategy",
+        "IYieldStrategy",
+        "IPausable",
+        "Ownable",
+        "ReentrancyGuard",
+        "Pausable"
+      ],
+      "complexity": {
+        "loc": 522,
+        "functions": 17,
+        "externalCalls": 9,
+        "stateVariables": 6
+      },
+      "verifiedProperties": {
+        "noUnboundedLoops": {
+          "value": false,
+          "confidence": "verified",
+          "note": "Two loops in _skimSurplus (via _accrueSurplusShares and _distributeBuffer) iterate over the full strategy-owned `_authorizedClients` EnumerableSet with no pagination. Bound is owner-controlled: setClient(client, true) is the only growth path. Same bound as phoenix-vault-06 L-02; story-042 adds a SECOND parallel loop (`_distributeBuffer`) plus a fresh memory allocation `uint256[](clients.length)` on each skim, increasing per-iteration constant-factor cost but not the asymptotic bound."
+        },
+        "checkedArithmetic": {
+          "value": true,
+          "confidence": "verified",
+          "note": "Solidity ^0.8.13; no unchecked blocks in this contract. New story-042 arithmetic: `shares * setAsideBufferSize[client] / 100` is bounded because `setAsideBufferSize <= 100` (enforced by `setSetAsideBuffer` in AYieldStrategy.sol#L255), and `shares` is already a uint256 in the range of vault share supply — no overflow risk in practice. `underlyingReceived * bufferShares[i] / totalShares` follows muldiv ordering (mul before div), preserving precision; rounding floors, dust accrues to `recipient` via `toRecipient = underlyingReceived - totalSetAside` (explicit comment confirms direction)."
+        },
+        "reentrancyGuarded": [
+          "deposit (via nonReentrant)",
+          "withdraw (via nonReentrant)",
+          "depositAsOwner (via nonReentrant)",
+          "withdrawAsOwner (via nonReentrant)",
+          "totalWithdrawal (parent, via nonReentrant)",
+          "skimSurplus (parent, via nonReentrant — covers _accrueSurplusShares + _distributeBuffer transitively)"
+        ],
+        "reentrancyUnguarded": [
+          "_skimSurplus, _accrueSurplusShares, _distributeBuffer (internal only — covered by the parent skimSurplus(external).nonReentrant guard)"
+        ],
+        "accessControlled": [
+          "skimSurplus (parent: onlyAuthorizedWithdrawer)",
+          "deposit (onlyAuthorizedClient)",
+          "withdraw (onlyAuthorizedClient)",
+          "depositAsOwner (onlyOwner)",
+          "withdrawAsOwner (onlyOwner)",
+          "setSlippageTolerance (onlyOwner)",
+          "setSetAsideBuffer (parent, onlyOwner)",
+          "setClient (parent, onlyOwner)",
+          "setWithdrawer (parent, onlyOwner)"
+        ],
+        "initializerProtected": {
+          "value": true,
+          "confidence": "verified",
+          "note": "Non-upgradeable; constructor enforces non-zero owner/underlyingToken/erc4626Vault/ammAdapter. No proxy storage layout concerns."
+        },
+        "pauseMechanism": {
+          "value": true,
+          "confidence": "verified",
+          "note": "deposit/withdraw/skimSurplus carry whenNotPaused. depositAsOwner/withdrawAsOwner intentionally bypass pause (owner emergency action) — same behavior as baseline."
+        },
+        "ceiInOrder": {
+          "value": false,
+          "confidence": "verified",
+          "note": "Pre-existing CEI deviations on _withdrawInternal and _totalWithdraw (state mutated AFTER external swap) — SLITHER-001/002 in baseline; covered by nonReentrant. UNCHANGED by story-042. NEW story-042 paths: _skimSurplus performs `safeIncreaseAllowance` and `ammAdapter.swap()` BEFORE the buffer-distribution transfers; principal accounting is never touched in any skim path (by design), so there is no state-mutation-after-call concern in the new code paths themselves. Each `safeTransfer` in _distributeBuffer goes to `clients[i]` (the protocol-owned client contract) — the loop body does not read or write contract storage, so even an ERC777-style hook in the underlying token (untrusted) cannot break the parallel array invariants."
+        },
+        "snapshotSemantics": {
+          "value": true,
+          "confidence": "verified",
+          "note": "`totalValue` is snapshotted ONCE at line 421 (`vault.convertToAssets(vault.balanceOf(address(this)))`) and used for every per-client surplus computation in _accrueSurplusShares. `td = totalDeposited[token]` is also read once in both _skimSurplus and (re-read once) in _accrueSurplusShares. No re-snapshot inside the loop."
+        }
+      },
+      "localFindings": [
+        {
+          "id": "LOCAL-001",
+          "type": "parallel-array-coupling",
+          "severity": "local-info",
+          "function": "_accrueSurplusShares / _distributeBuffer",
+          "lineStart": 465,
+          "lineEnd": 521,
+          "description": "story-042 introduces a parallel-array contract: `_accrueSurplusShares` populates `bufferShares[i]` for client `clients[i]`, then `_distributeBuffer` re-iterates the SAME `clients[]` array and indexes `bufferShares[i]` by position. Both calls are made within the same `_skimSurplus` invocation passing the SAME `clients` memory array (allocated by AYieldStrategy.skimSurplus from `_authorizedClients.values()`), so by construction `clients[i]` is identical between the two passes — no storage re-read of the EnumerableSet between passes, no reentrancy entry-point between passes (parent nonReentrant guard active). Verified local-safe; only flagged so downstream code-scanner can confirm no future refactor breaks the parallel invariant.",
+          "recommendation": "Consider an explicit struct{client, bufferShares}[] or `assert(clients.length == bufferShares.length)` defensive check in `_distributeBuffer` to lock in the contract. Not exploitable as written.",
+          "confidence": "verified"
+        },
+        {
+          "id": "LOCAL-002",
+          "type": "fresh-memory-allocation-in-loop-prelude",
+          "severity": "local-info",
+          "function": "_skimSurplus",
+          "line": 422,
+          "description": "`new uint256[](clients.length)` allocates fresh memory proportional to authorized-client count on every skim call. Composed with the now-double iteration (accrue + distribute), the per-skim gas cost is materially higher than the baseline (phoenix-vault-06) single-pass implementation. Same owner-controlled bound as L-02; documented for completeness — no new attack surface beyond what L-02 already covers.",
+          "recommendation": "None at protocol-owned client scale. If client set is expected to grow into the dozens, consider folding the buffer-share accumulator into the surplus-skim loop and replacing the parallel array with a per-client immediate transfer (BUT this changes the snapshot-then-swap-then-distribute ordering, which is currently correct for slippage attribution).",
+          "confidence": "verified"
+        },
+        {
+          "id": "LOCAL-003",
+          "type": "rounding-zero-dust-buffer",
+          "severity": "local-info",
+          "function": "_distributeBuffer",
+          "lineStart": 511,
+          "lineEnd": 519,
+          "description": "Two floor-division points in the buffer payout: (a) `shares * setAsideBufferSize[client] / 100` in _accrueSurplusShares (line 487) — buffer percentages 1-99 round per-client buffer shares down; (b) `underlyingReceived * bufferShares[i] / totalShares` in _distributeBuffer (line 513) — proportional underlying allocation rounds down. Both round toward `recipient` (the skim caller / SYA) via `toRecipient = underlyingReceived - totalSetAside`. For very small surplus, sub-1-share buffer percentages, or tiny per-client buffer shares, individual `buf == 0` is explicitly skipped (line 514). Verified protocol-favoring direction; consistent with the existing rounding convention.",
+          "recommendation": "None. Behavior is documented in the function NatSpec (\"dust (rounding) favors recipient\").",
+          "confidence": "verified"
+        },
+        {
+          "id": "LOCAL-004",
+          "type": "buffer-share-slot-reuse-name-shadowing",
+          "severity": "local-info",
+          "function": "_accrueSurplusShares",
+          "line": 487,
+          "description": "Local variable `shares` is reused: first holds surplus shares (line 485), then is reassigned to buffer shares (line 487) for the same iteration. The comment `// reuse slot: now buffer shares (0–100)` documents the intent, but a static-analysis reader (and downstream agents) may misread it as a bug. The `totalShares += shares` at line 486 happens BEFORE the reassignment, so the aggregate ceiling check at line 428 sees the correct (pre-buffer) surplus shares, not the buffer-reduced value. Verified correct.",
+          "recommendation": "Optional readability: rename to `bufShares` after reassignment, or inline the multiplication. Not a defect.",
+          "confidence": "verified"
+        },
+        {
+          "id": "LOCAL-005",
+          "type": "event-emission-before-final-amount",
+          "severity": "local-info",
+          "function": "_accrueSurplusShares",
+          "line": 484,
+          "description": "`SurplusSkimmed(token, client, msg.sender, surplus, recipient)` is emitted with the SNAPSHOT surplus (vault-asset terms, pre-redeem), NOT the actual amount delivered. This was true in the baseline too. story-042 adds a wedge: when buffers are set, the recipient of part of the proceeds is `clients[i]` (the buffer holder), NOT the recipient parameter — but the event still names `recipient` as the receiver and reports the full snapshot surplus. External indexers that assume `SurplusSkimmed.amount` flowing to `SurplusSkimmed.recipient` will be wrong by `bufferShares[i] / totalShares * underlyingReceived` per surplus-bearing client. The CLAUDE.md note on the new return value documents the snapshot-vs-actual gap, but does NOT document the per-client buffer redirection in the event semantics. Flagged for code-scanner: this is a spec/behavior consistency note, not a local exploit.",
+          "recommendation": "Either (a) emit an additional `SurplusBufferedToClient(client, amount)` event in _distributeBuffer when buf > 0, or (b) extend `SurplusSkimmed` with a `bufferAmount` field. Defer the decision to code-scanner/severity-classifier — the underlying tokens are NOT lost (they reach the protocol-owned client), only the event topology shifts.",
+          "confidence": "verified"
+        }
+      ],
+      "interfaceAbstraction": {
+        "externalEntryPoints": [
+          {
+            "function": "deposit(address token, uint256 amount, address recipient)",
+            "visibility": "external",
+            "stateChanges": ["clientBalances", "totalDeposited"],
+            "externalCalls": [
+              "underlyingToken.safeTransferFrom (depositor -> this)",
+              "vault.convertToShares (view)",
+              "underlyingToken.safeIncreaseAllowance (ammAdapter)",
+              "ammAdapter.swap (underlying -> vault)"
+            ],
+            "accessControl": "onlyAuthorizedClient",
+            "reentrancyGuard": true,
+            "pausable": true,
+            "unchangedByStory042": true
+          },
+          {
+            "function": "withdraw(address token, uint256 amount, address recipient)",
+            "visibility": "external",
+            "stateChanges": ["clientBalances", "totalDeposited"],
+            "externalCalls": [
+              "vault.convertToShares (view)",
+              "vault.balanceOf (view)",
+              "vault.convertToAssets (view)",
+              "IERC20(vault).safeIncreaseAllowance (ammAdapter)",
+              "ammAdapter.swap (vault -> underlying)",
+              "underlyingToken.safeTransfer (recipient)"
+            ],
+            "accessControl": "onlyAuthorizedClient",
+            "reentrancyGuard": true,
+            "pausable": true,
+            "unchangedByStory042": true
+          },
+          {
+            "function": "depositAsOwner(address token, uint256 amount, address client)",
+            "visibility": "external",
+            "stateChanges": ["clientBalances", "totalDeposited"],
+            "externalCalls": ["same as deposit"],
+            "accessControl": "onlyOwner",
+            "reentrancyGuard": true,
+            "pausable": false,
+            "note": "Intentionally bypasses pause for owner emergency action",
+            "unchangedByStory042": true
+          },
+          {
+            "function": "withdrawAsOwner(address client, address recipient, uint256 amount)",
+            "visibility": "external",
+            "stateChanges": ["clientBalances", "totalDeposited"],
+            "externalCalls": ["same as withdraw"],
+            "accessControl": "onlyOwner",
+            "reentrancyGuard": true,
+            "pausable": false,
+            "unchangedByStory042": true
+          },
+          {
+            "function": "skimSurplus(address token, address recipient) returns (uint256)",
+            "visibility": "external (inherited from AYieldStrategy)",
+            "stateChanges": ["NONE — principal accounting deliberately untouched"],
+            "externalCalls": [
+              "vault.balanceOf(address(this)) (view, line 421)",
+              "vault.convertToAssets(totalValue snapshot) (view, line 421)",
+              "vault.convertToShares(surplus) PER CLIENT (view, line 485)",
+              "vault.convertToShares(aggregateSurplus) (view, line 429 — ceiling check)",
+              "vault.convertToAssets(totalShares) (view, line 434 — minOut basis)",
+              "IERC20(vault).safeIncreaseAllowance(ammAdapter, totalShares) (line 436)",
+              "ammAdapter.swap(vault -> underlying, totalShares, minOut) (line 440 — SINGLE aggregate swap)",
+              "underlyingToken.safeTransfer(recipient, underlyingReceived) — FAST PATH (no buffers) (line 444)",
+              "underlyingToken.safeTransfer(clients[i], buf) — BUFFERED PATH, PER SURPLUS-BEARING CLIENT (line 516)",
+              "underlyingToken.safeTransfer(recipient, toRecipient) — BUFFERED PATH REMAINDER (line 519)"
+            ],
+            "accessControl": "onlyAuthorizedWithdrawer (parent)",
+            "reentrancyGuard": true,
+            "pausable": true,
+            "returnValue": "uint256 underlyingReceived — the post-swap actual underlying delivered to recipient. UNDER BUFFERED PATH this is REDUCED by the totalSetAside that went to clients[]. Downstream callers (e.g. SYA) must NOT assume the return value equals the sum of SurplusSkimmed.amount events (see CLAUDE.md).",
+            "story042Delta": "NEW return value; NEW external transfers to clients[i] in the buffered path; FAST PATH preserves baseline behavior when all setAsideBufferSize[client] == 0 (the default)."
+          },
+          {
+            "function": "setSlippageTolerance(uint256 _bps)",
+            "visibility": "external",
+            "stateChanges": ["slippageToleranceBps"],
+            "externalCalls": [],
+            "accessControl": "onlyOwner",
+            "reentrancyGuard": false,
+            "pausable": false,
+            "note": "Still no nonzero lower bound; pre-existing L-01 carries forward (unchanged by story-042)"
+          },
+          {
+            "function": "underlying() view returns (address)",
+            "visibility": "external",
+            "stateChanges": [],
+            "externalCalls": [],
+            "accessControl": "none (view)",
+            "reentrancyGuard": false
+          },
+          {
+            "function": "principalOf(address, address) view returns (uint256)",
+            "visibility": "external",
+            "stateChanges": [],
+            "externalCalls": [],
+            "accessControl": "none (view)",
+            "reentrancyGuard": false
+          },
+          {
+            "function": "totalBalanceOf(address, address) view returns (uint256)",
+            "visibility": "external",
+            "stateChanges": [],
+            "externalCalls": ["vault.balanceOf (view)", "vault.convertToAssets (view)"],
+            "accessControl": "none (view)",
+            "reentrancyGuard": false
+          },
+          {
+            "function": "balanceOf(address, address) view returns (uint256)",
+            "visibility": "external",
+            "stateChanges": [],
+            "externalCalls": [],
+            "accessControl": "none (view)",
+            "reentrancyGuard": false,
+            "note": "DEPRECATED — delegates to principalOf"
+          },
+          {
+            "function": "getTotalDeposited(address) view returns (uint256)",
+            "visibility": "external",
+            "stateChanges": [],
+            "externalCalls": [],
+            "accessControl": "none (view)"
+          },
+          {
+            "function": "getTotalShares() view returns (uint256)",
+            "visibility": "external",
+            "stateChanges": [],
+            "externalCalls": ["vault.balanceOf (view)"],
+            "accessControl": "none (view)"
+          }
+        ],
+        "externalCalls": [
+          {
+            "target": "IERC4626 vault (immutable)",
+            "methods": ["balanceOf", "convertToAssets", "convertToShares"],
+            "trustLevel": "semi-trusted (deployment-chosen ERC4626; story scope is sUSDe per AMMRoutes.json)",
+            "notes": "All vault interactions are VIEW. Trust assumption: NAV (convertToShares/convertToAssets) cannot be atomically manipulated. If deployed over an ERC4626 with manipulable share price, M-02's NAV-anchored minOut becomes a high-severity theft primitive (already documented in M-02 triage)."
+          },
+          {
+            "target": "IAMMAdapter ammAdapter (immutable)",
+            "methods": ["swap"],
+            "trustLevel": "trusted (owner-deployed CurveAMMAdapter)",
+            "notes": "Returns amountOut; reverts on minOut breach. Single aggregate swap point — all surplus is sold in one transaction in _skimSurplus."
+          },
+          {
+            "target": "IERC20 underlyingToken (immutable)",
+            "methods": ["safeTransferFrom", "safeTransfer", "safeIncreaseAllowance"],
+            "trustLevel": "trusted (per CLAUDE.md known-invalid list excludes non-standard ERC20s)",
+            "notes": "story-042 ADDS per-client safeTransfer calls in _distributeBuffer loop. With a standard ERC20 these are non-reentrant; with an ERC777-style hooked token they would be — but ERC777-style tokens are out of scope per CLAUDE.md known-invalid findings."
+          },
+          {
+            "target": "IERC20 vault (the vault token itself, used as ERC20)",
+            "methods": ["safeIncreaseAllowance", "safeTransfer (only in _emergencyWithdraw)"],
+            "trustLevel": "semi-trusted",
+            "notes": "Treated as standard ERC20 for approval flow."
+          }
+        ],
+        "stateVariables": [
+          {
+            "name": "underlyingToken",
+            "type": "IERC20 (immutable)",
+            "mutators": ["constructor"],
+            "readers": ["deposit", "withdraw", "_depositInternal", "_withdrawInternal", "_skimSurplus", "_accrueSurplusShares", "_distributeBuffer", "_totalWithdraw", "underlying"]
+          },
+          {
+            "name": "vault",
+            "type": "IERC4626 (immutable)",
+            "mutators": ["constructor"],
+            "readers": ["_depositInternal", "_withdrawInternal", "_skimSurplus", "_accrueSurplusShares", "_totalWithdraw", "_emergencyWithdraw", "totalBalanceOf", "getTotalShares"]
+          },
+          {
+            "name": "ammAdapter",
+            "type": "IAMMAdapter (immutable)",
+            "mutators": ["constructor"],
+            "readers": ["_depositInternal", "_withdrawInternal", "_skimSurplus", "_totalWithdraw"]
+          },
+          {
+            "name": "slippageToleranceBps",
+            "type": "uint256",
+            "mutators": ["setSlippageTolerance"],
+            "readers": ["_depositInternal", "_withdrawInternal", "_skimSurplus", "_totalWithdraw"]
+          },
+          {
+            "name": "clientBalances",
+            "type": "mapping(address => mapping(address => uint256)) private",
+            "mutators": ["_depositInternal (+=)", "_withdrawInternal (-=)", "_totalWithdraw (=0)"],
+            "readers": ["principalOf", "balanceOf", "totalBalanceOf", "_accrueSurplusShares", "_totalWithdraw", "_withdrawInternal"]
+          },
+          {
+            "name": "totalDeposited",
+            "type": "mapping(address => uint256) private",
+            "mutators": ["_depositInternal (+=)", "_withdrawInternal (-=)", "_totalWithdraw (-=)"],
+            "readers": ["_skimSurplus", "_accrueSurplusShares", "totalBalanceOf", "getTotalDeposited", "_totalWithdraw"]
+          }
+        ],
+        "events": [
+          "Deposited",
+          "Withdrawn",
+          "SlippageToleranceSet",
+          "SurplusSkimmed (inherited — emitted in _accrueSurplusShares with SNAPSHOT surplus, not post-swap actual; see LOCAL-005)"
+        ],
+        "modifiers": [
+          "onlyAuthorizedClient (parent)",
+          "onlyAuthorizedWithdrawer (parent)",
+          "onlyOwner (parent / OZ Ownable)",
+          "nonReentrant (parent / OZ ReentrancyGuard)",
+          "whenNotPaused (parent / OZ Pausable)"
+        ],
+        "internalFunctions": [
+          {
+            "function": "_skimSurplus(address token, address[] memory clients, address recipient) returns (uint256 underlyingReceived)",
+            "visibility": "internal override",
+            "callers": ["AYieldStrategy.skimSurplus (parent external, nonReentrant)"],
+            "story042Delta": "Now returns underlyingReceived. Splits into FAST PATH (totalBufferShares == 0, baseline-equivalent) vs BUFFERED PATH (delegates to _distributeBuffer)."
+          },
+          {
+            "function": "_accrueSurplusShares(address, address[] memory, address, uint256, uint256[] memory) returns (uint256, uint256)",
+            "visibility": "private (NEW in story-042)",
+            "callers": ["_skimSurplus only"],
+            "note": "Out-param mutates the caller's `bufferShares` memory array. Emits SurplusSkimmed per surplus-bearing client. Reads clientBalances and totalDeposited (re-reads td once internally). Reads setAsideBufferSize[client] from parent storage."
+          },
+          {
+            "function": "_distributeBuffer(address[] memory, uint256[] memory, uint256, uint256, address) returns (uint256 toRecipient)",
+            "visibility": "private (NEW in story-042)",
+            "callers": ["_skimSurplus only (BUFFERED PATH)"],
+            "note": "Pure distribution math + transfers; no contract storage reads/writes. Dust (rounding) routes to `recipient` by construction."
+          },
+          {
+            "function": "_emergencyWithdraw(uint256) internal override",
+            "visibility": "internal override",
+            "callers": ["AYieldStrategy.emergencyWithdraw (parent, onlyOwner)"],
+            "unchangedByStory042": true
+          },
+          {
+            "function": "_totalWithdraw(address, address, uint256) internal override",
+            "visibility": "internal override",
+            "callers": ["AYieldStrategy._executeWithdrawal (parent two-phase)"],
+            "unchangedByStory042": true
+          }
+        ]
+      },
+      "trustAssumptions": [
+        "Owner is trusted (centralization carries forward as C-01 in ledger — story-042 adds setSetAsideBuffer as another owner power, on top of setClient/setWithdrawer/setSlippageTolerance/depositAsOwner/withdrawAsOwner/emergencyWithdraw/totalWithdrawal).",
+        "Authorized clients are protocol-owned contracts (per AYieldStrategy.sol#L246 AUDITOR NOTE on setSetAsideBuffer: \"every client is a protocol-owned contract, so no external attacker can profit\"). The buffer's economic quirk — front-running a skim with a fresh deposit shifts the buffer share — is acceptable BECAUSE of this assumption. A future audit on a deployment that admits external clients MUST re-evaluate this as a possible H/M.",
+        "Authorized withdrawers are trusted to choose a sensible `recipient` and to tolerate the post-slippage delivered amount (e.g. SYA's minRewardTokenSupplied per the CLAUDE.md AUDITOR NOTE).",
+        "underlyingToken is a standard ERC20 (per CLAUDE.md project-level known-invalid list).",
+        "vault (the ERC4626) has non-atomically-manipulable NAV. Specifically for sUSDe per AMMRoutes.json: rate manipulation requires Ethena treasury action, not a same-block primitive.",
+        "ammAdapter is the owner-deployed CurveAMMAdapter; its swap() honors minOut and reverts on breach.",
+        "Rebasing vault tokens are explicitly UNSUPPORTED (line 19-20 NatSpec)."
+      ],
+      "story042DeltaSummary": {
+        "newFunctions": ["_accrueSurplusShares (private)", "_distributeBuffer (private)"],
+        "changedFunctions": ["_skimSurplus (signature: now returns uint256; body factored into helpers)"],
+        "newExternalEffects": [
+          "Per-client underlyingToken.safeTransfer(clients[i], buf) in the BUFFERED PATH",
+          "skimSurplus(token, recipient) now returns uint256 underlyingReceived",
+          "Reads parent storage setAsideBufferSize[client] for every surplus-bearing client (new SLOAD per iteration)"
+        ],
+        "behavioralEquivalence": "When all setAsideBufferSize[client] == 0 (the deployed default), the FAST PATH (line 443-446) makes story-042 behaviorally equivalent to phoenix-vault-06 baseline: a single safeTransfer(recipient, underlyingReceived) after the aggregate swap. The only externally observable delta in that case is the non-zero return value. All M-02 (NAV-anchored minOut), L-01 (slippage cap), L-02 (unbounded loop), C-01 (centralization) findings carry forward unchanged through the FAST PATH.",
+        "buffersDoNotAffectAggregateCeiling": "totalShares (used by the M-01 aggregate-surplus ceiling at line 428) is accumulated BEFORE the buffer-share reassignment (line 486 happens before line 487). The ceiling still bounds total skim shares ≤ floor(convertToShares(aggregateSurplus)). Buffers redistribute the proceeds of that swap; they do NOT permit selling more than the aggregate surplus."
+      }
+    },
+    {
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "solidityVersion": "^0.8.13",
+      "inheritanceChain": ["IAMMAdapter", "Ownable"],
+      "complexity": {
+        "loc": 142,
+        "functions": 4,
+        "externalCalls": 3,
+        "stateVariables": 2
+      },
+      "verifiedProperties": {
+        "noUnboundedLoops": {
+          "value": false,
+          "confidence": "verified",
+          "note": "Single bounded loop in setRoute (lines 75-79) iterates exactly 11 times (calldata `address[11]`) — constant bound, not unbounded."
+        },
+        "checkedArithmetic": {
+          "value": true,
+          "confidence": "verified",
+          "note": "No arithmetic operations in this contract beyond the constant loop counter."
+        },
+        "reentrancyGuarded": [],
+        "reentrancyUnguarded": ["swap"],
+        "reentrancyExposureNote": "swap() has no nonReentrant guard, but the only reentrant surface would be tokenIn.safeTransferFrom (line 132) or router.exchange (line 138). With a standard ERC20 tokenIn (per project-level trust assumption) and a trusted router, no exploitable reentrancy. The strategy callers (ERC4626MarketYieldStrategy.deposit/withdraw/_skimSurplus/_totalWithdraw) carry nonReentrant at their entry points, so the strategy state is protected even if swap re-entered.",
+        "accessControlled": ["setRoute (onlyOwner)"],
+        "initializerProtected": {
+          "value": true,
+          "confidence": "verified",
+          "note": "Constructor enforces non-zero router; Ownable initial owner enforced via OZ."
+        },
+        "pauseMechanism": false,
+        "ceiInOrder": {
+          "value": true,
+          "confidence": "verified",
+          "note": "swap() ordering: pull tokenIn (line 132) -> approve router (line 135) -> exchange (line 138) -> emit (line 140). No storage state to protect; routes mapping is read-only in swap. The `Swapped` event after the external call (SLITHER-006) is event-ordering only — no exploitable surface."
+        }
+      },
+      "localFindings": [
+        {
+          "id": "LOCAL-006",
+          "type": "leftover-allowance-on-revert-or-partial-pull",
+          "severity": "local-low",
+          "function": "swap",
+          "lineStart": 132,
+          "lineEnd": 138,
+          "description": "swap() uses `forceApprove(address(router), amountIn)` BEFORE calling router.exchange. If router.exchange reverts after the approve but before consuming all `amountIn` (or in an edge case where the router consumes less than amountIn), residual allowance to the trusted router remains. The forceApprove sets exactly amountIn each call, so the residual is overwritten on the next swap call — but in an idle period the adapter holds a non-zero allowance to a trusted external contract. Not exploitable as written (router is a trusted Curve contract, attacker cannot direct it to pull the leftover), and the every-call reset bounds the residual to the last call's amountIn. Flagged as defensive-coding low.",
+          "recommendation": "Optional: zero the router allowance at the end of swap (or use a try/catch around exchange that zeroes on revert). Not material at current trust level.",
+          "confidence": "verified"
+        },
+        {
+          "id": "LOCAL-007",
+          "type": "intermediate-token-balance",
+          "severity": "local-info",
+          "function": "swap",
+          "lineStart": 132,
+          "lineEnd": 138,
+          "description": "tokenIn is pulled to the adapter (line 132) then forwarded to the router via exchange. tokenOut is sent BY THE ROUTER directly to msg.sender (line 138, receiver argument). If router.exchange reverts after pulling tokenIn from the adapter (via internal accounting), the adapter retains tokenIn. In normal Curve Router NG operation this does not happen — exchange is atomic — but it's worth surfacing to downstream agents that there is NO sweep function for stuck tokens on this adapter. Owner cannot recover dust.",
+          "recommendation": "Consider an owner-only `sweep(address token, address to, uint256 amount)` for stuck-token recovery, OR add a comment confirming the design choice that the adapter is intentionally non-custodial. Not exploitable.",
+          "confidence": "verified"
+        },
+        {
+          "id": "LOCAL-008",
+          "type": "path-validation-incomplete",
+          "severity": "local-low",
+          "function": "setRoute",
+          "lineStart": 75,
+          "lineEnd": 80,
+          "description": "Path validation (lines 75-80) only checks `path[0] == tokenIn` and `lastNonZero == tokenOut`. It does NOT validate that the path is contiguously non-zero (i.e., that zeros only appear as padding at the tail), nor that pool addresses interleaved between tokens are non-zero. A malformed path with internal zeros could be set; correctness then relies entirely on the Curve Router NG rejecting it at exchange time. Because setRoute is onlyOwner and routes are deployment-time configuration verified off-chain against AMMRoutes.json, this is an integrity-check gap rather than an exploit surface.",
+          "recommendation": "Optional defense-in-depth: walk the path enforcing the interleaving invariant (token, pool, token, pool, ..., token, zero*) at set time. Current design accepts off-chain verification as the source of truth.",
+          "confidence": "verified"
+        }
+      ],
+      "interfaceAbstraction": {
+        "externalEntryPoints": [
+          {
+            "function": "setRoute(address tokenIn, address tokenOut, address[11] path, uint256[5][5] swapParams, address[5] pools)",
+            "visibility": "external",
+            "stateChanges": ["routes[tokenIn][tokenOut]"],
+            "externalCalls": [],
+            "accessControl": "onlyOwner",
+            "reentrancyGuard": false,
+            "note": "Validates path[0] == tokenIn and last non-zero == tokenOut. Bidirectional invariant enforced at SWAP time (both directions must be configured), NOT at set time."
+          },
+          {
+            "function": "getRoute(address, address) view returns (path, swapParams, pools, configured)",
+            "visibility": "external",
+            "stateChanges": [],
+            "externalCalls": [],
+            "accessControl": "none (view)"
+          },
+          {
+            "function": "isPairFullyConfigured(address, address) view returns (bool)",
+            "visibility": "public",
+            "stateChanges": [],
+            "externalCalls": [],
+            "accessControl": "none (view)"
+          },
+          {
+            "function": "swap(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut) returns (uint256 amountOut)",
+            "visibility": "external override",
+            "stateChanges": [],
+            "externalCalls": [
+              "IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn)",
+              "IERC20(tokenIn).forceApprove(address(router), amountIn)",
+              "router.exchange(path, swapParams, amountIn, minAmountOut, pools, msg.sender)"
+            ],
+            "accessControl": "none (callable by anyone holding tokenIn)",
+            "reentrancyGuard": false,
+            "note": "amountOut is the actual router-reported swap result; passed back via Swapped event AND the function return. Receiver is msg.sender, so tokenOut flows directly to the caller (the strategy) — the adapter is non-custodial."
+          }
+        ],
+        "externalCalls": [
+          {
+            "target": "ICurveRouterNG router (immutable)",
+            "methods": ["exchange"],
+            "trustLevel": "trusted (Curve Router NG mainnet 0x16C6...5353, owner-configured at deploy)",
+            "notes": "exchange is payable but called without value. router enforces _expected (minAmountOut) — if breached, exchange reverts."
+          },
+          {
+            "target": "IERC20 tokenIn (caller-supplied)",
+            "methods": ["safeTransferFrom", "forceApprove"],
+            "trustLevel": "trusted (standard ERC20 per project convention)",
+            "notes": "tokenIn is caller-chosen. In the deployed system, callers are owner-deployed strategies that pass deployment-vetted tokens — so tokenIn is effectively semi-trusted via the caller chain."
+          }
+        ],
+        "stateVariables": [
+          {
+            "name": "router",
+            "type": "ICurveRouterNG (immutable)",
+            "mutators": ["constructor"],
+            "readers": ["swap"]
+          },
+          {
+            "name": "routes",
+            "type": "mapping(address => mapping(address => Route)) private",
+            "mutators": ["setRoute"],
+            "readers": ["swap", "getRoute", "isPairFullyConfigured"]
+          }
+        ],
+        "events": ["RouteSet", "Swapped"],
+        "modifiers": ["onlyOwner (OZ Ownable)"]
+      },
+      "trustAssumptions": [
+        "Curve Router NG (0x16C6521Dff6baB339122a0FE25a9116693265353) honors _expected as a hard minimum-out and reverts on breach.",
+        "Owner verifies the route payload against the live pool's coins(i) before calling setRoute (off-chain procedure, per CLAUDE.md AMMRoutes.json guidance).",
+        "tokenIn callers are owner-deployed strategies; route configuration is the trust gate.",
+        "Bidirectional invariant: a swap requires BOTH directions configured (line 128), preventing half-configured deployment from soft-locking ERC4626MarketYieldStrategy round-trips."
+      ],
+      "story042DeltaSummary": {
+        "changed": false,
+        "note": "CurveAMMAdapter is UNCHANGED by story-042 (no diff in src/AMMAdapters/ between 043ff2c and 5f9abdd). Same code, same findings as baseline."
+      }
+    },
+    {
+      "contract": "src/AMMAdapters/IAMMAdapter.sol",
+      "solidityVersion": "^0.8.13",
+      "complexity": { "loc": 23, "functions": 1, "externalCalls": 0, "stateVariables": 0 },
+      "verifiedProperties": {
+        "noUnboundedLoops": { "value": true, "confidence": "verified" },
+        "checkedArithmetic": { "value": true, "confidence": "verified" },
+        "interfaceOnly": true
+      },
+      "localFindings": [],
+      "interfaceAbstraction": {
+        "externalEntryPoints": [
+          {
+            "function": "swap(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut) returns (uint256 amountOut)",
+            "visibility": "external (interface)",
+            "note": "Contract specifies a uniform swap interface for AMM adapters. Required-revert semantics on minAmountOut breach are documented by the NatSpec but not formally encoded — implementations must enforce."
+          }
+        ]
+      },
+      "trustAssumptions": ["Implementation must revert (not silently underdeliver) when amountOut < minAmountOut."],
+      "story042DeltaSummary": { "changed": false, "note": "Unchanged by story-042." }
+    },
+    {
+      "contract": "src/AMMAdapters/ICurveRouterNG.sol",
+      "solidityVersion": "^0.8.13",
+      "complexity": { "loc": 35, "functions": 1, "externalCalls": 0, "stateVariables": 0 },
+      "verifiedProperties": {
+        "noUnboundedLoops": { "value": true, "confidence": "verified" },
+        "checkedArithmetic": { "value": true, "confidence": "verified" },
+        "interfaceOnly": true
+      },
+      "localFindings": [],
+      "interfaceAbstraction": {
+        "externalEntryPoints": [
+          {
+            "function": "exchange(address[11] _route, uint256[5][5] _swap_params, uint256 _amount, uint256 _expected, address[5] _pools, address _receiver) payable returns (uint256)",
+            "visibility": "external (interface)",
+            "note": "Minimal Solidity surface for the Curve Router NG Vyper contract. payable but invoked without value by CurveAMMAdapter. Reverts on _expected breach (Curve-side enforcement)."
+          }
+        ]
+      },
+      "trustAssumptions": ["Mainnet Curve Router NG 0x16C6521Dff6baB339122a0FE25a9116693265353 honors _expected as a hard floor."],
+      "story042DeltaSummary": { "changed": false, "note": "Unchanged by story-042." }
+    },
+    {
+      "contract": "AMMRoutes.json",
+      "kind": "configuration",
+      "verifiedProperties": {
+        "routesBidirectional": {
+          "value": true,
+          "confidence": "verified",
+          "note": "Both USDe→sUSDe and sUSDe→USDe are present, as required by CurveAMMAdapter's bidirectional invariant for round-trip swaps."
+        },
+        "addressesChecksummed": {
+          "value": true,
+          "confidence": "likely",
+          "note": "Per ledger entry / story-039 commit b4427fc: addresses normalized to EIP-55. Spot-checked: 0x4c9EDD5852cd905f086C759E8383e09bff1E68B3 (USDe), 0x9D39A5DE30e57443BfF2A8307A4256c8797A3497 (sUSDe), 0x16C6521Dff6baB339122a0FE25a9116693265353 (Router NG)."
+        },
+        "swapParamsCoinIndicesSwap": {
+          "value": true,
+          "confidence": "likely",
+          "note": "USDe→sUSDe swapParams[0] = [0, 1, 1, 10, 2]; sUSDe→USDe swapParams[0] = [1, 0, 1, 10, 2] — i/j indices are mirrored as expected for a single Curve stable-NG pool. Per story-039 commit 763a1e2 these were corrected against mainnet verification."
+        }
+      },
+      "localFindings": [
+        {
+          "id": "LOCAL-009",
+          "type": "config-route-duplication",
+          "severity": "local-info",
+          "description": "Both routes are 2-hop ([0]=[0,1,1,10,2] then [1]=[0,1,1,10,2]) over the same pool address. Inspect whether the 2-hop encoding is intentional (e.g., to traverse a base-meta pair) or a vestige of an earlier construction. Two identical hops over the same pool will execute, but waste gas. Cross-checking against the live pool's `coins(i)` is the validation step explicitly called out in CLAUDE.md.",
+          "recommendation": "Flagged for econ-scanner / code-scanner — out of pure contract-profiler scope. Verify route encoding intent against the live Curve sUSDe/USDe pool.",
+          "confidence": "likely"
+        }
+      ],
+      "story042DeltaSummary": { "changed": false, "note": "Unchanged by story-042." }
+    }
+  ],
+  "crossContractTrustBoundary": {
+    "parentChild": "ERC4626MarketYieldStrategy inherits AYieldStrategy. story-042 changes are SHARED across the parent (storage + setter + external skim signature) and the child (override implementation). Treat the new state variable `setAsideBufferSize` and external setter `setSetAsideBuffer` as parent-owned but child-read; the child's `_accrueSurplusShares` reads `setAsideBufferSize[client]` directly from parent storage (line 487). The child does NOT validate `setAsideBufferSize <= 100` — it relies on the parent's enforcement in `setSetAsideBuffer` (AYieldStrategy.sol#L255). If a future code path sets `setAsideBufferSize` bypassing the setter (none exists today), the `shares * setAsideBufferSize / 100` math could exceed `shares`. Verified safe under current code.",
+    "ammRoutesJsonConsumed": "AMMRoutes.json is consumed by deployment scripts (not yet implemented per CLAUDE.md). Its correctness is a deployment-time concern; the on-chain contracts (CurveAMMAdapter.setRoute) accept any owner-signed payload, so the JSON only becomes binding when wired by a deployment script."
+  },
+  "regressionDelta": {
+    "fromBaseline": "phoenix-vault-06 @ 043ff2c",
+    "newOrChangedSurfaceArea": [
+      "ERC4626MarketYieldStrategy._skimSurplus (signature + body factored)",
+      "ERC4626MarketYieldStrategy._accrueSurplusShares (NEW, private)",
+      "ERC4626MarketYieldStrategy._distributeBuffer (NEW, private)",
+      "Parent: skimSurplus return type, setSetAsideBuffer, setAsideBufferSize, SetAsideBufferSet event"
+    ],
+    "carryForwardFindings": [
+      "M-02 (NAV-anchored minOut) — applies unchanged via the BUFFERED PATH (same single aggregate swap; buffers redistribute post-swap proceeds and DO NOT alter minOut derivation). FAST PATH also unchanged.",
+      "L-01 (slippage cap / default-0) — unchanged, setSlippageTolerance not modified",
+      "L-02 (unbounded iteration) — STILL APPLIES; story-042 ADDS a second parallel iteration and a memory allocation, increasing the per-iteration constant factor but not the asymptotic bound",
+      "C-01 (centralization) — AMPLIFIED: setSetAsideBuffer is an additional owner power. Owner can rebalance buffer attribution per client at any time, including the can-front-run-skim quirk documented in the AYieldStrategy NatSpec."
+    ],
+    "noLongerApplicable": [
+      "M-01 (FIXED in baseline run-06; story-042 does NOT reintroduce the duplicate-driven over-skim — caller still cannot supply clients[]; aggregate-surplus ceiling still in place at lines 428-431, evaluated on totalShares BEFORE buffer-share reassignment)"
+    ]
+  },
+  "downstreamHandoff": {
+    "forCodeScanner": [
+      "LOCAL-001 (parallel-array coupling) — confirm no future refactor of _accrueSurplusShares can desync clients[] vs bufferShares[] indexing",
+      "LOCAL-005 (SurplusSkimmed event topology under buffered path) — decide whether this is a spec-deviation finding worth raising vs. a documentation-only fix",
+      "Buffered-path interaction with downstream consumers: SYA bubbles the skimSurplus return value as 'yield collected'; under buffers, SYA will see LESS yield than the SurplusSkimmed events suggest. Confirm SYA's reporting integrity against the CLAUDE.md note."
+    ],
+    "forEconScanner": [
+      "Buffer-front-running quirk (AYieldStrategy.sol L240-251 AUDITOR NOTE) — owner-acknowledged within current trust model. If client set ever opens to external/permissionless clients, this becomes an economic exploit vector. Confirm scope assumption holds for the current deployment plan.",
+      "M-02 (NAV-anchored minOut) reconfirmation under buffered path — the swap is still one aggregate, governed by the same minOut, so the sandwich attack surface is unchanged. Buffers shift WHERE the leak is absorbed but not WHETHER it occurs.",
+      "LOCAL-009 (potential 2-hop encoding redundancy in AMMRoutes.json) — econ-scanner can verify against the live sUSDe/USDe pool whether the 2nd hop is intentional."
+    ],
+    "forSeverityClassifier": [
+      "All carry-forward findings retain their baseline severity classification absent new evidence",
+      "LOCAL-005 (event topology) is the only new local-level item with potential to escalate beyond informational; defer to code-scanner triage first"
+    ]
+  }
+}

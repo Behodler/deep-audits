@@ -1,0 +1,176 @@
+{
+  "project": "phoenix-vault",
+  "submodule": "lib/reflax-yield-vault",
+  "submoduleCommit": "5f9abdd",
+  "scanTimestamp": "2026-05-28T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "mode": "regression",
+  "baseline": "phoenix-vault-06 @ 043ff2c",
+  "scope": [
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+    "src/AMMAdapters/CurveAMMAdapter.sol",
+    "src/AMMAdapters/IAMMAdapter.sol",
+    "src/AMMAdapters/ICurveRouterNG.sol",
+    "AMMRoutes.json"
+  ],
+  "outOfScopeButTouched": [
+    "src/AYieldStrategy.sol — read-only, for cross-contract reasoning about setSetAsideBuffer / _authorizedClients interaction with the child's _accrueSurplusShares"
+  ],
+  "contractsScanned": 4,
+  "verifiedConcerns": [
+    {
+      "concern": "Buffer-share distribution math",
+      "result": "VERIFIED CORRECT",
+      "note": "ERC4626MarketYieldStrategy.sol#L503-L521: payout_i = underlyingReceived * bufferShares[i] / totalShares (floor); totalSetAside = Σ buf; toRecipient = underlyingReceived - totalSetAside. Sum-conservation holds by construction; dust accrues to recipient. Each bufferShares[i] ≤ totalShares (because bufferShares[i] = floor(shares_i * bp_i / 100) ≤ shares_i and Σ shares_i = totalShares), so totalSetAside ≤ underlyingReceived and the subtraction never underflows."
+    },
+    {
+      "concern": "Reentrancy posture on _accrueSurplusShares / _distributeBuffer",
+      "result": "VERIFIED SAFE",
+      "note": "Both helpers are private and only reachable via skimSurplus(external) on the parent, which carries nonReentrant + whenNotPaused. The new per-client safeTransfer(clients[i], buf) calls in _distributeBuffer transfer the configured underlyingToken (standard ERC20 per project trust assumption; ERC777-style hooks are out of scope per CLAUDE.md known-invalid list). Even on an ERC777-like hook, principal accounting is intentionally untouched during the entire skim path — so a callback re-entering the same parent would simply hit the nonReentrant guard. SA-001/SA-002 (slither reentrancy-no-eth on _withdrawInternal and _totalWithdraw) are pre-existing patterns covered by the entry-point guard; story-042 does NOT introduce new CEI violations."
+    },
+    {
+      "concern": "Sum-of-bufferShares ≤ totalShares invariant",
+      "result": "VERIFIED TIGHT",
+      "note": "ERC4626MarketYieldStrategy.sol#L485-L489: for each client, totalShares += shares (pre-reassignment); then shares is reassigned to floor(shares * bp / 100) with bp ≤ 100. The aggregate ceiling at L428-L431 is therefore evaluated on the PRE-buffer totalShares, which means buffers cannot expand the aggregate-surplus cap. Rounding favors recipient on both div-points (per-client buffer share floor at L487, per-client underlying payout floor at L513)."
+    }
+  ],
+  "findingsCount": 4,
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "cross-contract-stale-storage",
+      "category": "state-consistency",
+      "severity": "potential-low",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "setSetAsideBuffer / setClient",
+      "line": 253,
+      "lineStart": 183,
+      "lineEnd": 259,
+      "title": "setAsideBufferSize persists after a client is deauthorized and silently resurrects on re-auth",
+      "description": "setSetAsideBuffer (AYieldStrategy.sol#L253-L259) writes setAsideBufferSize[client] = bufferPercent unconditionally — it does NOT require `_authorizedClients.contains(client)`. Symmetrically, setClient(client, false) (L183-L193) removes the address from `_authorizedClients` but does NOT zero `setAsideBufferSize[client]`. The cross-contract consequence is that the child's _accrueSurplusShares (ERC4626MarketYieldStrategy.sol#L487) reads `setAsideBufferSize[client]` directly from parent storage during the next skim, and that value can be a previously-set non-zero percentage that the owner believed was 'cleared' when the client was removed. If the owner later re-authorizes the same address (`setClient(client, true)`), the stale buffer percentage takes effect immediately on the next skim — no re-write required — diverting surplus to that client. Conversely, an owner can pre-stage `setAsideBufferSize[future_client] = X`, then enable the client and have the buffer apply from authorization #1 (this direction is intended per the AUDITOR NOTE on L240-L251, but the resurrection-on-reauth direction is not documented).",
+      "impact": "Operational footgun. Owner-facing only (centralization-bounded per C-01). No external attacker leverage because every client is protocol-owned (per AYieldStrategy.sol#L246 AUDITOR NOTE). However, a deployment that toggles client authorization (e.g. rotating an integration's contract address while keeping the same logical identity, or temporarily deauthorizing during an incident) would silently restore the prior buffer attribution on re-auth, leading to misallocated yield in the very next skim. The risk surface widens if the trust assumption ('all clients are protocol-owned contracts') ever loosens.",
+      "exploitSketch": "Owner sets setAsideBufferSize[clientA] = 50 (intent: clientA reserves 50% of its own surplus). Later, owner deauthorizes clientA via setClient(clientA, false) to migrate to clientA' — sets setAsideBufferSize[clientA'] = 50, authorizes clientA'. Months later, owner needs to roll back and re-authorizes clientA via setClient(clientA, true). Without any setSetAsideBuffer call, the next skim sees setAsideBufferSize[clientA] = 50 (the never-zeroed legacy value) and diverts that fraction of clientA's surplus into clientA. If the intended new state was 0, the owner just unknowingly redirected yield away from the skim recipient.",
+      "recommendation": "Either (a) in setClient(client, false), explicitly zero `setAsideBufferSize[client]` and emit SetAsideBufferSet(client, oldPercent, 0); or (b) require `_authorizedClients.contains(client)` in setSetAsideBuffer (rejecting both stale writes and writes to never-authorized addresses); or (c) document the resurrection-on-reauth semantics in the NatSpec next to the L240-L251 AUDITOR NOTE so operators do not assume removal clears the buffer. Option (a) gives the cleanest invariant: setAsideBufferSize[client] != 0 implies _authorizedClients.contains(client).",
+      "confidence": "high",
+      "intentionalPattern": false,
+      "codeSnippet": "// AYieldStrategy.sol L183-L193 — setClient does NOT zero setAsideBufferSize\nfunction setClient(address client, bool _auth) external override onlyOwner {\n    require(client != address(0), ...);\n    if (_auth) { _authorizedClients.add(client); } else { _authorizedClients.remove(client); }\n    emit ClientAuthorizationSet(client, _auth);\n}\n// L253-L259 — setSetAsideBuffer does NOT check membership\nfunction setSetAsideBuffer(address client, uint256 bufferPercent) external override onlyOwner {\n    require(client != address(0), ...);\n    require(bufferPercent <= 100, ...);\n    setAsideBufferSize[client] = bufferPercent;\n    ...\n}",
+      "dedupHints": {
+        "patternIds": ["STALE-STORAGE-ON-DEAUTH"],
+        "relatedFindings": ["pattern-matches.json/skipped CENTRALIZATION-ADMIN (which dismissed this as 'stale-state surface' — code-scanner re-elevates it as a concrete operator footgun, not just stale storage)"]
+      },
+      "story042Specific": true
+    },
+    {
+      "id": "CODE-002",
+      "type": "event-spec-deviation",
+      "category": "external-integration",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_accrueSurplusShares / _distributeBuffer",
+      "line": 484,
+      "lineStart": 484,
+      "lineEnd": 519,
+      "title": "SurplusSkimmed event under-represents the buffered-path beneficiaries — no event records the per-client buffer redirection",
+      "description": "On the buffered path, `_distributeBuffer` (ERC4626MarketYieldStrategy.sol#L511-L519) performs `underlyingToken.safeTransfer(clients[i], buf)` for every surplus-bearing client whose `setAsideBufferSize[client] > 0`, splitting the swap proceeds between `recipient` and the per-client buffers. The only event emitted across this flow is `SurplusSkimmed(token, client, msg.sender, surplus, recipient)` in _accrueSurplusShares (L484), which: (a) reports the SNAPSHOT surplus in vault-asset terms (pre-redeem/pre-swap), not the actual underlying received per client; (b) names `recipient` as the receiver even when most of the proceeds for that client actually go to `clients[i]`. There is NO event marking the buffer-redirected transfer or the recipient-bound remainder. Downstream indexers and off-chain accounting that reconstruct fund flow from events will mis-attribute receipts: every wei that lands in any `clients[i]` via the buffered path is invisible to event consumers. The submodule's own CLAUDE.md note ('skimSurplus return value vs. SurplusSkimmed events') only documents the SUM-vs-RETURN-VALUE drift (snapshot vs. actual), not the RECIPIENT mismatch in the buffered path.",
+      "impact": "Spec/integration-level only. No tokens lost — all funds reach protocol-owned addresses (clients[i] and recipient). However, any integrator that builds reconciliation off SurplusSkimmed (e.g. SYA, or a future analytics consumer) and reads `recipient` as the destination will silently mis-route accounting under the buffered path. Combined with the (also documented) snapshot-vs-actual gap, an external observer cannot reconstruct the true distribution from on-chain events alone. The gap is bounded by the buffer percentage and is purely informational at the current trust level, but it is a documented behavior delta from baseline phoenix-vault-06 and from the IYieldStrategy event contract.",
+      "exploitSketch": "Not exploitable for fund theft. Operational scenario: SYA (or any future indexer) listens to SurplusSkimmed and increments `recipient`'s accounting by the emitted `amount`. With one client at setAsideBufferSize = 50%, the event reports `amount = surplus` (full snapshot) targeting `recipient`, but `safeTransfer(client, ~surplus/2)` actually fires. Indexer over-credits recipient by ~half the surplus and never credits the client buffer, producing a reconciliation diff that grows linearly with skim count.",
+      "recommendation": "Either (a) emit a new `SurplusBuffered(token, client, amount)` event from inside _distributeBuffer when `buf > 0`, and a `SurplusForwarded(token, recipient, amount)` for the remainder; or (b) extend `SurplusSkimmed` with an extra `bufferAmount` field and emit it in _distributeBuffer rather than _accrueSurplusShares (this also fixes the snapshot-vs-actual gap by deferring the event until post-swap); or (c) document the event semantics under the buffered path in IYieldStrategy.sol's NatSpec and in the submodule CLAUDE.md so consumers explicitly subtract buffer redirection when reconciling. Author NatSpec on AYieldStrategy.sol#L355-L357 documents the return-value-vs-event drift but not the event-recipient-vs-actual-recipient drift introduced by story-042.",
+      "confidence": "high",
+      "intentionalPattern": "partially — author CLAUDE.md documents the return-value-vs-events drift; story-042's event-recipient drift is NEW and undocumented",
+      "codeSnippet": "// ERC4626MarketYieldStrategy.sol L484 — event emission in _accrueSurplusShares\nemit SurplusSkimmed(token, client, msg.sender, surplus, recipient);\n// L511-L519 — actual proceeds split (no event)\nfor (uint256 i = 0; i < clients.length; i++) {\n    if (bufferShares[i] == 0) continue;\n    uint256 buf = underlyingReceived * bufferShares[i] / totalShares;\n    if (buf == 0) continue;\n    totalSetAside += buf;\n    underlyingToken.safeTransfer(clients[i], buf); // <-- no event\n}\ntoRecipient = underlyingReceived - totalSetAside;\nif (toRecipient > 0) underlyingToken.safeTransfer(recipient, toRecipient); // <-- no event",
+      "dedupHints": {
+        "patternIds": ["EVENT-VS-EFFECT-DRIFT"],
+        "relatedFindings": ["contract-profile.json/LOCAL-005 (profiler flagged this as informational — code-scanner concurs on materiality being integration-only, not exploit)"]
+      },
+      "story042Specific": true
+    },
+    {
+      "id": "CODE-003",
+      "type": "cross-contract-output-drift",
+      "category": "external-integration",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_skimSurplus / _distributeBuffer",
+      "line": 440,
+      "lineStart": 432,
+      "lineEnd": 521,
+      "title": "skimSurplus return value is the gross swap output, not the amount delivered to recipient — integrators that floor on it bypass the buffer split",
+      "description": "_skimSurplus returns `underlyingReceived` (ERC4626MarketYieldStrategy.sol#L440), the GROSS swap output. The function NatSpec on AYieldStrategy.sol#L352-L357 documents this as 'the actual underlying token amount delivered to recipient'. In the FAST PATH (totalBufferShares == 0, L443-L446), the two are equal. In the BUFFERED PATH (L450), the recipient actually receives `toRecipient = underlyingReceived - totalSetAside` while the function still returns `underlyingReceived` (because _distributeBuffer returns toRecipient, but `_skimSurplus`'s buffered path is `return _distributeBuffer(...)` at L450 — let me re-read).",
+      "descriptionCorrection": "RE-VERIFICATION: ERC4626MarketYieldStrategy.sol#L450 returns the result of _distributeBuffer, which at L520 is `toRecipient = underlyingReceived - totalSetAside`. So the BUFFERED PATH returns the NET amount to recipient, while the FAST PATH (L445) returns the SAME GROSS amount (no buffers). The return-value semantics therefore DIFFER between paths: in FAST PATH, return value = gross swap output = amount to recipient (equivalent). In BUFFERED PATH, return value = net-to-recipient amount, NOT the gross swap output. The NatSpec on AYieldStrategy.sol#L352-L357 says 'actual underlying token amount delivered to recipient' — which matches the BUFFERED PATH but NOT the literal swap result. Submodule CLAUDE.md says 'underlying actually received, net of AMM price, slippage, and rounding' — ambiguous on buffer split. The two paths return semantically-equivalent values ('what arrived at recipient'), but a reviewer who reads only the FAST PATH return (L445: `return underlyingReceived;`) would conclude the function returns the SWAP OUTPUT, not the recipient receipt — which is correct only because in the FAST PATH they are the same. If a future refactor adds a buffer or a tax on the fast path, the return value would silently change semantics. Net: the contract is correct today, but the return-value definition is path-dependent in a non-obvious way.",
+      "title_revised": "skimSurplus return value semantics are path-dependent — fast path returns swap-output, buffered path returns recipient-receipt; CLAUDE.md and NatSpec leave room for integrator confusion",
+      "impact": "Documentation/integration concern. SYA and any future caller that bubbles `underlyingReceived` into a 'yield collected' figure or applies a slippage floor against it: under the fast path they get the swap output; under the buffered path they get the post-buffer remainder. The submodule CLAUDE.md does flag that the return value differs from event sums, but it does NOT clearly state that in the buffered path the return value is REDUCED by buffer redirection. A caller that intends to enforce a slippage floor on the swap (e.g. minRewardTokenSupplied) gets a strictly more conservative floor under the buffered path — which is safe — but a caller that uses the return value as a yield-attribution counter under-counts the protocol's actual realized yield (because the buffer slices are real protocol revenue, just routed to a different protocol-owned address). Pattern-matcher already flagged this angle as PATTERN-001.",
+      "exploitSketch": "Not exploitable. Operational example: keeper invokes skimSurplus from a wrapper that asserts `assert(returned >= expectedYield)`. The buffered path delivers `expectedYield - totalSetAside` to the keeper's recipient and returns that smaller number, so the assertion may revert even though the protocol's TOTAL realized value (recipient + all buffers) is `expectedYield`. The wrapper's logic is the off-chain bug, but the return-value contract makes it easy to write.",
+      "recommendation": "(a) Make the NatSpec on AYieldStrategy.sol#L352-L357 explicit: 'In the buffered path this is REDUCED by the sum of all per-client buffer transfers; use SurplusSkimmed events to recover the gross swap output, or call getTotalShares() etc. for the pre-skim baseline.' (b) Optionally introduce two return values `(uint256 toRecipient, uint256 totalSwapped)` in a future minor version so integrators can choose. (c) Add a unit test that asserts return-value semantics on both paths so a future refactor doesn't break the contract silently.",
+      "confidence": "medium",
+      "intentionalPattern": "partial — author intent is documented in submodule CLAUDE.md but does not address buffered-path semantics explicitly",
+      "dedupHints": {
+        "patternIds": ["RETURN-VALUE-PATH-DEPENDENT"],
+        "relatedFindings": ["pattern-matches.json/PATTERN-001 (the slippage-basis side of the same drift, forwarded to econ-scanner)"]
+      },
+      "story042Specific": true
+    },
+    {
+      "id": "CODE-004",
+      "type": "input-validation-gap",
+      "category": "configuration-integrity",
+      "severity": "potential-low",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "function": "setRoute",
+      "line": 75,
+      "lineStart": 62,
+      "lineEnd": 89,
+      "title": "setRoute accepts tokenIn == tokenOut and paths with internal zero-gap segments — relies entirely on off-chain verification",
+      "description": "CurveAMMAdapter.setRoute (L62-L89) validates only (a) tokenIn != 0, (b) tokenOut != 0, (c) path[0] == tokenIn, and (d) the LAST non-zero entry in path equals tokenOut. It does NOT check: (i) tokenIn != tokenOut (a degenerate self-route is acceptable to the validator — path[0] == tokenIn == tokenOut would pass since lastToken would also be tokenIn); (ii) that path is contiguously non-zero (so e.g. [tokenIn, 0, pool, 0, tokenOut, 0, ...] with an internal zero gap would pass the lastToken==tokenOut check); (iii) that the swapParams matrix or pools array are consistent with the path topology (e.g. swapParams[0] coin indices i,j must reference real coins of pool path[1]). SA-005 (slither) flagged the uninitialized `address lastToken` at L74 — functionally safe today because path[0]!=0 guarantees lastToken is at least tokenIn, but the broader validation gap is real. Verification is fully delegated to off-chain procedures (per submodule CLAUDE.md `AMM Route Configuration` section, which instructs operators to verify against the live pool's `coins(i)`). A malformed route that survives setRoute will cause the corresponding swap to revert at the Curve Router NG (best case) or, if Curve Router NG silently degrades on a malformed segment (worst case — Vyper contract behavior depends on hop count handling), execute an unintended swap.",
+      "impact": "Configuration integrity only. Owner-only setter — same trust boundary as the rest of the centralization bundle (C-01). The owner is trusted to verify off-chain against AMMRoutes.json. The realistic risk is a typo in deployment scripts (no off-chain validator catches a route with an internal zero gap, and on-chain validation lets it through) leading to a self-DoS of the strategy at first swap. Tokens cannot be stolen via this path because (a) Curve Router NG enforces minAmountOut, (b) the strategy still revert-protects with its NAV-anchored minOut. The most plausible bad outcome is a strategy that bricks deposit/withdraw/skimSurplus until a corrected setRoute lands.",
+      "exploitSketch": "Owner runs a deployment script that has a typo where path[2] is accidentally left as address(0) (intermediate token slot blanked). setRoute accepts because path[0]==tokenIn (good), and lastToken scan finds path[4]==tokenOut (also good). First call to swap() forwards [tokenIn, pool1, 0, pool2, tokenOut, 0, 0, 0, 0, 0, 0] to router.exchange. Curve Router NG either reverts at the malformed hop (recovered by re-setRoute) or processes only the first hop and ignores the zeroed intermediate — in the latter case the strategy ends up holding pool1's exit token instead of tokenOut, and the slippage check on the strategy side (`amountOut > 0` and minOut) would catch a zero output but not a wrong-token output (the function signature returns a uint256, not a token check). The strategy then enters a stuck state with non-fungible holdings.",
+      "recommendation": "Defense-in-depth additions to setRoute: (a) `require(tokenIn != tokenOut, 'identity-route')`; (b) walk the path validating the (token, pool, token, pool, ..., token, 0*) interleave invariant — for each non-zero token slot at index i, require either (i % 2 == 0 if i < path-length-to-last-non-zero) and require the corresponding swapParams[i/2] to be non-trivial; (c) at minimum reject paths that contain a zero between two non-zero slots. Per LOCAL-008 the same gap was flagged. None of this is exploitable today because setRoute is onlyOwner and a known-invalid C4 category for 'reckless admin mistakes' — but the lower the validation bar, the less the on-chain contract protects the protocol from a fat-fingered deployment.",
+      "confidence": "medium",
+      "intentionalPattern": "stated — author NatSpec on CurveAMMAdapter.sol#L15-L18 explicitly defers verification to off-chain procedures",
+      "codeSnippet": "// CurveAMMAdapter.sol L74-L80\naddress lastToken;\nfor (uint256 i = 0; i < 11; i++) {\n    if (path[i] != address(0)) {\n        lastToken = path[i];\n    }\n}\nrequire(lastToken == tokenOut, \"CurveAMMAdapter: path must end at tokenOut\");",
+      "dedupHints": {
+        "patternIds": ["INPUT-VALIDATION-INCOMPLETE", "OWNER-CONFIG-FOOTGUN"],
+        "relatedFindings": ["contract-profile.json/LOCAL-008 (same validation gap, profiler classified local-low)", "static-analysis-findings.json/SA-005 (uninitialized-local on lastToken — cosmetic per slither but related to the broader gap)"]
+      },
+      "story042Specific": false
+    }
+  ],
+  "deferredToEconScanner": [
+    "PATTERN-001 (slippage-basis-mismatch under the buffered path) — slippage minOut is computed on full pre-buffer aggregate; under the buffered path, recipient receives less but minOut still anchored to the full swap. Author NatSpec on AYieldStrategy.sol#L246-L251 acknowledges this. Code-scanner does not raise as separate finding because the underlying tokens are not lost — they reach protocol-owned addresses.",
+    "PATTERN-002 (slippage-floor-from-stale-spot) — vault.convertToShares/Assets used as slippage anchor for AMM execution. Carry-forward M-02 surface.",
+    "PATTERN-003 (DoS-unbounded-loop) — bounded by owner-curated client set; carry-forward L-02.",
+    "PATTERN-004 (division-precision floor-aggregation-drift) — dust-scale weakening of minOut; econ-scanner to quantify against slippageToleranceBps envelope.",
+    "LOCAL-009 (AMMRoutes.json 2-hop redundancy claim) — code-scanner spot-checked the JSON: the two hops in the USDe-sUSDe route point to DIFFERENT pool addresses (route[1]=0xF55B...0442 and route[3]=0x5706...82e85) with a non-trivial intermediate token at route[2] (0xf939...c1b4E), so the 2-hop encoding is genuine, not redundant. The profiler's LOCAL-009 claim of 'two identical hops over the same pool address' is INCORRECT — both swapParams rows are [0,1,1,10,2] (mirrored by [1,0,1,10,2] in reverse), but the pool addresses differ. Forward to econ-scanner for liveness verification against the live Curve pools, but the 'redundant hop' framing should be retracted."
+  ],
+  "filteredOut": {
+    "alreadyCoveredByProfile": [
+      "LOCAL-001 (parallel-array coupling) — profiler-verified safe; no exploitable path; advisory only",
+      "LOCAL-002 (memory allocation in skim) — gas cost, not security",
+      "LOCAL-003 (rounding-zero-dust) — protocol-favoring rounding, intentional and documented",
+      "LOCAL-004 (variable name-shadowing) — readability only",
+      "LOCAL-006 (residual allowance) — every-call reset bounds residual; trusted router",
+      "LOCAL-007 (no sweep on CurveAMMAdapter) — non-custodial design"
+    ],
+    "preExistingAndUnchangedByStory042": [
+      "SA-001 (_withdrawInternal reentrancy-no-eth) — same in baseline; covered by nonReentrant guard",
+      "SA-002 (_totalWithdraw reentrancy-no-eth) — same in baseline; owner-gated two-phase flow",
+      "SA-003 (_depositInternal reentrancy-benign) — same in baseline; increments only",
+      "SA-004 (_totalWithdraw strict-equality early-return) — owner-gated state machine; not exploitable in the two-phase flow",
+      "SA-006 (uninitialized totalSetAside in _distributeBuffer) — default uint256(0) is intended start value; cosmetic",
+      "SA-007 (calls-loop in _accrueSurplusShares) — same bound as L-02"
+    ]
+  },
+  "regressionSummary": {
+    "newFindings": ["CODE-001", "CODE-002", "CODE-003"],
+    "carryForwardSurface": ["CODE-004 (re-elevation of LOCAL-008 with cross-contract framing)"],
+    "noRegressionsFrom": ["phoenix-vault-06 — all baseline H/M findings continue to apply through the FAST PATH; story-042 does not reintroduce M-01"]
+  },
+  "notes": [
+    "All four findings are story-042-driven cross-contract or integration-level concerns; none rises above potential-low at the current trust model (protocol-owned clients, trusted owner, standard ERC20 underlying).",
+    "CODE-001 (stale setAsideBufferSize) is the most concrete novel cross-contract concern and would warrant a one-line zero-out in setClient to remove the operator footgun.",
+    "CODE-002 and CODE-003 are integration/spec consistency concerns — they affect downstream consumers (SYA, indexers) more than the in-scope contracts.",
+    "CODE-004 is a re-framed LOCAL-008 with the cross-contract trust boundary explicitly described; left at potential-low for the same trust-model reasons as the profiler classification.",
+    "The buffer math, sum-of-buffer-shares invariant, and reentrancy posture on the new helpers all VERIFY CORRECT — no findings on those axes.",
+    "The LOCAL-009 'identical 2-hop' claim in the profile was checked and is INCORRECT — see deferredToEconScanner."
+  ]
+}

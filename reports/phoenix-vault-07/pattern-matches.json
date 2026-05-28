@@ -1,0 +1,201 @@
+{
+  "project": "phoenix-vault",
+  "submodule": "lib/reflax-yield-vault",
+  "commit": "5f9abdd",
+  "scanTimestamp": "2026-05-28T00:00:00Z",
+  "scanType": "pattern-matching",
+  "mode": "regression",
+  "regressionFocus": [
+    "src/AYieldStrategy.sol: _accrueSurplusShares / _skimSurplus / setSetAsideBuffer (story-042)",
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol (in-scope file)"
+  ],
+  "scope": [
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+    "src/AMMAdapters/CurveAMMAdapter.sol",
+    "src/AMMAdapters/IAMMAdapter.sol",
+    "src/AMMAdapters/ICurveRouterNG.sol"
+  ],
+  "patternsChecked": 22,
+  "findingsCount": 4,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "slippage-basis-mismatch",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 440,
+      "function": "_skimSurplus / _distributeBuffer",
+      "description": "Slippage minOut is computed on the FULL pre-buffer aggregate (`totalShares`) and the entire surplus is sold in a single swap, but the recipient only receives the post-buffer remainder (`underlyingReceived - totalSetAside`). Any caller-side floor (e.g. SYA's `minRewardTokenSupplied`) that the keeper enforces against the externally returned `underlyingReceived` is the SWAP output — not the recipient's actual receipt. A caller wiring its slippage floor to the function's return value is effectively unprotected against value diverted into per-client buffers, because the swap's own minOut never accounts for the buffer split. Author NatSpec acknowledges this tradeoff (lines 246–251 of AYieldStrategy.sol).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "ammAdapter.swap(address(vault), address(underlyingToken), totalShares, minOut)",
+        "underlyingReceived = ammAdapter.swap(...)",
+        "toRecipient = underlyingReceived - totalSetAside"
+      ],
+      "missingMitigations": [
+        "No floor on `toRecipient` itself (only on the unbuffered swap output)",
+        "Caller-side slippage floor (e.g. minRewardTokenSupplied) must be applied to the function's documented return value, not to the swap result — relies on integrator discipline",
+        "Aggregate buffer percentage is not capped, so all-clients-at-100% reduces recipient to zero with no revert"
+      ],
+      "references": [
+        "AYieldStrategy.sol:241-251 (author's acknowledgement)",
+        "ERC4626MarketYieldStrategy.sol:413-451",
+        "CLAUDE.md note: skimSurplus return value vs SurplusSkimmed events"
+      ],
+      "notes": "This is the user-highlighted concern. The leak is bounded by the buffer percentages (which only redirect funds between protocol-owned contracts), but a future client that the protocol does not directly own — or a buggy integrator that treats skimSurplus's return as ground-truth without subtracting buffers — could mis-account. Forward to econ-scanner for full impact analysis; the buffer redirection is documented as 'protocol-internal', so the most realistic angle is an integrator API contract / accounting drift, not a direct theft path."
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "slippage-floor-from-stale-spot",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 277,
+      "function": "_depositInternal / _withdrawInternal / _totalWithdraw / _skimSurplus",
+      "description": "Every swap's minOut is derived from `vault.convertToShares` / `vault.convertToAssets` — i.e., the external ERC4626 vault's REPORTED share price — and scaled by `slippageToleranceBps`. Since the AMM swap actually executes against an AMM pool (e.g. Curve), this anchor only protects against the *vault's* reported price diverging from the AMM clearing price by more than `slippageToleranceBps`. The pattern matches: spot price (from the ERC4626 vault) used as slippage benchmark for an AMM execution.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "uint256 idealShares = vault.convertToShares(amount); uint256 minOut = idealShares * (MAX_BPS - slippageToleranceBps) / MAX_BPS;",
+        "uint256 idealUnderlying = vault.convertToAssets(sharesToSell);"
+      ],
+      "missingMitigations": [
+        "No TWAP / oracle-derived expected price",
+        "`slippageToleranceBps` is owner-set with cap of MAX_BPS=10_000 → owner can set 10000 and disable slippage entirely (no `minOut`); revert never fires",
+        "No staleness/sequencer check (irrelevant here — no Chainlink — but no independent reference either)"
+      ],
+      "references": [
+        "ERC4626MarketYieldStrategy.sol:190-195, 275-283, 320-328, 382-390, 432-440"
+      ],
+      "notes": "WARNING in the contract NatSpec already states rebasing/yield-decreasing vaults are unsupported. The intended design is that `convertToShares` is roughly the fair AMM rate; this is a known economic assumption. Flag for econ-scanner: scenarios where the ERC4626 vault's share price diverges from AMM (e.g. AMM depeg of vault token, withdrawal queue / cooldown distortions like sUSDe) would let a flash-trader execute the swap at the unfavourable end of the tolerance band. The owner-only MAX_BPS=10_000 ceiling on `slippageToleranceBps` is a centralization knob, not a security boundary."
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "unbounded-client-loop",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 473,
+      "function": "_accrueSurplusShares / _distributeBuffer",
+      "description": "Both helpers loop over `clients.length` (the full `_authorizedClients.values()` set). Each iteration in `_accrueSurplusShares` performs at least one external `vault.convertToShares` call and a SLOAD on `setAsideBufferSize[client]`. `_distributeBuffer` additionally performs one `safeTransfer` per buffered client. With a sufficiently large authorized-client set, the single `skimSurplus` call risks exceeding the block gas limit.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "for (uint256 i = 0; i < clients.length; i++)"
+      ],
+      "missingMitigations": [
+        "No pagination / batched skim",
+        "No explicit cap on the authorized-client set size"
+      ],
+      "references": [
+        "AYieldStrategy.sol:183-193 (setClient)",
+        "ERC4626MarketYieldStrategy.sol:473, 511"
+      ],
+      "notes": "The set is owner-controlled, so realistic abuse requires malicious/incompetent owner. Per known-issues policy (reckless admin mistakes are out of scope) this is QA at best. Included so econ-scanner can decide whether story-042 changed the gas profile materially."
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "DIVISION-PRECISION",
+      "type": "floor-aggregation-rounding-drift",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 485,
+      "function": "_accrueSurplusShares",
+      "description": "`totalShares` is the SUM of per-client `vault.convertToShares(surplus_i)` (each independently floored). Sum-of-floors is always <= floor-of-sum, so `totalShares <= vault.convertToShares(aggregateSurplus)` is a tautology, making the loud aggregate-surplus require (line 429) effectively defense-in-depth and never a real bound. The `minOut` is then computed on this under-counted `totalShares`, yielding a marginally SMALLER `minOut` than the protocol's fair-share would imply — slightly weakening slippage protection. The drift is bounded by `clients.length` wei in shares (one wei rounding per client).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "uint256 shares = vault.convertToShares(surplus);",
+        "totalShares += shares;",
+        "require(totalShares <= vault.convertToShares(aggregateSurplus), ...)"
+      ],
+      "missingMitigations": [
+        "No single-shot `convertToShares(aggregateSurplus)` used as the swap basis (the contract chooses per-client floors deliberately per the 'protocol-favoring rounding' comment)"
+      ],
+      "references": [
+        "ERC4626MarketYieldStrategy.sol:421-440"
+      ],
+      "notes": "Author's comment explicitly calls the protocol-favoring rounding intentional. The minOut weakening is dust-scale unless `clients.length` is large AND the vault's `convertToShares` has wide rounding error. Forwarded for econ-scanner to confirm the slippage degradation stays within the documented `slippageToleranceBps` envelope and is not exploitable as a sandwich-with-many-clients amplifier."
+    }
+  ],
+  "skipped": [
+    {
+      "patternId": "ERC4626-INFLATION",
+      "reason": "deposit gated by onlyAuthorizedClient; this strategy buys vault tokens via AMM and tracks principal in clientBalances, not minted shares; not an open vault."
+    },
+    {
+      "patternId": "FIRST-DEPOSITOR-ATTACK",
+      "reason": "No special branch for totalSupply()==0; clientBalances accounting is per-client principal."
+    },
+    {
+      "patternId": "ORACLE-STALE",
+      "reason": "No Chainlink usage. ERC4626 spot conversion is used but is not an oracle in the Chainlink sense (separate pattern PATTERN-002 covers it)."
+    },
+    {
+      "patternId": "ORACLE-ROUNDID",
+      "reason": "No Chainlink usage."
+    },
+    {
+      "patternId": "REENTRANCY-ERC777",
+      "reason": "nonReentrant on every external entry point; principal accounting is intentionally untouched during skim so cross-call state coherence is preserved; underlying is configured per-deployment (not user-supplied)."
+    },
+    {
+      "patternId": "SIGNATURE-REPLAY",
+      "reason": "No ecrecover / EIP-712 paths in scope."
+    },
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "reason": "safeIncreaseAllowance / forceApprove used; C4 known-invalid finding category."
+    },
+    {
+      "patternId": "FLASH-LOAN-PRICE",
+      "reason": "Folded into PATTERN-002 (AMM-vs-vault price divergence is the real surface; classic getReserves()/slot0() pattern not present)."
+    },
+    {
+      "patternId": "UNSAFE-DOWNCAST",
+      "reason": "No downcasts in scope."
+    },
+    {
+      "patternId": "UNPROTECTED-INIT",
+      "reason": "Constructor-only initialization. No proxy."
+    },
+    {
+      "patternId": "STORAGE-COLLISION",
+      "reason": "No delegatecall / proxy."
+    },
+    {
+      "patternId": "CENTRALIZATION-ADMIN",
+      "reason": "Owner-set buffers and slippage are gated by Ownable; per C4 policy this is QA/known-issue. setAsideBufferSize being writable for not-yet-authorized client addresses is a stale-state surface, not a security bug — the buffer only applies when that address is in _authorizedClients."
+    },
+    {
+      "patternId": "RETURN-VALUE-IGNORE",
+      "reason": "SafeERC20 throughout; swap return value captured."
+    },
+    {
+      "patternId": "SELFDESTRUCT-FORCE-ETH",
+      "reason": "No address(this).balance reads; non-payable."
+    },
+    {
+      "patternId": "DOUBLE-VOTING",
+      "reason": "Not a governance contract."
+    },
+    {
+      "patternId": "PERMIT-FRONTRUN",
+      "reason": "No permit() calls."
+    },
+    {
+      "patternId": "INCORRECT-OPERATOR",
+      "reason": "Boundary operators audited (e.g. `totalValue > td`, `totalShares <= convertToShares(aggregateSurplus)`, `amount > availablePrincipal`) all use the protocol-favoring direction."
+    },
+    {
+      "patternId": "CROSS-CHAIN-REPLAY",
+      "reason": "Not a bridge."
+    },
+    {
+      "patternId": "TIMELOCK-BYPASS",
+      "reason": "Two-phase totalWithdrawal has explicit WAITING_PERIOD/EXECUTION_WINDOW enforcement; emergencyWithdraw is owner-only by design and out-of-scope as 'reckless admin'."
+    }
+  ]
+}

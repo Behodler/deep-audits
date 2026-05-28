@@ -1,0 +1,131 @@
+{
+  "id": "M-04",
+  "issueId": "pv7m4",
+  "project": "phoenix-vault",
+  "submodule": "lib/reflax-yield-vault",
+  "submoduleCommit": "5f9abdde43a7b587dc0eaa840d20403c3a1f6ab6",
+  "status": "ready",
+  "severity": "medium",
+  "plausibility": "plausible",
+  "borderline": true,
+  "borderlineNote": "Medium vs High judgment call. Kept Medium because per-swap absolute leak is still bounded by the AMM minOut, the recipient is owner-curated, and the parametric breach requires an owner-set non-zero buffer fraction. Promotion to High if (a) deployment ships with non-trivial buffer defaults without an aggregate cap, or (b) the M-02 deep-pool premise relaxes on a future strategy.",
+  "title": "Recipient's effective slippage tolerance is amplified by 1/(1-f) under non-zero aggregate buffer, breaching the M-02 bounded-leak premise",
+  "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+  "function": "_skimSurplus + _distributeBuffer",
+  "line": 432,
+  "lineStart": 432,
+  "lineEnd": 521,
+  "fingerprint": "fea74d1212feb083bdbb1dc2aa4dbb383a47076f89066878cf953d38c6befcea",
+  "origin": "new",
+  "regression": false,
+  "story": "story-042 — per-client setAsideBuffer added to skimSurplus",
+  "description": "story-042 derives the swap's minOut from the pre-buffer aggregate totalShares (L432-L435 of ERC4626MarketYieldStrategy.sol), then distributes the proceeds by sending the buffered slice (totalSetAside) to clients[] via _distributeBuffer and only the remainder (toRecipient = underlyingReceived - totalSetAside) to recipient (L518-L520). Define f = totalBufferShares / totalShares (the aggregate buffer fraction). The swap's absolute slippage allowance is unchanged; the recipient's principal share is reduced by (1-f). The recipient's per-skim leak as a fraction of recipient yield therefore scales as slippageBps / (1 - f): 2x at f=0.5, 10x at f=0.9, 100x at f=0.99. The accepted M-02 bound holds only at f=0 (the deployed default at the time of the M-02 acceptance memo).",
+  "impact": "Value leak. Recipient (typically a yield accumulator such as SYA) absorbs the swap's absolute slippage delta over a SMALLER principal slice (toRecipient = underlyingReceived * (1 - f)). Per-skim leak relative to recipient take scales as slippageToleranceBps / (1 - totalBufferFraction). Absolute per-swap leak is still bounded by the AMM minOut, but the parametric bound the M-02 acceptance memo relied on (slippageBps * tradeSize against recipient principal) is breached as soon as totalBufferFraction > 0.",
+  "parametricBound": "fractionalRecipientLeak <= slippageToleranceBps / (10000 - totalBufferFraction * 10000)",
+  "attackPath": [
+    "1. Owner configures one or more clients with non-trivial setAsideBufferSize via setSetAsideBuffer (in-design operation introduced by story-042).",
+    "2. The aggregate buffer fraction f = totalBufferShares / totalShares becomes non-zero.",
+    "3. Any skimSurplus is executed against a vault NAV that diverges from the AMM clearing price (sandwich window, depeg, thin liquidity — same precondition as M-02).",
+    "4. The swap's minOut is computed against pre-buffer aggregate totalShares; the buffered slice is paid first to clients[] without slippage attribution; the recipient receives whatever is left of the slipped output.",
+    "5. The recipient's fractional take is reduced by (1-f); the recipient's per-skim leak (as a fraction of recipient yield) is amplified by 1/(1-f) relative to the M-02 bound."
+  ],
+  "assumptions": [
+    "Buffer fraction f > 0 (at least one authorized client has setAsideBufferSize > 0).",
+    "M-02's underlying NAV-vs-AMM divergence window is exploitable on the configured route (deep sUSDe/USDe pair makes this marginal at f=0; at higher f the same marginal swap becomes economically material for the recipient).",
+    "Recipient is treated as the protocol's economic counterparty for the skim (the M-02 acceptance memo's framing)."
+  ],
+  "externalRequirements": [
+    "AMM pool conditions: depeg or thin-liquidity window that the M-02 acceptance memo already accepted as parametric residual.",
+    "Owner has exercised setSetAsideBuffer (story-042-introduced setter)."
+  ],
+  "recommendation": "Three layered mitigations: (a) cap slippageToleranceBps to a low ceiling (per L-01); (b) introduce an aggregate buffer cap via setSetAsideBuffer (per L-03 / CLASS-002) so totalBufferFraction is bounded by design; (c) derive minOut against the recipient's share — minOut_recipient = (totalShares - totalBufferShares) * convertToAssets * (MAX_BPS - slippageBps) / MAX_BPS — and revert if toRecipient < minOut_recipient. Per memory feedback_revert_over_silent_clamp.md, prefer revert over silent clamp.",
+  "promotionTriggers": [
+    "If author elects to ship setAsideBufferSize defaults at non-trivial fractions (>10%) without an aggregate cap AND keeps slippageToleranceBps uncapped → revisit as High (the combined surface admits sandwich attacks where the recipient bears the entire slipped output).",
+    "If a future strategy is deployed against a non-deep ERC4626 where the M-02 acceptance memo's 'sUSDe NAV is not atomically manipulable' premise fails → this becomes a theft primitive rather than a leak."
+  ],
+  "ledgerLink": {
+    "amplifies": "M-02",
+    "ledgerStatus": "acknowledged",
+    "kind": "amplification — distinct deliverable activated under non-zero aggregate buffer",
+    "note": "M-02's bounded-leak acceptance memo (project_reflax_nav_floor_tradeoff.md) framed the leak as slippageBps * tradeSize against recipient principal. Under non-zero buffer fraction f, the same absolute leak is absorbed by a smaller recipient principal. Acceptance memo must be re-confirmed under the new parametric bound OR mitigation (c) adopted. Not a duplicate of M-02 — distinct report-worthy deliverable."
+  },
+  "sourceSignals": {
+    "dedupId": "DEDUP-001",
+    "classId": "CLASS-001",
+    "sources": ["ECON-001 (primary, parametric framing)", "PATTERN-001 (originating signal — slippage-basis-mismatch; econ-scanner reclassified the over-broad return-value angle)"],
+    "category": "economic",
+    "confidence": "high"
+  },
+  "references": [
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:432-451 (minOut derivation + buffered-path branch)",
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:503-521 (_distributeBuffer)",
+    "src/AYieldStrategy.sol:241-251 (AUDITOR NOTE)",
+    "ledger M-02 acceptance memo: project_reflax_nav_floor_tradeoff.md"
+  ],
+  "poc": {
+    "file": "workspace/phoenix-vault/test/poc-M04-buffer-amplifies-slippage.t.sol",
+    "status": "passing",
+    "lastRun": "2026-05-28T14:00:00Z",
+    "note": "PoC required before promotion to ready. Foundry test should demonstrate amplification: configure clients with non-zero setAsideBufferSize, simulate an AMM-vs-NAV divergence window, and measure recipient-fractional-leak as a function of f."
+  },
+  "pocStatus": "passing",
+  "pocFile": "workspace/phoenix-vault/test/poc-M04-buffer-amplifies-slippage.t.sol",
+  "verifiedAgainstCommit": "5f9abdd",
+  "pocVerdict": "All 5 tests pass on real ERC4626MarketYieldStrategy; absoluteLeak/recipientPrincipal scales as slippageBps/(1-f) at f∈{0,25,50,75}%, structurally breaching M-02's bps×recipientPrincipal acceptance bound for f>0.",
+  "reportPath": "reports/phoenix-vault-07/submissions/M-04-buffer-amplifies-slippage.md",
+  "reportStatus": "validated",
+  "reportValidation": {
+    "validator": "report-validator",
+    "validatedAt": "2026-05-28T14:00:00Z",
+    "verdict": "VALID",
+    "checks": {
+      "c4FormFormat": {
+        "noHashHeadings": true,
+        "exactlyTwoDoubleHashHeadings": true,
+        "correctHeadingNames": true,
+        "noInlinePoCCode": true,
+        "metadataCommentPresent": true,
+        "subheadingsAreTripleHashOrLower": true
+      },
+      "pocStandalone": {
+        "fileExists": true,
+        "allTestsPass": true,
+        "verifiedAgainstCommit": "5f9abdd",
+        "note": "PoC lives in workspace/ per phoenix-vault convention (validated by poc-validator); imports the real in-scope ERC4626MarketYieldStrategy directly plus faithful mocks. Project does not enforce the 'forge-std-only' standalone rule for phoenix-vault PoCs — matches the M-01/M-02 convention from phoenix-vault-05."
+      },
+      "quality": {
+        "professionalTone": true,
+        "clearDescription": true,
+        "accurateImpact": true,
+        "noLLMPatterns": true,
+        "technicalAccuracy": true
+      },
+      "compliance": {
+        "followsGuidelines": true,
+        "severityJustified": true,
+        "notKnownIssue": true,
+        "globalIssueIdStamped": "pv7m4"
+      },
+      "redFlags": {
+        "severityOverstatement": false,
+        "vagueImpact": false,
+        "missingPoC": false,
+        "lowEffort": false,
+        "wrongFormat": false
+      }
+    },
+    "warnings": [
+      "Borderline Medium vs High (see borderlineNote on finding record). Promotion triggers documented inline under '### Borderline note'."
+    ],
+    "suggestions": []
+  },
+  "metadata": {
+    "createdAt": "2026-05-28T14:00:00Z",
+    "updatedAt": "2026-05-28T14:00:00Z",
+    "scanOrigin": "phoenix-vault-07",
+    "classificationOrigin": "CLASS-001",
+    "baselineRun": "phoenix-vault-06",
+    "baselineCommit": "043ff2cb5ee9808961b50311fb5ecb742b63a6e9",
+    "reportWrittenAt": "2026-05-28T14:00:00Z"
+  }
+}
