@@ -7,24 +7,26 @@ Update <submodule-dirname> to latest (<short-sha>)
 ```
 
 # Arguments
-- `$ARGUMENTS` format: `[name]` (optional)
+- `$ARGUMENTS` format: `[name] [--recursive]` (both optional)
 - `name` may be either:
   - a friendly name from `registered-projects.json` (e.g., `yield-claim-nft`, `phoenix-vault`), resolved to its `submodule` field, OR
   - a raw submodule directory under `lib/` (e.g., `yield-claim-nft`, `reflax-yield-vault`)
-- If omitted, the orchestrator MUST prompt the user to either:
+- `--recursive` (optional flag): when present, also initialize/update the submodule's own nested submodules. **Default is non-recursive** — nested submodules are left untouched unless this flag is given. Accept common spellings (`--recursive`, `recursive`, `(recursively)`) and strip the flag from the value before resolving `name`.
+- If `name` is omitted, the orchestrator MUST prompt the user to either:
   1. pick a specific submodule, or
   2. update all submodules under `lib/`
 
 # Orchestration Flow
 
 ## 1. Parse Arguments
-- If `$ARGUMENTS` is non-empty:
-  - Treat it as the target name and proceed to step 2
-- If `$ARGUMENTS` is empty:
+- First, detect and strip the optional recursive flag (`--recursive`, `recursive`, or `(recursively)`). Record `recursive = true|false` (default `false`). The remaining token(s) are the `name`.
+- If the remaining `name` is non-empty:
+  - Treat it as the target name and proceed to step 2, passing `recursive` through to the delegated task
+- If `name` is empty:
   - List the directory entries under `lib/` plus the friendly-name mappings in `registered-projects.json`
   - Ask the user: "Update all submodules, or name a specific one?"
   - Wait for the user's choice before delegating
-  - If the user picks "all", pass that intent to project-manager; otherwise resolve the chosen name
+  - If the user picks "all", pass that intent (with `recursive`) to project-manager; otherwise resolve the chosen name
 
 ## 2. Delegate Update (single submodule)
 Invoke **project-manager**: "Update submodule '<name>' to latest and commit at repo root"
@@ -37,11 +39,12 @@ Invoke **project-manager**: "Update submodule '<name>' to latest and commit at r
   1. `projects.<friendly>.defaultBranch` from `registered-projects.json`
   2. The `branch` key in `.gitmodules` for this submodule, if any
   3. The submodule's remote HEAD (`git -C lib/<dirname> remote show origin | awk '/HEAD branch/ {print $NF}'`)
-- Fetch and fast-forward (NEVER use `--recursive`):
+- Fetch and fast-forward:
   1. `git -C lib/<dirname> fetch origin`
   2. `git -C lib/<dirname> checkout <branch>`
   3. `git -C lib/<dirname> pull --ff-only origin <branch>`
 - Capture the new short SHA: `git -C lib/<dirname> rev-parse --short HEAD`
+- **If `recursive` was requested**, after the pointer has moved, sync the submodule's own nested submodules: `git -C lib/<dirname> submodule update --init --recursive`. (Default / no flag: skip this — leave nested submodules untouched.)
 - If old == new: report "already up to date" and do NOT create a commit
 - Otherwise:
   1. Stage ONLY the pointer move at root: `git add lib/<dirname>`
@@ -80,8 +83,8 @@ All git operations (fetch, checkout, pull, add, commit), filesystem inspection o
 | Task | Agent | Prompt Pattern |
 |------|-------|----------------|
 | Resolve name | project-manager | "Resolve '{name}' to a submodule directory under lib/ using registered-projects.json; fall back to raw dirname" |
-| Update single | project-manager | "Update submodule lib/{dirname} to latest on its tracked branch (no --recursive). If HEAD moved, stage `lib/{dirname}` and commit at repo root with message `Update {dirname} to latest (<new-short-sha>)`. Skip if already up to date." |
-| Update all | project-manager | "For every submodule in .gitmodules, update to latest on its tracked branch (no --recursive). Commit each moved pointer at repo root with the standard message. Report per-submodule old→new SHAs and errors." |
+| Update single | project-manager | "Update submodule lib/{dirname} to latest on its tracked branch (recursive={true\|false} — when true, also run `git -C lib/{dirname} submodule update --init --recursive` after the pointer moves; when false, leave nested submodules untouched). If HEAD moved, stage `lib/{dirname}` and commit at repo root with message `Update {dirname} to latest (<new-short-sha>)`. Skip if already up to date." |
+| Update all | project-manager | "For every submodule in .gitmodules, update to latest on its tracked branch (recursive={true\|false}, applied to each). Commit each moved pointer at repo root with the standard message. Report per-submodule old→new SHAs and errors." |
 
 # Error Handling
 - **Name not found**: report that `<name>` matches neither a friendly name in `registered-projects.json` nor a directory under `lib/`, and list valid choices
@@ -91,7 +94,7 @@ All git operations (fetch, checkout, pull, add, commit), filesystem inspection o
 - **Detached HEAD with no tracked branch discoverable**: report and skip
 
 # Critical Rules
-1. **NEVER use `--recursive`** when fetching/updating submodules (see CLAUDE.md)
+1. **Non-recursive by default.** Only initialize/update nested submodules (`git submodule update --init --recursive` inside the source repo) when the user passes `--recursive`. Never pull nested dependencies implicitly.
 2. **NEVER modify files inside source repos** — only move the submodule pointer from the outer repo
 3. **Commit only the pointer change** — stage `lib/<dirname>` by path, never `git add -A`
 4. **Never bypass hooks** (`--no-verify`, `--no-gpg-sign`) unless the user explicitly asks
@@ -113,4 +116,9 @@ All git operations (fetch, checkout, pull, add, commit), filesystem inspection o
 /update-lib
 # Orchestrator lists submodules and asks: "Update all, or name one?"
 # Then delegates accordingly
+
+/update-lib stable-yield-accumulator --recursive
+# Fetches lib/stable-yield-accumulator to latest, then also syncs its nested
+# submodules via `git -C lib/stable-yield-accumulator submodule update --init --recursive`
+# Commits at root: "Update stable-yield-accumulator to latest (<new-short-sha>)"
 ```

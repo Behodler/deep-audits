@@ -14,8 +14,6 @@ This repository contains the audit tooling used to review the Phoenix/Behodler s
 
 **Source repos are strictly read-only.** Never modify files in source repos. Never commit to source repos. They must remain exactly as cloned from the upstream Behodler-org repository.
 
-**Never use recursive submodule commands.** When adding or updating source repos, do not use `--recursive` flag. We must experience the repo exactly as the original developers intended, without pulling nested dependencies.
-
 ## Architecture
 
 ### Directory Structure
