@@ -1,0 +1,137 @@
+{
+  "project": "nft-staking",
+  "run": "nft-staking-13",
+  "submoduleHead": "031ffdab5bf1995026ca7a47391a19f7634e7d78",
+  "agent": "severity-classifier",
+  "classifiedAt": "2026-05-29T00:00:00Z",
+  "criteriaSource": "CLAUDE.md C4 severity definitions (High / Medium / QA-Low)",
+  "codeVerified": {
+    "BatchNFTMinter.sol:230-266": "Read at HEAD. Gate at line 246 is purely count-based (_nudgeSize != 0 && count >= _nudgeSize); payout at 251-253 transfers the FULL balanceOf(this) of the nudge token to a caller-chosen recipient with no comparison against value paid. Up-front equality guard at 230-233 is unconditional on nudgeSize.",
+    "yield-claim-nft/src/V2/NFTMinterV2.sol": "registerDispatcher (125) takes initialPrice with no >0 check; setPrice (282) takes newPrice with no >0 check; mint (159/164) does safeTransferFrom(msg.sender, dispatcher, price) — at price==0 this is a permissionless, zero-cost mint. price==0 is a structurally-supported state. Confirms DEDUP-001 sub-vector (a) precondition is real."
+  },
+  "classifiedFindings": [
+    {
+      "id": "CLASS-001",
+      "originalId": "DEDUP-001",
+      "severity": "high",
+      "plausibility": "plausible",
+      "proposedLabel": "H-01",
+      "regression": true,
+      "regressionOf": "H-01 (nft-staking-12, fingerprint 858e9e80...)",
+      "classification": {
+        "assetImpact": "The entire externally-funded nudgePaymentToken pot is transferred to a caller-chosen recipient. Repeatable as the pot refills. Direct loss of protocol/sponsor assets.",
+        "attackPath": [
+          "Sub-vector (a) — price==0 pinned dispatcher (supported state):",
+          "1. Protocol funds the nudge pot (any amount); pinned dispatcher config.price == 0 (NFTMinterV2 permits this; no price>0 validation anywhere).",
+          "2. Attacker calls batchMint with count >= nudgeSize, recipient = attacker. Each nftMinter.mint transfers price (0) — mints are free.",
+          "3. count >= nudgeSize clears the count-only gate at line 246.",
+          "4. Full nudge-token balance (the whole pot) is transferred to the attacker at lines 251-253 for ~zero token cost (gas only).",
+          "5. Repeat whenever the pot is refilled.",
+          "Sub-vector (b) — over-funded pot at non-zero price:",
+          "1. Independent owner knobs leave pot > nudgeSize * price (no on-chain coupling forces pot <= cost).",
+          "2. Attacker calls batchMint with count == nudgeSize, paying nudgeSize*price.",
+          "3. Gate clears; attacker receives the full pot > amount paid. Net profit = pot - nudgeSize*price."
+        ],
+        "likelihood": "high - sub-vector (a) needs only a funded pot while the pinned dispatcher sits at price==0 (a normal-operations configuration NFTMinterV2 explicitly supports, not an attacker-supplied input or admin blunder); sub-vector (b) needs only pot > nudgeSize*price, which two independent owner knobs make reachable with no on-chain guard against it. Both are permissionless once the precondition holds.",
+        "assumptions": "Pot is funded (the feature's purpose). For (a): pinned dispatcher price==0. For (b): pot exceeds total mint cost for nudgeSize mints.",
+        "externalRequirements": "A cross-contract config state in the sibling NFTMinterV2 (price==0 for sub-vector (a)). This is a protocol-supported, non-exotic operating state, not an attacker-controlled input — it does not weaken the path to a hypothetical."
+      },
+      "justification": "Meets High: assets (the full nudge pot) are directly drained to an attacker via a concrete, permissionless, executable path with no hand-wavy hypotheticals. The only precondition is a supported configuration (price==0 pin, or pot > cost), confirmed reachable by reading NFTMinterV2 (no price>0 validation on registerDispatcher/setPrice and free mints at price==0). story-014 fixed only the caller's CHOICE of minter/token; the value-blind gate — the literal root cause that the in-code NatSpec records as having previously drained mainnet — survives unchanged. I considered downgrading to Medium because sub-vector (a) leans on an operational config rather than a pure attacker input, but C4 High explicitly allows indirect paths with a valid attack route, and (b) is permissionlessly profitable with no misconfig at all (only pot>cost, which nothing on-chain prevents); the impact is full, direct, repeatable asset theft. This is a partial-fix REGRESSION of prior H-01 and inherits at least its High severity; flagged prominently. Plausible (not Implausible) High: no validator collusion or black-swan economics required.",
+      "humanReviewFlag": "Live exploitability of sub-vector (a) at a specific block depends on the deployed pinned dispatcher's price. If price==0 on the relevant pinned dispatcher, this is squarely a regression of H-01 via the surviving root cause; finding-manager should set regressionOf=H-01."
+    },
+    {
+      "id": "CLASS-002",
+      "originalId": "DEDUP-002",
+      "severity": "medium",
+      "plausibility": null,
+      "proposedLabel": "M-01",
+      "regression": false,
+      "classification": {
+        "assetImpact": "The nudge pot is paid to a front-running searcher instead of the honest qualifying minter. No protocol-owned asset is created or destroyed beyond the pot, but value is leaked away from the honest caller, who still pays mint cost + gas and receives zero nudge.",
+        "attackPath": [
+          "1. Honest user broadcasts a qualifying batchMint (count >= nudgeSize) with recipient = self.",
+          "2. A searcher observes the mempool, copies the call with recipient = searcher and a higher priority fee.",
+          "3. Searcher's tx lands first; the winner-take-all full-balance payout transfers the whole pot to the searcher.",
+          "4. The honest user's tx executes against an empty pot (nudgeAmount == 0): they pay mint cost + gas, mint the NFTs, and receive no nudge."
+        ],
+        "likelihood": "medium - fully permissionless and config-independent on any public mempool, but the searcher must itself pay nudgeSize mint cost + a competitive priority fee, so it is only net-positive when the pot exceeds that outlay (i.e. it collapses into / overlaps DEDUP-001 sub-vector (b)'s over-funded condition for profitability). The honest caller is harmed (loses the expected nudge and their gas) regardless of searcher profitability.",
+        "assumptions": "Public mempool; a pot worth racing for; an honest caller who expects the nudge.",
+        "externalRequirements": "Mempool visibility / a competitive block-builder market. No owner misconfiguration required."
+      },
+      "justification": "Meets Medium, not High: this is a value leak from an honest caller via a mempool race with stated assumptions (public mempool, fundable pot) and an external requirement (block-builder/priority-fee market). No protocol-owned asset is stolen in a way the protocol did not intend to give away — the pot was always destined to a qualifying minter; the defect is that the WRONG party (a parasitic front-runner) captures it and an honest participant is denied the incentive, degrading the function/fairness of the nudge mechanism. It does not reach High because the searcher's gain is bounded by and conditioned on the pot exceeding their own mint+gas outlay (an external/economic requirement), and there is no direct drain of protocol principal independent of an honest caller's own transaction. Distinct root cause from DEDUP-001 (mechanism/mempool race vs. value-blind gate) and a distinct mitigation surface (commit-reveal / sender-bound recipient / per-spend accounting), so kept separate.",
+      "humanReviewFlag": null
+    },
+    {
+      "id": "CLASS-003",
+      "originalId": "DEDUP-003",
+      "severity": "low",
+      "plausibility": null,
+      "proposedLabel": "L-01",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None on current code. ERC1155 onERC1155Received fires on the caller-chosen recipient mid-loop while max approval is live and paymentAmount is held, but the full-balance payout is idempotent to zero, the held paymentAmount is the attacker's own budget, the approval is bounded to the contract's own balance, and NFTStaker uses independent OZ-guarded storage. Sanitizer adjudicated NOT-EXPLOITABLE for third-party fund loss.",
+        "attackPath": [
+          "1. Reentrancy is reachable (recipient callback mid-loop) but no state read after the callback can be manipulated to extract extra funds on current code.",
+          "Defensive gap only; becomes High only under speculative future changes (fixed-amount payout or retained per-caller balance)."
+        ],
+        "likelihood": "n/a - no demonstrated fund-loss path on current code; severity rests on defense-in-depth and parity with the sibling NFTStaker, which does inherit ReentrancyGuard.",
+        "assumptions": "Standard ERC token; current payout semantics unchanged.",
+        "externalRequirements": "None for the gap; a future code change for any real impact."
+      },
+      "justification": "QA/Low: a missing-guard defensive gap with no demonstrated asset impact on current code. Per CLAUDE.md, speculation on future code without a demonstrated current root cause does not justify HM; classifying higher would overstate. Maps to prior L-01; carry forward in the QA bundle, recommend adding nonReentrant for parity with NFTStaker.",
+      "humanReviewFlag": null
+    },
+    {
+      "id": "CLASS-004",
+      "originalId": "DEDUP-004",
+      "severity": "low",
+      "plausibility": null,
+      "proposedLabel": "L-02",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None. Uncapped caller-supplied count loop; a large count exceeds the block gas limit and reverts the caller's own transaction. Per-iteration mint cost is the intended economic friction for the nudge gate.",
+        "attackPath": [
+          "1. Caller passes an oversized count; their own tx runs out of gas and reverts. No third party is affected; no funds at risk."
+        ],
+        "likelihood": "n/a - self-griefing only; bounded.",
+        "assumptions": "None.",
+        "externalRequirements": "None."
+      },
+      "justification": "QA/Low: caller self-DoS / gas-griefing with no impact on other users, protocol availability, or funds. State/usability robustness nit. Maps to prior L-02; carry forward in QA bundle.",
+      "humanReviewFlag": null
+    },
+    {
+      "id": "CLASS-005",
+      "originalId": "DEDUP-005",
+      "severity": "low",
+      "plausibility": null,
+      "proposedLabel": "L-03",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None. The up-front equality guard (lines 230-233) reverts whenever nudgePaymentToken == paymentToken, unconditionally on nudgeSize, before the nudgeSize gate at 245-246. So a configured-but-equal nudge token bricks every batchMint even when nudge is disabled via nudgeSize==0 and no payout would ever occur.",
+        "attackPath": [
+          "1. Owner config has nudgePaymentToken == paymentToken with nudgeSize == 0 (nudge disabled).",
+          "2. Every batchMint reverts despite no payout being possible — an overbroad guard / spec-vs-behavior mismatch."
+        ],
+        "likelihood": "n/a - configuration usability issue, no attacker, no fund loss.",
+        "assumptions": "Owner sets nudge token == payment token while nudge is size-disabled.",
+        "externalRequirements": "None."
+      },
+      "justification": "QA/Low: a spec-deviation / usability nit (an overbroad revert in a harmless configuration), no asset risk and no availability impact in any intended operating mode. Confirmed unchanged at HEAD. Maps to prior L-03; carry forward in QA bundle.",
+      "humanReviewFlag": null
+    }
+  ],
+  "summary": {
+    "high": 1,
+    "medium": 1,
+    "low": 3,
+    "regressions": ["DEDUP-001 (regression of prior H-01 via surviving value-blind root cause)"],
+    "proposedLabels": {
+      "DEDUP-001": "H-01",
+      "DEDUP-002": "M-01",
+      "DEDUP-003": "L-01",
+      "DEDUP-004": "L-02",
+      "DEDUP-005": "L-03"
+    }
+  }
+}

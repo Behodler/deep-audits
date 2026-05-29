@@ -1,0 +1,58 @@
+[
+  {
+    "id": "CODE-001",
+    "title": "Late V1 dispatcher registration permanently bricks migrate() for affected holders (init/registration ordering coupling)",
+    "severity_guess": "medium",
+    "files": [
+      "src/V2/NFTMigrator.sol",
+      "src/NFTMinter.sol",
+      "src/V2/NFTMinterV2.sol"
+    ],
+    "lines": [
+      "src/V2/NFTMigrator.sol:51-58 (setInitialized)",
+      "src/V2/NFTMigrator.sol:62-76 (migrate)",
+      "src/V2/NFTMigrator.sol:69-72 (v2Index=indexMapping[i]; mintFor loop)",
+      "src/V2/NFTMinterV2.sol:206-214 (mintFor reverts on index 0)",
+      "src/NFTMinter.sol:120-145 (V1 registerDispatcher bumps nextIndex)"
+    ],
+    "attack_path": "setInitialized() only validates that every V1 index in [1, v1.nextIndex()) has a non-zero indexMapping AT THE TIME OF INIT (NFTMigrator.sol:52-55), then flips `initialized` permanently (one-way, no un-set). The V1 NFTMinter and NFTMigrator are independent contracts with independent owners; V1.registerDispatcher (NFTMinter.sol:120-145) increases v1.nextIndex() at any time after migrator init. Sequence: (1) owner configures mappings for V1 indexes 1..N and calls setInitialized() — passes. (2) V1 owner later registers a new dispatcher -> V1 index N+1 now exists and users mint/hold NFTs of tokenId N+1. (3) Any such user calls migrate(): the loop runs i in [1, v1.nextIndex()) which now includes N+1; for i=N+1 it reads balance>0, executes v1.burn(msg.sender, N+1, balance) FIRST, then reads v2Index=indexMapping[N+1]=0 and calls v2.mintFor(0, msg.sender). NFTMinterV2.mintFor reverts on index 0 (configs[0].dispatcher==address(0), 'index not registered', NFTMinterV2.sol:208). The whole tx reverts (burn rolled back), so migrate() is permanently unexecutable for every user holding any V1 index added after init. There is no setMapping path that can be reached usefully because the require also blocks: even after the owner adds the missing mapping with setMapping(N+1, X), migrate works again — BUT until/unless the migrator owner notices and acts, the migration path is bricked for those users, and there is no re-validation enforcing it.",
+    "impact": "Availability/DoS of the migration path. Any V1 holder of a dispatcher index registered after the migrator was initialized cannot migrate (their migrate() reverts in v2.mintFor(0)). Because the loop is shared, a single un-mapped late index blocks migration for every user who also holds that index. No direct fund loss (burn-before-mint means the reverting tx rolls back the burn), but V1->V2 conversion is unavailable until the migrator owner manually adds the mapping. Cross-contract ordering coupling between two independently-owned contracts; not owner-self-harm because the V1 owner (who triggers it by registering a new dispatcher) need not be the migrator owner.",
+    "confidence": "high",
+    "notes": "Recommend setInitialized() does not exist as a permanent one-way flag, or migrate() skips indexes whose indexMapping is 0 (continue instead of mintFor(0)), or migrator reads/validates v1.nextIndex() at migrate time per-index and skips unmapped indexes. Profile NFTMigrator.md DOWNSTREAM note flagged this coupling for interaction analysis; confirmed against source."
+  },
+  {
+    "id": "CODE-002",
+    "title": "NFTMinterV2 mint path has no reentrancy guard; cross-contract reentrancy is gated only by the dispatcher's own nonReentrant (different-index re-entry possible but not currently exploitable)",
+    "severity_guess": "low",
+    "files": [
+      "src/V2/NFTMinterV2.sol",
+      "src/V2/dispatchers/ATokenDispatcherV2.sol"
+    ],
+    "lines": [
+      "src/V2/NFTMinterV2.sol:170-201 (_executeMint, unguarded)",
+      "src/V2/NFTMinterV2.sol:196 (_mint -> ERC1155 onERC1155Received to recipient)",
+      "src/V2/dispatchers/ATokenDispatcherV2.sol:118-126 (dispatch nonReentrant + hook.onDispatch after _dispatch)"
+    ],
+    "attack_path": "NFTMinterV2 inherits no ReentrancyGuard. Within _executeMint the order is: pull token (CEI ok) -> grow price (effect) -> dispatcher.dispatch() -> _mint(recipient,...). dispatch() is nonReentrant on the DISPATCHER only, so it blocks re-entry into THE SAME dispatcher.dispatch, but NOT a call to NFTMinterV2.mint targeting a DIFFERENT dispatcher index (each index = different dispatcher instance, each with its own ReentrancyGuard). Two callback surfaces exist inside the mint tx: (a) hook.onDispatch fired by the dispatcher after _dispatch (ATokenDispatcherV2.sol:125), and (b) the ERC1155 acceptance callback onERC1155Received fired by _mint to a contract recipient (NFTMinterV2.sol:196). Either could re-enter NFTMinterV2.mint(otherIndex,...). I traced exploitability: (1) the in-scope hooks (DefaultDispatchHook, BalancerPoolerMintDebtHook) make NO external calls in onDispatch, so (a) cannot reach attacker code today; setHook is owner-only (owner trust OOS). (2) For (b), price for the target index is already grown and dispatch already executed before _mint; a re-entrant mint of another index simply performs another full, fully-paid mint with its own price growth — no per-index invariant is violated, no double-spend, supply stays exact. So no exploit was found.",
+    "impact": "No exploitable impact under the current in-suite hook set and dispatcher implementations; documented as a latent trust-boundary / defense-in-depth gap. The architecture relies on (i) every installed hook being callback-free and (ii) all dispatch-phase external calls targeting trusted contracts. A future hook or dispatcher that makes an external call to an attacker-controlled contract during dispatch would expose NFTMinterV2 (which has no guard of its own) to cross-contract reentrancy across indexes. Recommend adding nonReentrant to NFTMinterV2._executeMint / mintFor for defense in depth rather than relying on each dispatcher's guard.",
+    "confidence": "medium",
+    "notes": "Matches profile LOCAL-002 (deferred to interaction). Verified: BalancerPoolerV2._dispatch only forceApprove+ERC4626.deposit (trusted); BurnerV2 burns+records (trusted); GatherV2 transfers to fixed recipient (no callback). No untrusted callback before _mint. Severity stays low/informational absent a callback-making hook."
+  },
+  {
+    "id": "CODE-003",
+    "title": "replaceDispatcher silently re-points already-minted NFTs to a new dispatcher/token/metadata with no migration of existing holders",
+    "severity_guess": "low",
+    "files": [
+      "src/V2/NFTMinterV2.sol"
+    ],
+    "lines": [
+      "src/V2/NFTMinterV2.sol:227-247 (replaceDispatcher)",
+      "src/V2/NFTMinterV2.sol:252-273 (uri reads new dispatcher metadata)",
+      "src/V2/NFTMinterV2.sol:177 (mint fetches token from current config.dispatcher)"
+    ],
+    "attack_path": "replaceDispatcher(index, newDispatcher) overwrites configs[index].dispatcher, tokenIdToDispatcher[index], and dispatcherToIndex while leaving every previously minted ERC1155 balance for tokenId==index untouched. NFTs minted under the old dispatcher (which represented a claim backed by oldDispatcher.primeToken() and old metadata) now resolve, for all on-chain purposes, to newDispatcher: uri(index) returns the NEW dispatcher's name/image/description (NFTMinterV2.sol:252-273), and any future mint at that index pulls the NEW primeToken (NFTMinterV2.sol:177). tokenId is the index, not a per-dispatcher identity, so existing holders' claim semantics change underneath them. This is owner-only, so it is a governance/spec concern rather than an external attack.",
+    "impact": "Existing holders of tokenId==index have the meaning/backing/metadata of their NFT changed by an owner action with no notice or opt-out. If any downstream redemption component keys off tokenIdToDispatcher or the dispatcher's primeToken, redemptions for pre-replace NFTs would be honored against the new dispatcher's token rather than what they paid for. No V2-in-scope on-chain redemption logic exists to exploit this directly, so impact is bounded to metadata/identity drift today; flagged as a QA/centralization integrity issue for the replace mechanism. Owner trust is OOS for malice, but the silent semantic change to already-issued tokens is a design soundness note for any redemption layer.",
+    "confidence": "medium",
+    "notes": "Matches profile NFTMinterV2.md DOWNSTREAM note. No on-chain redemption tying tokenId->token found in V2 scope (grep confirmed), so kept at low/QA. Recommend a new index for a genuinely different dispatcher, or freezing replace to dispatchers sharing the same primeToken."
+  }
+]

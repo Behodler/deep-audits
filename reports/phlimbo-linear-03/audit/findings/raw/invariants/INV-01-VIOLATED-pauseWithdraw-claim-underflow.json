@@ -1,0 +1,79 @@
+{
+  "invariantId": "INV-01",
+  "name": "invariant_no_pending_underflow_for_actors",
+  "result": "VIOLATED",
+  "runner": "forge invariant",
+  "project": "phlimbo-linear",
+  "submoduleHead": "1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301",
+  "profileRef": [
+    "Phlimbo.profile.md §7 I11",
+    "Phlimbo.profile.md §8.2",
+    "Phlimbo.profile.md §11 (highest-value invariant target)",
+    "Phlimbo.profile.md §12 invariant-generator routing hint"
+  ],
+  "property": "For every reachable state, pendingPhUSD(user) and pendingStable(user) must not revert with arithmetic underflow for any user with userInfo[user].amount > 0. Since the underflow site is shared with _claimRewards, a failing pending view implies claim()/stake()/withdraw() would also revert for that user (DoS of the user's position).",
+  "expectation": "The profile flagged this as 'likely-violated' via the pauseWithdraw -> unpause -> claim sequence (CODE-002, CODE-007). The fuzzer was asked to confirm reachability.",
+  "shrunkCounterexample": {
+    "originalLength": 103,
+    "shrunkLength": 5,
+    "sequence": [
+      {
+        "step": 1,
+        "call": "handler.stake(uint256 actorSeed, uint256 amount)",
+        "args": {
+          "actorSeed": "831315146841420",
+          "amount": "3854107718224133292208524018985200048149289379714209845662927042173418971807"
+        },
+        "effect": "Actor address(0x1000 + (831315146841420 % 5) + 1) stakes a bounded amount (>= MINIMUM_STAKE)."
+      },
+      {
+        "step": 2,
+        "call": "handler.warp(uint256 seconds_)",
+        "args": {
+          "seconds_": "50583173"
+        },
+        "effect": "Time advances ~585 days. accPhUSDPerShare and accStablePerShare grow on the next _updatePool."
+      },
+      {
+        "step": 3,
+        "call": "handler.claim(uint256 actorSeed)",
+        "args": {
+          "actorSeed": "100"
+        },
+        "effect": "claim() routes via _updatePool + _claimRewards, then rebases user.phUSDDebt = user.amount * accPhUSDPerShare / PRECISION. After this, user.phUSDDebt is anchored to the FULL current user.amount, NOT the post-pauseWithdraw amount."
+      },
+      {
+        "step": 4,
+        "call": "handler.pause(uint256)",
+        "args": {},
+        "effect": "Pauser pauses the contract. Stake/withdraw/claim become unavailable; pauseWithdraw becomes available."
+      },
+      {
+        "step": 5,
+        "call": "handler.pauseWithdraw(uint256 actorSeed, uint256 amount)",
+        "args": {
+          "actorSeed": "5696523827575297401936444687148800",
+          "amount": "14392265063725183266333548238469970688231976876222139622623809485564926249684"
+        },
+        "effect": "Actor reduces user.amount via pauseWithdraw, which intentionally does NOT call _updatePool / _claimRewards and does NOT rebase user.phUSDDebt / user.stableDebt. Now user.amount has shrunk but user.phUSDDebt still reflects the pre-withdraw amount. The invariant assertion (which runs pendingPhUSD on every actor with a non-zero remaining stake) underflows on (user.amount * accPhUSDPerShare / PRECISION) - user.phUSDDebt because the minuend is now smaller than the subtrahend."
+      }
+    ],
+    "violationSite": "src/Phlimbo.sol pendingPhUSD line 489 (and pendingStable line 513, _claimRewards lines 440 and 446). Same arithmetic expression in all four places.",
+    "panicCode": "0x11 (arithmetic underflow under Solidity 0.8 checked math)"
+  },
+  "mapsToCandidates": [
+    {
+      "id": "CODE-002",
+      "title": "_claimRewards underflow after pauseWithdraw",
+      "evidenceContribution": "Fuzzer-confirmed reachability with a 5-step shrunk sequence. Promote to High-severity PoC seed."
+    },
+    {
+      "id": "CODE-007",
+      "title": "pendingPhUSD/pendingStable view underflow DoS",
+      "evidenceContribution": "Fuzzer-confirmed reachability via the same site. Strengthens the case that off-chain integrators reading the view also break."
+    }
+  ],
+  "severity": "potential-high",
+  "rationale": "User can permanently DoS their own staked position (claim/withdraw revert) after a single pauseWithdraw if the accumulators have grown enough between the user's last debt-rebase and the pauseWithdraw. The user's only recovery is to wait for a future pause and exit the remaining principal via pauseWithdraw (rewards forfeited). Rewards earned in the interim window are lost. Reachable with no privileged inputs other than the pauser triggering the pause - which the profile treats as a trusted but non-adversarial action.",
+  "remediationHint": "pauseWithdraw should either (a) call _updatePool() and _claimRewards() before mutating user.amount, or (b) proportionally rebase user.phUSDDebt and user.stableDebt to the new user.amount. Option (b) preserves the emergency-exit semantics (no external mint/transfer calls) while keeping the debt invariant: user.debt == user.amount * accPerShare / PRECISION."
+}

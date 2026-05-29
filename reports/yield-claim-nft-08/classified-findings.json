@@ -1,0 +1,214 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-05-29T00:00:00Z",
+    "project": "yield-claim-nft",
+    "reportDir": "reports/yield-claim-nft-08",
+    "submoduleCommit": "bc99ee3b129d9bddccc28a46f912406832a60638",
+    "classifier": "severity-classifier",
+    "inputFindings": 10,
+    "suppressedExcluded": 1,
+    "severityCounts": { "high": 0, "medium": 2, "low": 3, "qa": 4, "centralization": 1 },
+    "borderlineFlags": ["CLASS-001 (DEDUP-002)", "CLASS-002 (DEDUP-003)"]
+  },
+  "classifiedFindings": [
+    {
+      "id": "CLASS-001",
+      "originalId": "DEDUP-002",
+      "label": "M-01",
+      "title": "migrate() unbounded per-unit mint loop causes gas DoS for large V1 holders",
+      "severity": "medium",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "No direct asset loss. V1 NFTs retain their original utility (migrate() is the only affected flow and it burns then re-mints atomically). Impact is unavailability of the migration path for any holder whose aggregate V1 ERC1155 balance at a single index is large enough that 'balance' iterations of v2.mintFor exceed the block gas limit.",
+        "attackPath": [
+          "1. A user legitimately accumulates a large balance of a single V1 index (NFTMigrator.sol:66 reads IERC1155.balanceOf(msg.sender, i)).",
+          "2. The user calls migrate() (NFTMigrator.sol:62).",
+          "3. The inner loop 'for (j = 0; j < balance; j++) v2.mintFor(v2Index, msg.sender)' (lines 70-72) performs one external _mint per unit held.",
+          "4. There is no batch mintFor and no pagination; migrate() processes the caller's ENTIRE balance in a single transaction.",
+          "5. For a sufficiently large balance, the cumulative gas exceeds the block gas limit and migrate() always reverts, leaving the holder permanently unable to migrate."
+        ],
+        "likelihood": "medium - requires a holder to have accumulated a large single-index balance; no special privilege needed (permissionless availability issue, balance is not owner-controlled).",
+        "assumptions": "A V1 holder's single-index balance is large enough that 'balance' sequential ERC1155 _mint operations exceed the block gas limit.",
+        "externalRequirements": "None beyond ordinary block gas limits."
+      },
+      "justification": "Protocol function (migration) becomes unavailable for affected holders with no in-contract workaround (no paginated/partial migrate path). Assets are not directly at risk because V1 NFTs are unaffected and remain usable, so this caps at Medium per C4 (function/availability impacted, no asset theft). Not High: there is no asset loss or theft, V1 utility is retained, and 'permanently stuck funds' would require demonstrating that V1 NFTs lose all value when un-migratable, which is not shown in scope.",
+      "borderlineFlag": "BORDERLINE for severity-auditor: depends on whether realistic single-index balances can plausibly reach the gas ceiling. If the realistic max balance per index is small (e.g. capped supply per dispatcher), this collapses toward Low/QA (merely expensive, not a brick). Conversely, if some V1 indexes have large per-holder balances, Medium is firm. Auditor should confirm realistic balance distribution and per-_mint gas cost."
+    },
+    {
+      "id": "CLASS-002",
+      "originalId": "DEDUP-003",
+      "label": "M-02",
+      "title": "Late V1 dispatcher registration bricks migrate() for affected holders via index-0 mintFor revert",
+      "severity": "medium",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "No direct asset loss. Migration becomes unavailable for holders of any V1 index registered after the migrator was initialized. V1 NFTs retain their utility. State is recoverable by a migrator-owner action.",
+        "attackPath": [
+          "1. Migrator owner configures mappings for all current V1 indexes and calls setInitialized() (NFTMigrator.sol:51-58), which validates indexMapping only for indexes 1..v1.nextIndex()-1 AT THAT TIME and is one-way.",
+          "2. Later, the V1 NFTMinter owner (a distinct trust principal from the migrator owner) registers a new dispatcher, incrementing v1.nextIndex() (NFTMinter.sol:127-128).",
+          "3. The migrator's indexMapping[newIndex] is still 0 (never set; setInitialized cannot be re-run meaningfully and did not cover newIndex).",
+          "4. A holder of newIndex calls migrate(); the loop reaches i=newIndex, burns the V1 NFTs (NFTMigrator.sol:68), then calls v2.mintFor(0, msg.sender) because indexMapping[newIndex]==0 (line 69-71).",
+          "5. mintFor reverts at 'NFTMinterV2: index not registered' (NFTMinterV2.sol:208) since configs[0].dispatcher==address(0) (V2 nextIndex starts at 1).",
+          "6. The entire migrate() tx reverts (the burn is rolled back), so the holder of newIndex cannot migrate until the mapping is fixed. Holders of other indexes are unaffected (balance==0 at newIndex skips the iteration)."
+        ],
+        "likelihood": "medium - requires post-initialization V1 dispatcher registration by the V1 owner; cross-contract ordering coupling, not a single-owner reckless mistake.",
+        "assumptions": "V1 owner registers a new dispatcher after the migrator is initialized, and at least one user holds that new index.",
+        "externalRequirements": "Action by the independently-owned V1 NFTMinter contract owner after migrator initialization."
+      },
+      "justification": "Availability of the migration flow is impacted for a subset of holders due to cross-contract ordering coupling between two independently-owned contracts (not pure single-owner self-harm, so KI-1/KI-4 do not fully absorb it). No assets are stolen or permanently lost: V1 NFTs remain usable and the migrator owner can restore migration by calling setMapping(newIndex, validV2Index). The recoverability and partial scope keep this firmly at Medium (function/availability impact), not High.",
+      "borderlineFlag": "BORDERLINE for severity-auditor: this is recoverable by the migrator owner adding the missing mapping, and the trigger is a privileged V1-owner action. If the auditor treats the cross-contract coupling as fully covered by owner-trust (V1 owner expected to coordinate with migrator owner), this could drop to Low/QA. Kept at Medium because the two owners are distinct trust principals and migrate() silently bricks (burns-then-reverts) rather than degrading gracefully."
+    },
+    {
+      "id": "CLASS-003",
+      "originalId": "DEDUP-007",
+      "label": "L-01",
+      "title": "NFTMinterV2._executeMint lacks ReentrancyGuard (cross-index re-entry not blocked)",
+      "severity": "low",
+      "plausibility": "n/a",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None today. No in-scope path is exploitable: in-scope hooks make no external calls in onDispatch, and BalancerPoolerV2._dispatch only forceApprove + ERC4626.deposit. A re-entrant mint would be a fully-paid mint.",
+        "attackPath": ["Latent: dispatch() nonReentrant guard lives on the dispatcher (ATokenDispatcherV2.sol:118-126), so re-entry into _executeMint targeting a DIFFERENT dispatcher index is not blocked by a guard on NFTMinterV2 itself (170-201). No current in-scope dispatcher makes a re-entrant external call, so it is not exploitable today."],
+        "likelihood": "none currently - defense-in-depth only.",
+        "assumptions": "Would require a future/added dispatcher whose onDispatch makes a re-entrant external call.",
+        "externalRequirements": "A re-entrancy-capable dispatcher that does not currently exist in scope."
+      },
+      "justification": "Missing guard is a real, present property of in-scope code (concrete root cause and concrete fix), but no current in-scope path makes it exploitable. Defense-in-depth hardening -> Low.",
+      "borderlineFlag": null
+    },
+    {
+      "id": "CLASS-004",
+      "originalId": "DEDUP-005",
+      "label": "L-02",
+      "title": "setRatio accepts ratio == MAX_RATIO, contradicting documented strict-less-than invariant",
+      "severity": "low",
+      "plausibility": "n/a",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None. Spec/code deviation only; truncation in added=amount*ratio/100 rounds in the harmless direction.",
+        "attackPath": ["setRatio uses 'if (newRatio > MAX_RATIO) revert' (BalancerPoolerMintDebtHook.sol:93) while NatSpec/invariant states strictly < MAX_RATIO=50 (lines 29,47,91); ratio==50 is wrongly accepted."],
+        "likelihood": "n/a",
+        "assumptions": "None.",
+        "externalRequirements": "None."
+      },
+      "justification": "Genuine spec-vs-code deviation of a stated invariant with no asset impact -> Low (state/spec correctness). Owner-set parameter, but the issue is correctness of the documented bound, not owner abuse.",
+      "borderlineFlag": null
+    },
+    {
+      "id": "CLASS-005",
+      "originalId": "DEDUP-004",
+      "label": "L-03",
+      "title": "Donation swap uses limitRaw=0 relying solely on a pooler-supplied minUSDC floor (no on-chain oracle/TWAP reference)",
+      "severity": "low",
+      "plausibility": "n/a",
+      "regression": false,
+      "classification": {
+        "assetImpact": "Bounded to the donation slice destined for the owner-configured batchMinter flow, not user deposits. pool() is onlyAuthorizedPooler + whenNotPaused + nonReentrant; minUSDC is supplied by that same semi-trusted pooler at call time.",
+        "attackPath": ["BalancerPoolerV2.sol:214-243 swaps with limitRaw=0 and only the pooler-provided minUSDC as slippage protection; no independent on-chain price reference. A pooler passing minUSDC=0 is itself a role mistake."],
+        "likelihood": "low - requires a semi-trusted pooler to supply a weak/zero floor.",
+        "assumptions": "Authorized pooler is semi-trusted per project trust model.",
+        "externalRequirements": "Authorized-pooler action with a weak minUSDC; value at risk is the owner-configured donation flow."
+      },
+      "justification": "Downgraded from Medium by sanitizer: protection is delegated to an off-chain-chosen floor supplied by a semi-trusted role, and the value at risk is an owner/role-governed donation slice rather than user funds. Residual concern (no on-chain TWAP reference) is real hardening -> Low.",
+      "borderlineFlag": null
+    },
+    {
+      "id": "CLASS-006",
+      "originalId": "DEDUP-006",
+      "label": "Q-01",
+      "title": "Missing zero-address validation in constructors (NFTMigrator, BurnerV2, GatherV2)",
+      "severity": "qa",
+      "plausibility": "n/a",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None. Deployment misconfiguration only (downstream calls revert if a critical address is zero).",
+        "attackPath": ["Constructors accept critical addresses without zero-address checks; a zero address bricks the flow at use time."],
+        "likelihood": "n/a (deployment-time hardening).",
+        "assumptions": "None.",
+        "externalRequirements": "None."
+      },
+      "justification": "Code-hardening recommendation, no attack path -> QA bundle.",
+      "borderlineFlag": null
+    },
+    {
+      "id": "CLASS-007",
+      "originalId": "DEDUP-009",
+      "label": "Q-02",
+      "title": "Unchecked ERC4626 deposit return value in BalancerPoolerV2._dispatch",
+      "severity": "qa",
+      "plausibility": "n/a",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None. pool() re-reads balanceOf(address(this)) (BalancerPoolerV2.sol:192) rather than the deposit return, so accounting uses actual held sUSDS.",
+        "attackPath": ["IERC4626(sUSDS).deposit return is ignored at line 183; bounded because subsequent logic does not rely on it."],
+        "likelihood": "n/a",
+        "assumptions": "None.",
+        "externalRequirements": "None."
+      },
+      "justification": "Accounting-hygiene hardening with bounded/no impact -> QA.",
+      "borderlineFlag": null
+    },
+    {
+      "id": "CLASS-008",
+      "originalId": "DEDUP-010",
+      "label": "Q-03",
+      "title": "abi.encodePacked used to build dynamic-string metadata in uri() (cosmetic)",
+      "severity": "qa",
+      "plausibility": "n/a",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None. The packed output (NFTMinterV2.sol:262-273) is returned as a metadata JSON string and is never hashed; no collision/identity impact materializes.",
+        "attackPath": ["No security path; original collision concern was based on a misread (no keccak256 on this output)."],
+        "likelihood": "n/a",
+        "assumptions": "None.",
+        "externalRequirements": "None."
+      },
+      "justification": "Cosmetic style note (prefer abi.encode for dynamic-string concatenation clarity), no security impact -> QA.",
+      "borderlineFlag": null
+    },
+    {
+      "id": "CLASS-009",
+      "originalId": "DEDUP-011",
+      "label": "Q-04",
+      "title": "setMinter emits no event (and V2 uses single-step Ownable)",
+      "severity": "qa",
+      "plausibility": "n/a",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None. Monitorability/operational-hygiene only.",
+        "attackPath": ["setMinter (ATokenDispatcherV2.sol:85) changes a privileged role without emitting an event, hindering off-chain detection; V2 Ownable is single-step (Ownable2Step would guard a transfer mistake, but reckless-admin mistakes are known-invalid)."],
+        "likelihood": "n/a",
+        "assumptions": "None.",
+        "externalRequirements": "None."
+      },
+      "justification": "Missing-event half is a legitimate monitorability QA point independent of owner trust; Ownable2Step half is reckless-admin-adjacent (known-invalid) and folded in as a minor note -> QA.",
+      "borderlineFlag": null
+    },
+    {
+      "id": "CLASS-010",
+      "originalId": "DEDUP-008",
+      "label": "C-01",
+      "title": "Owner can replaceDispatcher at an existing index, re-pointing token/metadata under existing holders",
+      "severity": "qa",
+      "plausibility": "n/a",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None demonstrable in scope. replaceDispatcher (NFTMinterV2.sol:227-247) is onlyOwner and changes the dispatcher/token/metadata for an index with existing holders; any 'redemption honored against new token' impact lives in an external redemption layer (OOS).",
+        "attackPath": ["Owner calls replaceDispatcher(index, newDispatcher); existing holders' tokenId now maps to a different dispatcher/token. No in-scope on-chain redemption keys off the mapping, so no in-scope value impact is demonstrable."],
+        "likelihood": "n/a (owner-gated privileged action).",
+        "assumptions": "Owner is trusted (KI-1/KI-4).",
+        "externalRequirements": "None in scope; impact would require an external redemption layer."
+      },
+      "justification": "Pure centralization/design-soundness note: wholly owner-gated, no in-scope value impact -> Centralization (C-01) in the QA bundle.",
+      "borderlineFlag": null
+    }
+  ],
+  "excluded": [
+    {
+      "originalId": "DEDUP-001",
+      "reason": "Hard-suppressed by sanitizer (KI-1/KI-4 owner-driven + C4-STD speculation on out-of-scope external phUSD backing; no permissionless extraction path). Not classified."
+    }
+  ]
+}

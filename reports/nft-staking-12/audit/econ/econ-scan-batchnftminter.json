@@ -1,0 +1,79 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-05-29T00:00:00Z",
+  "scanType": "economic",
+  "contractsScanned": 1,
+  "focus": "BatchNFTMinter.sol::batchMint nudge payout gate",
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "value-blind-payout-gate",
+      "title": "Nudge gate is value-blind: full nudge pot drainable for the cost of nudgeSize cheapest-dispatcher mints (incomplete fix)",
+      "severity": "potential-high",
+      "plausibility": "conditional-high (precondition: a reachable dispatcher index with low/zero or cheap ramped price relative to the nudge pot)",
+      "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 215,
+      "lineStart": 207,
+      "lineEnd": 226,
+      "description": "The historical exploit (caller-supplied no-op minter draining the pot) was fixed by pinning the minter to owner-set `tokenMinter`. But the nudge payout gate is still PURELY NUMERIC (`count >= nudgeSize`, line 215) and `dispatcherIndex` (line 186) is still CALLER-CONTROLLED. The payout transfers the contract's ENTIRE `nudgePaymentToken` balance (line 220) regardless of how much the caller actually paid for the qualifying mints. There is zero coupling between the cost of clearing the gate and the size of the pot being released. The fix moved the bug from 'fake minter' to 'cheapest real dispatcher' — it is the same value-blind-gate vulnerability class.",
+      "codeSnippet": "for (uint256 i; i < count; ++i) { nftMinter.mint(dispatcherIndex, recipient); }\n...\nif (_nudgeSize != 0 && count >= _nudgeSize) {\n  if (_nudgeTokenEntry != address(0)) {\n    uint256 nudgeAmount = IERC20(_nudgeTokenEntry).balanceOf(address(this));\n    if (nudgeAmount != 0) { IERC20(_nudgeTokenEntry).safeTransfer(recipient, nudgeAmount); }\n  }\n}",
+      "economicImpact": "Attacker captures the entire nudge pot (whatever USDC/phUSD balance the yield funnel has accumulated) while paying only the cumulative mint cost of `nudgeSize` units on the CHEAPEST reachable dispatcher index. Loser: the protocol / yield funnel that funded the pot, and indirectly the legitimate large-batch minters the nudge was meant to reward.",
+      "attackScenario": "1. Attacker observes nudge pot has accrued value P (in nudgePaymentToken).\n2. Attacker scans the pinned tokenMinter for the dispatcher index j with the lowest cumulative cost to clear the gate. The minter's per-dispatcher price ramp is set via registerDispatcher(initialPrice, growthBasisPoints) and setPrice — a 0 / dust initialPrice or a low-priced 'legacy' index is a candidate.\n3. Attacker calls batchMint(paymentToken_j, j, count=nudgeSize, recipient=attacker, paymentAmount = cumulative_cost_j). All nudgeSize mints succeed (genuine, but cheap).\n4. count >= nudgeSize is true -> contract transfers its ENTIRE nudgePaymentToken balance P to the attacker.\n5. Net profit = P - cumulative_cost_j - gas, and the attacker also keeps the nudgeSize real NFTs minted on index j.",
+      "profitabilityCondition": "PROFITABLE iff  nudge_pot_balance  >  C(j, nudgeSize) + gas  for the cheapest reachable dispatcher j, where C(j, n) is the dispatcher's cumulative ramp cost for n mints. With flat price p_j (growthBasisPoints == 0): C = n * p_j. With geometric ramp r_j = 1 + gbp/10_000: C = p0_j * (r_j^n - 1)/(r_j - 1). The attacker controls the LHS choice of j (picks the cheapest index) and the timing (waits until pot is large); the owner controls only nudgeSize and pot funding cadence. Because the two sides are set by DIFFERENT parties with NO on-chain linkage, the inequality is satisfiable whenever ANY low-cost index exists OR the pot grows past nudgeSize * cheapest-price between top-ups.",
+      "affectedParties": ["protocol / yield funnel (funds the nudge pot)", "legitimate large-batch minters (intended nudge beneficiaries)"],
+      "rootCauseDecoupling": "The nudge models 'reward someone who bought a big batch' but measures batch SIZE (count) not batch VALUE (paymentToken spent), and releases a FIXED pot (full balance) rather than a value-proportional cut. count is cheap to inflate via a cheap dispatcher; the pot is sized in a different asset (nudgePaymentToken != paymentToken is even MANDATORY per line 200) so the gate cost and the reward are denominated in unrelated units and cannot be made commensurate by the owner.",
+      "isAdminMisSizeOnly": false,
+      "adminMisSizeAnalysis": "This is NOT merely 'owner mis-sizes the pot' (which would be admin-error/OOS). The decoupling is STRUCTURAL: (a) the gate is denominated in count, the cost in paymentToken, and the reward in a MANDATORILY-DIFFERENT nudgePaymentToken (line 200 forces nudgePaymentToken != paymentToken), so there is no unit in which the owner can equate 'cost to clear' with 'pot released'; (b) the cheapest qualifying cost is set on the SIBLING minter via dispatcher registration/price, which BatchNFTMinter does not read or constrain — the owner of BatchNFTMinter may not even control which dispatcher indices exist or their prices; (c) the pot is funded asynchronously by a yield funnel, so even a correctly-sized-at-deploy pot drifts above the drain threshold between batches. Safe sizing requires the owner to continuously bound pot <= nudgeSize * min_reachable_dispatcher_cost across an externally-mutated price set — practically impossible.",
+      "confidence": "high (logic); medium (live exploitability — gated on sibling precondition below)",
+      "preconditionsToVerify": [
+        "SIBLING (yield-claim-nft): at least one dispatcher index reachable via the pinned tokenMinter has a cumulative cost for nudgeSize mints materially below the nudge pot value. A zero/dust initialPrice index, OR a flat-price (growthBasisPoints==0) low-price index, OR simply any index whose nudgeSize-mint cost < pot, satisfies this.",
+        "SIBLING: whether mint(index, recipient) succeeds for an arbitrary caller (no allowlist on who may mint on a given dispatcher) and pulls payment via the resolved prime token only (so the attacker just needs to fund paymentAmount).",
+        "Whether nudgePaymentToken is realistically ever funded to a value exceeding nudgeSize * cheapest-dispatcher-cost (yield funnel accrual)."
+      ],
+      "fixAssessment": "INCOMPLETE. Pinning the minter closed the no-op-minter variant but not the gate's value-blindness. The NatSpec (lines 26-28) claims qualifying 'now requires genuinely paying for >= nudgeSize real mints at the dispatcher's ramping price' — this is true but insufficient: 'genuinely paying' for cheap mints is still far below the pot. The fix narrowed the attack surface (must use a REAL dispatcher) without removing the economic exploit.",
+      "recommendation": "Make the gate value-aware and the payout proportional, not all-or-nothing on a count threshold: (a) gate on cumulative paymentToken actually spent (totalPaid) crossing a value threshold, not on count; and/or (b) pay a bounded, proportional nudge (e.g. min(potShare, k * totalPaid)) rather than the entire balance; and/or (c) pin dispatcherIndex to owner-set state too, and require the gate-qualifying index's cumulative cost to exceed the maximum single-batch nudge — so clearing the gate is never cheaper than the reward. Option (a)+(b) is the robust fix; pinning dispatcherIndex alone still leaves the owner to maintain the cost>=pot invariant manually."
+    },
+    {
+      "id": "ECON-002",
+      "type": "mev-frontrun-payout",
+      "title": "Nudge top-up is front-runnable: any pending pot increase can be captured by a same-block batchMint",
+      "severity": "potential-medium",
+      "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 220,
+      "lineStart": 215,
+      "lineEnd": 224,
+      "description": "Because the payout releases the FULL nudgePaymentToken balance on the cheap-to-satisfy count gate (see ECON-001), the nudge pot is a publicly-claimable, first-come pool. Any observable funding event — a yield-funnel sweep, an owner top-up, a third-party transfer into the contract — can be front-run by a batchMint that clears the gate, grabbing the freshly-added value. The intended beneficiary (the large minter the funnel was rewarding, or the next organic large batch) is sandwiched out.",
+      "economicImpact": "MEV searchers / the cheapest-dispatcher attacker from ECON-001 systematically capture every pot top-up the instant it lands, so the nudge value never reaches its intended recipients. Even absent the ECON-001 cheap-index precondition, whoever can clear the gate most cheaply wins the race for each deposit.",
+      "attackScenario": "1. Mempool shows a pending transfer/sweep crediting nudgePaymentToken to BatchNFTMinter.\n2. Attacker submits a batchMint with count==nudgeSize and a higher priority fee, ordered immediately AFTER the funding tx.\n3. Attacker's batchMint reads the just-increased balanceOf and transfers the whole pot out.\n4. Repeat on every top-up — the pot is drained as fast as it is filled.",
+      "profitabilityCondition": "Same as ECON-001 (pot delta from the top-up must exceed clearing cost + priority-fee bid). Front-running raises the attacker's effective cost only by the priority fee, which is small relative to a meaningful pot.",
+      "affectedParties": ["intended nudge recipients", "yield funnel"],
+      "confidence": "medium",
+      "note": "This is a direct consequence of the full-balance, count-gated design (ECON-001). Fixing ECON-001 (value-aware, proportional, owner-pinned dispatcher) largely neutralises this MEV angle as well, because clearing the gate would no longer be cheap relative to the released value."
+    },
+    {
+      "id": "ECON-003",
+      "type": "uncapped-loop-griefing",
+      "title": "Uncapped count loop — self-DoS / gas only; no protocol-level economic griefing",
+      "severity": "info",
+      "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 207,
+      "lineStart": 207,
+      "lineEnd": 209,
+      "description": "The mint loop (line 207) is bounded only by caller-supplied `count` with no upper cap. Each iteration pulls payment from the caller's pre-funded paymentAmount via the sibling minter, so a large count costs the caller proportionally (gas + cumulative ramp price). There is no shared/unbounded state mutated per iteration that would let one caller grief others or inflate protocol cost: the loop touches only the caller's own funds and the caller's own recipient balance. Worst case is the caller wasting their own gas or hitting the block gas limit (their own tx reverts). No cross-user griefing, no economic externality.",
+      "economicImpact": "None beyond the caller's own gas and payment. Not a protocol-level finding.",
+      "interactionWithEcon001": "The uncapped loop does NOT amplify ECON-001: the attacker only needs count == nudgeSize (the minimum to clear the gate), not a large count, so the loop bound is irrelevant to the drain. Noted for completeness because the task asked.",
+      "confidence": "high",
+      "recommendation": "Optional: a sane MAX_COUNT cap would tighten the surface and give a clearer revert than an out-of-gas, but it has no security impact here. QA at most."
+    }
+  ],
+  "summary": {
+    "headline": "The nudge-pot fix is INCOMPLETE. Pinning the minter closed the no-op-minter drain but the payout gate remains value-blind (count >= nudgeSize) and releases the entire pot, while dispatcherIndex stays caller-controlled — so an attacker can clear the gate with nudgeSize genuine-but-cheap mints on the cheapest reachable dispatcher and walk off with the whole pot.",
+    "primaryFinding": "ECON-001",
+    "fixComplete": false,
+    "severityReasoning": "High IF the sibling precondition holds (a reachable dispatcher whose nudgeSize-mint cost is below the pot, including the likely-fundable case where the asynchronously-funded pot simply drifts above nudgeSize*cheapest-price). Direct, attacker-profitable theft of protocol funds with no hypotheticals beyond the dispatcher-price precondition. Downgraded to conditional/Plausible-High pending sibling verification: if EVERY reachable dispatcher's nudgeSize cumulative cost is provably and permanently >= the maximum pot, the attack is uneconomic and this collapses to Medium/QA. That guarantee is not enforced on-chain and depends on externally-mutable sibling state, which is itself the finding.",
+    "crossContractPreconditionOwner": "Hand off ECON-001 preconditions to the sibling (yield-claim-nft) scanner: enumerate reachable dispatcher indices, their initialPrice/growthBasisPoints/setPrice values, whether zero/low-price indices exist, and whether arbitrary callers may mint on them."
+  }
+}

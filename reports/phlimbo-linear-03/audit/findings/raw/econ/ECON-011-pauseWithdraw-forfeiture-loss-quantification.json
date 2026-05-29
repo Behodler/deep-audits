@@ -1,0 +1,43 @@
+{
+  "id": "ECON-011",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "pauseWithdraw forfeits pending rewards by design, but the forfeited rewards are not redistributed -- they linger in rewardBalance as a permanent dead-weight, benefiting whoever remains staked at the next interaction (potentially the attacker)",
+  "type": "intent-mismatch / value-redistribution / cross-staker-leakage",
+  "severity": "potential-medium",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "pauseWithdraw / _updatePool / _claimRewards",
+  "line": 245,
+  "lineStart": 245,
+  "lineEnd": 261,
+  "rootCause": "When a user calls `pauseWithdraw(amount)`, three things happen: (a) `user.amount -= amount`, (b) `totalStaked -= amount`, (c) `phUSD.safeTransfer(msg.sender, amount)`. NOTHING is done with the user's `phUSDDebt` / `stableDebt`. Crucially, the per-share accumulators `accPhUSDPerShare` and `accStablePerShare` already reflect rewards earned by `amount`, and those rewards are NOT redistributed to remaining stakers. The user's exit reduces `totalStaked` but the cumulative rewards stay 'parked' in the accumulators. When the contract un-pauses, the rewards remain claimable per-share to remaining stakers PROPORTIONAL to their now-larger share of `totalStaked` -- so other stakers' pending rewards EFFECTIVELY GROW. But the user who exited loses both phUSD-mint rewards AND stable-rewards in their UserInfo's `pendingPhUSD/pendingStable` computation (because they no longer have `amount`, their `pending = 0 * acc - debt`, which underflows or returns garbage).",
+  "economicImpact": "Three layered economic effects: (1) the exiting user loses their accrued rewards -- expected per docs ('does not claim rewards'). (2) The accumulators continue to grow because rewards keep being credited per-share against the now-smaller `totalStaked` -- so remaining stakers' per-share entitlement appears unchanged but the user-share allocations rebalance: each remaining staker's pending grows as if they had earned the exiter's share. (3) Combined with the V1 re-anchor bug, the exited capital's 'orphaned' debt against the accumulator can never be reconciled -- the exited user's debt persists in `userInfo[user]` and if they later re-stake, they get charged debt against a larger `accumulator` baseline (potentially triggering the V2-underflow path documented in profile).",
+  "affectedParties": "Exiting user (loses rewards); remaining stakers (gain disproportionately, but only if they were big enough to capture the redistributed share); the protocol (unintended cross-user value transfer with no event signalling it).",
+  "attackScenario": [
+    "Scenario: contract is paused. Alice and Bob each have 100 staked. Pending: Alice=10, Bob=10. accStablePerShare = 0.1e18.",
+    "Alice calls pauseWithdraw(100). Alice gets her 100 phUSD principal. Alice's userInfo.amount = 0, stableDebt unchanged (was anchored at original entry, e.g. 0). Alice's pending stables (10) are forfeit.",
+    "Contract unpauses. Bob calls claim().",
+    "_updatePool runs. No time elapsed (mocked), so accStablePerShare unchanged. Bob's pending = 100 * 0.1e18 / 1e18 - 0 = 10. Bob receives 10 stable -- correctly his original 10, not Alice's 10.",
+    "BUT: where did Alice's 10 go? It's still 'allocated' against accStablePerShare (the accumulator was credited at the moment of original distribution). Once Bob withdraws his 10, accStablePerShare stays at 0.1e18 -- Alice's 10 is effectively orphaned as accumulator headroom that no one will claim (since Alice's amount=0).",
+    "Now: if a NEW staker enters with amount=200, they immediately get debt-anchored at 200 * 0.1e18 = 20. So they pay an entry-debt as if they'd been there to earn Alice's 10. Net: the new staker takes a 10-unit reward-debt 'hit' for which they receive no compensation -- Alice's orphaned share has been silently transferred to the protocol-side as un-distributable headroom.",
+    "Variant (extractive): Charlie waits for several stakers to pauseWithdraw, then enters with a small stake AND quickly increases his stake before any new accumulator growth, then waits for accumulator to grow only marginally before claiming -- Charlie is paying a small entry-debt that captures most of the orphaned headroom's upside."
+  ],
+  "profitability": "Hard to extract directly because the 'orphaned' headroom only benefits new entrants who can correctly time the accumulator state. But the value-leak from the exiter is real and unsignalled: stakers who emergency-exit are not told their forfeited share won't be re-credited to the funder either -- it's a dead-weight asymmetry.",
+  "preconditions": [
+    "Contract enters a paused state (pauser is invoked).",
+    "At least one user calls pauseWithdraw with `pending > 0` at the moment of exit."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Natspec on pauseWithdraw: 'Emergency exit mechanism - does NOT claim rewards or update pool'. The docs imply 'rewards are forfeit' but don't specify their fate (returned to funder? redistributed to remaining stakers? lost?). Users reasonably expect 'forfeited to the pool, redistributed to remaining stakers'.",
+    "implementation": "Forfeited rewards are neither returned to the funder nor redistributed; they remain accounted in the accumulator but become un-claimable -- a dead-weight liability against the rewardBalance.",
+    "discrepancy": "The 'forfeit' framing is incomplete. The actual behavior is: the user's debt-baseline-implied reward becomes an orphaned line item in the accumulator that benefits no one explicitly and complicates future debt accounting for new stakers."
+  },
+  "mitigations": [
+    "On `pauseWithdraw`, also rebase the user's `phUSDDebt` and `stableDebt` to the current `acc*` values so the orphaned share is explicitly returned to the funder pool (decrement rewardBalance by the forfeited portion).",
+    "Alternatively, refund the funder by transferring the proportional `rewardToken` amount back to a 'forfeited' address before the user's emergency exit.",
+    "Emit a `RewardsForfeited(user, phUSDForfeit, stableForfeit)` event so the off-chain accounting can track the value transfer.",
+    "Document precisely what happens to forfeited rewards so users can make an informed exit decision."
+  ],
+  "crossReferences": ["CODE-009 (pauseWithdraw silent forfeiture) - ECON-011 quantifies the downstream economic redistribution that CODE-009 leaves underspecified.", "CODE-002 (post-pauseWithdraw underflow) - shared root cause (un-rebased debt) but distinct economic angle: CODE-002 is the DoS path, ECON-011 is the value-transfer path.", "Profile §4.3 (pauseWithdraw analysis), §8.6."]
+}

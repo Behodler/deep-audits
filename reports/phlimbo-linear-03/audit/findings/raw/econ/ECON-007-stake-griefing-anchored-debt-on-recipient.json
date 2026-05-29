@@ -1,0 +1,42 @@
+{
+  "id": "ECON-007",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "stake(amount, recipient) lets anyone forcibly re-anchor a victim's reward-debt clock, harvesting their pending rewards to them prematurely (rewards-side griefing)",
+  "type": "griefing / forced-claim / accounting-manipulation",
+  "severity": "potential-low",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "stake (recipient branch)",
+  "line": 309,
+  "lineStart": 295,
+  "lineEnd": 328,
+  "rootCause": "`stake(amount, recipient)` allows the caller to specify any `recipient`. If `recipient` is a pre-existing staker, the function runs `_claimRewards(recipient)` (which calls `phUSD.mint(recipient, ...)` and `rewardToken.safeTransfer(recipient, ...)`) and then re-anchors `recipient`'s `phUSDDebt`/`stableDebt` based on `recipient.amount + amount`. The caller pays the `amount` (`safeTransferFrom(msg.sender, ...)`). Economically: a griefer can stake 1 minimum-stake on behalf of any victim, forcing the victim's pending rewards to be claimed NOW (potentially triggering a USDC blacklist revert, a phUSD-mint failure, or simply forcing a taxable event on a recipient who wanted to compound).",
+  "economicImpact": "The economic harm has three flavours: (a) forced taxable event -- in jurisdictions where claiming rewards is a taxable realisation event, the victim incurs tax liability on the griefer's schedule, not their own; (b) DoS-pivot: if `_claimRewards` reverts (e.g. USDC blacklist of `recipient`, phUSD mint cap, see ECON-006), the griefing stake itself reverts, but a victim with rewards that USE to claim cleanly can be selectively griefed by feeding the victim a tiny stake right before a rate change to lock them into the old rate; (c) MEV griefing -- forces the victim's pending rewards to be claimed at a moment chosen by the attacker, e.g. just before a `collectReward` injection that would have boosted the per-share, so victim loses the post-injection share appreciation. Cost: 1 minimum-stake (1e15 wei phUSD ~= 0.001 phUSD) per victim per grief.",
+  "affectedParties": "Any individual staker (one at a time); rewards-side accounting fairness; users who entered the protocol expecting full control over when their rewards realise.",
+  "attackScenario": [
+    "Victim has built up `pendingPhUSD = P_phUSD` and `pendingStable = P_stable` and plans to claim after an upcoming `collectReward` injection (when accStablePerShare would jump).",
+    "Attacker monitors the mempool. Just before the victim's planned `claim()`, attacker calls `stake(1e15, victim)`.",
+    "Inside `stake`: `_updatePool` runs, then `_claimRewards(victim)` runs because `user.amount > 0`. The victim receives their CURRENT pending rewards (before the imminent `collectReward` lands). Then `victim.amount += 1e15`, debts are re-anchored.",
+    "The `collectReward` lands next, but the victim's `accStablePerShare` debt baseline has been reset -- they no longer benefit from the post-injection appreciation that would otherwise apply to their old reward debt.",
+    "Net: victim received their pending rewards at a worse moment than they planned, and lost the post-injection upside on their existing position.",
+    "Tax-event variant: attacker repeatedly stakes 1e15 to high-value stakers in the US, forcing them to recognize phUSD income on attacker's chosen blocks, complicating tax accounting.",
+    "DoS-pivot variant: if victim is USDC-blacklisted, every attacker `stake(1e15, victim)` reverts but ALSO prevents the victim from ever calling `withdraw` (which also tries to claim). Combined cost: trivial."
+  ],
+  "profitability": "Not directly profitable -- this is pure griefing. Cost per grief = 1e15 phUSD (effectively dust). The phUSD ends up in the contract under the victim's `user.amount`, so the attacker also burns ~0.001 phUSD per call.",
+  "preconditions": [
+    "Victim has a non-zero `user.amount`.",
+    "Attacker has at least 1e15 phUSD per grief target."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Natspec on `stake`: 'recipient -- Address to receive the staked position (use address(0) for msg.sender)'. The design clearly intends third-party staking-for (e.g., a router or migrator pattern). But the natspec doesn't acknowledge that this also forces a claim on the recipient.",
+    "implementation": "No `require(recipient == msg.sender || recipient delegated to msg.sender)` check; no `onlyOwner` / `onlyMigrator` gate. Note that V2 reportedly introduces a `migrator` role for similar functionality -- suggesting the design team recognized the issue.",
+    "discrepancy": "V2's migrator role implies V1's open `stake(amount, recipient)` was intentional but not threat-modelled against griefing. Profile §4.3: 'Allows staking on behalf of any recipient. Anyone can grief a victim by topping them up -- minor griefing surface ... generally benign.' This finding sharpens 'minor' into specific economic harm vectors."
+  },
+  "mitigations": [
+    "Require `recipient == msg.sender` OR `recipient` has explicitly approved the staker (per-recipient mapping `mapping(address => mapping(address => bool)) stakingApproval`).",
+    "Adopt V2's `migrator` role pattern (single trusted address can stake-on-behalf).",
+    "Alternatively, when `recipient != msg.sender` and `recipient.amount > 0`, SKIP `_claimRewards` -- accrue the new stake at the current `acc*`, but treat the existing position's debt as unchanged. This is harder accounting-wise (mixes two anchor checkpoints) but eliminates the forced-claim grief."
+  ],
+  "crossReferences": ["Profile §4.3 'Allows staking on behalf of any recipient' note. ECON-007 elevates the 'generally benign' label by enumerating concrete economic harm vectors not flagged by any existing tool output."]
+}

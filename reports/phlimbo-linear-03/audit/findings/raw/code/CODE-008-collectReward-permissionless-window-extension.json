@@ -1,0 +1,28 @@
+{
+  "id": "CODE-008",
+  "source": "code-scanner",
+  "kind": "fresh",
+  "title": "collectReward(1) permissionless griefing: any wallet can re-anchor rewardPerSecond at trivial cost, extending the already-broken V1 depletion tail indefinitely",
+  "type": "griefing / window-reset-amplification",
+  "severity": "potential-medium",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "collectReward",
+  "line": 283,
+  "lineStart": 270,
+  "lineEnd": 286,
+  "rootCause": "`collectReward` is permissionless (no access control beyond `nonReentrant`), accepts any `amount > 0`, and ends by recomputing `rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration`. Because the V1 `_updatePool` already re-anchors the rate on every accrual (see CODE-001 / known issue), any third-party caller pinging `collectReward(1)` periodically prevents `rewardPerSecond` from ever stabilising at the larger pre-depletion rate -- it gets cut to a tiny fraction every call. Combined with the asymptotic decay, this lets a griefer keep stakers' rewardToken stream arbitrarily small.",
+  "impact": "Reward token effectively never reaches stakers in the advertised `depletionDuration`. Even worse than CODE-001's baseline asymptotic behavior, because a griefer with a tiny phUSD budget can mechanically reset the rate every block. Stakers' effective stable-yield rate drops toward zero while `rewardBalance` lingers in the contract.",
+  "attackVector": "Attacker wallet approves the reward token (any vanilla ERC20, e.g. USDC, allows 1 wei approvals). They submit `collectReward(1)` once per block (or once per N blocks). Each call: (a) pulls 1 wei from attacker, (b) runs `_updatePool` which subtracts a tiny amount from `rewardBalance` and re-anchors rate, (c) increments `rewardBalance += 1`, (d) recomputes `rewardPerSecond` again. Cost per block: 1 wei of USDC plus gas. Over a 7-day depletion window with a 12s block time, attacker spends ~50_400 wei (i.e. $0.00) of USDC and the equivalent gas to keep the rate clamped near zero indefinitely. On L2, gas is negligible.",
+  "steps": [
+    "Funder calls collectReward(1_000e6) -- rewardPerSecond is set to a non-trivial value.",
+    "Attacker contract calls collectReward(1) every block (or every few blocks).",
+    "Each call shrinks rewardPerSecond toward zero because _updatePool depletes a sliver of rewardBalance, then divides the remainder by the full depletionDuration again.",
+    "After the advertised window expires, rewardBalance is still ~100% of the original deposit instead of ~0%. Stakers received almost nothing on the stable leg.",
+    "Funder cannot 'cancel' the griefing -- only owner-side `setDepletionDuration(1)` can force a rapid distribution, and even that requires owner intervention."
+  ],
+  "codeSnippet": "// collectReward, lines 270-286\nfunction collectReward(uint256 amount) external nonReentrant {\n    require(amount > 0, \"Amount must be greater than 0\");\n    _updatePool();                                                    // re-anchors via the V1 bug\n    rewardToken.safeTransferFrom(msg.sender, address(this), amount);\n    rewardBalance += amount;\n    rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration; // <-- explicit second re-anchor\n    emit RewardCollected(amount, rewardBalance, rewardPerSecond);\n}",
+  "remediation": "Either gate `collectReward` to the trusted yield-accumulator (the natspec already names it as the expected caller), or enforce a minimum funding amount, or both. The deeper fix is the V2 change (no rate recompute inside `_updatePool`) -- this finding is the permissionless-amplification of the known V1 bug.",
+  "profileReference": "Profile §6 'collectReward caller -- anyone ... Minor griefing surface; impact is slows depletion further -- amplifies the V1 window-reset bug', §8.3.",
+  "relatesTo": ["CODE-001"]
+}

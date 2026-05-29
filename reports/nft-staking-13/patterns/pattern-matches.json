@@ -1,0 +1,138 @@
+{
+  "project": "nft-staking",
+  "scanTimestamp": "2026-05-29T00:00:00Z",
+  "scanType": "pattern-matching",
+  "targetCommit": "031ffdab5bf1995026ca7a47391a19f7634e7d78",
+  "scope": [
+    "src/BatchNFTMinter.sol",
+    "src/NFTStaker.sol"
+  ],
+  "focus": "src/BatchNFTMinter.sol (batchMint + nudge payout logic)",
+  "patternsChecked": 22,
+  "findingsCount": 5,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC777",
+      "type": "reentrancy-via-receiver-hook",
+      "severity": "potential-high",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 238,
+      "description": "batchMint loops nftMinter.mint(dispatcherIndex, recipient) which mints an ERC1155 unit to the CALLER-CHOSEN recipient on every iteration. ERC1155 _mint invokes onERC1155Received on recipient if it is a contract, handing control to attacker code MID-LOOP while (a) the contract holds the freshly pulled paymentAmount, (b) the minter approval is still type(uint256).max (lines 236/239), and (c) the nudge pot is still present. There is NO ReentrancyGuard / nonReentrant on batchMint (the contract does not even inherit ReentrancyGuard), unlike the sibling NFTStaker. A reentrant call back into batchMint can stack a second batch against the same outstanding max approval and the same nudge balance before the outer call reaches the dust sweep, breaking the implicit accounting (paymentAmount pulled once, balance read fresh). This is the ERC777/receiver-hook reentrancy pattern adapted to the ERC1155 acceptance callback.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "nftMinter.mint(_dispatcherIndex, recipient) inside for-loop (ERC1155 mint -> onERC1155Received hook)",
+        "forceApprove(address(nftMinter), type(uint256).max) live across the external-call loop",
+        "state-affecting external calls with no reentrancy guard"
+      ],
+      "missingMitigations": [
+        "No ReentrancyGuard inherited and no nonReentrant modifier on batchMint",
+        "Max approval is live for the whole loop instead of per-iteration",
+        "Nudge payout and dust sweep run after attacker-controllable callbacks"
+      ],
+      "references": [
+        "patterns/vulnerability-patterns.json#REENTRANCY-ERC777",
+        "OZ ERC1155 _doSafeTransferAcceptanceCheck / onERC1155Received"
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "unbounded-loop",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 238,
+      "description": "batchMint loops `for (uint256 i; i < count; ++i) nftMinter.mint(...)` with `count` a fully caller-supplied uint256 and no upper bound. Each iteration performs an external mint (dispatcher logic + ERC1155 mint + acceptance callback), so a large count trivially exceeds the block gas limit. More relevant to the nudge: the loop body is the ONLY thing standing between the caller and the `count >= nudgeSize` payout gate, so the cost of clearing the gate is whatever the dispatcher charges per real mint times nudgeSize. Confidence medium because the per-iteration cost is the intended economic friction (the gate is meant to require nudgeSize real paid mints); flag is the gas/DoS dimension plus the linkage to PATTERN-004.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "for (uint256 i; i < count; ++i)",
+        "count is unbounded caller-supplied uint256"
+      ],
+      "missingMitigations": [
+        "No MAX_COUNT / batch-size ceiling",
+        "No pagination"
+      ],
+      "references": [
+        "patterns/vulnerability-patterns.json#DOS-UNBOUNDED-LOOP"
+      ]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE",
+      "type": "value-blind-incentive-gate",
+      "severity": "potential-high",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 246,
+      "description": "The nudge payout is gated PURELY on the numeric `count >= nudgeSize` (line 246), then transfers the contract's ENTIRE nudgePaymentToken balance to the caller-chosen recipient (lines 251-253). The gate validates a count, not value paid. This is the canonical 'attacker drains an incentive pot by supplying a cheap/zero-price input the contract trusts without validating its value' pattern. The in-code NatSpec (lines 22-31) documents that this exact gate WAS exploited on mainnet when the minter was caller-supplied: a no-op minter let an attacker fake `count` cheap mints, clear the gate, and walk off with the pot. The committed fix pins the minter to owner-set state (line 217) and derives paymentToken from the pinned dispatcher's primeToken() (line 228), so clearing the gate now requires count real paid mints at the dispatcher's ramping price. RESIDUAL CONCERN: the gate still binds value to count only indirectly via the dispatcher price. If the owner-pinned dispatcher's configs(index).price can be 0 (the NFTStaker side explicitly treats price==0 as a supported state) or growth ramps cheaply, a large count can be cleared for near-zero payment yet still drain the full nudge pot. The defense is now 'minter is trusted' rather than 'value is validated' - the gate itself remains value-blind. Cross-reference PATTERN-005 (zero-price).",
+      "confidence": "high",
+      "matchedSignatures": [
+        "if (_nudgeSize != 0 && count >= _nudgeSize)  -- numeric-only gate",
+        "nudgeAmount = IERC20(_nudgeTokenEntry).balanceOf(address(this)); safeTransfer(recipient, nudgeAmount)  -- full-pot payout",
+        "payout to caller-chosen recipient"
+      ],
+      "missingMitigations": [
+        "Gate checks count, not aggregate value/price actually paid",
+        "Pays full balance rather than a bounded reward",
+        "Relies entirely on the owner-pinned dispatcher charging a non-trivial per-mint price"
+      ],
+      "references": [
+        "patterns/vulnerability-patterns.json#FLASH-LOAN-PRICE",
+        "BatchNFTMinter.sol NatSpec lines 22-47 (documented mainnet exploit + fix)"
+      ]
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "CALLER-CONTROLLED-TARGET",
+      "type": "caller-controlled-external-call-target",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 211,
+      "description": "Historical pattern: the original design accepted the minter/dispatcher as a caller-supplied argument, an arbitrary-external-call-target into which an attacker injected a no-op contract (NatSpec lines 22-31). At HEAD this is REMEDIATED - tokenMinter (line 217) and dispatcherIndex (line 222) are owner-pinned state and not call parameters. The residual caller-controlled input that still flows into external behaviour is `recipient` (line 211): it is the ERC1155 mint target on every loop iteration AND the nudge payout target (line 253). Because recipient is the mint destination, it is the attacker's reentrancy entry point (see PATTERN-001) and is itself the beneficiary of the nudge, so a single attacker contract can be both the callback re-entrant and the pot recipient. Confidence medium: the dangerous arbitrary-target vector is closed; the recipient-as-callback-target surface remains and is what makes PATTERN-001 reachable.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "batchMint(uint256 count, address recipient, uint256 paymentAmount)  -- recipient is caller-controlled",
+        "nftMinter.mint(_dispatcherIndex, recipient)  -- recipient is the external-callback target",
+        "safeTransfer(recipient, nudgeAmount)  -- recipient is the value sink"
+      ],
+      "missingMitigations": [
+        "recipient is unconstrained (any contract, including the caller's own re-entrant contract)",
+        "No recipient == msg.sender restriction nor code-size / allowlist check"
+      ],
+      "references": [
+        "patterns/vulnerability-patterns.json (SWC-107 arbitrary external call family)",
+        "BatchNFTMinter.sol NatSpec lines 22-31 (minter pinning fix)"
+      ]
+    },
+    {
+      "id": "PATTERN-005",
+      "source": "pattern-db",
+      "patternId": "ZERO-PRICE-INPUT",
+      "type": "zero-price-trusted-input",
+      "severity": "potential-high",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 228,
+      "description": "Directly matches the requested focus: 'attacker drains an incentive/nudge pot by supplying a cheap or zero-price input the contract trusts without validation.' batchMint derives paymentToken from the pinned dispatcher's primeToken() (line 228) but NEVER reads or validates the dispatcher's price. It does not check configs(dispatcherIndex).price > 0, does not compute an expected aggregate cost, and does not require totalPaid >= some per-mint minimum * count. Solvency rests entirely on the inner mint() reverting when paymentAmount is short. The sibling NFTStaker._recomputeSchedule (NFTStaker.sol lines 389, 401) and the project known-issues BOTH explicitly state price==0 is a SUPPORTED dispatcher state (collapses reward rate R to 0). If the owner-pinned dispatcher is in a price==0 / disabled / cheap-ramp state, an attacker can pass paymentAmount==0 (or dust), loop count >= nudgeSize free/near-free mints (the inner mint never reverts on a zero charge), clear the value-blind gate (PATTERN-003), and have the entire nudgePaymentToken balance transferred to recipient - the exact zero-price drain the NatSpec claims was closed, re-opened through the un-validated dispatcher price rather than a fake minter. High confidence the price is unvalidated in this file; the live exploitability hinges on whether the production dispatcher can present price==0/cheap while the nudge is funded - flagged for manual confirmation against NFTMinterV2 config and deployment.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "IERC20(ITokenDispatcherV2(dispatcher).primeToken())  -- token derived, price never read",
+        "no require on configs(dispatcherIndex).price",
+        "count >= nudgeSize payout independent of paymentAmount actually charged",
+        "price==0 documented as supported state in NFTStaker.sol:389 and project known-issues"
+      ],
+      "missingMitigations": [
+        "No dispatcher price > 0 validation in batchMint",
+        "No minimum aggregate spend / per-mint price floor tying nudge eligibility to value paid",
+        "Nudge gate decoupled from totalPaid"
+      ],
+      "references": [
+        "patterns/vulnerability-patterns.json#FLASH-LOAN-PRICE (price-trust family)",
+        "NFTStaker.sol lines 367-369, 389, 401 (price==0 is a supported edge case)",
+        "BatchNFTMinter.sol NatSpec lines 22-47"
+      ]
+    }
+  ]
+}

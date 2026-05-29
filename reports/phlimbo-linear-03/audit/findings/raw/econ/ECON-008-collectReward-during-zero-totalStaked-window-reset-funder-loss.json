@@ -1,0 +1,42 @@
+{
+  "id": "ECON-008",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "collectReward with zero totalStaked is silently lossy: rewardPerSecond is set immediately, but _updatePool early-returns when totalStaked==0, allowing the depletion clock to consume funded rewards before any staker can claim",
+  "type": "intent-mismatch / value-leak / funder-side",
+  "severity": "potential-medium",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "collectReward / _updatePool",
+  "line": 283,
+  "lineStart": 270,
+  "lineEnd": 286,
+  "rootCause": "Two facts interact: (1) `collectReward` unconditionally sets `rewardPerSecond = rewardBalance * PRECISION / depletionDuration` AND updates `lastRewardTime` indirectly via `_updatePool()`. (2) When `totalStaked == 0`, `_updatePool` sets `lastRewardTime = block.timestamp` and returns WITHOUT depleting `rewardBalance`. Combination: if a funder deposits at totalStaked==0, the clock is anchored, but no accrual happens. So far so good. BUT -- the moment one staker enters (`stake`), `_updatePool` is called with `totalStaked` still zero (the increment happens AFTER `_updatePool`), so once again no accrual. On the SECOND block, with totalStaked>0 now, `_updatePool` runs with `timeElapsed = blockN+1 - lastRewardTime` (1 block). That's the only consumed time. SO this case is actually safe -- but the OPPOSITE case is the bug: if a funder calls `collectReward` while `totalStaked > 0`, then everyone withdraws, then a long time passes, then a new staker enters -- the period of zero-staked time is NOT credited back to anyone. The `lastRewardTime` was advanced on every interaction, so the time gap is lost. Importantly: `rewardBalance` was not reduced (because of the zero-staked branch), but it also can't be re-injected back into the rate because the rate is fixed at the formula. So from the new staker's perspective, `rewardPerSecond` is computed against an undeleted `rewardBalance` but the depletion clock is invisibly shorter by the zero-staked gap.",
+  "economicImpact": "Funder-side: deposits made while totalStaked == 0 are silently 'parked' but the rate is set based on the FULL depletionDuration even though the effective distribution window is shortened by the zero-staked gap. From the funder's perspective: they paid for X seconds of depletion but only got Y seconds (Y < X) because the rate was anchored against a freezer of clock. Staker-side: a staker who enters AFTER a long zero-staked gap sees `rewardPerSecond` at the original-funded rate but `rewardBalance` is undepleted -- they get a windfall. Net economic impact: the protocol's stated depletion economics are not stable across staker presence; funders are penalised for funding during empty-pool periods.",
+  "affectedParties": "Reward funders (yield-accumulator) who fund during low/zero TVL periods; stakers who enter just after such funding (they get a windfall but only if they discover the timing); the protocol's APY accuracy (the published rate is wrong relative to actual distribution speed).",
+  "attackScenario": [
+    "Timeline T0: contract is freshly deployed, totalStaked = 0, rewardBalance = 0.",
+    "T0: funder calls collectReward(1_000e6). lastRewardTime = T0. rewardPerSecond = 1_000e6 * PRECISION / 7 days.",
+    "T0 to T0+1 day: no staker exists. _updatePool is not called (no stake/claim/withdraw); the rate is dormant.",
+    "T0+1 day: first staker enters with stake(X, staker). Inside stake: _updatePool runs. block.timestamp > lastRewardTime, but totalStaked is still 0 (increment happens after). Branch: lastRewardTime = T0+1 day, return. NO accrual, but ALSO no rewardBalance depletion. Then totalStaked += X. _updatePool was already called and won't run again until the next interaction.",
+    "T0+1 day to T0+2 days: staker accrues at rewardPerSecond computed at T0. That's correct -- their accrual would be 1_000e6 / 7 days * 1 day. But the depletion clock effectively had 2 days of head start without depleting. The advertised '7 day depletion window' is now an effective '6 day distribution to this staker, with 1 day of stalled time funder paid for but no one captured'.",
+    "Variant 2 (drained-then-empty): T0: 1 staker with X, rewardBalance = 1M. T0+3 days: staker withdraws all (totalStaked = 0). T0+3 to T0+10 days: no stakers. T0+10: new staker enters with Y. _updatePool sees totalStaked == 0, advances lastRewardTime, no accrual. T0+11: another _updatePool runs, computes timeElapsed = 1 day, accrues at rewardPerSecond. But rewardPerSecond was set at T0+3 (during the original staker's exit, _updatePool ran with rewardBalance = (mostly distributed), then on withdraw recompute via _updatePool at the staker's withdraw, the rate was reset to (small_remaining_balance * PRECISION / 7 days) -- so the new staker gets a tiny stream. Meanwhile rewardBalance has 7 days of frozen-clock time that no one will ever capture: it was at the rate computed at T0+3, the rate that assumes continuous distribution -- but distribution was paused. The undeleted balance lingers."
+  ],
+  "profitability": "Not directly an attack; funder loss is structural. A sophisticated funder could detect zero-stake windows and delay funding (waiting for `totalStaked > 0`) -- but the natspec presents `collectReward` as 'anyone, anytime' so unsophisticated funders (yield-accumulator on a schedule) silently waste capital.",
+  "preconditions": [
+    "Periods of `totalStaked == 0` exist (early protocol life, after a mass exit, between epochs).",
+    "Funder doesn't manually check `totalStaked` before calling `collectReward`."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Submodule CLAUDE.md describes the contract as a 'linear-depletion staking yield farm' that 'distributes rewards over depletionDuration seconds'. The implication is that funding always begins depletion. The natspec doesn't carve out a zero-staked exception.",
+    "implementation": "`_updatePool` early-returns when `totalStaked == 0` without depleting `rewardBalance`. `collectReward` doesn't check or warn about totalStaked. The rate formula is the same regardless of whether anyone is there to receive.",
+    "discrepancy": "The 'linear depletion over N seconds' invariant fails when totalStaked oscillates around zero. The rate is set as if distribution were continuous, but the clock pauses during empty periods. Funders pay for time that won't be distributed; eventually the rewardBalance lingers."
+  },
+  "mitigations": [
+    "Make `collectReward` revert (or emit a strong warning event) when `totalStaked == 0`.",
+    "When `_updatePool` runs with `totalStaked == 0`, do NOT advance `lastRewardTime`; instead, leave the depletion clock paused so the time gets credited to stakers when they return. This is a known MasterChef variant.",
+    "Document the zero-staked behavior prominently so the yield-accumulator's funding cadence can avoid empty windows.",
+    "Compute `rewardPerSecond` as `rewardBalance / max(remainingDepletionTime, MIN_TIME)` so funding mid-stream doesn't restart the clock from scratch (this also addresses CODE-001 partially)."
+  ],
+  "crossReferences": ["CODE-001 (V1 rate re-anchor bug) - distinct angle: CODE-001 is the per-interaction re-anchor that causes asymptotic decay; ECON-008 is the OPPOSITE problem -- silent fund loss when totalStaked oscillates to zero. Both follow from the rate formula being decoupled from elapsed-time accounting.", "Profile §5 _updatePool note: 'during periods of zero stake, the depletion clock does NOT consume rewardBalance ... benign locally'. ECON-008 challenges 'benign' and shows the funder-side loss."]
+}

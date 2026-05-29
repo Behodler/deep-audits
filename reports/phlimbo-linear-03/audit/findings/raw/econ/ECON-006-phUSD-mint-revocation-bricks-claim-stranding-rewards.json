@@ -1,0 +1,41 @@
+{
+  "id": "ECON-006",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "phUSD mint authority is load-bearing for solvency: revocation, pause, or supply cap on IFlax bricks claim/stake/withdraw, stranding both phUSD principal and reward tokens",
+  "type": "trust-assumption-failure / cross-contract-dependency / value-leak",
+  "severity": "potential-medium",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "_claimRewards (-> phUSD.mint) / stake / withdraw / claim",
+  "line": 442,
+  "lineStart": 432,
+  "lineEnd": 455,
+  "rootCause": "`_claimRewards` calls `phUSD.mint(user, pendingPhUSDAmount)` unconditionally whenever `pendingPhUSDAmount > 0`. There is NO try/catch, NO conditional skip, NO fallback to accrue-without-mint. If `phUSD.mint` reverts for any reason (e.g. the IFlax-level `revokeAllMintPrivileges()` call documented in the profile §6, a phUSD-level pause, a per-block mint cap, or a global supply ceiling), then `_claimRewards` reverts, which means: (a) `claim()` reverts, (b) `stake()` reverts for any user with a pre-existing position (because the stake path runs `_claimRewards` before transferring in), (c) `withdraw()` reverts always (because withdraw also runs `_claimRewards` first). Only `pauseWithdraw` (which doesn't claim) keeps working -- and only while the contract is paused.",
+  "economicImpact": "A single external action on the phUSD token (which is mutable per the IFlax interface) can globally brick the staking contract. Stakers with `pendingPhUSDAmount == 0` are unaffected (their claim path is dormant), but any staker who ever had phUSD rewards accrued is locked out of `withdraw`/`claim` for as long as mint is unavailable. Pending `rewardToken` rewards are stranded too because they're claimed alongside in the same function. The only exit becomes 'someone (pauser) pauses the contract, then users call pauseWithdraw to recover principal but FORFEIT all accrued rewards' (see CODE-009). This is a one-tx grief surface against a sibling-controlled contract: whoever controls phUSD's mint role can DoS this contract trivially.",
+  "affectedParties": "All stakers with non-zero pending phUSD; reward funders whose deposits become unclaimable; the protocol's effective APY narrative.",
+  "attackScenario": [
+    "Operator of phUSD (whether by mistake, governance, attack, or coordinated rug) calls `revokeAllMintPrivileges()` on IFlax (or otherwise causes phUSD.mint to revert for this contract).",
+    "All `stake`/`withdraw`/`claim` calls for users with existing positions revert at `_claimRewards`. New stakers with zero position can still stake (the `if (user.amount > 0)` guard skips `_claimRewards`), increasing trapped TVL while the bug compounds.",
+    "Stakers complain. Pauser (a different mutable sibling) is asked to pause. Once paused, `pauseWithdraw` becomes usable -- but it forfeits all pending rewards (CODE-009).",
+    "Net loss for stakers: every wei of accrued `pendingPhUSDAmount` and `pendingRewardAmount` that was sitting in the accounting state. The reward funder lost the corresponding `rewardBalance` allocated to those debts.",
+    "Variant: phUSD has a per-block mint cap. Under normal operation a heavy-claim block can deterministically revert claims for the unlucky-ordered users, creating per-block DoS."
+  ],
+  "profitability": "Not directly profitable for a third party, but profitable as a coordination attack: a competing yield product wants stakers to migrate; one phUSD governance vote later, the competitor's mint is bricked. Or: a phUSD bug forces an emergency revoke; this contract becomes collateral damage.",
+  "preconditions": [
+    "phUSD token is an `IFlax` instance whose mint authority can be revoked, paused, or bounded.",
+    "Some stakers have non-zero `pendingPhUSDAmount` (i.e. normal operation has produced accruals)."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Profile §10 trust assumption #1: 'phUSD is a non-callback ERC20 ... AND grants this contract a minter role that remains valid through the audit horizon.' The profile flags this as load-bearing. The submodule's own CLAUDE.md does not address what happens when the assumption fails.",
+    "implementation": "`_claimRewards` makes mint failure fatal for all three core flows. No graceful degradation; no 'accrue-but-don't-mint' fallback; no event signalling the failure mode.",
+    "discrepancy": "A 'linear depletion farm' that bricks on mint-revoke is implicitly a trust assertion that the phUSD mint will NEVER be revoked while the farm holds principal. That assertion is not encoded on-chain and is not documented to users."
+  },
+  "mitigations": [
+    "Wrap `phUSD.mint(user, pendingPhUSDAmount)` in a try/catch (or low-level call). On failure: accrue the phUSD owed in a per-user `unpaidPhUSDDebt` mapping and continue. Provide a `claimUnpaidPhUSD()` function for later settlement.",
+    "Separate the phUSD claim from the rewardToken claim: allow stakers to claim only the reward token (no mint call) when phUSD mint is unavailable.",
+    "Make `withdraw` callable in a 'principal-only' mode that skips `_claimRewards` (i.e. forfeit pending rewards in exchange for guaranteed exit). This is what `pauseWithdraw` does, but only during pause.",
+    "Add a heartbeat: if `phUSD.mint` reverts N times in a row, auto-pause and emit an event so external monitors notice the trust-boundary failure."
+  ],
+  "crossReferences": ["CODE-009 (pauseWithdraw silent reward forfeiture) - related: ECON-006 is the upstream trigger (mint authority issue), CODE-009 is the resulting forfeiture path users are forced into.", "Profile §6, §10 trust assumption #1."]
+}

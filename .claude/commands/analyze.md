@@ -134,11 +134,12 @@ Invoke **severity-classifier**: "Classify findings by C4 severity"
 Invoke **finding-manager**: "Create finding records and upsert the ledger"
 - Write findings to `<report-dir>/findings/<severity>/` with labels `H-01`, `M-01`, `L-01`, `C-01`.
 - Status `draft` or `needs-poc`. Tag new vs regressed vs still-open.
+- For each **still-open** entry (all severities), write a thin carryover stub to `<report-dir>/submissions/carryover/<label>-CARRYOVER.md` linking back to its original report — so untriaged-but-unfixed findings never disappear from the run you review.
 - Upsert `reports/ledgers/<project>.json`: add new entries, bump `lastSeenRun` for still-open, mark entries whose code changed and are no longer flagged as `fixed` at the current commit, set `lastAuditedCommit = HEAD`.
 
 ## 11. Save Analysis Report
 Save raw analysis to `<report-dir>/analysis-<timestamp>.json` (scan metadata, counts, filtering + reconciliation stats).
-- If a regression run surfaced no new/regressed findings, write a one-line `<report-dir>/NO-NEW-FINDINGS.md` instead of the full empty tree.
+- If a regression run surfaced no new/regressed findings, write a one-line `<report-dir>/NO-NEW-FINDINGS.md` instead of the full empty tree. **Carryover stubs are still written** in this case (step 10) — "no new findings" does not mean "no open findings"; the `NO-NEW-FINDINGS.md` note should point to `submissions/carryover/` when stubs exist.
 
 ## 12. Present Summary
 ```
@@ -156,6 +157,9 @@ Pipeline:
 
 Classified (new + regressed only):
   High: 1 (1 REGRESSION)   Medium: 2   Low: 1
+
+Carried over (still open from prior runs):  M-01, L-02, L-04
+  → reports/nft-staking-12/submissions/carryover/  (stubs link to original reports)
 
 Output:  reports/nft-staking-12/
 Ledger:  reports/ledgers/nft-staking.json (updated)

@@ -1,0 +1,139 @@
+{
+  "sanitizationReport": {
+    "timestamp": "2026-05-29T00:00:00Z",
+    "project": "yield-claim-nft",
+    "reportDir": "reports/yield-claim-nft-08",
+    "submoduleCommit": "bc99ee3b129d9bddccc28a46f912406832a60638",
+    "ledger": "none (known-issue filtering only; no ledger reconciliation)",
+    "inputFindings": 11,
+    "passedFindings": 7,
+    "suppressedFindings": 2,
+    "downgradedFindings": 2,
+    "flaggedForReview": 0
+  },
+  "knownIssuesApplied": [
+    "KI-1: Owner-driven attacks OOS (owner lists tokens, registers dispatchers, sets prices/ratios/recipients, pauses, emergency-withdraws). Owner trusted.",
+    "KI-2: Dodgy/malicious tokens OOS (owner controls dispatcher registration / token selection).",
+    "KI-3: Fee-on-transfer handling uses balance-before/after (documented design).",
+    "KI-4: Owner trust assumptions (dispatchers, prices, pausing, emergency withdraw).",
+    "KI-5: Pauser trust assumptions.",
+    "KI-6: Price growth via basis points may compound to very large values (documented design).",
+    "KI-7: All reports/yield-claim-nft-02 findings already fixed in stories 24-28.",
+    "C4-STD: non-standard ERC20 (except USDT), FOT (unless in scope), CryptoPunks, approve race / safeApprove front-run, user input/phishing, reckless admin mistakes, unused view functions (QA at best), speculation on external/future code without demonstrated in-scope root cause."
+  ],
+  "decisions": [
+    {
+      "findingId": "DEDUP-001",
+      "decision": "SUPPRESS",
+      "originalSeverity": "high",
+      "finalSeverity": "n/a (suppressed; may survive as QA design note)",
+      "matchedRule": "KI-1 / KI-4 (owner-driven) + C4-STD (speculation on external/out-of-scope code)",
+      "confidence": "high",
+      "reasoning": "Traced every value-extraction lever in source. phUSD is NOT minted automatically to users on mint: onDispatch only accrues mintDebt (BalancerPoolerMintDebtHook.sol:112-122); the actual phUSD mint occurs solely in pull() which is onlyOwnerOrRecipient (lines 127-134), minting to a `recipient` the owner sets via setRecipient (onlyOwner, lines 102-106). The backing sUSDS leaves the system only through owner/role-gated paths: pool() is onlyAuthorizedPooler (BalancerPoolerV2.sol:191); the donation slice is governed by batchDonationSize (setBatchDonationSize onlyOwner, 147-151), batchMinter (setBatchMinter onlyOwner, 156-159), and setSwapConfig (onlyOwner, 166-174); withdrawBPT is onlyOwner (301-303). The ECON-002 worst case (100% donation + 50% phUSD mint) is reachable ONLY by the trusted owner configuring batchDonationSize=100, batchMinter, swap config, and calling pull() — i.e. the trusted owner deliberately exfiltrating backing. There is NO permissionless path for a non-owner to mint unbacked phUSD or extract user-deposited value. Furthermore, phUSD's redemption/backing model lives in an external system that is NOT in this repo; the 'phUSD is unbacked' impact cannot be demonstrated with an in-scope exploit path and is therefore speculation on out-of-scope code. Falls under KI-1/KI-4 and C4-STD. SUPPRESSED. Recommend the surviving signal (mint-debt basis = per-dispatch gross while backing-retention is per-batch owner-tunable 0-100%, and the two are disjoint) be retained at most as a QA/design note for the sponsor's economic review, not a High/Medium finding.",
+      "auditTrail": {
+        "permissionlessMintPath": false,
+        "ownerGatedExtraction": ["pull() onlyOwnerOrRecipient", "setRecipient onlyOwner", "setBatchDonationSize onlyOwner", "setBatchMinter onlyOwner", "setSwapConfig onlyOwner", "withdrawBPT onlyOwner", "pool() onlyAuthorizedPooler"],
+        "inRepoRedemption": "none (external phUSD system OOS)"
+      }
+    },
+    {
+      "findingId": "DEDUP-002",
+      "decision": "KEEP",
+      "originalSeverity": "medium",
+      "finalSeverity": "medium",
+      "matchedRule": "none",
+      "confidence": "high",
+      "reasoning": "migrate() inner per-unit loop (NFTMigrator.sol:62-76) scales external mintFor calls with the caller's entire aggregate V1 ERC1155 balance; no batch path, no pagination. The unbounded dimension is per-holder `balance`, which is NOT owner-controlled — it is set by how many V1 NFTs a user legitimately holds. This is a permissionless availability/DoS affecting the holder's ability to migrate, not owner self-harm. No known-issue covers it. Real in-scope Medium (availability of a core user flow). KEEP."
+    },
+    {
+      "findingId": "DEDUP-003",
+      "decision": "KEEP",
+      "originalSeverity": "medium",
+      "finalSeverity": "medium",
+      "matchedRule": "none (NOT owner self-harm)",
+      "confidence": "high",
+      "reasoning": "Cross-contract ordering coupling between independently-owned V1 NFTMinter and the V2 NFTMigrator. setInitialized() is one-way (NFTMigrator.sol:51-58) and validates indexMapping only at init time, but migrate() loops over the LIVE v1.nextIndex() (62-76). The V1 owner (who need NOT be the migrator owner) registering a new dispatcher later (NFTMinter.sol:120-145) bricks migrate() for every holder of the late index via the index-0 mintFor revert (NFTMinterV2.sol:206-214). The triggering party is a DIFFERENT trust principal than the migrator owner, so this is not a single-owner reckless-mistake case under KI-1/KI-4 — it is a real cross-contract design coupling causing unavailability. KEEP."
+    },
+    {
+      "findingId": "DEDUP-004",
+      "decision": "DOWNGRADE",
+      "originalSeverity": "medium",
+      "finalSeverity": "low / QA",
+      "matchedRule": "partial KI-1/KI-4 (authorized pooler is a semi-trusted role) + KI-1 (donation params owner-set)",
+      "confidence": "medium",
+      "reasoning": "The donation swap uses limitRaw=0 with only a pooler-supplied minUSDC floor (BalancerPoolerV2.sol:214-243). However: (a) pool() is onlyAuthorizedPooler + whenNotPaused + nonReentrant, so the caller is an authorized (semi-trusted) role, not an arbitrary actor; (b) the slippage floor minUSDC is supplied by that same authorized pooler at call time — a pooler passing minUSDC=0 is itself a reckless-admin/role mistake (KI-4 / C4-STD); (c) the value at risk is the donation slice destined for batchMinter, an owner-configured flow (KI-1), not user funds. The genuine residual concern (no on-chain TWAP/oracle reference; protection delegated entirely to an off-chain-chosen floor) is real but its severity collapses to QA/Low once the pooler is treated as semi-trusted per the project trust model. DOWNGRADE to Low/QA. The deduplicator's humanReviewFlag is resolved here: under the stated trust assumptions this is not a standalone Medium."
+    },
+    {
+      "findingId": "DEDUP-005",
+      "decision": "KEEP",
+      "originalSeverity": "low",
+      "finalSeverity": "low (QA)",
+      "matchedRule": "none (spec deviation, not owner-trust)",
+      "confidence": "high",
+      "reasoning": "Confirmed in source: setRatio uses `if (newRatio > MAX_RATIO) revert` (BalancerPoolerMintDebtHook.sol:93) but NatSpec/invariant says strictly < MAX_RATIO=50 (lines 29, 47, 91). As written ratio==50 is accepted, contradicting the contract's own documented bound. This is a genuine spec/code deviation (QA-class), independent of owner trust — it is about correctness of a stated invariant, not malicious owner behavior. The truncation half (added=amount*ratio/100) is harmless-direction rounding. Symbolically corroborated. KEEP as QA/Low (valid spec-deviation note)."
+    },
+    {
+      "findingId": "DEDUP-006",
+      "decision": "KEEP",
+      "originalSeverity": "qa-low",
+      "finalSeverity": "qa-low",
+      "matchedRule": "none (but bounded impact: deployment misconfig)",
+      "confidence": "high",
+      "reasoning": "Missing zero-address validation in constructors (NFTMigrator, BurnerV2, GatherV2). Impact is deployment misconfiguration (bricks the flow via revert), no attack path. This is standard QA-bundle material. Not equivalent to 'reckless admin mistake' as a known-invalid because it is a code-hardening recommendation, not a runtime privileged-action abuse. KEEP in QA bundle only."
+    },
+    {
+      "findingId": "DEDUP-007",
+      "decision": "KEEP",
+      "originalSeverity": "low",
+      "finalSeverity": "low (informational / defense-in-depth)",
+      "matchedRule": "none",
+      "confidence": "high",
+      "reasoning": "NFTMinterV2._executeMint (170-201) has no ReentrancyGuard; dispatch() nonReentrant lives on the dispatcher only (ATokenDispatcherV2.sol:118-126), so cross-index re-entry into mint targeting a DIFFERENT dispatcher is not blocked. Confirmed NON-exploitable today: in-scope hooks make no external calls in onDispatch (BalancerPoolerMintDebtHook.onDispatch is pure-internal), and BalancerPoolerV2._dispatch only forceApprove + ERC4626.deposit. A re-entrant mint just performs another fully-paid mint. This is a latent defense-in-depth gap, NOT speculation on future code in the disqualifying sense (the root cause — missing guard — is present and demonstrable in current in-scope code; the recommendation is concrete). KEEP as Low/informational. Not suppressed because the missing guard is a real, present property of in-scope code."
+    },
+    {
+      "findingId": "DEDUP-008",
+      "decision": "DOWNGRADE",
+      "originalSeverity": "low",
+      "finalSeverity": "qa-low (informational design note)",
+      "matchedRule": "KI-1 / KI-4 (owner-only replaceDispatcher) — partial",
+      "confidence": "high",
+      "reasoning": "replaceDispatcher (NFTMinterV2.sol:227-247) is onlyOwner and re-points an existing index's dispatcher/token/metadata under existing holders. The action is wholly owner-gated (KI-1/KI-4: owner trusted to register/replace dispatchers). There is no in-scope on-chain redemption that keys off the changed mapping, so there is no demonstrable in-scope value impact today — the 'redemption honored against new token' leak is speculation on an external redemption layer (C4-STD). Reduces to a centralization/design-soundness note. DOWNGRADE to QA-low informational; keep only as a design caution in the QA bundle."
+    },
+    {
+      "findingId": "DEDUP-009",
+      "decision": "KEEP",
+      "originalSeverity": "low",
+      "finalSeverity": "qa-low",
+      "matchedRule": "none",
+      "confidence": "high",
+      "reasoning": "Unchecked IERC4626(sUSDS).deposit return in BalancerPoolerV2._dispatch (line 183). Confirmed real-impact is bounded because pool() re-reads balanceOf(address(this)) (line 192) rather than the deposit return, so accounting operates on actual held sUSDS. This is accounting-hygiene, not a known-invalid category, and not owner-trust. KEEP as QA-low (legitimate hardening note)."
+    },
+    {
+      "findingId": "DEDUP-010",
+      "decision": "KEEP",
+      "originalSeverity": "low",
+      "finalSeverity": "qa-low",
+      "matchedRule": "none",
+      "confidence": "medium",
+      "reasoning": "abi.encodePacked feeding keccak256 — confirmed the actual site (NFTMinterV2.sol:262-273) is the uri() metadata JSON string builder, NOT a hashed mint key or dispatcher identifier. The encodePacked output is returned as a string for metadata, not hashed for identity/uniqueness. The deduplicator's note (line 263 abi.encodePacked -> keccak256) misreads the site: there is no keccak256 on this packed output in uri(). The collision-risk impact described does not materialize. Resolving the humanReviewFlag: this is at most a QA hygiene note (prefer abi.encode for dynamic-string concatenation clarity) with NO security impact. KEEP only as a minor QA note; impact corrected to none/cosmetic."
+    },
+    {
+      "findingId": "DEDUP-011",
+      "decision": "DOWNGRADE",
+      "originalSeverity": "qa-low",
+      "finalSeverity": "qa-low (kept, but note overlaps documented owner trust)",
+      "matchedRule": "partial KI-4/KI-5 (owner/role trust documented)",
+      "confidence": "high",
+      "reasoning": "setMinter lacks an event (ATokenDispatcherV2.sol:85) and V2 uses single-step Ownable. These are governance/operational-hygiene observations. Owner trust is a documented known issue (KI-1/KI-4), and Ownable2Step guards against a reckless transfer mistake (C4-STD: reckless admin mistakes are known-invalid). The missing setMinter event is a legitimate monitorability QA point not covered by the trust assumption (events aid off-chain detection regardless of trust). KEEP the missing-event half as QA; treat the Ownable2Step half as borderline (reckless-admin-mistake-adjacent) but acceptable in a QA bundle. Net: KEEP in QA bundle, flagged as low-value/partially-overlapping documented trust."
+    }
+  ],
+  "suppressed": [
+    {
+      "findingId": "DEDUP-001",
+      "reason": "owner-driven (KI-1/KI-4) + speculation on out-of-scope external phUSD backing (C4-STD); no permissionless extraction path",
+      "matchedTo": "Known Issue #1/#4 owner trust; C4 known-invalid (external/future code speculation)",
+      "confidence": "high"
+    }
+  ],
+  "note": "Only DEDUP-001 is hard-suppressed. DEDUP-004 and DEDUP-008 are downgraded (Medium/Low -> Low/QA) due to semi-trusted-role / owner-gated framing. DEDUP-010 impact corrected to cosmetic. Surviving HM-candidate findings after sanitization: DEDUP-002 (Medium), DEDUP-003 (Medium). Everything else lands in the QA bundle."
+}

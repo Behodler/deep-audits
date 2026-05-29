@@ -1,0 +1,28 @@
+{
+  "id": "CODE-001",
+  "source": "code-scanner",
+  "kind": "matches-known-issue",
+  "title": "Linear depletion broken: rewardPerSecond is re-anchored on every interaction, causing asymptotic (not linear) reward emission",
+  "type": "incorrect-rate-recompute",
+  "severity": "potential-high",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "_updatePool (also setDepletionDuration, collectReward)",
+  "line": 416,
+  "lineStart": 389,
+  "lineEnd": 426,
+  "rootCause": "After each accrual step in `_updatePool` the rate is recomputed as `rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration` using the post-accrual (decreased) `rewardBalance`. Because this happens on every block that has a stake/withdraw/claim/collectReward/setDepletionDuration call, the depletion window is effectively reset on every interaction. The protocol's stated property (`rewardBalance` is fully distributed over `depletionDuration` seconds at a constant `rewardPerSecond`) does not hold: instead `rewardBalance` decays as `rewardBalance_{n+1} ~= rewardBalance_n * (1 - Δt/depletionDuration)`, i.e. exponentially with a heavy tail that never reaches zero.",
+  "impact": "Stakers receive materially less reward token than designed. Over a full `depletionDuration` of continuous interaction, only a fraction (~1 - 1/e at the smooth limit) of `rewardBalance` is actually distributed; the remainder lingers indefinitely. Reward funders pay full notional but only a fraction is consumed in the intended window. Also affects `pendingStable()` and `collectReward`'s rate publication.",
+  "attackVector": "No malicious actor required. Triggered by normal usage: any caller invoking `_updatePool` (directly via `collectReward` or indirectly via `stake`/`withdraw`/`claim`/`setDepletionDuration`) re-anchors the window. Worst case: a third party calling `collectReward(1 wei)` repeatedly amplifies the asymptotic behaviour further.",
+  "steps": [
+    "Funder seeds `collectReward(1_000_000e6)` with `depletionDuration = 7 days`.",
+    "Single staker is present.",
+    "Caller pokes `_updatePool` (via any of stake/withdraw/claim) every block.",
+    "After 7 days, `rewardBalance` is roughly `1_000_000e6 / e ~= 368_000e6`, not zero.",
+    "Stakers have received ~632_000e6 instead of the expected 1_000_000e6 over the advertised window; the remainder remains stuck and continues to decay asymptotically."
+  ],
+  "codeSnippet": "// _updatePool, lines 389-426\nfunction _updatePool() internal {\n    if (block.timestamp <= lastRewardTime) {\n        return;\n    }\n\n    if (totalStaked == 0) {\n        lastRewardTime = block.timestamp;\n        return;\n    }\n\n    uint256 timeElapsed = block.timestamp - lastRewardTime;\n    uint256 potentialReward = (rewardPerSecond * timeElapsed) / PRECISION;\n    uint256 toDistribute = potentialReward > rewardBalance ? rewardBalance : potentialReward;\n\n    if (toDistribute > 0) {\n        accStablePerShare += (toDistribute * PRECISION) / totalStaked;\n        rewardBalance -= toDistribute;\n        // <-- BUG: rate re-anchored every accrual; window resets on every interaction\n        rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration;\n    }\n    ...\n}",
+  "knownIssueReference": "lib/phlimbo-ea/CLAUDE.md: 'src/Phlimbo.sol -- PhlimboEA (V1, deployed). Linear-depletion staking yield farm. Has the V1 rate-recompute bug ... DO NOT MODIFY.' Profile §7 V1 / §12 routing hint flags this for ledger dedup.",
+  "remediation": "Remove the rate recompute from `_updatePool` (the V2 fix). Either freeze `rewardPerSecond` at the value set by `collectReward`/`setDepletionDuration` and let `rewardBalance` deplete linearly with the cap on `toDistribute`, or refactor to a streaming-rate model.",
+  "notesToDedup": "Already documented as the known V1 behavior. Sanitizer should suppress against the CLAUDE.md known-issue note. Listed here for ledger completeness."
+}

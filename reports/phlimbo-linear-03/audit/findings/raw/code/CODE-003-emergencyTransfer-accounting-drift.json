@@ -1,0 +1,29 @@
+{
+  "id": "CODE-003",
+  "source": "code-scanner",
+  "kind": "fresh",
+  "title": "emergencyTransfer leaves totalStaked / userInfo / rewardBalance non-zero while sweeping all tokens, permanently bricking user exit paths",
+  "type": "accounting-drift / invariant-violation",
+  "severity": "potential-high",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "emergencyTransfer",
+  "line": 214,
+  "lineStart": 214,
+  "lineEnd": 227,
+  "rootCause": "`emergencyTransfer` moves `phUSD.balanceOf(this)` and `rewardToken.balanceOf(this)` to an arbitrary recipient and then `_pause()`s the contract, but does not zero or reconcile any of `totalStaked`, `userInfo[*].amount`, `userInfo[*].phUSDDebt`, `userInfo[*].stableDebt`, `rewardBalance`, `accPhUSDPerShare`, `accStablePerShare`, `rewardPerSecond`. The contract's bookkeeping continues to claim users hold positions that the contract can no longer back.",
+  "impact": "After invocation, every user-facing path is permanently broken: (a) the contract is paused, so `stake`/`withdraw`/`claim` revert via `whenNotPaused`; (b) `pauseWithdraw` is open but reverts at `phUSD.safeTransfer(msg.sender, amount)` because the contract holds zero phUSD -- so stakers cannot recover principal even in the emergency path; (c) `unpause` only re-opens `withdraw`, which again fails at the final `phUSD.safeTransfer`. The owner can refill off-chain, but on-chain there is no recovery path for users without owner action. Combined with the fact that `emergencyTransfer` has no `nonReentrant`, no `whenNotPaused`, and no recipient validation other than the value being uncoerced, this concentrates principal-loss risk on a single owner key.",
+  "attackVector": "Single owner transaction. With one `onlyOwner` call, all staked principal and undistributed rewards leave the contract; users are left with internal ledger entries that cannot be redeemed on-chain. If the owner key is compromised, this is a single-tx rug. If the owner is honest, an off-chain process must redistribute funds back to users -- there is no on-chain claim mechanism after emergency.",
+  "steps": [
+    "Multiple users stake phUSD; totalStaked = S > 0",
+    "Funder calls collectReward; rewardBalance = R > 0",
+    "owner.emergencyTransfer(attackerAddress) -- contract sends all phUSD and rewardToken to attackerAddress, then _pause()",
+    "user.pauseWithdraw(any amount) -- reverts inside SafeERC20.safeTransfer because phUSD balance is 0",
+    "owner.unpause -> user.withdraw(any amount) -- also reverts at safeTransfer",
+    "Internal state still says user.amount > 0 and totalStaked = S, but no tokens back it"
+  ],
+  "codeSnippet": "// emergencyTransfer, lines 214-227\nfunction emergencyTransfer(address recipient) external onlyOwner {\n    uint256 phUSDBalance = phUSD.balanceOf(address(this));\n    uint256 rewardTokenBalance = rewardToken.balanceOf(address(this));\n\n    if (phUSDBalance > 0) {\n        IERC20(address(phUSD)).safeTransfer(recipient, phUSDBalance);\n    }\n    if (rewardTokenBalance > 0) {\n        rewardToken.safeTransfer(recipient, rewardTokenBalance);\n    }\n\n    // totalStaked, userInfo[*], rewardBalance NOT updated -- accounting now inconsistent\n    _pause();\n}",
+  "remediation": "Either (a) reframe the function as a true 'abandon ship' by also zeroing `totalStaked`, `rewardBalance`, `accX`, and emitting a per-snapshot event the off-chain redistribution can use; (b) restrict the function to only sweeping the excess (`balanceOf - totalStaked` on the phUSD side, `balanceOf - rewardBalance` on the reward side), preserving the user-exit invariant; (c) add an on-chain post-emergency claim path that pays users pro-rata from a refill. At minimum require the recipient to be a non-zero, distinct address and emit a clearly-labeled event so off-chain bookkeeping can reconcile.",
+  "profileReference": "Profile §4.1 emergencyTransfer, §7 V5, §8.6.",
+  "notes": "Owner power is documented (centralization risk), but the on-chain DoS of pauseWithdraw is an independent implementation-level defect, not a pure centralization concern -- a benign owner who runs emergencyTransfer (e.g. to migrate to V2) still cannot let users escape via the documented emergency path."
+}

@@ -1,0 +1,43 @@
+{
+  "id": "ECON-005",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "emergencyTransfer + pauseWithdraw interaction is a principal-loss trap: stakers' on-chain exit is silently broken after owner sweep, with no documented off-chain commitment",
+  "type": "intent-mismatch / value-leak / centralization",
+  "severity": "potential-high",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "emergencyTransfer / pauseWithdraw / withdraw / claim",
+  "line": 214,
+  "lineStart": 214,
+  "lineEnd": 261,
+  "rootCause": "`emergencyTransfer(recipient)` sweeps both `phUSD` and `rewardToken` balances out of the contract and immediately calls `_pause()`. It does NOT zero `totalStaked`, `userInfo[*]`, `rewardBalance`, or per-user debts. After the sweep: (a) `withdraw` reverts at the final `phUSD.safeTransfer` (contract no longer holds phUSD); (b) `pauseWithdraw` is reachable (whenPaused is true) but ALSO reverts at the `phUSD.safeTransfer` step; (c) `claim` is gated by `whenNotPaused` so it cannot run while paused, but even if unpaused, it would fail because phUSD mint may not be the only issue. Net: stakers' `userInfo[u].amount` records an on-chain claim against a vault with zero balance.",
+  "economicImpact": "All staked principal is at-risk to a single owner key. Unlike a clean rug, this leaves stakers with an on-chain entitlement that is unenforceable: `userInfo[user].amount > 0` but no token can be transferred out. Even if the owner intended an off-chain remediation (refund), the only on-chain exit -- `pauseWithdraw` -- is bricked. The natspec frames `pauseWithdraw` as an 'Emergency exit mechanism' but that exit is contingent on the contract holding phUSD, which `emergencyTransfer` destroys.",
+  "affectedParties": "Every staker at the moment of `emergencyTransfer`. The amount lost is `Σ userInfo[u].amount` -- which equals `totalStaked` immediately before the sweep. With a sufficiently large TVL, this is a protocol-killing event.",
+  "attackScenario": [
+    "Owner key is compromised (or owner acts maliciously, or owner makes a mistake).",
+    "Attacker calls `emergencyTransfer(attackerAddr)`. Contract phUSD balance and reward token balance flow to attacker. Contract becomes `_pause()`d.",
+    "Stakers see the on-chain event and attempt to recover via `pauseWithdraw(amount)`. Their UserInfo says they have a stake -- but the `phUSD.safeTransfer(msg.sender, amount)` reverts because contract balance is zero.",
+    "`withdraw` reverts on `whenNotPaused`. `claim` reverts on `whenNotPaused`. Even if a friendly party calls `pauser.unpause()`, `withdraw` still reverts on the `safeTransfer`.",
+    "Only remediation: someone (owner? a benefactor?) deposits phUSD directly to the contract address via raw `transfer` to top up the balance, then stakers can call `pauseWithdraw`. This requires off-chain coordination with no on-chain guarantee.",
+    "Variant (mistake mode): owner intends `emergencyTransfer` to move funds to a treasury for safekeeping but forgets to refill the contract before unpause. Stakers' exits silently fail with a SafeERC20 revert that gives users no actionable error message."
+  ],
+  "profitability": "If malicious: profit = `totalStaked + rewardBalance + accumulated phUSD donations`. Cost = one tx + owner-key control. No on-chain recourse for stakers.",
+  "preconditions": [
+    "Owner key is controlled by an actor willing to use `emergencyTransfer` for any reason (malice or mistake).",
+    "Stakers have on-chain entitlements (`totalStaked > 0`) at the moment of the call."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Natspec: 'Emergency function to transfer all tokens to a recipient'. `pauseWithdraw` natspec: 'Allows users to withdraw their staked phUSD when contract is paused -- Emergency exit mechanism'. The two functions together imply 'emergencyTransfer is rare; stakers retain exit'.",
+    "implementation": "The two are mutually destructive: invoking `emergencyTransfer` makes the 'emergency exit mechanism' inoperable. There is no on-chain refund path, no accounting zeroing, no event signalling that user balances are now stranded.",
+    "discrepancy": "The protocol presents `pauseWithdraw` as a user safety guarantee but `emergencyTransfer` silently removes that guarantee. No documentation warns stakers that an owner's emergencyTransfer turns their `userInfo[*].amount > 0` into a stranded balance."
+  },
+  "mitigations": [
+    "Make `emergencyTransfer` only sweep the EXCESS balance (i.e. `phUSD.balanceOf(this) - totalStaked` and `rewardToken.balanceOf(this) - rewardBalance`), preserving principal accounting.",
+    "Alternatively, on `emergencyTransfer`, zero out `userInfo[*]` (impossible to enumerate cheaply -- use a flag instead) and emit a single 'protocol shutdown' event so users have on-chain evidence.",
+    "Implement a `refillForExit(uint256 amount)` function callable by anyone that lets a benefactor (or the original owner) re-fund the contract for orderly exit; combined with `pauseWithdraw` this provides an on-chain recovery path.",
+    "Add a long timelock specifically on `emergencyTransfer` so users have time to call `pauseWithdraw` before the sweep lands.",
+    "Document the centralization risk prominently in user-facing docs."
+  ],
+  "crossReferences": ["CODE-003 (emergencyTransfer-accounting-drift) - distinct angle: CODE-003 frames it as accounting state drift; ECON-005 frames it as the principal-loss path and the silent breakage of the documented 'emergency exit mechanism' guarantee.", "PATTERN-004 (centralization-emergency-transfer) - structural pattern match; ECON-005 quantifies the staker-side economic outcome.", "Profile §7 V5, §8.6."]
+}

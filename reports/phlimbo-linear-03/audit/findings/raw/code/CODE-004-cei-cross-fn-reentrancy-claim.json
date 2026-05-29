@@ -1,0 +1,28 @@
+{
+  "id": "CODE-004",
+  "source": "code-scanner",
+  "kind": "fresh",
+  "title": "claim() violates checks-effects-interactions: _claimRewards externally mints phUSD and transfers rewardToken BEFORE user.{phUSD,stable}Debt is rebased; cross-function reentrancy enables double-claim if either token has a callback",
+  "type": "cross-function-reentrancy / CEI-violation",
+  "severity": "potential-high",
+  "confidence": "medium",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "claim",
+  "line": 376,
+  "lineStart": 374,
+  "lineEnd": 381,
+  "rootCause": "`claim()` runs `_updatePool()` and `_claimRewards(msg.sender)` BEFORE rebasing `user.phUSDDebt` and `user.stableDebt`. `_claimRewards` calls `phUSD.mint(user, pendingPhUSD)` and `rewardToken.safeTransfer(user, pendingReward)`. While `claim` itself is not `nonReentrant`, neither are `stake`, `withdraw`, or `claim`; only `collectReward` is guarded. If `phUSD.mint` (mintable Flax-family token) or `rewardToken.transfer` (generic IERC20) triggers a callback into the user, the user can re-enter `claim()` while `user.{phUSD,stable}Debt` is still at its pre-claim value and `accX` has not changed -- so the second nested `_claimRewards` recomputes the same `pendingX > 0`, mints/transfers the same amount again. Repeated until the rewards budget is drained.",
+  "impact": "Double (or N-times) reward extraction by a single user. For the phUSD leg, the loss surfaces as uncapped extra mint pressure (capped only by gas / per-tx accumulator state). For the rewardToken leg, the contract drains its rewardToken balance until `safeTransfer` reverts or `rewardBalance` becomes the actual constraint via subsequent calls. Even without a malicious token, the same pattern applies in `stake` and `withdraw` (see CODE-005, CODE-006).",
+  "attackVector": "Cross-function reentrancy. Exploit requires either (a) `phUSD` to expose a callback during `mint` (e.g. ERC777-like, mint hook, or an extension to IFlax that delegates to user code), or (b) `rewardToken` to be a callback-capable ERC20 (ERC777, hooks). The profile (§10) lists 'non-callback ERC20' as a trust assumption for both -- meaning this finding is contingent on that assumption being violated. For `phUSD` (Flax) the surface is internal-to-protocol; for `rewardToken` it is external and only loosely constrained by the 'stablecoin' wording. If governance ever points `rewardToken` at a non-vanilla token, the exploit is live.",
+  "steps": [
+    "Attacker stakes; lets accStablePerShare and accPhUSDPerShare grow so a non-trivial pending balance accumulates.",
+    "Attacker contract calls claim().",
+    "_updatePool runs; _claimRewards computes pendingPhUSD = P, pendingReward = R using attacker's CURRENT debt and current accX.",
+    "phUSD.mint(attacker, P) triggers attacker callback (or rewardToken.safeTransfer triggers ERC777 tokensReceived hook).",
+    "Inside callback, attacker re-enters claim(); user.{phUSD,stable}Debt are still the pre-claim values, accX is unchanged. _claimRewards computes the SAME pendingPhUSD=P, pendingReward=R, mints/transfers again.",
+    "Callback returns; outer _claimRewards completes; outer claim() finally sets user.phUSDDebt and user.stableDebt to the new high-water mark, but the attacker already received 2x (or 3x, 4x...) the rewards they should have."
+  ],
+  "codeSnippet": "// claim(), lines 374-381\nfunction claim() external whenNotPaused {\n    _updatePool();\n    _claimRewards(msg.sender);                              // <-- external mint + transfer happen here\n    UserInfo storage user = userInfo[msg.sender];\n    user.phUSDDebt = (user.amount * accPhUSDPerShare) / PRECISION;  // <-- debt rebased AFTER\n    user.stableDebt = (user.amount * accStablePerShare) / PRECISION;\n}\n\n// _claimRewards inner external calls\nphUSD.mint(user, pendingPhUSDAmount);            // line 442\nrewardToken.safeTransfer(user, pendingRewardAmount); // line 448",
+  "remediation": "Add `nonReentrant` to `stake`, `withdraw`, and `claim`. Alternatively, rebase `user.{phUSD,stable}Debt` to the post-update accumulators INSIDE `_claimRewards` BEFORE the `phUSD.mint` / `rewardToken.safeTransfer` external calls (proper CEI). Even under the documented trust assumption (non-callback tokens), adding the guard is cheap and removes the contingent risk surface.",
+  "profileReference": "Profile §4.3 claim (CEI lever), §8.1 cross-function reentrancy lever -- explicitly flagged in §12 for code-scanner."
+}

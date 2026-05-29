@@ -1,0 +1,102 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-05-29T00:00:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "submoduleHead": "031ffdab5bf1995026ca7a47391a19f7634e7d78",
+  "scopeFocus": "src/BatchNFTMinter.sol nudge mechanism",
+  "contractsScanned": 2,
+  "crossContractTrustBoundary": "lib/mutable/yield-claim-nft/src/V2/NFTMinterV2.sol (interface-only per submodule rules; impl read to verify price==0 mint behaviour)",
+
+  "nudgeEconomicModel": {
+    "intendedPurpose": "The nudge is a batch-mint incentive: an externally-funded pot (e.g. USDC routed in by a yield funnel) that rewards a caller who mints at least nudgeSize NFTs in one transaction. Intent: nudge the marginal large minter, who pays the dispatcher's ramping mint price across nudgeSize real mints, with a bonus that is meant to be SMALL relative to the real economic activity (mint revenue) it incentivises.",
+    "intendedCostBenefit": "Honest caller cost = sum over i in [0,count) of dispatcher.price_i (geometric ramp at growthBasisPoints) + gas. Intended benefit = pot, which the owner is implicitly trusted to keep < cost so the nudge subsidises rather than funds the mint. The economic security of the gate rests ENTIRELY on (mint cost for nudgeSize mints) > (pot). There is no on-chain enforcement of this relation.",
+    "gateIsValueBlind": "CONFIRMED. Line 246 gates only on count >= nudgeSize. It never reads dispatcher.price, never computes expected aggregate cost, never compares pot payout (line 251 = full balanceOf) to caller net spend (totalPaid). The fix in 031ffda removed the caller's ability to CHOOSE the value source (minter+dispatcher+token) but added zero intrinsic value validation (diffSummary.wasPriceValueValidationAdded = NO)."
+  },
+
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "value-blind-incentive-gate / zero-price-pot-drain",
+      "severity": "potential-high",
+      "verdict": "CONDITIONAL",
+      "permissionlessGivenPrecondition": true,
+      "precondition": "Owner-pinned dispatcherIndex resolves to config.price == 0 (a project-documented SUPPORTED dispatcher state) while nudgePaymentToken is funded with a non-zero pot. price==0 is reachable via registerDispatcher(initialPrice=0), setPrice(index,0), and is the genesis state of any freshly registered dispatcher; with growthBasisPoints==0 it never ramps off zero. NFTMinterV2._executeMint (line 170-201) has NO require(price>0): a price==0 mint does safeTransferFrom(msg.sender, dispatcher, 0) which succeeds for standard ERC20s and the price-grow keeps it at 0.",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 246,
+      "lineStart": 238,
+      "lineEnd": 257,
+      "codeSnippet": "for (uint256 i; i < count; ++i) { nftMinter.mint(_dispatcherIndex, recipient); } ... if (_nudgeSize != 0 && count >= _nudgeSize) { uint256 nudgeAmount = IERC20(_nudgeTokenEntry).balanceOf(address(this)); if (nudgeAmount != 0) { IERC20(_nudgeTokenEntry).safeTransfer(recipient, nudgeAmount); } }",
+      "description": "This is the SAME class of bug the NatSpec (lines 22-31) claims was exploited on mainnet and remediated by story-014. The mainnet exploit used a caller-supplied no-op minter to fake `count` free mints; story-014 pinned the minter and dispatcher so the gate now requires `count` real mints at the pinned dispatcher's price. But the gate is still value-blind, so the SAME drain re-opens through any price==0 (or near-zero) dispatcher price. The fix relocated the attack precondition from 'caller chooses cheap value source' to 'owner-pinned dispatcher is at the supported price==0 state' - it did not eliminate the drain.",
+      "economicImpact": "Attacker mints `count = nudgeSize` NFTs at 0 cost (price==0), clears the gate, and the ENTIRE nudgePaymentToken balance is transferred to a caller-chosen recipient. Loss = full pot, repeatable as the pot refills.",
+      "attackScenario": "1. Owner registers/pins a dispatcher at price==0 (genesis or post-setPrice(0)) - a documented supported state.\n2. Yield funnel routes USDC into BatchNFTMinter (pot funded).\n3. Attacker calls batchMint(count=nudgeSize, recipient=attacker, paymentAmount=0). safeTransferFrom of 0 succeeds; the loop runs nudgeSize zero-charge mints (each inner safeTransferFrom of price==0 succeeds, no revert).\n4. count>=nudgeSize clears; full pot -> attacker. attacker also receives nudgeSize NFTs for free.\n5. Repeat each block as pot refills.",
+      "costMath": "Attacker cost = nudgeSize * 0 (price) + gas(nudgeSize external mint calls). Payout = pot (whatever balanceOf returns). Profitable whenever pot > gas. With price==0 there is NO mint-cost floor protecting the pot, so any funded pot is fully extractable.",
+      "profitability": "Guaranteed profit when pot > gas cost of nudgeSize mint() iterations. nudgeSize amplifies only the gas, not any token cost, so a modestly-sized pot dominates.",
+      "affectedParties": "Protocol / the yield funnel funding the pot; honest batch-minters who never get the nudge.",
+      "isOwnerMisconfig": "Precondition (price==0 pin) is reachable by normal/owner operation and is a DOCUMENTED SUPPORTED state, not a reckless mistake. Given the precondition the attack is fully PERMISSIONLESS. This is materially stronger than 'requires reckless admin' because price==0 is an intended operating mode (NFTStaker.sol:368, 388-389 handle it as a first-class edge case).",
+      "confidence": "high",
+      "intentMismatch": "NatSpec lines 28-31 assert qualifying 'now requires genuinely paying for >= nudgeSize real mints at the dispatcher's ramping price'. Implementation does NOT enforce any non-zero price: a price==0 dispatcher (supported) lets the gate clear at zero real payment, contradicting the documented invariant the fix claims to establish."
+    },
+    {
+      "id": "ECON-002",
+      "type": "first-claimer-race / MEV-frontrun on full-pot payout",
+      "severity": "potential-medium",
+      "verdict": "EXPLOITABLE",
+      "permissionlessGivenPrecondition": true,
+      "precondition": "nudge configured and pot funded; nudgeSize mints are economically feasible for the front-runner (cheaper precondition than ECON-001: works even at non-zero price if the searcher is willing to pay, and is free if combined with ECON-001's price==0).",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 251,
+      "lineStart": 246,
+      "lineEnd": 256,
+      "description": "Payout is full-balance, winner-take-all: the FIRST caller in any block with count>=nudgeSize takes the entire pot (profile nudgeMechanism.howPaidOut: 'first qualifying caller in any block takes the whole pot'). batchMint is permissionless (whenNotPaused only) and recipient is fully caller-chosen. An honest user who broadcasts a qualifying batchMint reveals the funded pot; a searcher copies the tx (recipient=searcher) and front-runs with higher priority fee, scooping the pot. The honest tx then sees nudgeAmount==0 (pot already drained) and still pays for its real mints with no nudge - a strict loss of the incentive it was promised.",
+      "economicImpact": "Pot is captured by whoever wins the priority-gas auction, not by the honest large minter the nudge was designed to reward. Mechanism-design failure: the incentive is divorced from the intended behaviour (honest batch minting) and routed to MEV searchers. Honest minter loses gas + mint cost with zero nudge.",
+      "attackScenario": "1. Honest user submits batchMint(count>=nudgeSize, recipient=self) to mempool.\n2. Searcher observes pot is funded + tx will clear gate; submits identical batchMint with recipient=searcher at higher priority fee.\n3. Searcher's tx lands first, drains pot.\n4. Honest tx executes: still mints, still pays, nudgeAmount==0, no payout.",
+      "profitability": "Profitable for searcher whenever pot - (mint cost + priority fee) > 0. Trivially profitable under ECON-001 (price==0) since mint cost is zero. Even at non-zero price, profitable if pot > nudgeSize*price + gas.",
+      "affectedParties": "Honest batch-minters (lose the incentive); searchers extract it.",
+      "isOwnerMisconfig": "No owner misconfig needed beyond having the feature enabled and funded. Inherent to the winner-take-all full-balance payout design.",
+      "confidence": "high",
+      "recommendation": "Out-of-scope to fully fix here, but note: a value-bound payout (pot proportional to verified spend) and/or commit-reveal / per-recipient accounting would remove the winner-take-all MEV surface. Even capping payout to <= net mint spend (ECON-001 fix) makes front-running unprofitable."
+    },
+    {
+      "id": "ECON-003",
+      "type": "dust-sweep / over-supply reclaim accounting",
+      "severity": "informational",
+      "verdict": "NOT (no leak)",
+      "permissionlessGivenPrecondition": false,
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 259,
+      "lineStart": 259,
+      "lineEnd": 265,
+      "description": "Checked the caller over/under-supply path. The dust sweep re-reads paymentToken.balanceOf(this) AFTER the loop and refunds the remainder to msg.sender when remaining/DUST_THRESHOLD != 0 (i.e. remaining >= 1e6 wei). Because nudgePaymentToken MUST differ from paymentToken (up-front guard line 231), the nudge payout cannot inflate the paymentToken balance, so the sweep cannot be gamed to reclaim the pot. Over-supplying paymentAmount is fully refunded (minus sub-1e6 dust), so a caller cannot over-supply and profit; under-supplying reverts an inner mint and rolls back the whole batch (atomic). totalPaid accounting (line 262) is consistent with the refund. No cross-token leak between the two refund/payout legs.",
+      "economicImpact": "None. Sub-DUST_THRESHOLD (1e6 wei, ~1e-12 of an 18-dec unit) residue is intentionally retained and donated to the next caller's sweep (documented lines 42-47). A pre-deposit griefer only donates to the next caller.",
+      "noteOnPaymentTokenAsNudgeToken": "If paymentToken == nudgePaymentToken the call reverts up-front (line 231), so the dangerous case where the dust sweep and nudge payout fight over the same balance is structurally excluded. This is a real config invariant the owner must hold but it is enforced per-call.",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-004",
+      "type": "reentrancy-on-nudge-payout (economic angle)",
+      "severity": "informational",
+      "verdict": "CONDITIONAL (deferred - depends on nudge token semantics)",
+      "permissionlessGivenPrecondition": false,
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 253,
+      "description": "batchMint has no nonReentrant guard (profile LOCAL-002). The nudge safeTransfer to a caller-chosen recipient (line 253) precedes the dust sweep (line 259). For a standard ERC20 nudge token (USDC) there is no transfer callback, so no reentrancy. For an ERC777/callback token the recipient could re-enter batchMint; however the pot is read as balanceOf(this) which is already drained by the first transfer, so a re-entrant nudge claim sees nudgeAmount==0 - no double-pay of the pot. Economic impact of reentrancy is therefore limited to the paymentToken sweep, which refunds only msg.sender's own surplus. Net: no additional value-leak beyond ECON-001/002 for a standard token. Flag retained because nudge token is owner-configured; if a callback token is ever used, re-confirm.",
+      "confidence": "medium"
+    }
+  ],
+
+  "quantification": {
+    "q1_intendedPurpose": "Nudge = externally-funded bonus to incentivise honest large batch mints. Intended invariant (per NatSpec lines 28-31): clearing the gate costs >= nudgeSize real mints at the dispatcher's ramping price, which the owner is trusted to keep above the pot. No on-chain enforcement of pot < mint-cost.",
+    "q2_currentCodeExploitability": "CONDITIONAL on dispatcher price. To clear count>=nudgeSize the attacker must call the pinned real minter `count` times, each pulling config.price. Attacker cost = nudgeSize*price + gas; payout = full pot. Profitable iff pot > nudgeSize*price + gas. The code NEVER checks nudgeSize*price > pot, so profitability is purely an owner-configuration accident: if the owner ever funds a pot exceeding nudgeSize*price, the attack is permissionlessly profitable even at NON-zero price. nudgeSize does not bound the pot - they are independent owner knobs.",
+    "q3_zeroPriceDrain": "At price==0 (a SUPPORTED state, NFTMinterV2._executeMint has no price>0 check, NFTStaker.sol:368/388 treats it as first-class), nudgeSize*price = 0, so attacker cost collapses to gas only. Drain = ENTIRE pot for cost of nudgeSize zero-value mint() calls' gas. Fully permissionless given the price==0 pin. This is the re-opened mainnet exploit (ECON-001).",
+    "q4_firstClaimerMEV": "EXPLOITABLE. Winner-take-all full-balance payout (line 251) + permissionless entry + caller-chosen recipient => any funded pot is a public MEV target; searchers front-run honest batch-minters to scoop the pot (ECON-002). Honest minter still pays mint cost, gets no nudge.",
+    "q5_otherValueLeak": "NONE found in dust-sweep / over-supply path (ECON-003): over-supply is refunded, under-supply reverts atomically, nudge!=payment guard prevents cross-token sweep gaming. Reentrancy gives no extra pot leak for a standard token (ECON-004)."
+  },
+
+  "rootCauseSummary": "The 031ffda fix is INCOMPLETE at the economic level. It removed the caller's CHOICE of value source but left the gate VALUE-BLIND: it compares a count to a threshold, never the pot payout to the value actually paid. The documented mainnet exploit class (drain the pot via a near-free way to clear count>=nudgeSize) survives, now reachable via the owner-pinned dispatcher's supported price==0 state (ECON-001) or any owner config where pot > nudgeSize*price (ECON-001 general case), and the winner-take-all payout adds an independent MEV-frontrun leak (ECON-002).",
+  "recommendation": "Bind the payout to verified value: either (a) require config.price > 0 in batchMint and cap the nudge payout to a function of net mint spend (e.g. nudge <= k * totalPaid), or (b) accrue the nudge proportionally to verified spend rather than full-balance winner-take-all. Adding a price>0 / disabled check in batchMint is the minimal step; capping payout to <= totalPaid neutralises both ECON-001 and ECON-002 simultaneously."
+}

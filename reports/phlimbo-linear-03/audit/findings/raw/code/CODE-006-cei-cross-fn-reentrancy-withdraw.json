@@ -1,0 +1,29 @@
+{
+  "id": "CODE-006",
+  "source": "code-scanner",
+  "kind": "fresh",
+  "title": "withdraw() runs _claimRewards (external mint + transfer) before updating user.amount, debts, and totalStaked; enables double-claim and partial-pre-withdraw inflation via callback",
+  "type": "cross-function-reentrancy / CEI-violation",
+  "severity": "potential-high",
+  "confidence": "medium",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "withdraw",
+  "line": 341,
+  "lineStart": 334,
+  "lineEnd": 369,
+  "rootCause": "`withdraw` runs `_updatePool()` then `_claimRewards(msg.sender)` (which mints phUSD and transfers rewardToken externally) BEFORE updating `user.amount`, `user.{phUSD,stable}Debt`, or `totalStaked`. Withdraw is not `nonReentrant`. A callback during `phUSD.mint` or `rewardToken.transfer` can re-enter `claim`/`stake`/`withdraw` while the user still appears to hold the full pre-withdraw stake, so reward calculations and the dust-handler all see stale state.",
+  "impact": "Two compounding issues: (1) double-claim of pending rewards (same as CODE-004/005); (2) the re-entered call sees the pre-withdraw `user.amount`, so a second `withdraw(amount)` succeeds against the un-decremented balance. Combined with the dust-handler at lines 347-351, the attacker can force the dust path and drain more than they should. The trailing `phUSD.safeTransfer(msg.sender, actualWithdrawAmount)` at line 362 is itself post-state-update and therefore not the lever; the lever is the `_claimRewards` inner external calls.",
+  "attackVector": "Attacker holds a stake. They trigger `withdraw(half)` from a token-aware attacker contract. Inside the callback fired by `phUSD.mint` (pending phUSD) or `rewardToken.safeTransfer` (pending stable), the attacker re-enters `withdraw(rest)` -- this passes the `user.amount >= amount` check because `user.amount` is still the old value. The nested call computes its own pending again (debts still stale) and drains another batch of rewards plus the principal.",
+  "steps": [
+    "User stake = 100e18, accStablePerShare grown so pendingReward > 0.",
+    "User calls withdraw(50e18) from a contract that hooks ERC777 tokensReceived (or a phUSD mint hook).",
+    "_updatePool + _claimRewards run; rewardToken.safeTransfer fires the user's callback.",
+    "Inside callback, user re-enters withdraw(100e18). user.amount still == 100e18, so require passes. _claimRewards re-pays the SAME pending. Then user.amount = 0; totalStaked -= 100e18; phUSD.safeTransfer(user, 100e18).",
+    "Control returns to outer withdraw, which then sets user.amount = 100e18 - 50e18 = 50e18 (overwriting the inner 0!), debts rebased, totalStaked -= 50e18 (now totalStaked is corrupted: under-counts by 50e18), and tries to phUSD.safeTransfer(user, 50e18) -- which may or may not have liquidity.",
+    "End-state: attacker received 100e18 + 50e18 = 150e18 phUSD principal plus 2x rewards; totalStaked accounting is wrong; user.amount = 50e18 with no backing tokens."
+  ],
+  "codeSnippet": "// withdraw, lines 334-369 (key ordering)\nfunction withdraw(uint256 amount) external whenNotPaused {\n    UserInfo storage user = userInfo[msg.sender];\n    require(user.amount >= amount, \"Insufficient balance\");\n    _updatePool();\n    _claimRewards(msg.sender);                              // <-- external mint + transfer; re-entry lever\n    uint256 remaining = user.amount - amount;\n    uint256 actualWithdrawAmount = amount;\n    if (remaining > 0 && remaining < MINIMUM_STAKE) {\n        actualWithdrawAmount = user.amount;\n        remaining = 0;\n    }\n    user.amount = remaining;                                // <-- effect AFTER interactions\n    user.phUSDDebt = (user.amount * accPhUSDPerShare) / PRECISION;\n    user.stableDebt = (user.amount * accStablePerShare) / PRECISION;\n    totalStaked -= actualWithdrawAmount;\n    IERC20(address(phUSD)).safeTransfer(msg.sender, actualWithdrawAmount);\n    _updatePhUSDEmissionRate();\n    emit Withdrawn(msg.sender, actualWithdrawAmount);\n}",
+  "remediation": "Add `nonReentrant` to `withdraw`. Or refactor: snapshot `user.amount` and `totalStaked` decrements into local vars, write the user struct first, then run `_claimRewards` (which only reads accX and debts), then do the principal transfer. The current ordering also corrupts `totalStaked` on outer-after-inner sequencing (see steps), independent of any reward double-claim.",
+  "profileReference": "Profile §4.3 withdraw, §8.1.",
+  "relatesTo": ["CODE-004", "CODE-005", "SLITHER-005", "SLITHER-009"]
+}

@@ -1,0 +1,27 @@
+{
+  "id": "CODE-002",
+  "source": "code-scanner",
+  "kind": "fresh",
+  "title": "_claimRewards underflows and reverts after pauseWithdraw -> unpause -> claim sequence, bricking the user's reward-claim and normal withdraw paths",
+  "type": "checked-arithmetic-underflow / reward-debt-staleness",
+  "severity": "potential-high",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "_claimRewards (reachable from claim, withdraw, stake)",
+  "line": 440,
+  "lineStart": 432,
+  "lineEnd": 455,
+  "rootCause": "`pauseWithdraw` decrements `user.amount` and `totalStaked` but does NOT rebase `user.phUSDDebt` / `user.stableDebt`. On subsequent `unpause` + `claim` (or `withdraw`/`stake`), `_claimRewards` computes `pendingPhUSDAmount = (user.amount * accPhUSDPerShare) / PRECISION - user.phUSDDebt`. Because `user.amount` was reduced while `user.{phUSD,stable}Debt` was anchored to the larger pre-pause amount and an earlier `accX` checkpoint, the new product can be strictly less than the stale debt, triggering Solidity 0.8 checked subtraction underflow and reverting the entire call.",
+  "impact": "After legitimately recovering principal via `pauseWithdraw`, the user is permanently unable to call `claim`, `withdraw(amount < user.amount)`, or `stake(amount, recipient = victim)` on their remaining position: every path that reaches `_claimRewards` reverts. The view helpers `pendingPhUSD(user)` and `pendingStable(user)` also revert, breaking front-end displays. Only remaining principal-recovery path is `withdraw(user.amount)` -- which also reverts because it too runs `_claimRewards` first -- so the user must wait for the next pause and call `pauseWithdraw(user.amount)` again to finally exit. Pending phUSD and stable rewards earned prior to the partial pauseWithdraw are silently forfeited.",
+  "attackVector": "No attacker required; reachable by any honest user who partially escapes during a pause. Concrete sequence: (1) user stakes; (2) accumulator funds rewards via `collectReward`; (3) time passes, `accPhUSDPerShare` and `accStablePerShare` grow; (4) user claims so `user.{phUSD,stable}Debt` is set to a non-trivial value; (5) pauser pauses the contract; (6) user calls `pauseWithdraw(part)`; (7) pauser unpauses; (8) user calls `claim()` -> revert (Panic 0x11). A malicious or merely-careless pauser can be combined with normal user behavior to brick positions at scale.",
+  "steps": [
+    "stake(amount=100e18, recipient=self)",
+    "collectReward(R), advance time by Δt so accStablePerShare and accPhUSDPerShare both rise",
+    "claim() -- user.amount=100e18, user.phUSDDebt and user.stableDebt now equal (100e18 * accX) / PRECISION",
+    "pauser.pause(); user.pauseWithdraw(50e18) -- user.amount drops to 50e18, debts unchanged",
+    "pauser.unpause(); user.claim() -- _claimRewards computes (50e18 * accPhUSDPerShare)/PRECISION which is ~half of user.phUSDDebt, triggers underflow on subtraction, REVERTS"
+  ],
+  "codeSnippet": "// _claimRewards, lines 432-455\nfunction _claimRewards(address user) internal {\n    UserInfo storage userDetails = userInfo[user];\n    if (userDetails.amount == 0) {\n        return;\n    }\n\n    // underflows if (amount * acc)/PREC < phUSDDebt -- reachable post-pauseWithdraw\n    uint256 pendingPhUSDAmount = (userDetails.amount * accPhUSDPerShare) / PRECISION - userDetails.phUSDDebt;\n    if (pendingPhUSDAmount > 0) {\n        phUSD.mint(user, pendingPhUSDAmount);\n    }\n\n    // same underflow path\n    uint256 pendingRewardAmount = (userDetails.amount * accStablePerShare) / PRECISION - userDetails.stableDebt;\n    if (pendingRewardAmount > 0) {\n        rewardToken.safeTransfer(user, pendingRewardAmount);\n    }\n    ...\n}\n\n// pauseWithdraw, lines 245-261 -- does not touch userDetails.{phUSD,stable}Debt\nfunction pauseWithdraw(uint256 amount) external whenPaused {\n    UserInfo storage user = userInfo[msg.sender];\n    require(user.amount >= amount, \"Insufficient balance\");\n    require(amount > 0, \"Amount must be greater than 0\");\n    user.amount -= amount;\n    totalStaked -= amount;\n    IERC20(address(phUSD)).safeTransfer(msg.sender, amount);\n    emit EmergencyWithdrawal(msg.sender, amount);\n}",
+  "remediation": "Either (a) in `pauseWithdraw`, proportionally reduce `user.phUSDDebt` and `user.stableDebt` so the invariant `(user.amount * accX)/PRECISION >= user.XDebt` is preserved (e.g. multiply each debt by `(user.amount - amount) / user.amount` before assigning); or (b) in `_claimRewards`, clamp the subtraction (`pending = a > b ? a - b : 0`) to make the path forfeit pending rewards rather than revert; or (c) call `_updatePool` + `_claimRewards` inside `pauseWithdraw` so debts are rebased atomically before the principal cut.",
+  "profileReference": "Profile §4.3 (pauseWithdraw worked-case 2 final paragraph), §7 V2, §8.2; flagged for code-scanner reachability confirmation in §12."
+}

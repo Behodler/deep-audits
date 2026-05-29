@@ -28,6 +28,8 @@ reports/<project>-XX/
 ├── submissions/
 │   ├── H-01-submission.md
 │   ├── qa-report.md
+│   ├── carryover/          # thin stubs for prior-run findings still open (see CARRYOVER STUBS)
+│   │   └── M-01-CARRYOVER.md
 │   └── rejected/
 └── analysis-<timestamp>.json
 ```
@@ -88,6 +90,30 @@ Ledger entry shape:
 ```
 Never silently overwrite a human-set status (`acknowledged`/`wont-fix`/`false-positive`) — those are triage decisions set via `/ledger`.
 
+## CARRYOVER STUBS
+A finding that stays **`open`** in the ledger across runs (the sanitizer marked it `still-open`) is **not** re-reported with a full submission, but it must remain visible in the run you actually review. So for **every** still-open ledger entry — **all severities** (H/M/L/C) — write a thin stub to the current run's `submissions/carryover/<label>-CARRYOVER.md`. The stub carries no new analysis; it points back to the authoritative report.
+
+The sanitizer passes the still-open list (with each entry's ledger record); generate one stub per entry. Do **not** write stubs for `fixed`, `acknowledged`, `wont-fix`, or `false-positive` entries — only `open` ones that are still flagged by the current scan.
+
+Stub format:
+```markdown
+# [CARRYOVER] M-01 — _skimSurplus over-skim via duplicate clients[] under-backs principal
+
+> **This is a carryover stub, not new analysis.** This finding was reported in a
+> prior run and is **still open** (not fixed, not triaged). It is reproduced here so
+> it is not lost between runs. Triage it with `/ledger <project>`.
+
+- **Severity:** Medium
+- **Status:** open (still-open)
+- **Location:** `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L413-L441` (`_skimSurplus`)
+- **First seen:** phoenix-vault-05  ·  **Still present as of:** phoenix-vault-08
+- **Original report:** [reports/phoenix-vault-05/submissions/M-01-skim-overskim.md](../../phoenix-vault-05/submissions/M-01-skim-overskim.md)
+- **Fingerprint:** `9addc259…`
+
+See the original report for the full description, impact, attack path, PoC, and recommendation.
+```
+The link is **relative** from the current `submissions/carryover/` dir to the entry's `reportPath` (`../../<original-run>/submissions/<file>.md`). "First seen" = ledger `firstSeenRun`; "Still present as of" = current run.
+
 ## ERROR HANDLING
 - Duplicate label → reject, suggest next available.
 - Missing finding → clear error with suggestions.
@@ -100,3 +126,4 @@ Never silently overwrite a human-set status (`acknowledged`/`wont-fix`/`false-po
 3. **Validate before transitions** — PoC must exist before `ready`.
 4. **Sequential labeling** — never reuse or skip labels.
 5. **Respect human ledger statuses** — never auto-overwrite acknowledged/wont-fix/false-positive.
+6. **Never drop an open finding from view** — every still-open ledger entry gets a carryover stub in the current run's `submissions/carryover/`; reusing its original label.

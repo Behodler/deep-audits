@@ -1,0 +1,43 @@
+{
+  "id": "ECON-003",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "collectReward is a publicly-mempool MEV bait: searchers can sandwich a yield-accumulator deposit to capture rewards intended for long-term stakers",
+  "type": "MEV / sandwich / value-leak-to-MEV-bots",
+  "severity": "potential-medium",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "collectReward / stake / withdraw",
+  "line": 270,
+  "lineStart": 270,
+  "lineEnd": 286,
+  "rootCause": "When the yield-accumulator (the documented expected funder per the natspec) calls `collectReward(amount)`, two things happen visibly in the mempool: (1) the funding transaction is in flight, (2) immediately after it lands, `rewardBalance` jumps and `rewardPerSecond` is re-anchored upward. Because (a) `stake` is permissionless / capital-only (no whitelist), (b) `withdraw` is also instant with no exit fee, and (c) `accStablePerShare` is updated against the current `totalStaked` at the moment `_updatePool` runs, an MEV bot can: stake immediately before the `collectReward` lands (or in the same bundle, right before), then withdraw + claim immediately after, capturing a disproportionate slice of the just-deposited rewards.",
+  "economicImpact": "Long-term honest stakers receive less of every `collectReward` deposit than they would under a fee or commit period. Effective APY for buy-and-hold stakers is depressed by the MEV bot's share. The yield-accumulator's deposits leak value to MEV searchers rather than the staking pool the protocol intends to incentivise.",
+  "affectedParties": "Long-term stakers (lose share of each reward injection); the protocol's stated APY (overstates effective yield); MEV bots gain.",
+  "attackScenario": [
+    "Yield-accumulator (or any funder) signals or schedules a `collectReward(X)` call (e.g., a weekly drip).",
+    "MEV bot sees the pending `collectReward` in the mempool. It stakes a large amount in the same block, slot ordered just before `collectReward` lands.",
+    "`collectReward` runs: (a) `_updatePool` accrues nothing new (just-staked), (b) `rewardBalance += X`, (c) `rewardPerSecond` recomputed.",
+    "On the very next block, the bot calls `withdraw(all)` -- `_updatePool` accrues `rewardPerSecond * 1 block / PRECISION` (which after the V1 re-anchor is non-trivial because rewardBalance is now large), the bot's pro-rata share of that accrual flows to it.",
+    "Over many such cycles, the bot extracts a fraction of every `collectReward` injection roughly equal to its capital share of totalStaked at that block.",
+    "Sophisticated variant: bot uses a flash loan of phUSD if the staking asset is liquid enough on AMMs, capturing rewards with zero capital lockup."
+  ],
+  "profitability": "Profit per `collectReward(X)` cycle ~= `X * (bot_stake / (bot_stake + honest_stake)) * (Δt/depletionDuration)` over the holding window minus gas. Because the V1 re-anchor concentrates payouts in early blocks after a `collectReward` (the rate is highest right after a deposit and asymptotically decays), the bot's optimal hold is short -- making this a clean sandwich.",
+  "preconditions": [
+    "Reward funder broadcasts `collectReward` to the public mempool (true in default RPC paths).",
+    "`stake`/`withdraw` are open and have no holding-period requirement.",
+    "Bot has phUSD or can borrow it cheaply."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Natspec on `collectReward` says 'Anyone with approved tokens can contribute rewards' and 'rewards from yield-accumulator contract'. The implied beneficiary is the stable pool of long-term stakers, not arbitrage capital.",
+    "implementation": "No holding period, no withdrawal fee, no anti-MEV mechanism (commit/reveal, private mempool, EIP-712-signed funder). Profile §8.10 already notes this as standard MasterChef behavior.",
+    "discrepancy": "While 'standard MasterChef behaviour' is usually noted as acceptable, the V1 rate-re-anchor bug (CODE-001) materially worsens this: rewards are concentrated right after each `collectReward` (the rate is highest there and decays), so the MEV reward per dollar of capital is larger here than in vanilla MasterChef."
+  },
+  "mitigations": [
+    "Gate `collectReward` to a trusted funder address (the yield-accumulator) via a whitelist, eliminating the public-mempool signalling.",
+    "Use a private/MEV-protected RPC for the yield-accumulator's funding transactions.",
+    "Add a withdrawal lock or fee on stakes younger than some threshold, with proceeds flowing back to long-term stakers.",
+    "Use a 'staking score' (time-weighted) to compute reward shares so freshly-staked capital does not capture freshly-deposited rewards in the same block."
+  ],
+  "crossReferences": ["CODE-008 (collectReward(1) griefing) - distinct economic angle: CODE-008 is the funder-side griefing (depress yields), ECON-003 is the staker-side MEV theft (redirect yield). Both share permissionless `collectReward` as root.", "Profile §8.3, §8.10."]
+}

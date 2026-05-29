@@ -1,0 +1,42 @@
+{
+  "id": "ECON-002",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "setDepletionDuration(1) is a one-tx rug surface: owner can collapse the depletion window so the next _updatePool drains rewardBalance to a single coordinated staker",
+  "type": "owner-controlled-flash-drain / value-extraction",
+  "severity": "potential-high",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "setDepletionDuration / _updatePool / _claimRewards",
+  "line": 188,
+  "lineStart": 178,
+  "lineEnd": 191,
+  "rootCause": "`setDepletionDuration` accepts any `_duration > 0`. With `_duration = 1`, `rewardPerSecond = rewardBalance * PRECISION / 1 = rewardBalance * PRECISION`. The very next `_updatePool` with `timeElapsed >= 1` computes `potentialReward = (rewardPerSecond * timeElapsed) / PRECISION = rewardBalance * timeElapsed`, capped by `rewardBalance` -- so the entire `rewardBalance` is credited to `accStablePerShare` in one block. There is no two-step gate on this setter (unlike `setDesiredAPY`).",
+  "economicImpact": "Owner (or a compromised owner key) can drain the entire stable reward pool to whichever stakers exist at the moment of the next `_updatePool`. Because `setDepletionDuration` is callable in a single transaction (no preview / commit), and `stake` immediately triggers `_updatePool`, the owner can bundle (a) `setDepletionDuration(1)`, (b) `stake(huge_amount, ownerAddr)`, (c) `claim()` into one MEV bundle and walk away with the entire `rewardBalance` -- effectively a one-block rug of every reward funder's contribution.",
+  "affectedParties": "All honest stakers who were proportionally smaller than the owner's flash-stake; reward funders (typically the yield-accumulator sibling) whose deposited rewards never reach the intended depletion schedule.",
+  "attackScenario": [
+    "Owner observes large `rewardBalance` (e.g. 1M USDC sitting in `collectReward`-funded pool).",
+    "Owner flash-loans (or just stakes from treasury) a phUSD amount that is several orders of magnitude larger than honest `totalStaked`.",
+    "In the same bundle: (1) `setDepletionDuration(1)`, (2) `stake(huge_amount, owner)`. The `stake` call's `_updatePool` runs BEFORE the user's debt is set: it pushes `accStablePerShare` upward by the entire `rewardBalance / oldTotalStaked` -- but the owner's stake is added AFTER this. Wait -- need to re-derive carefully: see attack variant below.",
+    "Variant (correct path): Owner stakes FIRST (so they're part of `totalStaked`), wait at least one block (or just push timestamp). Then in a single bundle: `setDepletionDuration(1)` followed by `claim()`. The `setDepletionDuration` calls `_updatePool()` itself BEFORE changing duration, so the old rate is locked. But it then sets `rewardPerSecond = rewardBalance * PRECISION` for the next block. At t+1, the owner calls `claim()` -- `_updatePool` runs with `timeElapsed = 1`, `toDistribute = min(rewardBalance, rewardBalance)`, full balance flows into `accStablePerShare`, and `_claimRewards` transfers it almost entirely to owner.",
+    "Owner sells the drained reward tokens and unstakes via `withdraw()`. Net: owner captures ~rewardBalance * (owner_stake / totalStaked) -- which can be ~100% if the owner-staked share dominates."
+  ],
+  "profitability": "Profit = rewardBalance * (attacker_share_of_totalStaked). With a treasury-sized stake against a small honest TVL, attacker can capture >99% of `rewardBalance`. Cost = gas + temporary capital cost of the phUSD stake. On a chain with cheap phUSD this is profit-with-zero-risk for the owner.",
+  "preconditions": [
+    "Owner can call `setDepletionDuration` (no on-chain timelock).",
+    "`rewardBalance > 0`.",
+    "Attacker is willing to pre-stake a dominant share (or owner already controls a dominant position)."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Submodule CLAUDE.md describes the contract as a 'Linear depletion' farm intended to distribute rewards 'over depletionDuration seconds' (typical example: 1 week). Calling `setDepletionDuration(1)` violates the spirit of the design -- it converts the linear stream into a single-block payout.",
+    "implementation": "`setDepletionDuration` has no min/max bound, no two-step gate, no timelock, and is `onlyOwner`. The natspec literally suggests `604800 = 1 week` as the canonical example but enforces no proximity to that.",
+    "discrepancy": "Compared to `setDesiredAPY` (which DOES have a two-step gate), `setDepletionDuration` is strictly more dangerous (instant effect on the next `_updatePool`) and yet has weaker access controls. The asymmetry is itself a red flag."
+  },
+  "mitigations": [
+    "Add `require(_duration >= MIN_DEPLETION_DURATION)` with MIN measured in hours or days.",
+    "Add a two-step preview/commit gate symmetric with `setDesiredAPY`, ideally with a time-based delay (not block-based).",
+    "Wrap in an on-chain timelock so honest stakers can exit via `pauseWithdraw` (if Pauser cooperates) before a malicious duration change takes effect.",
+    "Defensively cap `rewardPerSecond` at `2 * rewardBalance / MIN_PHYSICAL_RATE` so even a flash-set duration cannot drain the pool in one block."
+  ],
+  "crossReferences": ["PATTERN-006 (centralization-depletion-acceleration) - econ angle adds: (a) explicit one-tx rug scenario with profit math, (b) asymmetry vs setDesiredAPY two-step gate, (c) interaction with collectReward funders (their deposits become the owner's drain target).", "Profile §7 V4-ish, §8.7."]
+}

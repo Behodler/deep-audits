@@ -1,0 +1,278 @@
+{
+  "project": "yield-claim-nft",
+  "reportDir": "reports/yield-claim-nft-08",
+  "submoduleCommit": "bc99ee3b129d9bddccc28a46f912406832a60638",
+  "dedupTimestamp": "2026-05-29T00:00:00Z",
+  "rawInputCount": 43,
+  "rawInputBreakdown": {
+    "profiles_LOCAL": 11,
+    "static_SAST": 13,
+    "patterns": 4,
+    "code_CODE": 3,
+    "econ_ECON": 6,
+    "tier3_symbolic_findings": 2,
+    "tier3_invariant_observations": 1,
+    "tier3_confirmations_passes": "not counted as findings (proofs/passes)"
+  },
+  "deduplicatedCount": 11,
+  "findings": [
+    {
+      "id": "DEDUP-001",
+      "title": "Minted phUSD has no in-suite backing or redemption: hook mints ratio% fresh phUSD per dispatch while up to 100% of the backing sUSDS is LP'd (owner-extractable BPT) or donated out as USDC",
+      "severityGuess": "high",
+      "mergedSources": ["ECON-001", "ECON-002", "ECON-006"],
+      "rootCause": "phUSD mint-debt is accrued per-dispatch on the gross dispatched USDS (default 50%), but the corresponding sUSDS is never escrowed 1:1 as redeemable collateral. It is either added single-sided to the sUSDS/phUSD pool (BPT held on the dispatcher, fully extractable by the owner via withdrawBPT) or, when batchDonationSize is set up to 100%, swapped to USDC and transferred entirely to batchMinter. No phUSD redemption function exists anywhere in V2 scope. The mint-debt basis (per-dispatch, gross) and the backing-retention (per-batch, owner-tunable 0-100%) are disjoint and non-deterministic from a minter's perspective.",
+      "files": [
+        "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+        "src/V2/dispatchers/BalancerPoolerV2.sol",
+        "src/V2/NFTMinterV2.sol"
+      ],
+      "lines": [
+        "src/V2/hooks/BalancerPoolerMintDebtHook.sol:118-122 (mintDebt += amount*ratio/100)",
+        "src/V2/hooks/BalancerPoolerMintDebtHook.sol:127-134 (pull() mints phUSD to recipient)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:178-184 (_dispatch wraps USDS->sUSDS)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:191-276 (pool() LPs remaining / donates a slice)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:207 (donationSUSDS = sUSDSAmount*batchDonationSize/100)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:147-151 (batchDonationSize up to 100)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:238 (donated USDC sent to batchMinter)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:301-303 (withdrawBPT: owner extracts all LP BPT)"
+      ],
+      "leakPath": "User pays `price` USDS in NFTMinterV2._executeMint; USDS is forwarded to BalancerPoolerV2 and wrapped to sUSDS. The hook accrues mintDebt += amount*ratio/100 and pull() later mints that much NEW phUSD to `recipient`. The backing sUSDS does not stay escrowed: pool() either LPs it (BPT owner-extractable) or, at batchDonationSize=100, ships 100% of it out as USDC to batchMinter. Worst case: 100% of deposit value exfiltrated AND 0.5 phUSD/USDS freshly printed with zero on-chain backing. Net new unbacked phUSD = ratio% * cumulative USDS mint volume.",
+      "preliminarySeverity": "high",
+      "notes": "ECON-001 (no in-suite backing/redemption, LP branch) and ECON-002 (gross-debt basis vs up-to-100% donation) are two manifestations of the same root cause (minted phUSD decoupled from retained backing); ECON-002 is the donation-amplified worst case and ECON-006 (batch-level vs per-dispatch attribution) is the accounting-basis support. Merged into one High. CAVEAT: phUSD's external/global backing system is not defined in this repo and there is no documentation; intent (collateralized issuance vs discretionary seigniorage) cannot be confirmed from source. Owner trust is OOS for malice, but issuance of unbacked supply is a protocol-economics property independent of owner honesty. FLAG FOR HUMAN REVIEW: severity hinges on the OOS external phUSD backing model — confirm intent before submission as High.",
+      "humanReviewFlag": true
+    },
+    {
+      "id": "DEDUP-002",
+      "title": "NFTMigrator.migrate() per-unit mint loop is unbounded over ERC1155 balance: large holders can be permanently unable to migrate (gas-limit DoS)",
+      "severityGuess": "medium",
+      "mergedSources": ["LOCAL-004", "PATTERN-002", "SAST-010"],
+      "rootCause": "migrate() runs an outer loop over [1, v1.nextIndex()) and an inner loop `for (j=0; j<balance; j++)` that calls v2.mintFor(...) once per NFT unit held, with a require/revert inside the loop. Total external calls scale with the caller's entire aggregate V1 ERC1155 balance. There is no batch mint (_mintBatch), no pagination, and no partial-migration path; a single failing id reverts the whole migration.",
+      "files": ["src/V2/NFTMigrator.sol"],
+      "lines": [
+        "src/V2/NFTMigrator.sol:62-76 (migrate outer/inner loops)",
+        "src/V2/NFTMigrator.sol:65 (inner per-unit mintFor loop)",
+        "src/V2/NFTMigrator.sol:66 (IERC1155.balanceOf)",
+        "src/V2/NFTMigrator.sol:68 (v1.burn)",
+        "src/V2/NFTMigrator.sol:71 (v2.mintFor per unit)"
+      ],
+      "leakPath": "A holder with a large aggregate V1 balance (ERC1155 tokenIds can legitimately hold high quantities) makes `balance` external calls in one tx. Once cost exceeds the block gas limit the migration cannot complete in a single transaction and there is no pagination/partial path, so the holder's V1->V2 conversion is permanently blocked. Balances are not user-reducible downward without migrating.",
+      "preliminarySeverity": "medium",
+      "notes": "Availability/DoS, no direct fund loss. v1.nextIndex() (outer bound) is owner-bounded and small; the unbounded dimension is per-holder `balance`. Distinct from DEDUP-003 (which is the late-registration index-0 brick, a different root cause). Recommend quantity-aware mintFor / ERC1155 _mint(recipient,id,balance,'') or pagination. SAST-002 (state-change-after-external-call in migrate) and SAST-001/003 reentrancy-on-migrate are folded here as the same code site; reentrancy through trusted V1/V2 contracts found non-exploitable.",
+      "humanReviewFlag": false
+    },
+    {
+      "id": "DEDUP-003",
+      "title": "Late V1 dispatcher registration permanently bricks migrate() for affected holders (index-0 mintFor revert; init/registration ordering coupling between independently-owned contracts)",
+      "severityGuess": "medium",
+      "mergedSources": ["CODE-001"],
+      "rootCause": "setInitialized() validates non-zero indexMapping for all V1 indexes in [1, v1.nextIndex()) only AT INIT TIME, then flips `initialized` permanently (one-way). V1 NFTMinter and NFTMigrator are independently owned; V1.registerDispatcher increases v1.nextIndex() at any later time. migrate() loops over the LIVE v1.nextIndex(), so a late-registered index N+1 is included with indexMapping[N+1]==0, and v2.mintFor(0,...) reverts ('index not registered') after the burn — reverting the whole tx.",
+      "files": [
+        "src/V2/NFTMigrator.sol",
+        "src/V2/NFTMinterV2.sol",
+        "src/NFTMinter.sol"
+      ],
+      "lines": [
+        "src/V2/NFTMigrator.sol:51-58 (setInitialized one-way validation)",
+        "src/V2/NFTMigrator.sol:62-76 (migrate loops over live nextIndex)",
+        "src/V2/NFTMigrator.sol:69-72 (v2Index=indexMapping[i]; mintFor)",
+        "src/V2/NFTMinterV2.sol:206-214 (mintFor reverts on index 0)",
+        "src/NFTMinter.sol:120-145 (V1 registerDispatcher bumps nextIndex)"
+      ],
+      "leakPath": "(1) Owner maps V1 indexes 1..N and calls setInitialized() — passes. (2) V1 owner later registers a new dispatcher -> V1 index N+1 exists and users mint/hold tokenId N+1. (3) Any such user's migrate() loops to i=N+1, burns the balance first, then calls v2.mintFor(indexMapping[N+1]=0) which reverts; the tx (incl. burn) rolls back. Because the loop is shared, one un-mapped late index blocks migration for every user who also holds it. No fund loss (burn rolled back), but migration is unavailable until the migrator owner manually adds the mapping.",
+      "preliminarySeverity": "medium",
+      "notes": "Cross-contract ordering coupling, NOT owner-self-harm: the V1 owner who triggers it need not be the migrator owner. Distinct root cause from DEDUP-002. Recommend migrate() skip (continue) indexes whose indexMapping is 0, or re-validate at migrate time.",
+      "humanReviewFlag": false
+    },
+    {
+      "id": "DEDUP-004",
+      "title": "Donation-phase sUSDS->waUSDC swap uses limitRaw=0 with only a pooler-supplied minUSDC floor, exposing the donation leg to sandwich/MEV when minUSDC is loose",
+      "severityGuess": "medium",
+      "mergedSources": ["LOCAL-007", "PATTERN-004", "ECON-003"],
+      "rootCause": "In unlockCallback the sUSDS->waUSDC swap is EXACT_IN with limitRaw=0 (accepts any output); the only slippage protection is require(usdcReceived >= minUSDC) checked AFTER the waUSDC->USDC unwrap, with minUSDC supplied by the authorized pooler at pool() call time. There is no on-chain TWAP/oracle reference or enforced max-slippage floor relative to a queried quote.",
+      "files": ["src/V2/dispatchers/BalancerPoolerV2.sol"],
+      "lines": [
+        "src/V2/dispatchers/BalancerPoolerV2.sol:214-243 (donation phase)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:217-226 (VaultSwapParams limitRaw=0, EXACT_IN)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:231-235 (slippage only post-unwrap vs minUSDC)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:191 (minUSDC chosen by authorized pooler)"
+      ],
+      "leakPath": "pool() is a public-mempool transaction (authorized-pooler EOA). An attacker observing the pending tx can sandwich the swapPool to push the sUSDS->waUSDC price against the donation and capture the difference, bounded below only by minUSDC. If a pooler passes minUSDC=0 or loosely, up to batchDonationSize% of each batch is extractable — value that would otherwise reach batchMinter.",
+      "preliminarySeverity": "medium",
+      "notes": "Mitigated by pool() being onlyAuthorizedPooler + nonReentrant + whenNotPaused and the caller-supplied minUSDC/minBPT floors; severity hinges on whether a sane on-chain floor is required vs delegated to a semi-trusted pooler. SAST-006/007 (unchecked ERC4626.deposit / Balancer swap-settle-addLiquidity returns) and SAST-009 (getIdealBPT == 0 strict equality) touch this same pooling code path; SAST-009 was disproven by symbolic check_zeroBranch_dustDoesNotBypass (dust >= 1 wei does not bypass the zero branch) so it is dropped as noise. SAST-006 retained below as DEDUP-009. FLAG: confirm whether pooler is sufficiently trusted to make this QA vs Medium.",
+      "humanReviewFlag": true
+    },
+    {
+      "id": "DEDUP-005",
+      "title": "setRatio off-by-one (ratio can equal MAX_RATIO=50, NatSpec says strictly <50) and (amount*ratio)/100 truncation silently zeroes phUSD debt on dust dispatches",
+      "severityGuess": "low",
+      "mergedSources": ["LOCAL-001", "PATTERN-001", "PATTERN-003", "ECON-004", "OBS-RATIO-BOUND", "SYMBOLIC:check_setRatio_allows50"],
+      "rootCause": "setRatio uses `if (newRatio > MAX_RATIO) revert` but the documented invariant is ratio STRICTLY < MAX_RATIO (50). The operator should be `>=`; as written ratio=50 is accepted and DEFAULT_RATIO is already 50, so the spec's own bound is violated. Separately, added=(amount*ratio)/100 truncates: if amount*ratio<100 the debt rounds to 0 and onDispatch early-returns.",
+      "files": ["src/V2/hooks/BalancerPoolerMintDebtHook.sol"],
+      "lines": [
+        "src/V2/hooks/BalancerPoolerMintDebtHook.sol:30 (MAX_RATIO=50)",
+        "src/V2/hooks/BalancerPoolerMintDebtHook.sol:92-93 (setRatio check newRatio > MAX_RATIO)",
+        "src/V2/hooks/BalancerPoolerMintDebtHook.sol:118-119 (added=amount*ratio/100; if added==0 return)"
+      ],
+      "leakPath": "Spec deviation: downstream reasoners trusting `ratio < 50` are wrong (actual is ratio <= 50). Truncation under-mints phUSD by (amount*ratio mod 100)/100 wei per dispatch (rounds toward backing, harmless direction); only reachable to zero for sub-2-wei dispatches, unreachable for 18-decimal USDS at realistic prices.",
+      "preliminarySeverity": "low",
+      "notes": "QA/spec deviation. setRatio is onlyOwner; no theft path. Symbolically proven (check_setRatio_allows50 PASS, check_onDispatch_debtMatchesRatio PASS: debt==floor(amount*ratio/100), no over-accrual). Economic safety bound (ratio<=50, at most 50% of USDS becomes phUSD debt) holds per fuzz+symbolic. Recommend `newRatio >= MAX_RATIO` or fix the NatSpec.",
+      "humanReviewFlag": false
+    },
+    {
+      "id": "DEDUP-006",
+      "title": "Constructors lack zero-address validation across NFTMigrator, BurnerV2, GatherV2 (and other V2 components)",
+      "severityGuess": "qa-low",
+      "mergedSources": ["LOCAL-005", "LOCAL-010", "LOCAL-011", "SAST(missing-zero-check, filtered)"],
+      "rootCause": "Constructors set critical immutable/state addresses (v1/v2, token_/burnRecorder_, token_) without non-zero checks. Misconfiguration bricks the relevant flow (revert on external call) rather than causing loss.",
+      "files": [
+        "src/V2/NFTMigrator.sol",
+        "src/V2/BurnerV2.sol",
+        "src/V2/GatherV2.sol"
+      ],
+      "lines": [
+        "src/V2/NFTMigrator.sol:25-28 (constructor: v1, v2)",
+        "src/V2/BurnerV2.sol (constructor: token_, burnRecorder_)",
+        "src/V2/GatherV2.sol (constructor: token_)"
+      ],
+      "leakPath": "Owner-deployment misconfiguration only; no external attack path. Bundled QA.",
+      "preliminarySeverity": "qa-low",
+      "notes": "Slither's 15 missing-zero-check results were filtered as noise; this consolidates the LOCAL-flagged constructor cases into one QA bundle item. Low value — include in QA report only.",
+      "humanReviewFlag": false
+    },
+    {
+      "id": "DEDUP-007",
+      "title": "NFTMinterV2 mint path has no reentrancy guard; cross-contract reentrancy gated only by each dispatcher's own nonReentrant (latent defense-in-depth gap, not currently exploitable)",
+      "severityGuess": "low",
+      "mergedSources": ["LOCAL-002", "CODE-002", "SAST-011"],
+      "rootCause": "NFTMinterV2 inherits no ReentrancyGuard. dispatch() is nonReentrant on the DISPATCHER only, so it blocks re-entry into the same dispatcher but not a re-entrant NFTMinterV2.mint targeting a DIFFERENT dispatcher index. Two callback surfaces exist in the mint tx: hook.onDispatch and the ERC1155 onERC1155Received acceptance callback. Separately, nonReentrant is not the first modifier on BalancerPoolerV2.pool / BalancerPoolerMintDebtHook (SAST-011).",
+      "files": [
+        "src/V2/NFTMinterV2.sol",
+        "src/V2/dispatchers/ATokenDispatcherV2.sol",
+        "src/V2/dispatchers/BalancerPoolerV2.sol"
+      ],
+      "lines": [
+        "src/V2/NFTMinterV2.sol:170-201 (_executeMint, unguarded)",
+        "src/V2/NFTMinterV2.sol:196 (_mint -> onERC1155Received callback)",
+        "src/V2/dispatchers/ATokenDispatcherV2.sol:118-126 (dispatch nonReentrant + hook.onDispatch after _dispatch)",
+        "src/V2/dispatchers/BalancerPoolerV2.sol:191 (nonReentrant not first on pool)"
+      ],
+      "leakPath": "No exploit found under the current in-suite hook set: in-scope hooks (DefaultDispatchHook, BalancerPoolerMintDebtHook) make no external calls in onDispatch, and a re-entrant mint of another index simply performs another fully-paid mint with its own price growth (no invariant broken). A FUTURE hook/dispatcher making an external call to attacker code during dispatch would expose the unguarded minter to cross-index reentrancy.",
+      "preliminarySeverity": "low",
+      "notes": "Informational / defense-in-depth. Verified non-exploitable today (BalancerPoolerV2._dispatch only forceApprove+ERC4626.deposit; BurnerV2/GatherV2 no untrusted callback before _mint). Recommend adding nonReentrant to NFTMinterV2._executeMint/mintFor. SAST-011 (modifier ordering) folded in as the same defense-in-depth theme.",
+      "humanReviewFlag": false
+    },
+    {
+      "id": "DEDUP-008",
+      "title": "replaceDispatcher silently re-points already-minted NFTs to a new dispatcher/token/metadata with no migration of existing holders",
+      "severityGuess": "low",
+      "mergedSources": ["CODE-003"],
+      "rootCause": "replaceDispatcher(index, newDispatcher) overwrites configs[index].dispatcher, tokenIdToDispatcher[index] and dispatcherToIndex while leaving existing ERC1155 balances for tokenId==index untouched. tokenId is the index, not a per-dispatcher identity, so existing holders' claim semantics, backing and metadata change underneath them.",
+      "files": ["src/V2/NFTMinterV2.sol"],
+      "lines": [
+        "src/V2/NFTMinterV2.sol:227-247 (replaceDispatcher)",
+        "src/V2/NFTMinterV2.sol:252-273 (uri reads new dispatcher metadata)",
+        "src/V2/NFTMinterV2.sol:177 (mint fetches token from current config.dispatcher)"
+      ],
+      "leakPath": "Owner-only action: uri(index) returns the new dispatcher's metadata and future mints pull the new primeToken; if any downstream redemption keys off tokenIdToDispatcher / dispatcher.primeToken(), pre-replace NFTs would be honored against the new token. No V2-in-scope on-chain redemption exists to exploit this directly, so impact is bounded to metadata/identity drift today.",
+      "preliminarySeverity": "low",
+      "notes": "QA/centralization integrity for the replace mechanism. Owner trust OOS for malice, but the silent semantic change to issued tokens is a design-soundness note for any redemption layer. Recommend a new index for a genuinely different dispatcher, or freezing replace to dispatchers sharing the same primeToken.",
+      "humanReviewFlag": false
+    },
+    {
+      "id": "DEDUP-009",
+      "title": "Unchecked return value of IERC4626(sUSDS).deposit in BalancerPoolerV2._dispatch (shares-minted ignored on core dispatch path)",
+      "severityGuess": "low",
+      "mergedSources": ["SAST-006"],
+      "rootCause": "The shares-minted return of IERC4626(_sUSDS).deposit(amount, address(this)) is ignored; the wrapped-share amount is assumed implicitly. If the ERC4626 wrapper mints fewer shares than expected (rounding/fees/partial deposit), downstream donation/pooling accounting can diverge from the actual sUSDS held.",
+      "files": ["src/V2/dispatchers/BalancerPoolerV2.sol"],
+      "lines": ["src/V2/dispatchers/BalancerPoolerV2.sol:183 (IERC4626(_sUSDS).deposit return ignored)"],
+      "leakPath": "Pooling later reads balanceOf(address(this)) rather than the deposit return, so in practice it operates on actual held sUSDS; impact is bounded unless deposit can partial-fill without reverting. Flagged because it is on the core USDS->sUSDS dispatch path.",
+      "preliminarySeverity": "low",
+      "notes": "High-confidence static finding but low real impact since pool() re-reads balanceOf. Kept separate from DEDUP-004 (slippage) as a distinct accounting-hygiene item. Consider QA bundle. SAST-007 (unchecked Balancer swap/settle/addLiquidity returns) folded into DEDUP-004 context.",
+      "humanReviewFlag": false
+    },
+    {
+      "id": "DEDUP-010",
+      "title": "abi.encodePacked with potentially dynamic types feeding keccak256 in NFTMinterV2",
+      "severityGuess": "low",
+      "mergedSources": ["SAST-004"],
+      "rootCause": "abi.encodePacked() used with possibly dynamic-length arguments whose packed bytes are hashed; if two distinct argument tuples pack to the same byte string, hash collisions could break uniqueness/identity assumptions (mint keys / dispatcher identifiers).",
+      "files": ["src/V2/NFTMinterV2.sol"],
+      "lines": ["src/V2/NFTMinterV2.sol:263 (abi.encodePacked -> keccak256)"],
+      "leakPath": "Exploitability depends on whether any hashed argument is dynamic AND attacker-influenced. Needs manual confirmation of what is hashed; if dynamic types are present, switch to abi.encode.",
+      "preliminarySeverity": "low",
+      "notes": "Unverified static lead; could be QA or no-impact. FLAG FOR HUMAN REVIEW: confirm the encoded arguments at line 263 are not dynamic/attacker-controlled before discarding or escalating. V1 mirror (SAST-005, NFTMinter.sol:218) dropped as V1/context scope.",
+      "humanReviewFlag": true
+    },
+    {
+      "id": "DEDUP-011",
+      "title": "Privileged setMinter / single-step Ownable changes lack events or two-step safety (governance monitorability + transfer footgun)",
+      "severityGuess": "qa-low",
+      "mergedSources": ["SAST-012", "SAST-013"],
+      "rootCause": "ATokenDispatcherV2.setMinter reassigns the privileged minter with no event (reduced off-chain monitorability of a security-critical role change), and all owner-gated V2 contracts use single-step Ownable rather than Ownable2Step (irrecoverable accidental transfer).",
+      "files": [
+        "src/V2/dispatchers/ATokenDispatcherV2.sol",
+        "src/V2/NFTMinterV2.sol",
+        "src/V2/NFTMigrator.sol",
+        "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+        "src/V2/BurnRecorder.sol"
+      ],
+      "lines": [
+        "src/V2/dispatchers/ATokenDispatcherV2.sol:85 (setMinter no event)",
+        "src/V2/NFTMinterV2.sol:16 (single-step Ownable)",
+        "src/V2/NFTMigrator.sol:12 (single-step Ownable)"
+      ],
+      "leakPath": "No external attack; centralization/operational-hygiene. Owner trust is a documented known issue.",
+      "preliminarySeverity": "qa-low",
+      "notes": "QA bundle. setMinter event (SAST-012) and Ownable2Step (SAST-013) merged as the same governance-hygiene theme.",
+      "humanReviewFlag": false
+    }
+  ],
+  "removedOrFiltered": [
+    {
+      "ref": "SYMBOLIC-001, SYMBOLIC-002",
+      "reason": "Overflow-boundary counterexamples only at ~2**255, far beyond realistic 18-decimal token supplies; companion realistic-bound proofs PASS. Informational precision-corrections, not vulnerabilities. Not promoted to findings."
+    },
+    {
+      "ref": "SAST-009 (getIdealBPT strict == 0 equality)",
+      "reason": "Disproven by symbolic proof check_zeroBranch_dustDoesNotBypass: dust >= 1 wei does NOT bypass the zero branch and pool() hard-requires sUSDSAmount > 0. No off-by-one. Tool noise."
+    },
+    {
+      "ref": "SAST-001, SAST-002, SAST-003 (reentrancy / state-change-after-call leads)",
+      "reason": "Consolidated: migrate-site reentrancy folded into DEDUP-002; minter-side cross-contract reentrancy into DEDUP-007. Reentrancy through trusted V1/V2/Balancer contracts confirmed non-exploitable (CODE-002 trace)."
+    },
+    {
+      "ref": "SAST-005, SAST-008 (V1 BalancerPooler / NFTMinter)",
+      "reason": "V1 / context-only scope; root cause out of V2 scope."
+    },
+    {
+      "ref": "SAST-007 (unchecked Balancer swap/settle/addLiquidity returns)",
+      "reason": "Folded into DEDUP-004 (same pooling code path); slippage floor is the substantive concern."
+    },
+    {
+      "ref": "ECON-005 (compounding mint price vs linear phUSD; value-flow asymmetry)",
+      "reason": "Basis-point price compounding is documented intended design (OOS as a standalone finding per audit guidance); incentive-fairness observation with no demonstrated extraction. Dropped to keep report focused; can be a QA note."
+    },
+    {
+      "ref": "LOCAL-003 (mintFor free mint by authorizedMinter)",
+      "reason": "By-design migration path; authorized-role/centralization surface, owner/role trust OOS. Not a bug."
+    },
+    {
+      "ref": "LOCAL-006",
+      "reason": "Verified-OK property (migrate burns full balance before mint, second call is no-op); not a finding."
+    },
+    {
+      "ref": "LOCAL-008",
+      "reason": "Folded into DEDUP-001 (ECON-006): batch-level donation vs per-dispatch debt accounting basis."
+    },
+    {
+      "ref": "LOCAL-009 (rescueERC20 / withdrawBPT owner power)",
+      "reason": "Owner escape-hatch power; owner trust OOS. Note only. (withdrawBPT's role in unbacked-phUSD is captured in DEDUP-001.)"
+    },
+    {
+      "ref": "Slither/Aderyn/Semgrep raw noise (missing-zero-check x15, too-many-digits, divide-before-multiply on lib OZ, push-zero, unspecific-pragma, unused-import, 129 INFO-level style/gas, etc.)",
+      "reason": "Tool noise / lib-only / style-gas; pre-filtered in static-analysis-findings.json. Constructor zero-address subset consolidated into DEDUP-006."
+    }
+  ]
+}

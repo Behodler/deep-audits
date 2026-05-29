@@ -1,0 +1,43 @@
+{
+  "id": "ECON-004",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "setDesiredAPY commit is mempool-visible: any staker can front-run the commit to lock in a higher (or lower) accPhUSDPerShare than the protocol intends",
+  "type": "MEV / front-running / two-step-gate-bypass",
+  "severity": "potential-medium",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "setDesiredAPY (commit branch) / _updatePool / _updatePhUSDEmissionRate",
+  "line": 165,
+  "lineStart": 151,
+  "lineEnd": 172,
+  "rootCause": "The two-step gate is described as a safety mechanism, but economically it FAILS to deter front-runners: when the owner submits the commit transaction, the new `desiredAPYBps` is fully predictable (it equals the public `pendingAPYBps`), so any staker can frontrun the commit. Because `setDesiredAPY` (commit branch) calls `_updatePool()` THEN `_updatePhUSDEmissionRate()`, the order is: accrue under OLD rate -> set new rate. A front-runner who stakes immediately before the commit lands gets debt-anchored at the OLD `accPhUSDPerShare`; immediately after the commit, the new (higher) rate begins compounding to their advantage. Conversely, a front-runner who claims/withdraws BEFORE a downward commit locks in the higher pre-cut rate.",
+  "economicImpact": "The two-step gate is economically useless against the very actors it should slow down (sophisticated stakers monitoring the mempool). It only slows down the OWNER and (incidentally) gives MEV bots a 100-block visibility window. Honest passive stakers do not benefit; active mempool-watching stakers and bots capture the difference.",
+  "affectedParties": "Honest passive stakers (relative loss vs front-runners); protocol intent (the gate was designed to telegraph intent, not to subsidise front-runners).",
+  "attackScenario": [
+    "Owner calls `setDesiredAPY(NEW_HIGHER)` (preview). Public event `IntendedSetAPY(NEW_HIGHER, blockNumber, owner)`.",
+    "Up-direction case: MEV bot sees the preview event. Bot stakes a large `phUSD` amount immediately. `_updatePool` runs first, settling the OLD `accPhUSDPerShare`; bot's `phUSDDebt = amount * acc_OLD / PRECISION` is anchored at the pre-commit checkpoint.",
+    "Owner's commit lands at block N+1..N+100. `_updatePhUSDEmissionRate` jumps `phUSDPerSecond` upward.",
+    "Bot accrues at the NEW rate immediately. Over the next blocks, bot's pending phUSD grows ~`amount * new_phUSDPerSecond * Δt / totalStaked`.",
+    "After enough accrual, bot calls `claim()` or `withdraw(all)`. Net: bot captures a disproportionate slice of NEW-rate emissions for capital it deposited only after the rate was known.",
+    "Down-direction symmetric attack: bot sees a preview that would LOWER APY, calls `claim()` immediately to lock in OLD rate emissions before the commit lands."
+  ],
+  "profitability": "Profit per upward-APY event ~= bot_capital * (new_rate - old_rate) * holding_blocks * (bot_share / total_share). With a doubling APY change and a few blocks of holding, this is easily a meaningful capture against passive stakers. Cost = gas + capital cost of the short hold.",
+  "preconditions": [
+    "Owner uses a public mempool for the commit transaction.",
+    "Public `pendingAPYBps` / `getPendingAPYInfo()` view returns the next value (it does - profile §4.4).",
+    "Bot has phUSD or can borrow."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Profile §8.10: 'setDesiredAPY commit is publicly mempool-visible ... Standard MEV; document but not a finding.' But the existence of a TWO-STEP gate implies a security goal beyond standard MEV -- otherwise why bother with the preview? The protocol clearly intends the gate to give stakers TIME to react. Economically, it gives MEV bots time to react, not slow stakers.",
+    "implementation": "The commit branch updates state IN the transaction visible to the mempool; there is no rate-change cooldown for new stakes, no per-user time-weighted accrual, no anti-snipe mechanism.",
+    "discrepancy": "The two-step gate is designed for caution but in practice it (a) doesn't bound the new rate, (b) doesn't slow MEV, (c) doesn't notify users via any on-chain throttle on their next claim/stake. Its only effect is to require a second admin tx -- a UX delay, not an economic safeguard."
+  },
+  "mitigations": [
+    "Use a private mempool (Flashbots Protect, MEV-Share) for the commit tx.",
+    "Replace block-based 100-block window with a longer time-based window AND add a rate-change cooldown: stakes within N blocks of a commit accrue at the average of old/new rate or are excluded from the bonus.",
+    "Use time-weighted accrual (e.g. weight by stake-block-age) so newly-staked capital cannot snipe rate changes.",
+    "Combine with on-chain timelock + public scheduler so the rate transition timestamp is known well in advance and rewards accrue smoothly."
+  ],
+  "crossReferences": ["CODE-010 (twoStep-APY-pending-state-not-cleared) - distinct angle: CODE-010 is the state-cleanup spec gap, ECON-004 is the economic MEV failure of the two-step model.", "PATTERN-005 (centralization-unbounded-apy) - shares the underlying setter but ECON-004 is about MEV around legitimate APY changes, not the unbounded-magnitude problem.", "Profile §8.10."]
+}

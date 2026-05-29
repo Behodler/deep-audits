@@ -1,0 +1,107 @@
+[
+  {
+    "id": "ECON-001",
+    "title": "Minted phUSD is unbacked within the suite: hook mints fresh phUSD = ratio% of dispatched USDS, but the dispatched sUSDS is LP'd or donated away, never escrowed 1:1 as collateral",
+    "severity_guess": "high",
+    "files": [
+      "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+      "src/V2/dispatchers/BalancerPoolerV2.sol",
+      "src/V2/NFTMinterV2.sol"
+    ],
+    "lines": [
+      "BalancerPoolerMintDebtHook.sol:118-122 (mintDebt += amount*ratio/100)",
+      "BalancerPoolerMintDebtHook.sol:127-134 (pull mints phUSD to recipient)",
+      "BalancerPoolerV2.sol:178-184 (_dispatch wraps USDS->sUSDS, held on dispatcher)",
+      "BalancerPoolerV2.sol:191-276 (pool() LPs remaining sUSDS / donates a slice as USDC)",
+      "BalancerPoolerV2.sol:301-303 (withdrawBPT: owner extracts all LP BPT)",
+      "BalancerPoolerV2.sol:238 (donated USDC sent to batchMinter)"
+    ],
+    "leak_path": "User pays `price` USDS in NFTMinterV2._executeMint (L182-191). USDS is forwarded to BalancerPoolerV2 and wrapped to sUSDS (L182-184). The hook then accrues mintDebt += amount*ratio/100 (default 50%) on every dispatch (hook L118-120). pull() later mints NEW phUSD = that debt to `recipient` (hook L132). The sUSDS that was supposed to back the new phUSD does NOT stay escrowed: pool() either (a) adds it single-sided to the sUSDS/phUSD Balancer pool and the resulting BPT is held on the dispatcher and is fully extractable by the owner via withdrawBPT (L301-303), or (b) diverts batchDonationSize% of it through a swap to USDC and transfers that USDC out to `batchMinter` (L238). In neither branch is there a lockbox of collateral redeemable by phUSD holders, and there is no phUSD redemption function anywhere in scope.",
+    "impact": "For every 1 USDS of mint volume, the protocol issues 0.5 phUSD of fresh supply while the corresponding 1 USDS of sUSDS is converted into LP exposure (BPT held by owner) or donated out as USDC. The newly minted phUSD is collateralized only by phUSD's external peg machinery, NOT by any escrowed asset in this suite. If the new phUSD is paired into the sUSDS/phUSD pool as the counter-asset, the protocol is effectively printing the pool's own quote token against single-sided sUSDS deposits, diluting phUSD backing system-wide. Net new unbacked phUSD = 0.5 * cumulative USDS mint volume.",
+    "assumptions": "phUSD is the protocol stablecoin with an external/global backing system (not defined in this repo). If that external system treats this hook's mint authority as fully collateralized issuance, the dilution is real and protocol-wide. If phUSD mint here is intended as discretionary seigniorage backed off-chain, this is a documented design choice — but no documentation exists in the repo (README is Foundry boilerplate; no documentation/ dir), so intent cannot be confirmed. Owner/recipient trust is OOS, but the *issuance of unbacked supply itself* is a protocol-economics concern independent of owner honesty: even an honest owner mints phUSD with no escrowed backing in-suite."
+  },
+  {
+    "id": "ECON-002",
+    "title": "phUSD mint debt accrues on gross dispatched USDS while up to 100% of that USDS can be donated away as USDC, fully decoupling minted phUSD from any retained sUSDS backing",
+    "severity_guess": "high",
+    "files": [
+      "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+      "src/V2/dispatchers/BalancerPoolerV2.sol"
+    ],
+    "lines": [
+      "BalancerPoolerMintDebtHook.sol:118 (debt on full dispatched amount)",
+      "BalancerPoolerV2.sol:207 (donationSUSDS = sUSDSAmount*batchDonationSize/100)",
+      "BalancerPoolerV2.sol:147-151 (batchDonationSize up to 100)",
+      "BalancerPoolerV2.sol:214-243 (donation phase removes donationSUSDS before LP)"
+    ],
+    "leak_path": "The hook accrues phUSD debt = ratio% of the FULL dispatched USDS amount (hook L118), independent of what later happens to the sUSDS. BalancerPoolerV2.pool() can divert up to batchDonationSize=100% of the accumulated sUSDS (L207, setter allows <=100 at L148) into a sUSDS->waUSDC->USDC swap whose proceeds are transferred entirely to batchMinter (L238). When batchDonationSize=100, ALL of the sUSDS leaves the dispatcher as USDC to a third party, yet 50% phUSD was (or will be) minted against that same flow via pull().",
+    "impact": "The accounting bases are completely disjoint: phUSD is minted per-dispatch on gross USDS, while the backing sUSDS can be 100% donated out. At batchDonationSize=100 the protocol mints 0.5 phUSD per USDS AND ships 1.0 USDS-equivalent of USDC to batchMinter, retaining zero on-chain backing for the minted phUSD. This is strictly worse than ECON-001's LP branch (where at least BPT is retained, even if owner-extractable). Worst case: 100% of mint proceeds donated out plus 50% phUSD freshly printed = pure inflation of phUSD with simultaneous full exfiltration of the deposit.",
+    "assumptions": "batchMinter and donation are owner-configured (owner trust OOS for *whether* to enable), but the structural decoupling of mint-debt basis (gross USDS) from backing-retention (which can be 0%) is a design property, not an owner abuse. Even with batchMinter being a legitimate protocol component, minted phUSD has no claim on the donated value."
+  },
+  {
+    "id": "ECON-003",
+    "title": "Donation swap leg uses limitRaw=0 with pooler-supplied minUSDC, exposing the sUSDS->USDC donation to sandwich/MEV when minUSDC is set loosely",
+    "severity_guess": "medium",
+    "files": [
+      "src/V2/dispatchers/BalancerPoolerV2.sol"
+    ],
+    "lines": [
+      "BalancerPoolerV2.sol:217-226 (VaultSwapParams limitRaw=0, EXACT_IN)",
+      "BalancerPoolerV2.sol:231-235 (slippage only checked post-unwrap vs minUSDC)",
+      "BalancerPoolerV2.sol:191 (minUSDC chosen by authorized pooler)"
+    ],
+    "leak_path": "In unlockCallback, the sUSDS->waUSDC swap is EXACT_IN with limitRaw=0 (L223), accepting any output. The only protection is require(usdcReceived >= minUSDC) AFTER the waUSDC->USDC unwrap (L235). minUSDC is supplied by the authorized pooler at pool() call time (L191). pool() is a public-mempool transaction (authorized pooler EOA), so an attacker can observe the pending pool() tx, sandwich the swapPool to push the sUSDS->waUSDC price against the donation, and capture the difference, bounded below only by minUSDC. If a pooler passes minUSDC too low (or 0), the donation leg is fully extractable.",
+    "impact": "MEV extraction on the donated portion (up to batchDonationSize% of each batch). Per-batch loss bounded by (fair USDC out - minUSDC). With a loose or zero minUSDC the entire donation slice is at risk to a sandwicher. This is value that would otherwise reach batchMinter, so it is a protocol value leak on every pool() with donation active.",
+    "assumptions": "Authorized poolers are semi-trusted operators who SHOULD compute a tight minUSDC off-chain, but nothing on-chain enforces a sane floor (no oracle, no max-slippage bound relative to a queried quote). The swapPool must have enough liquidity to be economically sandwichable. Pooler honesty is partially OOS, but the lack of any on-chain quote/limit on the swap leg is a design weakness, and pool() being mempool-visible makes it MEV-reachable even with an honest pooler."
+  },
+  {
+    "id": "ECON-004",
+    "title": "ratio cap is <=50 not <50, and truncation in (amount*ratio)/100 silently zeroes phUSD debt for small dispatches and on every dust mint",
+    "severity_guess": "low",
+    "files": [
+      "src/V2/hooks/BalancerPoolerMintDebtHook.sol"
+    ],
+    "lines": [
+      "BalancerPoolerMintDebtHook.sol:92-93 (setRatio check newRatio > MAX_RATIO)",
+      "BalancerPoolerMintDebtHook.sol:30 (MAX_RATIO=50)",
+      "BalancerPoolerMintDebtHook.sol:118-119 (added = amount*ratio/100; if added==0 return)"
+    ],
+    "leak_path": "Two minor mismatches: (1) NatSpec on MAX_RATIO/ratio/setRatio all state ratio must be STRICTLY < 50, but the check is `newRatio > MAX_RATIO` (L93) which permits exactly 50. So achievable max is 50%, not 49%. (2) added = (amount*ratio)/100 truncates; if amount*ratio < 100 the debt added is 0 and onDispatch silently returns (L119). With ratio=50, any dispatched USDS amount < 2 wei accrues zero debt. USDS is 18-decimals so a real mint price makes this negligible, but a dispatcher configured with a tiny-decimals primeToken, or a deliberately low price, makes the truncation systematically under-mint phUSD relative to the advertised ratio.",
+    "impact": "Systematic under-minting of phUSD on a per-dispatch basis equal to (amount*ratio mod 100)/100 phUSD-wei per mint, rounded toward the protocol (favors backing, so harmless in the unbacked direction). The ratio off-by-one means the advertised invariant `ratio < MAX_RATIO` does NOT hold (it is `ratio <= 50`); downstream reasoners trusting `ratio < 50` are wrong. No direct theft; spec-deviation / QA.",
+    "assumptions": "USDS is 18-decimal and mint prices are >= ~2 wei, so the truncation-to-zero edge is unreachable in practice for the default config. The off-by-one is owner-only (setRatio onlyOwner) so impact is bounded by owner trust; flagged as spec deviation per LOCAL-001."
+  },
+  {
+    "id": "ECON-005",
+    "title": "NFT mint cost grows per-mint (compounding basis points) while minted phUSD scales linearly with USDS paid, so late minters subsidize phUSD issuance with no proportional claim",
+    "severity_guess": "low",
+    "files": [
+      "src/V2/NFTMinterV2.sol",
+      "src/V2/hooks/BalancerPoolerMintDebtHook.sol"
+    ],
+    "lines": [
+      "NFTMinterV2.sol:188 (price = price + price*growthBasisPoints/10000)",
+      "NFTMinterV2.sol:191 (dispatch with actualReceived)",
+      "BalancerPoolerMintDebtHook.sol:118 (debt = amount*ratio/100)"
+    ],
+    "leak_path": "Mint price compounds per mint (L188), so the Nth minter pays price0*(1+g)^N USDS. The hook mints phUSD = 50% of whatever USDS was paid (hook L118). The NFT itself confers a claim/redemption defined elsewhere (V1/V2 burn -> claim), but the minted phUSD goes to the hook `recipient`, not the minter. Thus a late minter paying a high compounded price funds proportionally more phUSD issuance to the recipient while receiving the same single ERC1155 unit as an early minter.",
+    "impact": "Value-flow asymmetry: NFT mint revenue (which grows superlinearly) translates into phUSD minted for a centralized recipient, not for the minter. This is an incentive/fairness observation rather than a theft path — the NFT redemption value vs mint cost is governed by external claim logic not in scope. Documented basis-point compounding is stated as intended design (per scan guidance), so flagged low/informational; included for the value-flow record.",
+    "assumptions": "Basis-point price compounding is documented design (per audit instructions, OOS as a finding on its own). The NFT's downstream redemption value is out of this repo's scope. No demonstrated profit extraction; recorded as an incentive-alignment note tying mint economics to phUSD issuance."
+  },
+  {
+    "id": "ECON-006",
+    "title": "pool() processes the entire aggregated sUSDS balance with batch-level donation %, mismatching the per-dispatch phUSD debt basis and enabling cross-mint donation skew",
+    "severity_guess": "low",
+    "files": [
+      "src/V2/dispatchers/BalancerPoolerV2.sol",
+      "src/V2/hooks/BalancerPoolerMintDebtHook.sol"
+    ],
+    "lines": [
+      "BalancerPoolerV2.sol:192 (sUSDSAmount = balanceOf(this) — whole batch)",
+      "BalancerPoolerV2.sol:207 (donation = batch * size/100)",
+      "BalancerPoolerMintDebtHook.sol:118-120 (debt accrued per individual dispatch)"
+    ],
+    "leak_path": "phUSD debt is accrued per-dispatch on each mint's `amount` (hook L118). But pool()/donation operate on the AGGREGATE sUSDS balance present at pool() time (L192,207), with no attribution to individual dispatches. The donation percentage applies to the whole accumulated batch, including any sUSDS from FOT/airdrop dust or from rescued/seeded balances. The owner can change batchDonationSize between batches, so the fraction of backing donated out is decoupled from, and applied unevenly across, the mints that generated the phUSD debt.",
+    "impact": "No per-mint backing guarantee: two identical mints can have different effective backing retention depending on when pool() runs and what batchDonationSize was at that moment. Combined with ECON-002, this means the relationship between minted phUSD (per-dispatch) and retained backing (per-batch, owner-tunable) is non-deterministic from a minter's perspective. Accounting-integrity / transparency concern; no direct theft beyond ECON-001/002.",
+    "assumptions": "Batch processing is intended design (per profile LOCAL-008). Owner controls batchDonationSize timing (owner trust OOS for intent). Flagged as an accounting-basis mismatch supporting the ECON-001/002 collateralization findings rather than a standalone exploit."
+  }
+]

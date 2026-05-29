@@ -108,6 +108,8 @@ After removing known/OOS issues, reconcile each surviving finding against the pe
 
 Only `new` and `regression` findings proceed to classification/reporting; `still-open` and suppressed findings are logged for the audit trail and passed to finding-manager for ledger bookkeeping. In a `--full` cold run, still treat human statuses (`acknowledged`/`wont-fix`/`false-positive`) as suppressions.
 
+**Still-open carryover.** A `still-open` finding is not re-reported, but it must not silently vanish from the run's `submissions/` dir. Pass the full list of `still-open` entries (each with its ledger record: label, fingerprint, severity, title, contract/lines, `firstSeenRun`, `reportPath`) to finding-manager so it writes a thin **carryover stub** per entry (see finding-manager → CARRYOVER STUBS). This applies to all severities. Suppressed (`acknowledged`/`wont-fix`/`false-positive`) entries get **no** stub — the human already triaged them.
+
 ## ERROR HANDLING
 - **Missing Known Issues**: Warn and proceed without filtering
 - **Missing Ledger**: Treat all findings as `new` (first audit of the project)

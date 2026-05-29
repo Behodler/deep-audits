@@ -1,0 +1,42 @@
+{
+  "id": "ECON-001",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "Uncapped desiredAPYBps converts directly into unbounded phUSD mint pressure; only friction is a 100-block (~20 min) two-step gate",
+  "type": "owner-controlled-inflation / intent-mismatch",
+  "severity": "potential-high",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "setDesiredAPY / _updatePhUSDEmissionRate / _claimRewards",
+  "line": 167,
+  "lineStart": 151,
+  "lineEnd": 172,
+  "rootCause": "`setDesiredAPY` accepts any `uint256 bps`. `_updatePhUSDEmissionRate` then computes `phUSDPerSecond = totalStaked * desiredAPYBps / 10000 / SECONDS_PER_YEAR` with no sanity cap. `_claimRewards` directly calls `phUSD.mint(user, pending)` against that rate. The only economic friction is the two-step preview/commit window (must commit within 100 blocks of the same value). There is no on-chain cap, no timelock and no per-period mint ceiling.",
+  "economicImpact": "Owner unilaterally controls phUSD supply expansion via this contract. Setting `desiredAPYBps = 1_000_000_000` (10,000,000% APY) is legal and the only delay is ~20 minutes on mainnet (much less on L2s with shorter block times). Because phUSD is the stake AND a fungible Flax-family stablecoin, runaway mints (a) dilute every external phUSD holder, (b) let the owner extract phUSD value via any address staking immediately before the APY hike, and (c) can drain phUSD's mint authority (e.g. exhaust a global supply cap if one exists elsewhere). The two-step gate doesn't price the action; it merely delays it past one MEV block.",
+  "affectedParties": "All phUSD holders system-wide (not just stakers in this contract); the Flax/phUSD peg; downstream protocols pricing phUSD; honest stakers who get diluted relative to the owner's pre-commit stake.",
+  "attackScenario": [
+    "Owner secretly opens a position in PhlimboEA from a personal address (or coordinates with a friendly EOA).",
+    "Owner submits `setDesiredAPY(1_000_000_000)` (preview). The transaction is public; even if front-runners notice, none of them can stop the commit because access is `onlyOwner`.",
+    "After ~1 block (but within 100), owner calls `setDesiredAPY(1_000_000_000)` again to commit. `_updatePhUSDEmissionRate` recomputes `phUSDPerSecond = totalStaked * 1e9 / 10000 / 365 days`.",
+    "Owner's address (which is part of `totalStaked`) accrues a huge `accPhUSDPerShare` over even a few seconds, then calls `claim()` which mints phUSD directly to the owner address.",
+    "Owner immediately calls `setDesiredAPY` back to a normal value, or `emergencyTransfer` to exit. The minted phUSD is already in their EOA wallet."
+  ],
+  "profitability": "Profitable whenever owner can pre-stake or coordinate with a staker. The mint is uncapped at the protocol layer, so profit scales with whatever phUSD authority cap exists at the IFlax / governance layer. On a clean Flax mint setup (no cap), this is unbounded.",
+  "preconditions": [
+    "Contract holds the phUSD MINTER role (assumed per profile §10 trust assumption #1).",
+    "Owner is in control of `setDesiredAPY`.",
+    "No external timelock wrapping `setDesiredAPY` (none on-chain)."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Submodule CLAUDE.md describes 'linear-depletion staking yield farm' and the natspec on `desiredAPYBps` reads 'Desired APY in basis points (e.g., 500 = 5%)'. The example values consistently sit in single-digit-percent territory.",
+    "implementation": "No `require(bps <= MAX_BPS)` anywhere. `pendingAPYBps` is `uint256` with no cap. Profile §7 V4 and §8.4 already flag this as a centralization concern.",
+    "discrepancy": "The two-step gate is presented as the safety mechanism but its 100-block window doesn't bound the resulting mint pressure; it only forces the action across two transactions in a ~20 minute window."
+  },
+  "mitigations": [
+    "Add a hard cap, e.g. `require(bps <= MAX_APY_BPS)` with MAX_APY_BPS in the low thousands (e.g. 20_000 = 200%).",
+    "Add a minimum two-step delay measured in time (e.g. >= 24 hours) rather than blocks; 100 blocks on L2 is sub-second.",
+    "Wrap `setDesiredAPY` (and `setDepletionDuration`, `emergencyTransfer`) in an on-chain timelock so that holders can exit before the change takes effect.",
+    "Emit a 'pending' lockout window inside `_claimRewards` (e.g. enforce that no claim within N seconds of an APY change can use the new rate)."
+  ],
+  "crossReferences": ["PATTERN-005 (centralization-unbounded-apy) - econ angle adds: (a) cross-system phUSD inflation impact beyond this contract, (b) MEV pre-stake monetisation path, (c) treats 20-minute window on L2 as effectively zero-friction.", "Profile §7 V4, §8.4."]
+}

@@ -101,6 +101,7 @@ Submissions ready:
   High:   1 report (1 regression)
   Medium: 2 reports
   QA:     1 report (Low + Centralization + 4naly3er output)
+  Carryover: 3 still-open from prior runs (M-01, L-02, L-04) — stubs in submissions/carryover/
 
 Reports:  reports/nft-staking-12/submissions/*.md
 PoCs:     workspace/nft-staking/test/poc-*.t.sol

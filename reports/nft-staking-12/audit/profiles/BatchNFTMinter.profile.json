@@ -1,0 +1,220 @@
+{
+  "contract": "src/BatchNFTMinter.sol",
+  "profileTimestamp": "2026-05-29T00:00:00Z",
+  "submoduleCommit": "ab07199a658b58d0162c3914e4b32384d3a59a7b",
+  "solidityVersion": "^0.8.20",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": false,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": [],
+    "accessControlled": ["setTokenMinter", "setNudgeSize", "setNudgePaymentToken", "setPauser", "rescueERC20", "pause", "unpause"],
+    "initializerProtected": "n/a (non-upgradeable, constructor-only)",
+    "pausable": ["batchMint"]
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-001",
+      "type": "unbounded-loop",
+      "severity": "local-high",
+      "function": "batchMint",
+      "line": 207,
+      "boundedBy": "count (caller-supplied uint256, unvalidated upper bound)",
+      "description": "The core mint loop `for (uint256 i; i < count; ++i) nftMinter.mint(dispatcherIndex, recipient);` iterates `count` times where `count` is an unbounded caller-supplied uint256. The only validation is `count != 0` (BatchMint__ZeroCount). There is NO upper cap on `count`. Each iteration performs an external CALL into the trusted tokenMinter (token transfer + ERC1155 mint + dispatcher price ramp), so per-iteration gas is substantial. A caller may pass a `count` large enough to exceed the block gas limit, reverting the whole batch, or simply forcing self-DoS / wasted gas. This is the structural locus of the reported live exploit: the function trusts a numeric `count`/`paymentAmount` pair supplied by the caller with no relation enforced between them other than the dispatcher reverting when funds run out.",
+      "recommendation": "Introduce an owner-settable maxBatchSize cap and require(count <= maxBatchSize). Note: the inner mint reverting on insufficient paymentAmount provides economic backstop but NOT a gas/DoS bound."
+    },
+    {
+      "id": "LOCAL-002",
+      "type": "param-coupling / spec-note",
+      "severity": "local-info",
+      "function": "batchMint",
+      "line": 184,
+      "description": "batchMint accepts FIVE independent scalar parameters (paymentToken, dispatcherIndex, count, recipient, paymentAmount). There are NO arrays in the current signature, so there is no array-length cross-check to perform. The historical exploit narrative ('attacker could supply too many params') maps onto the unbounded `count` (LOCAL-001) and the previously caller-supplied minter argument (see dev NatSpec lines 18-29) which has since been pinned to owner-set `tokenMinter`. Confirm with the audit team whether the in-scope deployed bytecode matches this source: if an earlier ABI took a minter address or arrays, the live exploit surface differs from this source.",
+      "recommendation": "Confirm deployed ABI == this source. Document the removed minter parameter as a fixed historical issue, not a current one."
+    },
+    {
+      "id": "LOCAL-003",
+      "type": "rounding / dust-threshold logic",
+      "severity": "local-low",
+      "function": "batchMint",
+      "line": 229,
+      "description": "Refund gate uses `if (remaining / DUST_THRESHOLD != 0)` rather than `remaining >= DUST_THRESHOLD`. These are equivalent for the refund decision (integer division is non-zero iff remaining >= 1e6), so behaviour is correct but the idiom is non-obvious. `totalPaid` accounting: when a refund occurs, `totalPaid = paymentAmount > remaining ? paymentAmount - remaining : 0`. Because `remaining` is the FULL post-loop balance (which can include pre-existing donations or nudge leftovers, not just unused budget), `remaining` may exceed `paymentAmount`, yielding a reported `totalPaid == 0` even though real spend occurred. The return value is advisory only and not used for any on-chain accounting, so impact is informational.",
+      "recommendation": "Document that totalPaid is a best-effort figure and can be skewed by donated/residual balances; off-chain consumers must not treat it as authoritative."
+    },
+    {
+      "id": "LOCAL-004",
+      "type": "donation / griefing surface (defer exploitability)",
+      "severity": "local-info",
+      "function": "batchMint",
+      "line": 220,
+      "description": "Nudge payout transfers the contract's ENTIRE balanceOf(nudgePaymentToken) to `recipient` whenever count >= nudgeSize. The amount is read live from balanceOf, not tracked. Combined with the unbounded `count` (LOCAL-001), the cheapest path to clear the nudge gate is to pass a large `count` of genuine paid mints. The dev NatSpec argues pinning the minter forces genuine payment; that reasoning is cross-contract (depends on tokenMinter actually charging) and is DEFERRED to interaction analysis. Locally note: the dust refund at line 228 reads paymentToken balance AFTER the nudge transfer — if nudgePaymentToken == paymentToken the nudge would drain funds slated for refund, which is exactly why the line 200 up-front guard forbids that equality.",
+      "recommendation": "Defer nudge-economic exploitability to econ-scanner; the local guard (nudge != payment token) is verified present and correct."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "batchMint(IERC20 paymentToken, uint256 dispatcherIndex, uint256 count, address recipient, uint256 paymentAmount)",
+        "visibility": "external",
+        "returns": "uint256 totalPaid",
+        "accessControl": "none (any caller)",
+        "pauseGate": "whenNotPaused",
+        "reentrancyGuard": false,
+        "stateChanges": ["transient ERC20 allowance on tokenMinter (set max then 0)"],
+        "externalCalls": [
+          "paymentToken.transferFrom(msg.sender, this, paymentAmount)  [1x]",
+          "paymentToken.approve(tokenMinter, max) / approve(tokenMinter, 0)  [forceApprove, up to 2x]",
+          "tokenMinter.mint(dispatcherIndex, recipient)  [count times, UNBOUNDED]",
+          "nudgePaymentToken.balanceOf(this) + transfer(recipient, bal)  [conditional]",
+          "paymentToken.balanceOf(this) + transfer(msg.sender, remaining)  [conditional dust refund]"
+        ],
+        "validations": [
+          "count != 0 -> else BatchMint__ZeroCount",
+          "recipient != address(0) -> else BatchMint__ZeroRecipient",
+          "tokenMinter != address(0) -> else BatchMint__MinterNotConfigured",
+          "nudgePaymentToken == 0 OR nudgePaymentToken != paymentToken -> else BatchMint__NudgeTokenMatchesPaymentToken",
+          "NO upper bound on count",
+          "NO check that paymentAmount relates to count * price (dispatcher reverts if short)"
+        ]
+      },
+      {
+        "function": "setTokenMinter(ITokenMinterV2 newMinter)",
+        "visibility": "external",
+        "accessControl": "onlyOwner",
+        "stateChanges": ["tokenMinter"],
+        "externalCalls": []
+      },
+      {
+        "function": "setNudgeSize(uint256 newSize)",
+        "visibility": "external",
+        "accessControl": "onlyOwner",
+        "stateChanges": ["nudgeSize"],
+        "externalCalls": []
+      },
+      {
+        "function": "setNudgePaymentToken(address newToken)",
+        "visibility": "external",
+        "accessControl": "onlyOwner",
+        "stateChanges": ["nudgePaymentToken"],
+        "externalCalls": []
+      },
+      {
+        "function": "setPauser(address newPauser)",
+        "visibility": "external",
+        "accessControl": "onlyOwner",
+        "stateChanges": ["pauser"],
+        "externalCalls": []
+      },
+      {
+        "function": "pause()",
+        "visibility": "external",
+        "accessControl": "onlyPauser",
+        "stateChanges": ["Pausable._paused"],
+        "externalCalls": []
+      },
+      {
+        "function": "unpause()",
+        "visibility": "external",
+        "accessControl": "onlyPauser",
+        "stateChanges": ["Pausable._paused"],
+        "externalCalls": []
+      },
+      {
+        "function": "rescueERC20(IERC20 token, address to, uint256 amount)",
+        "visibility": "external",
+        "accessControl": "onlyOwner",
+        "pauseGate": "callable while paused",
+        "stateChanges": ["external token balance only"],
+        "externalCalls": ["token.transfer(to, amount)"],
+        "validations": ["to != address(0) -> else Rescue__ZeroRecipient"]
+      }
+    ],
+
+    "externalCalls": [
+      {
+        "target": "ITokenMinterV2 tokenMinter (owner-pinned state, NOT a param)",
+        "methods": ["mint(uint256,address)"],
+        "trustLevel": "trusted (owner-configured)",
+        "callSite": "loop body, line 208",
+        "perIteration": true,
+        "notes": "mint() overload WITHOUT extraData. Pulls payment from this contract's max-approved allowance, mints ERC1155 to recipient, ramps dispatcher price. Reverts (rolling back whole batch) if paymentAmount allowance/balance insufficient or paymentToken mismatches dispatcher prime token."
+      },
+      {
+        "target": "IERC20 paymentToken (caller-supplied param)",
+        "methods": ["transferFrom", "forceApprove", "balanceOf", "transfer"],
+        "trustLevel": "semi-trusted (assumed standard ERC20; caller picks address)",
+        "notes": "Caller chooses the token address. Assumes no fee-on-transfer (else upfront pull leaves less than paymentAmount and refund math skews). Per project known-issues, weird/FoT ERC20s are out of scope except USDT."
+      },
+      {
+        "target": "IERC20 nudgePaymentToken (owner-set state)",
+        "methods": ["balanceOf", "transfer"],
+        "trustLevel": "trusted (owner-configured)",
+        "notes": "Full balance swept to recipient when count >= nudgeSize. Funded externally (yield funnel)."
+      }
+    ],
+
+    "stateVariables": [
+      {"name": "tokenMinter", "type": "ITokenMinterV2", "visibility": "public", "mutators": ["setTokenMinter"], "readers": ["batchMint"], "trust": "owner-pinned mint target"},
+      {"name": "nudgeSize", "type": "uint256", "visibility": "public", "mutators": ["setNudgeSize"], "readers": ["batchMint"]},
+      {"name": "nudgePaymentToken", "type": "address", "visibility": "public", "mutators": ["setNudgePaymentToken"], "readers": ["batchMint"]},
+      {"name": "pauser", "type": "address", "visibility": "public", "mutators": ["setPauser"], "readers": ["onlyPauser modifier"]},
+      {"name": "DUST_THRESHOLD", "type": "uint256 internal constant", "value": "1e6", "readers": ["batchMint refund gate"]}
+    ],
+
+    "events": ["NudgeSizeChanged", "NudgePaymentTokenChanged", "NudgePaid", "TokenMinterSet", "Rescued", "PauserChanged"],
+    "errors": ["BatchMint__ZeroCount", "BatchMint__ZeroRecipient", "BatchMint__NudgeTokenMatchesPaymentToken", "BatchMint__MinterNotConfigured", "Rescue__ZeroRecipient"],
+    "modifiers": ["onlyOwner (OZ)", "onlyPauser (custom)", "whenNotPaused (OZ)"]
+  },
+
+  "batchMintDeepProfile": {
+    "signature": "batchMint(IERC20 paymentToken, uint256 dispatcherIndex, uint256 count, address recipient, uint256 paymentAmount) external whenNotPaused returns (uint256 totalPaid)",
+    "parameters": {
+      "paymentToken": "IERC20 — caller-supplied token used to pay each mint. Address fully attacker-controlled. Used for transferFrom, forceApprove, balanceOf, transfer.",
+      "dispatcherIndex": "uint256 — caller-supplied dispatcher route on the pinned minter. NOT validated against any allowlist locally; validity enforced by tokenMinter.mint reverting on bad index.",
+      "count": "uint256 — caller-supplied number of mint iterations. Validated only as != 0. NO UPPER BOUND. This is the loop bound.",
+      "recipient": "address — caller-supplied ERC1155 + nudge recipient. Validated != address(0).",
+      "paymentAmount": "uint256 — caller-supplied aggregate budget pulled upfront. NO arithmetic relation to count enforced in this contract; only the inner mint reverting on insufficient allowance/balance ties them together."
+    },
+    "arrays": "NONE. The current ABI has zero array parameters, therefore NO array-length validation and NO cross-array length check exists or is needed. Any 'mismatched array length' framing of the live exploit does not apply to THIS source; the live issue maps to unbounded `count` and/or a removed caller-supplied minter param (see dev NatSpec).",
+    "loopBound": "count (uint256, unvalidated max). Loop at line 207-209.",
+    "perIterationWork": "Exactly one external call tokenMinter.mint(dispatcherIndex, recipient). No per-iteration storage writes in this contract; all gas variance is inside the trusted minter (ERC20 pull, ERC1155 mint, dispatcher price ramp/storage write).",
+    "gasCharacteristics": "Linear in count with a heavy per-iteration constant (cross-contract mint). With no cap, large count can exceed block gas limit (transaction reverts, whole batch atomic). Attacker self-DoS / griefing of own tx; no partial state persists because allowance is opened before and closed after the loop in the same tx.",
+    "executionOrder": [
+      "1. whenNotPaused gate",
+      "2. require count != 0",
+      "3. require recipient != 0",
+      "4. load tokenMinter; require != 0",
+      "5. load nudgePaymentToken; if set && == paymentToken -> revert (BEFORE any funds move)",
+      "6. paymentToken.transferFrom(msg.sender, this, paymentAmount)  [funds pulled]",
+      "7. paymentToken.forceApprove(tokenMinter, max)",
+      "8. LOOP count times: tokenMinter.mint(dispatcherIndex, recipient)",
+      "9. paymentToken.forceApprove(tokenMinter, 0)  [allowance revoked]",
+      "10. if nudgeSize != 0 && count >= nudgeSize && nudgePaymentToken != 0: transfer full nudge balance to recipient, emit NudgePaid",
+      "11. remaining = paymentToken.balanceOf(this); if remaining/DUST_THRESHOLD != 0 refund remaining to msg.sender; compute totalPaid"
+    ],
+    "crossArrayCheck": "N/A — no arrays.",
+    "itemCap": "NONE — count is uncapped.",
+    "atomicity": "Fully atomic: any inner mint revert (bad index, insufficient budget, paymentToken != dispatcher prime token, gas exhaustion) rolls back the entire batch including the upfront pull and any allowance change."
+  },
+
+  "trustAssumptions": [
+    "tokenMinter is owner-configured and honest; it genuinely charges paymentToken per mint (the anti-drain argument depends on this — cross-contract, deferred).",
+    "paymentToken is a standard non-fee-on-transfer ERC20 (FoT/weird tokens out of scope per project known-issues except USDT).",
+    "nudgePaymentToken is owner-configured and funded externally; the owner can also drain it via rescueERC20 / nudge setters (centralization acknowledged).",
+    "pauser (global Pauser) is trusted to pause/unpause batchMint.",
+    "Owner is trusted (can set minter, nudge knobs, rescue any ERC20)."
+  ],
+
+  "inheritanceChain": ["Ownable (OZ)", "Pausable (OZ)", "IPausable (pauser submodule)"],
+
+  "complexity": {
+    "loc": 236,
+    "externalFunctions": 8,
+    "loops": 1,
+    "externalCallSites": 6,
+    "stateVariables": 4,
+    "constants": 1
+  }
+}

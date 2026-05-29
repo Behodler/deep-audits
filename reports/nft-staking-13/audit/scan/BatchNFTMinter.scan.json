@@ -1,0 +1,111 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-05-29T00:00:00Z",
+  "scanType": "code",
+  "scanner": "code-scanner (Tier 2, interaction-level)",
+  "submoduleHead": "031ffdab5bf1995026ca7a47391a19f7634e7d78",
+  "storyContext": "story-014: pin dispatcherIndex + derive paymentToken from dispatcher.primeToken(); H-01 'caller-supplied minter/dispatcher' removed.",
+  "contractsScanned": 2,
+  "scope": ["src/BatchNFTMinter.sol", "src/NFTStaker.sol"],
+  "crossContractImplsRead": [
+    "lib/mutable/yield-claim-nft/src/V2/NFTMinterV2.sol (concrete tokenMinter impl)",
+    "lib/yield-claim-nft/src/V2/dispatchers/ATokenDispatcherV2.sol (dispatch path)",
+    "OZ ERC1155._mint -> _updateWithAcceptanceCheck (onERC1155Received callback)"
+  ],
+
+  "exploitChainOfRecord": {
+    "summary": "batchMint loop -> nftMinter.mint() -> NFTMinterV2._executeMint() -> _mint(recipient) -> OZ _updateWithAcceptanceCheck -> recipient.onERC1155Received() fires MID-LOOP, on every iteration, with (a) a LIVE type(uint256).max approval to the minter, (b) the pulled paymentAmount still held, and (c) the full nudge pot still in the contract. recipient is fully caller-controlled. NFTMinterV2 has NO ReentrancyGuard and BatchNFTMinter.batchMint has NO nonReentrant guard, so the callback can re-enter batchMint freely.",
+    "callbackProof": "NFTMinterV2._executeMint line 196 `_mint(recipient, resolvedTokenId, 1, \"\")` -> OZ ERC1155._mint line 309 -> _updateWithAcceptanceCheck (ids.length==1 => single onERC1155Received). The dispatcher's `dispatch` (line 191) is nonReentrant but RETURNS before _mint, so its guard is NOT held during the callback."
+  },
+
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "cross-contract-reentrancy",
+      "title": "batchMint lacks nonReentrant; ERC1155 mint callback re-enters mid-loop with live max approval and intact nudge pot",
+      "severity": "low",
+      "severityRationale": "The reentrancy surface is real and undisputed (no guard, attacker-controlled callback target, sensitive state live during callback), but after tracing every sub-vector adversarially NONE yields a net loss of third-party assets on the CURRENT code. The nudge pot is a FULL-balance transfer (idempotent to zero), the held paymentAmount is the attacker's own per-call budget (not co-mingled with victims), and the live max approval can only pull the contract's own held balance. Impact is confined to self-griefing and a defensive-coding/parity gap with NFTStaker. Severity-classifier should treat as QA/Low unless a co-located funded path (below) is introduced.",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 238,
+      "lineStart": 235,
+      "lineEnd": 257,
+      "verdict": "NOT-EXPLOITABLE (as a third-party fund-loss vector) / DEFENSIVE-GAP-CONFIRMED",
+      "callbackEntryPoint": "NFTMinterV2._executeMint -> _mint(recipient) -> recipient.onERC1155Received(), fires once per loop iteration (count times) BEFORE forceApprove(0) at line 242 and BEFORE the nudge payout at line 246-257.",
+      "subVectors": [
+        {
+          "id": "a",
+          "claim": "Drain the nudge pot more than once",
+          "verdict": "NOT-EXPLOITABLE",
+          "reasoning": "The nudge payout (line 251-253) transfers the ENTIRE current balanceOf(this) of nudgePaymentToken. A re-entrant batchMint that clears the gate first drains the pot to zero; when the outer (or any subsequent nested) call reaches its own nudge block, balanceOf(this) == 0 so `nudgeAmount != 0` (line 252) is false and no second transfer occurs. Full-balance semantics are idempotent to zero: the pot is drainable exactly ONCE per funding regardless of reentrancy depth. Reentrancy does not multiply the payout.",
+          "evidence": "BatchNFTMinter.sol:251 `uint256 nudgeAmount = IERC20(_nudgeTokenEntry).balanceOf(address(this));` then :252 `if (nudgeAmount != 0)`."
+        },
+        {
+          "id": "b",
+          "claim": "Steal the held paymentAmount from another (victim) caller",
+          "verdict": "NOT-EXPLOITABLE",
+          "reasoning": "Each batchMint pulls its OWN paymentAmount fresh (line 235) and refunds its own surplus at the end (line 259-265). There is no persistent per-caller balance held across calls — the only residue is sub-DUST_THRESHOLD dust (<1e6 wei), which the contract intentionally donates to the next caller and is economically negligible. During a callback the only paymentToken the contract holds is the attacker's own freshly-pulled budget for the in-flight call; a victim's funds are never simultaneously resident and reachable. No cross-call fund commingling => no theft of others' principal.",
+          "evidence": "BatchNFTMinter.sol:235 pull; :259-265 per-call surplus sweep; DUST_THRESHOLD=1e6 (line 64)."
+        },
+        {
+          "id": "c",
+          "claim": "Abuse the live type(uint256).max approval to the minter",
+          "verdict": "NOT-EXPLOITABLE (bounded to own balance)",
+          "reasoning": "The max approval (line 236) lets the minter pull paymentToken from BatchNFTMinter. The only avenue to trigger such a pull is another mint() (NFTMinterV2._executeMint:183 safeTransferFrom(msg.sender=BatchNFTMinter, dispatcher, price)). A re-entrant batchMint(paymentAmount=0) CAN force extra mints that draw on the contract's held balance via this live approval — but the drawn funds are the ATTACKER's own in-flight budget, and any over-spend simply shrinks the attacker's own dust refund. The approval cannot be redirected to a third party or used to pull a victim's tokens (allowance is on the contract's own balance only). Net effect: the attacker pays for MORE real mints (nested N + outer N), which is strictly more expensive, not a cheaper drain. Self-griefing only.",
+          "evidence": "forceApprove(max) BatchNFTMinter.sol:236; revoke :242; inner pull NFTMinterV2.sol:183."
+        },
+        {
+          "id": "d",
+          "claim": "Cross-function reentrancy into NFTStaker entrypoints",
+          "verdict": "NOT-EXPLOITABLE",
+          "reasoning": "NFTStaker is a separate contract with INDEPENDENT storage (profile: 'no shared state'). Every NFTStaker user entrypoint (stake/unstake/claim/emergencyWithdraw) is nonReentrant (NFTStaker.profile verifiedProperties.reentrancyGuarded). A callback originating inside batchMint could call into NFTStaker, but NFTStaker's own guard and self-contained masterchef accounting prevent state corruption, and BatchNFTMinter holds no NFTStaker position. There is no A->B->A shared-state path between the two contracts. (Note: the BatchNFTMinter callback CANNOT re-enter a guarded NFTStaker function while NFTStaker already holds its guard, because the entry originates from BatchNFTMinter, not from within an NFTStaker call.)",
+          "evidence": "NFTStaker.profile.json reentrancyGuarded=[stake,unstake,claim,emergencyWithdraw]; sharedDependenciesWithBatchNFTMinter notes independent storage."
+        }
+      ],
+      "residualConcernForFutureDiffs": "The defensive gap becomes a HIGH the moment ANY of these hold: (1) batchMint is changed to retain a per-caller or aggregate balance across calls; (2) the nudge payout is changed from full-balance to a fixed/per-call amount (then nested calls each pay out a fixed amount before the pot zeroes => multiplicative drain); or (3) a sibling that DOES hold a BatchNFTMinter-controlled position is added. Because the only thing preventing a multi-drain today is the incidental full-balance idempotency, this is a fragile, implicit invariant.",
+      "attackVector": "Permissionless. Attacker deploys a contract implementing onERC1155Received that re-enters batchMint; passes it as `recipient`. Confirmed reachable but yields no net third-party loss on current code.",
+      "recommendation": "Add OZ ReentrancyGuard.nonReentrant to batchMint for parity with NFTStaker (which guards every entrypoint). This removes the fragile reliance on full-balance idempotency and pre-empts (1)/(2) above. Low cost, eliminates an entire class of future regressions. This is the single highest-value hardening despite the current NOT-EXPLOITABLE adjudication.",
+      "confidence": "high"
+    },
+
+    {
+      "id": "CODE-002",
+      "type": "unchecked-return-value / value-blind-gate-residual",
+      "title": "Owner-pinned dispatcher with config.price == 0 lets an attacker clear the count>=nudgeSize gate for free and drain the nudge pot (residual of prior H-01)",
+      "severity": "medium",
+      "severityRationale": "Conditional on owner configuration (price==0 on the pinned dispatcher), so not a permissionless live exploit on a correctly-configured deployment => not High. But once that owner/config precondition holds, the drain is fully permissionless, requires no privilege, and directly transfers the entire nudge pot to an attacker => protocol-function/value-leak with a stated external requirement => Medium per C4. The user reports a live mainnet exploit; if the deployed dispatcher's price was 0 (or set to 0 via setPrice), THIS is the live path.",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 246,
+      "lineStart": 238,
+      "lineEnd": 257,
+      "verdict": "CONDITIONAL (EXPLOITABLE iff pinned dispatcher config.price == 0 or trivially small relative to the pot)",
+      "uncheckedReturnAnalysis": {
+        "observation": "BatchNFTMinter.sol:239 ignores the bool return of nftMinter.mint(_dispatcherIndex, recipient). Inspected the concrete impl NFTMinterV2._executeMint (lines 170-201): it ALWAYS `return true` and there is NO success/no-op-false path — every failure mode (paused, unregistered index, disabled dispatcher, insufficient allowance/balance, dispatcher dispatch revert) REVERTS rather than returning false. Therefore the ignored return value is NOT independently exploitable: a failed mint reverts the whole batch atomically; count cannot be incremented past a silently-failed mint.",
+        "verdict": "Ignored return value alone: NOT-EXPLOITABLE (mint() reverts-on-failure, never no-ops to false). The real residual is the price==0 path below, which is a SUCCESSFUL mint that pulls 0 tokens — not a failed/false mint."
+      },
+      "zeroPriceAnalysis": {
+        "observation": "NFTMinterV2._executeMint has NO require(price > 0) (line 179 reads config.price, line 183 does safeTransferFrom of `price` which is a no-op zero-value transfer for price==0 on a standard ERC20). The mint still SUCCEEDS (returns true, mints the NFT, advances price by growth which is 0+0=0). registerDispatcher (line 125-147) accepts initialPrice with no >0 check; setPrice (line 282-287) can set any value INCLUDING 0 with no floor. So a registered, enabled dispatcher with price==0 is reachable owner state.",
+        "drainPath": "If the owner-pinned dispatcherIndex resolves to config.price == 0: attacker calls batchMint(count = nudgeSize, recipient = self, paymentAmount = 0). Loop runs nudgeSize times; each inner mint pulls 0 tokens (free); count >= nudgeSize gate (line 246) clears; entire nudgePaymentToken balance transfers to attacker (line 253). Cost ~= gas only. This is the SAME economic outcome as the original H-01 (free gate clear -> pot drain); story-014 only removed the CALLER's ability to CHOOSE the cheap dispatcher, it did NOT add an intrinsic price>0 / value-vs-payout check. The gate remains purely numeric and value-blind.",
+        "precondition": "Owner pins (or leaves pinned) a dispatcherIndex whose NFTMinterV2 config.price == 0, OR owner/anyone-with-minter-owner calls setPrice(index, 0). On a deployment where price>0 and ramps upward, clearing the gate costs sum of `nudgeSize` ramping prices, which must exceed the pot for safety — an UNVALIDATED economic invariant the contract never enforces."
+      },
+      "attackVector": "Permissionless given the price==0 precondition. No reentrancy required. Single batchMint(count>=nudgeSize, recipient=attacker, paymentAmount=0) drains the full pot.",
+      "impact": "Complete drain of the nudge pot (externally-funded nudgePaymentToken balance, e.g. USDC routed in by a yield funnel) to an arbitrary attacker, repeatable each time the pot is refunded, for ~zero token cost.",
+      "rootCause": "The nudge gate (count >= nudgeSize) is value-blind: it never compares the payout to what the caller actually paid. story-014 relocated the trust from caller-choice to owner-config but left the underlying value-blindness. Defense-in-depth (require price>0 in NFTMinterV2._executeMint, OR a value/floor check in batchMint, OR gating the nudge on actual spend) is absent.",
+      "recommendation": "Primary (in-scope for BatchNFTMinter): make the nudge gate value-aware - e.g. require the caller's realised spend (paymentAmount - refund, or sum of inner prices) to exceed a configured floor before paying the nudge, instead of a pure count comparison. Secondary (cross-submodule, requires change request): add require(price > 0) to NFTMinterV2._executeMint and a >0 floor to registerDispatcher/setPrice. At minimum, document and test the owner-config invariant 'pinned dispatcher price * nudgeSize > pot' and add a price>0 sanity check in setDispatcherIndex (read configs(idx).price and revert on 0).",
+      "confidence": "high",
+      "noteOnLiveExploit": "If the mainnet incident is confirmed, FIRST check the deployed NFTMinterV2.configs(BatchNFTMinter.dispatcherIndex).price on-chain at the exploit block. price==0 (or << pot/nudgeSize) confirms this finding as the live root cause. If price was healthy and >0, re-examine CODE-001's residualConcernForFutureDiffs and any nudgePaymentToken == paymentToken edge."
+    }
+  ],
+
+  "tier1FindingsNotDuplicated": [
+    "LOCAL-001 unbounded loop (self-limiting by per-iteration cost; trusted to Tier 1).",
+    "LOCAL-002 missing reentrancy guard (adjudicated at interaction level here as CODE-001).",
+    "LOCAL-003 ignored configs() price/disabled (adjudicated here as CODE-002)."
+  ],
+
+  "ledgerReconciliation": {
+    "priorH01": "run-12 H-01 'value-blind nudge gate lets attacker drain nudge pot via caller-chosen cheap/zero-price dispatcher'.",
+    "status": "PARTIALLY-FIXED -> see CODE-002. The CALLER-CHOICE half (attacker supplies cheap/zero dispatcher) is FIXED by story-014 (dispatcher pinned, paymentToken derived). The VALUE-BLIND half (numeric gate ignores actual spend; price==0 on the pinned dispatcher re-opens the free drain) is NOT fixed. Recommend ledger entry as 'fixed-caller-vector, residual-config-vector' rather than fully fixed; CODE-002 is the residual. If the pinned dispatcher price was 0 on mainnet this is effectively a REGRESSION of H-01 via owner config rather than a new bug."
+  }
+}

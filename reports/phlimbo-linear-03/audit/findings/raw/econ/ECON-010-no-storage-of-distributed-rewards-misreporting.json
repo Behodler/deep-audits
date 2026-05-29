@@ -1,0 +1,41 @@
+{
+  "id": "ECON-010",
+  "source": "econ-scanner",
+  "kind": "fresh",
+  "title": "Contract publishes no audit trail of cumulative rewards distributed vs funded, breaking the linear-depletion intent verifiability and enabling silent fund mis-routing",
+  "type": "intent-mismatch / observability / spec-vs-implementation",
+  "severity": "potential-low",
+  "confidence": "high",
+  "contract": "lib/phlimbo-ea/src/Phlimbo.sol",
+  "function": "_updatePool / collectReward / _claimRewards",
+  "line": 389,
+  "lineStart": 270,
+  "lineEnd": 455,
+  "rootCause": "The contract tracks `rewardBalance` (undistributed) and `accStablePerShare` (per-share accumulator) but does NOT track `totalRewardsCollected` (lifetime funding) or `totalRewardsDistributed` (lifetime payout). Combined with the V1 re-anchor bug (CODE-001) which leaves rewards perpetually stuck in `rewardBalance`, and ECON-008 (zero-staked time loss), and `emergencyTransfer` sweeping balances without accounting, there is NO on-chain way to verify the protocol's headline 'linear depletion' claim. A funder cannot easily prove how much of their deposit actually reached stakers vs. lingered vs. was swept. Stakers cannot reconcile their claims against a global ledger of distributions.",
+  "economicImpact": "Subtler than a direct theft, but corrosive: (a) the linear-depletion claim cannot be verified by third parties without complex off-chain replay; (b) `emergencyTransfer` becomes a clean exit for funds with no on-chain ledger entry telling stakers what fraction of `rewardBalance` was 'theirs vs not'; (c) the V1 re-anchor's asymptotic tail means `rewardBalance > 0` is a persistent state with no signal about how much should have already been distributed by now. This is an accountability gap, not a hot bug -- but in a custody-mode 'yield farm' it materially erodes funder trust.",
+  "affectedParties": "Funders (cannot prove deposit fate); stakers (cannot reconcile claims with a global rate); auditors and users monitoring the contract.",
+  "attackScenario": [
+    "Funder deposits 1M USDC via collectReward over time. No event accumulates this; only individual `RewardCollected` events exist.",
+    "Owner calls `emergencyTransfer` 6 months later, sweeping 800k USDC.",
+    "On-chain question: 'how much of the 1M was distributed to stakers, and how much was swept?'. Answering requires summing RewardCollected events, replaying every _updatePool to compute total accStablePerShare growth * totalStaked at each block, comparing to the swept balance -- impractical without an indexer.",
+    "Owner (or compromised owner) can claim 'most of it was distributed' and there is no easy way to disprove without a full replay.",
+    "Variant: a malicious yield-accumulator operator funds collectReward, watches the V1 asymptotic decay leave 30% lingering, then has the Phlimbo owner emergencyTransfer the residue back to themselves -- collecting fees twice (once as yield, once as residue)."
+  ],
+  "profitability": "Not directly profitable as an isolated attack, but enables hidden value siphoning in combination with ECON-005 (emergencyTransfer trap), CODE-001 (asymptotic decay residue), and the absence of a public dashboard.",
+  "preconditions": [
+    "No indexer is monitoring all events with replay logic.",
+    "The protocol presents a 'linear depletion' marketing claim that users believe."
+  ],
+  "intentMismatchEvidence": {
+    "documentation": "Profile §1, §11: 7 events including `RewardCollected(amount, newRewardBalance, newRate)` and `RewardsClaimed(user, phUSDAmount, rewardAmount)`. But there's no event for `_updatePool` distributing rewards to the per-share accumulator -- that's the actual 'distribution' step. Funders see deposits; stakers see claims; nobody sees the accrual.",
+    "implementation": "`_updatePool` mutates `accStablePerShare`, `accPhUSDPerShare`, and `rewardBalance` silently. The dead `RateUpdated` event (see CODE-012) was presumably intended to fill this gap but is unwired.",
+    "discrepancy": "The contract claims linear depletion but exposes no on-chain trail to verify it. The single observability primitive (`RewardCollected` event) only fires on deposits; outflows to stakers are aggregated in `RewardsClaimed` per-user, not globally. The dead `RateUpdated` is evidence the design intended better observability."
+  },
+  "mitigations": [
+    "Track `totalRewardsCollectedAllTime` and `totalRewardsDistributedAllTime` as immutable accumulators (only ever increase). Emit them in events.",
+    "Wire the dead `RateUpdated` event in `_updatePool` so the rate evolution is on-chain visible.",
+    "Emit a per-update event with `(block.timestamp, toDistribute, rewardBalanceBefore, rewardBalanceAfter, accStablePerShare)` in `_updatePool` so external observers can reconstruct the depletion curve.",
+    "Add view functions: `verifyLinearDepletion()` returning `(expectedAtThisBlock, actualAtThisBlock)` from genesis."
+  ],
+  "crossReferences": ["CODE-001 (V1 re-anchor) - this finding is the observability gap that makes CODE-001 hard to monitor in production.", "CODE-012 (RateUpdated event never emitted) - shares the dead-event evidence.", "ECON-005 (emergencyTransfer trap) - amplifier: opaque accounting makes the sweep harder to challenge.", "Profile §11."]
+}

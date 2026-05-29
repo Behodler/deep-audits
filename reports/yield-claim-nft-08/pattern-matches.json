@@ -1,0 +1,65 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-05-29T00:00:00Z",
+  "scanType": "pattern-matching",
+  "patternsChecked": 23,
+  "findingsCount": 4,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "INCORRECT-OPERATOR",
+      "type": "boundary-off-by-one",
+      "severity": "potential-medium",
+      "contract": "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+      "line": 93,
+      "description": "setRatio uses `if (newRatio > MAX_RATIO) revert RatioTooHigh()` but the documented invariant (lines 29-30, 91) is that ratio must be STRICTLY less than MAX_RATIO (50) — 'Max settable ratio is MAX_RATIO - 1'. The operator should be `>=`. As written, a ratio of exactly 50 is accepted, and DEFAULT_RATIO is already 50, so the constructor itself sets ratio to a value the spec says is out of range. Contradicts the contract's own stated bound; the off-by-one means the realised mint-debt is 50% of dispatched USDS rather than the intended <50% cap.",
+      "confidence": "high",
+      "matchedSignatures": ["if (newRatio > MAX_RATIO) revert RatioTooHigh();"],
+      "missingMitigations": ["Operator does not enforce the documented strict-less-than bound; should be `newRatio >= MAX_RATIO`"],
+      "notes": "ratio setter is onlyOwner, but this is a spec-vs-code boundary deviation (the bound itself is wrong), not an owner-attack. Manual review should confirm intended semantics of MAX_RATIO vs DEFAULT_RATIO."
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "dos-unbounded-loop",
+      "severity": "potential-medium",
+      "contract": "src/V2/NFTMigrator.sol",
+      "line": 65,
+      "description": "migrate() runs an outer loop over [1, v1.nextIndex()) and, for each index the caller holds, an inner loop `for (j = 0; j < balance; j++)` that calls v2.mintFor(...) once per NFT held. Total external calls scale with the caller's entire V1 NFT balance across all indexes. A user (or a holder who was airdropped/accumulated many V1 NFTs) with a large aggregate balance cannot migrate in a single transaction once the cost exceeds the block gas limit, permanently blocking their migration (migrate() has no pagination or partial-migration path). Self-inflicted for most users, but balances are not user-controllable downward (no partial migrate), so a sufficiently large holder is bricked.",
+      "confidence": "medium",
+      "matchedSignatures": ["for (uint256 i = 1; i < upperBound; i++)", "for (uint256 j = 0; j < balance; j++)"],
+      "missingMitigations": ["No pagination / per-index or bounded-quantity migrate variant", "mintFor is called once per NFT instead of batch-minting `balance` in one _mint call"],
+      "notes": "v1.nextIndex() is owner-bounded (small), but `balance` is unbounded per holder. Also note setMappings (line 43) and setInitialized (line 53) loop over nextIndex but are owner-only and bounded."
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "DIVISION-PRECISION",
+      "type": "rounding-loss",
+      "severity": "potential-low",
+      "contract": "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+      "line": 118,
+      "description": "onDispatch computes `added = (amount * ratio) / 100`. Multiplication-before-division is correct ordering, but integer division truncates: for small dispatched `amount` (or low ratio) `added` rounds to 0 and the code early-returns (line 119), so that dispatch accrues no mint-debt. Repeated small dispatches systematically under-accrue the phUSD debt ledger vs the nominal ratio%. Value-leak is bounded by the per-dispatch rounding remainder.",
+      "confidence": "medium",
+      "matchedSignatures": ["uint256 added = (amount * ratio) / 100;"],
+      "missingMitigations": ["No remainder carry-forward; truncated dust is silently dropped"],
+      "notes": "Low impact; flagged for completeness. Related to (but distinct from) the documented basis-point price-compounding known issue, which is excluded."
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE",
+      "type": "spot-balance-sizing",
+      "severity": "potential-low",
+      "contract": "src/V2/dispatchers/BalancerPoolerV2.sol",
+      "line": 207,
+      "description": "unlockCallback sizes the donation/LP split off `balanceOf(address(this))` snapshotted in pool() (line 192) and the donation swap (line 226) executes against live Balancer V3 pool reserves. The swap path passes limitRaw: 0 (line 223) and relies solely on the post-unwrap USDC slippage check (`usdcReceived >= minUSDC`, line 235) supplied by the authorized pooler. If a pooler passes a low/zero minUSDC, an in-block reserve manipulation (sandwich) of the sUSDS->waUSDC swap could extract value on the donation leg. Mitigated in practice by: pool() being onlyAuthorizedPooler + nonReentrant + whenNotPaused, and the caller-supplied minUSDC/minBPT floors.",
+      "confidence": "low",
+      "matchedSignatures": ["IERC20(_sUSDS).balanceOf(address(this))", "IBalancerVault(_vault).swap(swapParams)"],
+      "missingMitigations": ["limitRaw set to 0 on the intermediate swap; slippage protection delegated entirely to the pooler-supplied minUSDC, no on-chain TWAP/oracle reference"],
+      "notes": "Requires a careless or compromised authorized pooler to set minUSDC too low; pooler trust + slippage params reduce severity. Donation phase is the newly-added Story-031 code path. Worth manual review of the minUSDC sizing guidance for poolers."
+    }
+  ]
+}
