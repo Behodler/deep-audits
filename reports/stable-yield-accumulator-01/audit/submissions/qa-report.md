@@ -1,4 +1,4 @@
-# QA Report: yield-accumulator
+# QA Report: stable-yield-accumulator
 
 ## Summary
 

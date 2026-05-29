@@ -39,7 +39,7 @@ PoCs/tests live in `workspace/<project>/test/` (preferred) or `reports/<project>
 ```json
 {
   "id": "H-01",
-  "project": "nft-staking",
+  "project": "phoenix-nft-staking",
   "status": "ready",
   "severity": "high",
   "title": "Reward debt accounting allows draining the vault",
@@ -52,7 +52,7 @@ PoCs/tests live in `workspace/<project>/test/` (preferred) or `reports/<project>
   "impact": "...",
   "attackPath": ["..."],
   "recommendation": "...",
-  "poc": { "file": "workspace/nft-staking/test/poc-H-01.t.sol", "status": "passing", "lastRun": "..." },
+  "poc": { "file": "workspace/phoenix-nft-staking/test/poc-H-01.t.sol", "status": "passing", "lastRun": "..." },
   "metadata": { "createdAt": "...", "updatedAt": "...", "scanOrigin": "SCAN-001", "classificationOrigin": "CLASS-001" }
 }
 ```
@@ -81,11 +81,11 @@ Ledger entry shape:
 {
   "fingerprint": "<sha256>", "title": "...", "severity": "high",
   "status": "open | fixed | acknowledged | wont-fix | false-positive",
-  "firstSeenRun": "nft-staking-09", "lastSeenRun": "nft-staking-12",
+  "firstSeenRun": "phoenix-nft-staking-09", "lastSeenRun": "phoenix-nft-staking-12",
   "fixedAtCommit": null, "regressionOf": null,
   "contract": "src/RewardVault.sol", "function": "withdrawRewardToken",
   "lineStart": 240, "lineEnd": 252,
-  "reportPath": "reports/nft-staking-12/submissions/H-01-submission.md"
+  "reportPath": "reports/phoenix-nft-staking-12/submissions/H-01-submission.md"
 }
 ```
 Never silently overwrite a human-set status (`acknowledged`/`wont-fix`/`false-positive`) — those are triage decisions set via `/ledger`.
@@ -106,8 +106,8 @@ Stub format:
 - **Severity:** Medium
 - **Status:** open (still-open)
 - **Location:** `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L413-L441` (`_skimSurplus`)
-- **First seen:** phoenix-vault-05  ·  **Still present as of:** phoenix-vault-08
-- **Original report:** [reports/phoenix-vault-05/submissions/M-01-skim-overskim.md](../../phoenix-vault-05/submissions/M-01-skim-overskim.md)
+- **First seen:** reflax-yield-vault-05  ·  **Still present as of:** reflax-yield-vault-08
+- **Original report:** [reports/reflax-yield-vault-05/submissions/M-01-skim-overskim.md](../../reflax-yield-vault-05/submissions/M-01-skim-overskim.md)
 - **Fingerprint:** `9addc259…`
 
 See the original report for the full description, impact, attack path, PoC, and recommendation.

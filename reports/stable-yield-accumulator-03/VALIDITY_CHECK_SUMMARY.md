@@ -1,6 +1,6 @@
-# Validity Check Summary: yield-accumulator-03
+# Validity Check Summary: stable-yield-accumulator-03
 
-**Project**: yield-accumulator (regular audit mode)
+**Project**: stable-yield-accumulator (regular audit mode)
 **Date**: 2026-02-10
 
 ---

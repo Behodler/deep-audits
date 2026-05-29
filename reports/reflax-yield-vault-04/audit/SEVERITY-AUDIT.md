@@ -1,4 +1,4 @@
-# Severity Audit Report — phoenix-vault-04
+# Severity Audit Report — reflax-yield-vault-04
 
 **Auditor:** severity-auditor (independent second opinion)
 **Date:** 2026-04-07
@@ -253,5 +253,5 @@ The risk for the judge is interpretive: if the judge reads the natspec broadly a
 
 - `<repo>/lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol`
 - `<repo>/lib/reflax-yield-vault/src/AYieldStrategy.sol`
-- `<repo>/reports/phoenix-vault-04/audit/findings/high/H-01.json` through `H-05.json`
-- `<repo>/reports/phoenix-vault-04/audit/findings/medium/M-01.json`
+- `<repo>/reports/reflax-yield-vault-04/audit/findings/high/H-01.json` through `H-05.json`
+- `<repo>/reports/reflax-yield-vault-04/audit/findings/medium/M-01.json`

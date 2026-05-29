@@ -1,4 +1,4 @@
-# Severity Audit Report -- yield-accumulator-07
+# Severity Audit Report -- stable-yield-accumulator-07
 
 **Project**: StableYieldAccumulator
 **Contract**: `lib/stable-yield-accumulator/src/StableYieldAccumulator.sol`

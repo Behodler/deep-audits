@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-03] Single-token threshold check prevents compounding when fees accumulate asymmetrically
 Root Cause Link: https://github.com/Behodler/stable-yield-accumulator/blob/main/src/UniswapV4Hooks/AutoCompoundPositionHook.sol#L289-L293
-PoC File: workspace/yield-accumulator/test/poc-M-03-threshold.t.sol
+PoC File: workspace/stable-yield-accumulator/test/poc-M-03-threshold.t.sol
 -->
 
 ## Finding description and impact
@@ -55,7 +55,7 @@ The PoC demonstrates 50,000 tokens stuck waiting for a 900 token shortfall in th
 
 ### Proof of Concept
 
-The PoC file at `workspace/yield-accumulator/test/poc-M-03-threshold.t.sol` demonstrates:
+The PoC file at `workspace/stable-yield-accumulator/test/poc-M-03-threshold.t.sol` demonstrates:
 
 ```solidity
 function test_M03_SingleTokenThresholdPreventsCompounding() public {

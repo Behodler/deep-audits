@@ -4,7 +4,7 @@ Title: [M-02] `rewardBudget < windowDuration` permanently strands funds at `rewa
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/2e56588fd9cc81f43edf42914638d6a122164b3e/src/NFTStaker.sol#L194
 Additional Sites: https://github.com/Behodler/phoenix-nft-staking/blob/2e56588fd9cc81f43edf42914638d6a122164b3e/src/NFTStaker.sol#L204
                https://github.com/Behodler/phoenix-nft-staking/blob/2e56588fd9cc81f43edf42914638d6a122164b3e/src/NFTStaker.sol#L228
-PoC File: workspace/nft-staking/test/poc-CS-02.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-CS-02.t.sol
 Status: submitted
 -->
 
@@ -62,7 +62,7 @@ Given that the exploit leaks value rather than stealing the full pool, and requi
 A runnable Foundry PoC is provided at:
 
 ```
-workspace/nft-staking/test/poc-CS-02.t.sol
+workspace/phoenix-nft-staking/test/poc-CS-02.t.sol
 ```
 
 The PoC covers three vectors:

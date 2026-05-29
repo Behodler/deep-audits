@@ -1,6 +1,6 @@
 # Validity Check Summary: Phlimbo Linear Audit
 
-**Project**: phlimbo-linear (PhlimboEA Contract)
+**Project**: phlimbo-ea (PhlimboEA Contract)
 **Date**: 2026-01-15
 **Validator**: validity-checker agent
 
@@ -199,9 +199,9 @@ All findings passed validity checks. No known C4 invalid patterns detected.
 
 | Finding | PoC Exists | PoC Location |
 |---------|------------|--------------|
-| M-01 | YES | workspace/phlimbo-linear/test/poc-M-01.t.sol |
-| M-03 | YES | workspace/phlimbo-linear/test/poc-M-03.t.sol |
-| M-04 | YES | workspace/phlimbo-linear/test/poc-M-04.t.sol |
+| M-01 | YES | workspace/phlimbo-ea/test/poc-M-01.t.sol |
+| M-03 | YES | workspace/phlimbo-ea/test/poc-M-03.t.sol |
+| M-04 | YES | workspace/phlimbo-ea/test/poc-M-04.t.sol |
 
 All Medium findings have coded, runnable PoCs as required by C4 standards.
 

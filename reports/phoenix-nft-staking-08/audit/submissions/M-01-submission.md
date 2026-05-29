@@ -3,7 +3,7 @@ C4 Submission Metadata
 Title: [M-01] BatchNFTMinter wired to V1 ITokenMinter; non-functional against production NFTMinterV2
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/b9272e483a04a82060b37dd722b818b2b7aa3a40/src/BatchNFTMinter.sol#L73
 Severity: Medium
-PoC File: workspace/nft-staking/test/poc-M-01.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-M-01.t.sol
 -->
 
 ## Finding description and impact
@@ -61,7 +61,7 @@ Functional denial-of-service of the entire `BatchNFTMinter` helper against the s
 
 ### Proof of concept
 
-Full Foundry PoC: [`workspace/nft-staking/test/poc-M-01.t.sol`](../../../../workspace/nft-staking/test/poc-M-01.t.sol).
+Full Foundry PoC: [`workspace/phoenix-nft-staking/test/poc-M-01.t.sol`](../../../../workspace/phoenix-nft-staking/test/poc-M-01.t.sol).
 
 The PoC stands up two scenarios sharing the same `BatchNFTMinter` and `MockERC20` payment token:
 
@@ -71,7 +71,7 @@ The PoC stands up two scenarios sharing the same `BatchNFTMinter` and `MockERC20
 Run with:
 
 ```bash
-cd workspace/nft-staking
+cd workspace/phoenix-nft-staking
 forge test --match-test test_M01 -vvv
 ```
 

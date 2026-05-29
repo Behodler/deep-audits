@@ -19,7 +19,7 @@ The C4 form has these separate fields that we generate content for:
 # Orchestration Flow
 
 ## 1. Resolve report dir and load finding
-Invoke **project-manager**: "Get the latest versioned report dir for the project" → `<report-dir>` (e.g. `reports/nft-staking-12/`).
+Invoke **project-manager**: "Get the latest versioned report dir for the project" → `<report-dir>` (e.g. `reports/phoenix-nft-staking-12/`).
 Invoke **finding-manager**: "Get finding with PoC details"
 - Look up finding by project and label
 - Verify finding exists and has status "ready"

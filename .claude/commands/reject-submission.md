@@ -15,7 +15,7 @@ Extract project name and finding ID from $ARGUMENTS:
 - Validate finding ID format (H-XX, M-XX, or L-XX)
 
 ## 2. Locate Submission
-Invoke **project-manager**: "Get the latest versioned report dir" → `<report-dir>` (e.g. `reports/nft-staking-12/`).
+Invoke **project-manager**: "Get the latest versioned report dir" → `<report-dir>` (e.g. `reports/phoenix-nft-staking-12/`).
 Invoke **finding-manager**: "Locate submission file for finding"
 - Search in `<report-dir>/submissions/` for matching file
 - Expected pattern: `<finding-id>-submission.md`

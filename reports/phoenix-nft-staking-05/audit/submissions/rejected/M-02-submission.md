@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-02] emergencyWithdraw decrements totalStaked without _updatePool, retroactively repricing the pre-withdraw window at the new smaller denominator
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/66af47d/src/NFTStaker.sol#L452-L461
-PoC File: workspace/nft-staking/test/poc-M-02.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-M-02.t.sol
 -->
 
 ## Finding description and impact

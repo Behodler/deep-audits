@@ -1,9 +1,9 @@
-# Static Analysis - phoenix-vault (reflax-yield-vault)
+# Static Analysis - reflax-yield-vault (reflax-yield-vault)
 
-- **Project:** phoenix-vault (submodule `lib/reflax-yield-vault`)
+- **Project:** reflax-yield-vault (submodule `lib/reflax-yield-vault`)
 - **Scan timestamp:** 2026-05-25
 - **Scan type:** static (deterministic SAST)
-- **Build:** workspace copy `workspace/phoenix-vault`, `forge build` OK (artifacts in `out/`), solc 0.8.x (pragma `^0.8.13`)
+- **Build:** workspace copy `workspace/reflax-yield-vault`, `forge build` OK (artifacts in `out/`), solc 0.8.x (pragma `^0.8.13`)
 - **Tools:** Slither 0.11.3, Aderyn 0.6.8, Semgrep 1.163.0 (`p/smart-contracts`, 50 solidity rules)
 
 ## In-scope files

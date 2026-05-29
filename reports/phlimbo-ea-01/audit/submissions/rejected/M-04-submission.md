@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-04] Cumulative precision loss in rewardPerSecond recalculation
 Root Cause Link: https://github.com/Behodler/phlimbo-ea/blob/main/src/Phlimbo.sol#L437
-PoC File: workspace/phlimbo-linear/test/poc-M-04.t.sol
+PoC File: workspace/phlimbo-ea/test/poc-M-04.t.sol
 -->
 
 ## Finding description and impact

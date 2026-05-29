@@ -1,4 +1,4 @@
-# QA Report for Phlimbo (Linear Distribution) — Run phlimbo-linear-03
+# QA Report for Phlimbo (Linear Distribution) — Run phlimbo-ea-03
 
 **Submodule head**: `1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301`
 **Target**: `lib/phlimbo-ea/src/Phlimbo.sol`
@@ -21,7 +21,7 @@ The automated 4naly3er bot report is attached as Appendix A.
 
 ## Centralization Risks
 
-### [C-01] `setDepletionDuration` has no minimum floor and no two-step gate — one-tx flash-drain of `rewardBalance` <!-- id: pl3c1 -->
+### [C-01] `setDepletionDuration` has no minimum floor and no two-step gate — one-tx flash-drain of `rewardBalance` <!-- id: pe3c1 -->
 
 **Location**: [`src/Phlimbo.sol#L178-L191`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L178-L191)
 
@@ -48,7 +48,7 @@ commit applies after a delay window). Optionally route through a timelock contro
 
 ---
 
-### [C-02] `emergencyTransfer` sweeps all funds without zeroing accounting, silently bricking `pauseWithdraw` <!-- id: pl3c2 -->
+### [C-02] `emergencyTransfer` sweeps all funds without zeroing accounting, silently bricking `pauseWithdraw` <!-- id: pe3c2 -->
 
 **Location**: [`src/Phlimbo.sol#L214-L227`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L214-L227)
 
@@ -74,7 +74,7 @@ per-user accounting (loop over users or require migration shutdown) before sweep
 
 ---
 
-### [C-03] Uncapped `desiredAPYBps` converts directly into unbounded `phUSD` mint pressure; the two-step gate is delay-only <!-- id: pl3c3 -->
+### [C-03] Uncapped `desiredAPYBps` converts directly into unbounded `phUSD` mint pressure; the two-step gate is delay-only <!-- id: pe3c3 -->
 
 **Location**: [`src/Phlimbo.sol#L151-L172`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L151-L172)
 
@@ -101,7 +101,7 @@ minimal-code, high-value hardening.
 
 ---
 
-### [C-04] Pauser can sandwich `pause`/`unpause` cycles to selectively deny yield to specific stakers <!-- id: pl3c4 -->
+### [C-04] Pauser can sandwich `pause`/`unpause` cycles to selectively deny yield to specific stakers <!-- id: pe3c4 -->
 
 **Location**: [`src/Phlimbo.sol#L197-L261`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L197-L261)
 
@@ -131,7 +131,7 @@ rebase recommendation.
 
 ## Low Risk Findings
 
-### [L-01] Declared event `RateUpdated` is never emitted <!-- id: pl3l1 -->
+### [L-01] Declared event `RateUpdated` is never emitted <!-- id: pe3l1 -->
 
 **Location**: [`src/Phlimbo.sol#L105-L106`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L105-L106)
 
@@ -150,7 +150,7 @@ Emitting is the better fix because the observability is genuinely useful.
 
 ---
 
-### [L-02] `setDesiredAPY` commit is mempool-visible; stakers front-run to capture rate-change delta <!-- id: pl3l2 -->
+### [L-02] `setDesiredAPY` commit is mempool-visible; stakers front-run to capture rate-change delta <!-- id: pe3l2 -->
 
 **Location**: [`src/Phlimbo.sol#L151-L172`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L151-L172)
 
@@ -172,7 +172,7 @@ magnitude-cap recommendation in C-03 with a rate-of-change cap
 
 ---
 
-### [L-03] `setDesiredAPY` commit branch does not clear `pendingAPYBps` / `pendingAPYBlockNumber` <!-- id: pl3l3 -->
+### [L-03] `setDesiredAPY` commit branch does not clear `pendingAPYBps` / `pendingAPYBlockNumber` <!-- id: pe3l3 -->
 
 **Location**: [`src/Phlimbo.sol#L163-L171`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L163-L171)
 
@@ -198,7 +198,7 @@ apySetInProgress = false;
 
 ---
 
-### [L-04] `setPauser` emits no event <!-- id: pl3l4 -->
+### [L-04] `setPauser` emits no event <!-- id: pe3l4 -->
 
 **Location**: [`src/Phlimbo.sol#L206-L208`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L206-L208)
 
@@ -227,7 +227,7 @@ unpause-cooldown) are repeated in the C-04 recommendation.
 
 ---
 
-### [L-06] `pauseWithdraw` silently forfeits accrued rewards with no event and orphans per-share accumulator residue <!-- id: pl3l6 -->
+### [L-06] `pauseWithdraw` silently forfeits accrued rewards with no event and orphans per-share accumulator residue <!-- id: pe3l6 -->
 
 **Location**: [`src/Phlimbo.sol#L245-L261`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L245-L261)
 
@@ -254,7 +254,7 @@ M-01 fix (rebase debts) for a consistent `pauseWithdraw` shape.
 
 ---
 
-### [L-07] `collectReward` is mempool-visible: searchers can sandwich a funding deposit to capture rewards intended for long-term stakers <!-- id: pl3l7 -->
+### [L-07] `collectReward` is mempool-visible: searchers can sandwich a funding deposit to capture rewards intended for long-term stakers <!-- id: pe3l7 -->
 
 **Location**: [`src/Phlimbo.sol#L270-L286`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L270-L286)
 
@@ -276,7 +276,7 @@ a `collectReward` is excluded from that batch's accrual.
 
 ---
 
-### [L-08] `collectReward` with zero `totalStaked` silently leaks funder value: rate is anchored but the depletion clock does not advance <!-- id: pl3l8 -->
+### [L-08] `collectReward` with zero `totalStaked` silently leaks funder value: rate is anchored but the depletion clock does not advance <!-- id: pe3l8 -->
 
 **Location**: [`src/Phlimbo.sol#L270-L286`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L270-L286)
 
@@ -297,7 +297,7 @@ liveness but needs an explicit semantics decision about windfall allocation.
 
 ---
 
-### [L-09] `claim()` / `stake()` / `withdraw()` violate CEI; cross-function reentrancy lever conditional on hooked-token semantics <!-- id: pl3l9 -->
+### [L-09] `claim()` / `stake()` / `withdraw()` violate CEI; cross-function reentrancy lever conditional on hooked-token semantics <!-- id: pe3l9 -->
 
 **Location**: [`src/Phlimbo.sol#L295-L381`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L295-L381)
 
@@ -323,7 +323,7 @@ elsewhere in the codebase.
 
 ---
 
-### [L-10] `stake(amount, recipient)` lets anyone forcibly re-anchor a victim's reward-debt clock <!-- id: pl3l10 -->
+### [L-10] `stake(amount, recipient)` lets anyone forcibly re-anchor a victim's reward-debt clock <!-- id: pe3l10 -->
 
 **Location**: [`src/Phlimbo.sol#L295-L328`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L295-L328)
 
@@ -347,7 +347,7 @@ simplest and matches the V2 pattern's natural shape.
 
 ---
 
-### [L-11] `phUSD`-is-stake-AND-reward tokenomic compounding spiral <!-- id: pl3l11 -->
+### [L-11] `phUSD`-is-stake-AND-reward tokenomic compounding spiral <!-- id: pe3l11 -->
 
 **Location**: [`src/Phlimbo.sol#L432-L469`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L432-L469)
 
@@ -368,7 +368,7 @@ accrual). Pairs with the C-03 magnitude cap as a sufficient mitigation envelope.
 
 ---
 
-### [L-12] Contract publishes no cumulative-distribution audit trail <!-- id: pl3l12 -->
+### [L-12] Contract publishes no cumulative-distribution audit trail <!-- id: pe3l12 -->
 
 **Location**: [`src/Phlimbo.sol#L270-L455`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L270-L455)
 
@@ -391,7 +391,7 @@ at every `_updatePool` or at owner-triggered checkpoints.
 
 ---
 
-### [L-13] `_updatePhUSDEmissionRate` truncates `phUSDPerSecond` to zero at low TVL × low APY <!-- id: pl3l13 -->
+### [L-13] `_updatePhUSDEmissionRate` truncates `phUSDPerSecond` to zero at low TVL × low APY <!-- id: pe3l13 -->
 
 **Location**: [`src/Phlimbo.sol#L461-L470`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L461-L470)
 
@@ -413,7 +413,7 @@ computation.
 
 ---
 
-### [L-14] `pendingPhUSD()` and `pendingStable()` view-helpers underflow for users with stale debt after `pauseWithdraw` <!-- id: pl3l14 -->
+### [L-14] `pendingPhUSD()` and `pendingStable()` view-helpers underflow for users with stale debt after `pauseWithdraw` <!-- id: pe3l14 -->
 
 **Location**: [`src/Phlimbo.sol#L479-L514`](https://github.com/Behodler/phlimbo-ea/blob/1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301/src/Phlimbo.sol#L479-L514)
 

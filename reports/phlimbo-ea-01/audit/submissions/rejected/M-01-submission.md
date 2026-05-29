@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-01] Front-running collectReward() allows disproportionate reward capture
 Root Cause Link: https://github.com/Behodler/phlimbo-ea/blob/main/src/Phlimbo.sol#L290-L307
-PoC File: workspace/phlimbo-linear/test/poc-M-01.t.sol
+PoC File: workspace/phlimbo-ea/test/poc-M-01.t.sol
 -->
 
 ## Finding description and impact

@@ -1,9 +1,9 @@
-# QA Report — phoenix-vault (reflax-yield-vault)
+# QA Report — reflax-yield-vault (reflax-yield-vault)
 
-**Run:** `phoenix-vault-07`
+**Run:** `reflax-yield-vault-07`
 **Submodule:** `lib/reflax-yield-vault`
 **Commit:** `5f9abdde43a7b587dc0eaa840d20403c3a1f6ab6`
-**Baseline:** `phoenix-vault-06` (`043ff2cb5ee9808961b50311fb5ecb742b63a6e9`)
+**Baseline:** `reflax-yield-vault-06` (`043ff2cb5ee9808961b50311fb5ecb742b63a6e9`)
 **Story under review:** story-042 — per-client `setAsideBuffer` added to `skimSurplus`
 **Scope:** `src/AYieldStrategy.sol`, `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol`, `src/AMMAdapters/CurveAMMAdapter.sol`, `src/AMMAdapters/IAMMAdapter.sol`, `src/AMMAdapters/ICurveRouterNG.sol`, `src/interfaces/IYieldStrategy.sol`
 
@@ -33,9 +33,9 @@ L-06 was classified by both classifier and finding-manager as a folding candidat
 
 ## Low Risk Findings
 
-### [L-01] `slippageToleranceBps` default-0 and setter has no upper cap <!-- id: pv7l1 -->
+### [L-01] `slippageToleranceBps` default-0 and setter has no upper cap <!-- id: ryv7l1 -->
 
-**Status:** Reconfirmed OPEN at phoenix-vault-07. Originally reported in [`reports/phoenix-vault-05/submissions/qa-report.md`](../../phoenix-vault-05/submissions/qa-report.md). Carried forward unchanged — `setSlippageTolerance` (`ERC4626MarketYieldStrategy.sol#L190-L195`) is untouched by story-042. The full original write-up (uninitialized state + over-permissive `[0, MAX_BPS]` band) stands; refer to the phoenix-vault-05 report for code excerpts.
+**Status:** Reconfirmed OPEN at reflax-yield-vault-07. Originally reported in [`reports/reflax-yield-vault-05/submissions/qa-report.md`](../../reflax-yield-vault-05/submissions/qa-report.md). Carried forward unchanged — `setSlippageTolerance` (`ERC4626MarketYieldStrategy.sol#L190-L195`) is untouched by story-042. The full original write-up (uninitialized state + over-permissive `[0, MAX_BPS]` band) stands; refer to the reflax-yield-vault-05 report for code excerpts.
 
 **Location:**
 - [`ERC4626MarketYieldStrategy.sol#L40`](https://github.com/Behodler/reflax-yield-vault/blob/5f9abdde43a7b587dc0eaa840d20403c3a1f6ab6/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L40) — `uint256 public slippageToleranceBps;` (no initializer)
@@ -47,9 +47,9 @@ L-06 was classified by both classifier and finding-manager as a folding candidat
 
 ---
 
-### [L-02] `skimSurplus` iterates the full authorized-client set, no pagination (`wont-fix`) <!-- id: pv7l2 -->
+### [L-02] `skimSurplus` iterates the full authorized-client set, no pagination (`wont-fix`) <!-- id: ryv7l2 -->
 
-**Status:** Reconfirmed `wont-fix` carry-forward at phoenix-vault-07. Original entry in [`reports/phoenix-vault-05/submissions/qa-report.md`](../../phoenix-vault-05/submissions/qa-report.md), restated/narrowed at phoenix-vault-06 (the zero-address whole-batch revert sub-vector was structurally resolved by story-041; the unbounded-loop sub-vector persists in transformed form). Author acknowledgement: *"This is almost certainly unlikely to become an issue as we're likely to never have more than 3 clients."* Recorded here for completeness; no fix expected.
+**Status:** Reconfirmed `wont-fix` carry-forward at reflax-yield-vault-07. Original entry in [`reports/reflax-yield-vault-05/submissions/qa-report.md`](../../reflax-yield-vault-05/submissions/qa-report.md), restated/narrowed at reflax-yield-vault-06 (the zero-address whole-batch revert sub-vector was structurally resolved by story-041; the unbounded-loop sub-vector persists in transformed form). Author acknowledgement: *"This is almost certainly unlikely to become an issue as we're likely to never have more than 3 clients."* Recorded here for completeness; no fix expected.
 
 **Location:** [`ERC4626MarketYieldStrategy.sol#L419-L429`](https://github.com/Behodler/reflax-yield-vault/blob/5f9abdde43a7b587dc0eaa840d20403c3a1f6ab6/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L419-L429) (snapshot-accrual loop) and [`#L511-L519`](https://github.com/Behodler/reflax-yield-vault/blob/5f9abdde43a7b587dc0eaa840d20403c3a1f6ab6/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L511-L519) (distribution loop, new in story-042).
 
@@ -57,9 +57,9 @@ L-06 was classified by both classifier and finding-manager as a folding candidat
 
 ---
 
-### [L-03] No aggregate cap on per-client `setAsideBuffer` — recipient take can collapse to zero <!-- id: pv7l3 -->
+### [L-03] No aggregate cap on per-client `setAsideBuffer` — recipient take can collapse to zero <!-- id: ryv7l3 -->
 
-**Origin:** New at phoenix-vault-07 (story-042). Extends C-01.
+**Origin:** New at reflax-yield-vault-07 (story-042). Extends C-01.
 
 **Location:**
 - [`AYieldStrategy.sol#L253-L259`](https://github.com/Behodler/reflax-yield-vault/blob/5f9abdde43a7b587dc0eaa840d20403c3a1f6ab6/src/AYieldStrategy.sol#L253-L259) — `setSetAsideBuffer` (per-client `bufferPercent <= 100` check only)
@@ -103,9 +103,9 @@ Alternatively, add a require in `_distributeBuffer` rejecting `toRecipient == 0 
 
 ---
 
-### [L-04] Stale `setAsideBufferSize` survives `setClient(_, false)` and silently re-activates on re-add <!-- id: pv7l4 -->
+### [L-04] Stale `setAsideBufferSize` survives `setClient(_, false)` and silently re-activates on re-add <!-- id: ryv7l4 -->
 
-**Origin:** New at phoenix-vault-07 (story-042). Extends C-01.
+**Origin:** New at reflax-yield-vault-07 (story-042). Extends C-01.
 
 **Location:**
 - [`AYieldStrategy.sol#L183-L193`](https://github.com/Behodler/reflax-yield-vault/blob/5f9abdde43a7b587dc0eaa840d20403c3a1f6ab6/src/AYieldStrategy.sol#L183-L193) — `setClient` (no buffer-clear on deauth)
@@ -149,9 +149,9 @@ Additionally — or alternatively — require `_authorizedClients.contains(clien
 
 ---
 
-### [L-05] Buffered-path integration transparency — event and return-value drift <!-- id: pv7l5 -->
+### [L-05] Buffered-path integration transparency — event and return-value drift <!-- id: ryv7l5 -->
 
-**Origin:** New at phoenix-vault-07 (story-042). Folds L-06 (`pv7l6` — return-value semantics) as a sub-point per finding-manager guidance: both address the same buffered-path integration surface and a single documentation/event fix-direction resolves both.
+**Origin:** New at reflax-yield-vault-07 (story-042). Folds L-06 (`ryv7l6` — return-value semantics) as a sub-point per finding-manager guidance: both address the same buffered-path integration surface and a single documentation/event fix-direction resolves both.
 
 **Location:**
 - [`ERC4626MarketYieldStrategy.sol#L484`](https://github.com/Behodler/reflax-yield-vault/blob/5f9abdde43a7b587dc0eaa840d20403c3a1f6ab6/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L484) — `SurplusSkimmed` emit
@@ -180,7 +180,7 @@ Additionally — or alternatively — require `_authorizedClients.contains(clien
 
 ---
 
-### [L-07] `setRoute` accepts identity and zero-gap paths <!-- id: pv7l7 -->
+### [L-07] `setRoute` accepts identity and zero-gap paths <!-- id: ryv7l7 -->
 
 **Origin:** Carry-forward of LOCAL-008 (CurveAMMAdapter unchanged by story-042; contract-profile confirms no diff in `src/AMMAdapters/` between `043ff2c` and `5f9abdd`). First-time ledger appearance, surfaced fresh this run via convergent slither + aderyn + profiler + code-scanner signals. Extends C-01.
 
@@ -243,9 +243,9 @@ The require-loud form is preferred over silent clamping (e.g. truncating the pat
 
 ## Centralization Risks
 
-### [C-01] Owner-power bundle / centralization envelope <!-- id: pv7c1 -->
+### [C-01] Owner-power bundle / centralization envelope <!-- id: ryv7c1 -->
 
-**Status:** Reconfirmed OPEN at phoenix-vault-07. Original write-up in [`reports/phoenix-vault-05/submissions/qa-report.md`](../../phoenix-vault-05/submissions/qa-report.md). The trust model — owner is expected to be a trusted multisig acting in the protocol's and clients' interest; the authorized withdrawer can redirect yield/surplus only, never principal — remains the project's authoritative posture. This entry is retained for completeness and to track the envelope's growth across runs.
+**Status:** Reconfirmed OPEN at reflax-yield-vault-07. Original write-up in [`reports/reflax-yield-vault-05/submissions/qa-report.md`](../../reflax-yield-vault-05/submissions/qa-report.md). The trust model — owner is expected to be a trusted multisig acting in the protocol's and clients' interest; the authorized withdrawer can redirect yield/surplus only, never principal — remains the project's authoritative posture. This entry is retained for completeness and to track the envelope's growth across runs.
 
 **Owner-power surface as of `5f9abdd`:**
 - `setRoute` ([`CurveAMMAdapter.sol#L62-L89`](https://github.com/Behodler/reflax-yield-vault/blob/5f9abdde43a7b587dc0eaa840d20403c3a1f6ab6/src/AMMAdapters/CurveAMMAdapter.sol#L62-L89)) — full AMM-route control.
@@ -268,7 +268,7 @@ Each of L-03/L-04/L-07 should be read as a *setter-design defect within* the C-0
 
 **Impact:** Unchanged from the original write-up. Yield/route/slippage/emergency redirection on owner-key compromise; principal accounting remains protected by the verified withdrawer-yield-only boundary and the two-phase total-withdrawal timelock.
 
-**Recommended action (unchanged from phoenix-vault-05 + run-07 additions):**
+**Recommended action (unchanged from reflax-yield-vault-05 + run-07 additions):**
 - Hold the owner role in a multisig; consider a timelock on `setRoute`, `setSlippageTolerance`, and now `setSetAsideBuffer` so route, slippage, and buffer changes are observable before they take effect.
 - Emit events (with old/new values) on every privileged parameter change. `setSlippageTolerance` already does; `setRoute` does not include old/new values (and cannot easily, given the 11-slot path); `setSetAsideBuffer` already does (`SetAsideBufferSet(client, old, bufferPercent)`).
 - Implement the L-03 / L-04 / L-07 setter-side recommendations as defense-in-depth within the envelope; they reduce blast radius from operator footgun without altering the trust model.

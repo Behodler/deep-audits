@@ -21,14 +21,14 @@ Invoke **project-manager**: "Resolve friendly name (lowercase-kebab)" and locate
 ## 2a. List (no action)
 Invoke **finding-manager**: "Load and summarize the ledger"
 ```
-Ledger: nft-staking   (lastAuditedCommit a1b2c3d, updated 2026-05-24)
+Ledger: phoenix-nft-staking   (lastAuditedCommit a1b2c3d, updated 2026-05-24)
 ─────────────────────────────────────────────────────────────────
 OPEN (3)
-  H  a1f9..  Reward debt accounting drain        first nft-staking-09 · last -12
-  M  7c2e..  Missing staleness check on oracle   first nft-staking-11 · last -12
-  L  3b80..  Unindexed event                     first nft-staking-12 · last -12
+  H  a1f9..  Reward debt accounting drain        first phoenix-nft-staking-09 · last -12
+  M  7c2e..  Missing staleness check on oracle   first phoenix-nft-staking-11 · last -12
+  L  3b80..  Unindexed event                     first phoenix-nft-staking-12 · last -12
 FIXED (7)
-  H  9d44..  Migrator drain via unstakeFor       fixed at 0fae12 (nft-staking-08)
+  H  9d44..  Migrator drain via unstakeFor       fixed at 0fae12 (phoenix-nft-staking-08)
 ACKNOWLEDGED (2)
   C  5e11..  Single-admin migrator key (by design)   "trusted multisig" 
 WONT-FIX (0)   FALSE-POSITIVE (0)

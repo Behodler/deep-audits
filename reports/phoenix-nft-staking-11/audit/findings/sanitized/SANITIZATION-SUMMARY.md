@@ -1,4 +1,4 @@
-# Sanitization Summary - nft-staking-11
+# Sanitization Summary - phoenix-nft-staking-11
 
 **Input:** 5 deduplicated findings
 **Kept:** 3 findings (DEDUP-01, DEDUP-03, DEDUP-04)

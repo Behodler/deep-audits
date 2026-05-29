@@ -1,4 +1,4 @@
-# Validity Check Summary -- yield-accumulator-06
+# Validity Check Summary -- stable-yield-accumulator-06
 
 **Date**: 2026-02-13
 **Findings Checked**: 3

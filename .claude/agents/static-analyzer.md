@@ -17,7 +17,7 @@ Run all available tools and merge their findings (tag each with `source`). If a 
 
 The orchestrator provides:
 ```json
-{ "project": "nft-staking", "reportDir": "reports/nft-staking-12", "contractsPath": "lib/phoenix-nft-staking/src" }
+{ "project": "phoenix-nft-staking", "reportDir": "reports/phoenix-nft-staking-12", "contractsPath": "lib/phoenix-nft-staking/src" }
 ```
 If only the project name is given, resolve paths from `registered-projects.json` (`.projects["<project>"].submodule`) and look for `src/` then `contracts/`.
 
@@ -77,7 +77,7 @@ Severity mapping: tool High → `potential-high`, Medium → `potential-medium`,
 Write merged findings to `<reportDir>/static-analysis-findings.json`:
 ```json
 {
-  "project": "nft-staking",
+  "project": "phoenix-nft-staking",
   "scanTimestamp": "2026-05-24T10:00:00Z",
   "scanType": "static",
   "tools": { "slither": "0.11.3", "aderyn": "0.x", "semgrep": "1.x" },

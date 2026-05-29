@@ -108,6 +108,6 @@ the distinct call sites.)
 
 ## Raw tool output files
 
-- `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-11/slither-output.json`
-- `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-11/aderyn-report.json`
-- `/home/justin/code/C4/solidity-audit/reports/yield-accumulator-11/semgrep-output.json`
+- `/home/justin/code/C4/solidity-audit/reports/stable-yield-accumulator-11/slither-output.json`
+- `/home/justin/code/C4/solidity-audit/reports/stable-yield-accumulator-11/aderyn-report.json`
+- `/home/justin/code/C4/solidity-audit/reports/stable-yield-accumulator-11/semgrep-output.json`

@@ -25,7 +25,7 @@ import "./Mocks.sol";
  *         the stale debt -- which may be effectively never.
  *
  * Vulnerable code:
- *   workspace/phlimbo-linear/src/PhlimboV2.sol, pauseWithdraw, lines 280-291
+ *   workspace/phlimbo-ea/src/PhlimboV2.sol, pauseWithdraw, lines 280-291
  */
 contract H01_PauseWithdrawDebtDesync_PoC is Test {
     PhlimboV2 public phlimbo;

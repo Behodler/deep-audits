@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-03] Permissionless pullAndRefresh enables window-stretching griefing that dilutes emission rate for existing stakers
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/2e56588fd9cc81f43edf42914638d6a122164b3e/src/NFTStaker.sol#L210-L230
-PoC File: workspace/nft-staking/test/poc-ES-01.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-ES-01.t.sol
 -->
 
 ## Finding description and impact
@@ -63,7 +63,7 @@ This violates the contract's stated invariant (CLAUDE.md, "Window reset on inflo
 
 ### Proof of concept
 
-A runnable Foundry PoC is provided in [`workspace/nft-staking/test/poc-ES-01.t.sol`](../../../../workspace/nft-staking/test/poc-ES-01.t.sol). Run with `cd workspace/nft-staking && forge test --match-path test/poc-ES-01.t.sol -vv`. Key assertions from the primary test `test_ES01_PermissionlessPokeDilutesRewardRateForExistingStakers`:
+A runnable Foundry PoC is provided in [`workspace/phoenix-nft-staking/test/poc-ES-01.t.sol`](../../../../workspace/phoenix-nft-staking/test/poc-ES-01.t.sol). Run with `cd workspace/phoenix-nft-staking && forge test --match-path test/poc-ES-01.t.sol -vv`. Key assertions from the primary test `test_ES01_PermissionlessPokeDilutesRewardRateForExistingStakers`:
 
 - After 450 days of a 540-day schedule with no on-schedule intervention, the rate is the original `540e18 / 540 days`.
 - A non-privileged EOA (no stake, no reward token, not owner, not pauser) calls `pullAndRefresh()` with only 1e12 wei of pending mint-debt on the hook.

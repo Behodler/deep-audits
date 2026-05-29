@@ -1,6 +1,6 @@
 ---
-name: nft-staking-batchminter-nudge
-description: nft-staking BatchNFTMinter nudge-pot — H-01 history, story-014 fix, and what survives owner-driven invalidation
+name: phoenix-nft-staking-batchminter-nudge
+description: phoenix-nft-staking BatchNFTMinter nudge-pot — H-01 history, story-014 fix, and what survives owner-driven invalidation
 metadata:
   type: project
 ---

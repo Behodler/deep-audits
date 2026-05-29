@@ -12,7 +12,7 @@ import "./Mocks.sol";
  * @notice Protocol value leak via a missing on-chain prerequisite check
  *
  * @dev Finding: M-03
- *      Contract: MigratorV1V2 (workspace/phlimbo-linear/src/MigratorV1V2.sol)
+ *      Contract: MigratorV1V2 (workspace/phlimbo-ea/src/MigratorV1V2.sol)
  *      Lines: 106-239 (seedObligations / migrateDeposits)
  *
  * SUMMARY OF THE ISSUE

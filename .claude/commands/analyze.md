@@ -7,9 +7,9 @@ Orchestrate a comprehensive vulnerability scan of a project's in-scope contracts
 - Project name is the friendly name from registration (case-insensitive; normalized to lowercase-kebab).
 - `--full` forces a cold scan of the entire scope. Without it, the run is a **regression scan** when a ledger exists (see step 3).
 - Examples:
-  - `nft-staking` — regression scan if a ledger exists, else full
-  - `nft-staking --full` — cold scan of all in-scope contracts
-  - `nft-staking src/Staking.sol` — focused scan of one contract
+  - `phoenix-nft-staking` — regression scan if a ledger exists, else full
+  - `phoenix-nft-staking --full` — cold scan of all in-scope contracts
+  - `phoenix-nft-staking src/Staking.sol` — focused scan of one contract
 
 # Orchestration Flow
 
@@ -41,7 +41,7 @@ Invoke **project-manager**: "Load the persistent ledger and compute changed file
 ```
 Run Mode
 ────────
-Ledger: reports/ledgers/nft-staking.json (12 findings: 3 open, 7 fixed, 2 acknowledged)
+Ledger: reports/ledgers/phoenix-nft-staking.json (12 findings: 3 open, 7 fixed, 2 acknowledged)
 Last audited commit: a1b2c3d
 Changed since: src/Staking.sol, src/RewardVault.sol (2 files)
 Mode: REGRESSION (focus on changed code + open findings) — use --full to force cold scan
@@ -143,9 +143,9 @@ Save raw analysis to `<report-dir>/analysis-<timestamp>.json` (scan metadata, co
 
 ## 12. Present Summary
 ```
-Analysis Complete: nft-staking
+Analysis Complete: phoenix-nft-staking
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Run: reports/nft-staking-12/   Mode: REGRESSION (changed: 2 files)
+Run: reports/phoenix-nft-staking-12/   Mode: REGRESSION (changed: 2 files)
 
 Tier 1:  profiles 3 · slither 15 · aderyn 9 · semgrep 4 · patterns 3
 Tier 2:  code 28 · econ 14
@@ -159,15 +159,15 @@ Classified (new + regressed only):
   High: 1 (1 REGRESSION)   Medium: 2   Low: 1
 
 Carried over (still open from prior runs):  M-01, L-02, L-04
-  → reports/nft-staking-12/submissions/carryover/  (stubs link to original reports)
+  → reports/phoenix-nft-staking-12/submissions/carryover/  (stubs link to original reports)
 
-Output:  reports/nft-staking-12/
-Ledger:  reports/ledgers/nft-staking.json (updated)
+Output:  reports/phoenix-nft-staking-12/
+Ledger:  reports/ledgers/phoenix-nft-staking.json (updated)
 
 Next:
-  /list-findings nft-staking
-  /generate-poc nft-staking H-01
-  /ledger nft-staking
+  /list-findings phoenix-nft-staking
+  /generate-poc phoenix-nft-staking H-01
+  /ledger phoenix-nft-staking
 ```
 
 # Agent Delegation

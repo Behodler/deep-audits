@@ -1,4 +1,4 @@
-# Severity Audit Report: yield-accumulator-06
+# Severity Audit Report: stable-yield-accumulator-06
 
 **Date:** 2026-02-13
 **Auditor:** severity-auditor
@@ -30,7 +30,7 @@
 
 2. **Accumulation argument fails.** The submission claims "systematic rounding bias compounds over thousands of claims." One thousand claims at $0.000001 each yields $0.001 total. Even one million claims totals $1. The gas cost to execute one million claim transactions -- even on the cheapest L2 -- far exceeds $1.
 
-3. **Prior classification as Low.** This exact root cause (`_denormalizeAmount` truncation for low-decimal tokens) was identified in `yield-accumulator-01` as finding `L-01` ("Precision Loss in Decimal Normalization Round Trip") with severity Low. The prior finding's assessment: "Dust amounts are lost per claim transaction. The impact is systematic but negligible in practice -- each claim loses at most 1 unit of the smallest decimal representation." The current submission attempts to escalate by framing zero payment as qualitatively different from dust payment, but the economic reality is the same.
+3. **Prior classification as Low.** This exact root cause (`_denormalizeAmount` truncation for low-decimal tokens) was identified in `stable-yield-accumulator-01` as finding `L-01` ("Precision Loss in Decimal Normalization Round Trip") with severity Low. The prior finding's assessment: "Dust amounts are lost per claim transaction. The impact is systematic but negligible in practice -- each claim loses at most 1 unit of the smallest decimal representation." The current submission attempts to escalate by framing zero payment as qualitatively different from dust payment, but the economic reality is the same.
 
 4. **C4 Medium criteria not met.** Medium requires "protocol function/availability impacted, or value leak with stated assumptions and external requirements." A value leak measured in millionths of a cent per instance does not constitute a meaningful value leak. The protocol functions correctly for all economically significant yield amounts.
 
@@ -102,12 +102,12 @@
 
 ## Files Referenced
 
-- **M-01 Finding:** `<repo>/reports/yield-accumulator-06/audit/findings/medium/M-01.json`
-- **M-01 Submission:** `<repo>/reports/yield-accumulator-06/audit/submissions/M-01-submission.md`
-- **M-02 Finding:** `<repo>/reports/yield-accumulator-06/audit/findings/medium/M-02.json`
-- **M-02 Submission:** `<repo>/reports/yield-accumulator-06/audit/submissions/M-02-submission.md`
-- **M-03 Finding:** `<repo>/reports/yield-accumulator-06/audit/findings/medium/M-03.json`
-- **M-03 Submission:** `<repo>/reports/yield-accumulator-06/audit/submissions/M-03-submission.md`
+- **M-01 Finding:** `<repo>/reports/stable-yield-accumulator-06/audit/findings/medium/M-01.json`
+- **M-01 Submission:** `<repo>/reports/stable-yield-accumulator-06/audit/submissions/M-01-submission.md`
+- **M-02 Finding:** `<repo>/reports/stable-yield-accumulator-06/audit/findings/medium/M-02.json`
+- **M-02 Submission:** `<repo>/reports/stable-yield-accumulator-06/audit/submissions/M-02-submission.md`
+- **M-03 Finding:** `<repo>/reports/stable-yield-accumulator-06/audit/findings/medium/M-03.json`
+- **M-03 Submission:** `<repo>/reports/stable-yield-accumulator-06/audit/submissions/M-03-submission.md`
 - **Source (SYA):** `<repo>/lib/stable-yield-accumulator/src/StableYieldAccumulator.sol`
 - **Source (CA):** `<repo>/lib/stable-yield-accumulator/src/ClaimArbitrage.sol`
-- **Prior L-01:** `<repo>/reports/yield-accumulator-01/audit/findings/low/L-01-precision-loss-decimal-normalization.json`
+- **Prior L-01:** `<repo>/reports/stable-yield-accumulator-01/audit/findings/low/L-01-precision-loss-decimal-normalization.json`

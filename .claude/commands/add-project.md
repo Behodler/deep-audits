@@ -1,40 +1,41 @@
-Add an auditable project as a git submodule with friendly name mapping
+Add an auditable project as a git submodule, named after its upstream repository
 # Purpose
-Orchestrate adding a new auditable project to the repository with a friendly name alias.
+Orchestrate adding a new auditable project to the repository. **A project is always named after its upstream repo directory** — the submodule directory name, the registry key, the report-dir family, the ledger filename, and the workspace dir are all the same canonical string. There is no separate "friendly name"; project name and repo name must agree.
 
 # Arguments
-- `$ARGUMENTS` format: `<repo-url> [friendly-name]`
-- Example: `https://github.com/Behodler/phoenix-nft-staking nft-staking`
-- If friendly-name omitted, derive from repo name.
+- `$ARGUMENTS` format: `<repo-url>`
+- Example: `https://github.com/Behodler/phoenix-nft-staking`
+- The project name is **derived from the repo**, not supplied by the caller.
 
 # Orchestration Flow
 
-## 1. Parse Arguments
-Extract repo URL and friendly name from $ARGUMENTS:
+## 1. Parse Arguments & Derive Name
+Extract the repo URL from $ARGUMENTS:
 - Validate URL format (must be valid git URL).
-- If no friendly name provided: derive from repo name (strip dates, "-c4", "-audit", etc.).
-- **Normalize the friendly name to lowercase-kebab** (lowercase, spaces/underscores → `-`). This prevents divergent report trees.
+- **Derive the canonical project name from the repo**: take the last path segment of the URL and strip a trailing `.git` (e.g. `https://github.com/Behodler/phoenix-nft-staking[.git]` → `phoenix-nft-staking`). Do **not** strip or rewrite the name beyond that — it must match the upstream repo exactly so the submodule directory and the project name are identical.
+- Reject a URL whose derived name is not lowercase-kebab; do not silently transform it (ask the user to confirm the upstream repo name instead of inventing a divergent alias).
 
 ## 2. Check for Conflicts
-Invoke **project-manager**: "Check if friendly name already registered"
-- If name exists: Present error and suggest alternatives
-- If URL already added: Report existing mapping
+Invoke **project-manager**: "Check if project name already registered"
+- If name exists: Present error and report the existing mapping.
+- If URL already added: Report existing registration.
 
 ## 3. Add Submodule
 Invoke **project-manager**: "Add submodule without recursive flag"
 - Command: `git submodule add <repo-url> lib/<repo-name>`
 - **CRITICAL**: Never use --recursive flag
+- The `lib/` directory name MUST equal the derived project name.
 - Verify submodule added successfully
 - Report any errors (repo not found, permission denied, etc.)
 
 ## 4. Register Project
-Invoke **project-manager**: "Register project with friendly name"
-- Update registered-projects.json:
+Invoke **project-manager**: "Register project under its repo name"
+- Update registered-projects.json (the key equals the submodule directory name):
   ```json
   {
     "projects": {
-      "<friendly-name>": {
-        "submodule": "<repo-directory-name>",
+      "<repo-name>": {
+        "submodule": "<repo-name>",
         "repoUrl": "<repo-url>",
         "defaultBranch": "main",
         "addedAt": "<ISO-timestamp>"
@@ -42,6 +43,7 @@ Invoke **project-manager**: "Register project with friendly name"
     }
   }
   ```
+- The `submodule` field is retained for backwards compatibility and MUST equal the key.
 
 ## 5. Discover Scope
 Invoke **project-manager**: "Discover contracts and scope for project"
@@ -60,17 +62,17 @@ Invoke **project-manager**: "Extract known issues from project documentation"
 ## 7. Initialize Ledger
 Create an empty persistent ledger so the first run is treated as a full cold scan:
 ```
-reports/ledgers/<friendly-name>.json   →  { "project": "<name>", "lastAuditedCommit": null, "findings": [] }
+reports/ledgers/<repo-name>.json   →  { "project": "<repo-name>", "lastAuditedCommit": null, "findings": [] }
 ```
-Run directories (`reports/<friendly-name>-XX/`) are created per-run by `/analyze`, not here.
+Run directories (`reports/<repo-name>-XX/`) are created per-run by `/analyze`, not here.
 
 ## 8. Completion Report
 Present to user:
-- Friendly name registered (lowercase-kebab)
+- Project name (= upstream repo name)
 - Submodule location
 - Number of contracts in scope
 - Number of known issues found
-- Next step: suggest `/analyze <friendly-name>`
+- Next step: suggest `/analyze <repo-name>`
 
 # Agent Delegation (MANDATORY)
 
@@ -88,30 +90,31 @@ All file operations, git operations, and data extraction MUST be performed by th
 ## Required Delegations
 | Task | Agent | Prompt Pattern |
 |------|-------|----------------|
-| Check conflicts | project-manager | "Check if friendly name '{name}' or URL '{url}' already registered" |
-| Add submodule | project-manager | "Add submodule {url} to lib/{dirname} without --recursive flag" |
-| Register project | project-manager | "Register project '{name}' with submodule '{dirname}' and URL '{url}'" |
-| Discover scope | project-manager | "Discover contracts and scope for project in lib/{dirname}" |
-| Extract known issues | project-manager | "Extract known issues from documentation in lib/{dirname}" |
+| Check conflicts | project-manager | "Check if project '{name}' or URL '{url}' already registered" |
+| Add submodule | project-manager | "Add submodule {url} to lib/{name} without --recursive flag" |
+| Register project | project-manager | "Register project '{name}' with submodule '{name}' and URL '{url}'" |
+| Discover scope | project-manager | "Discover contracts and scope for project in lib/{name}" |
+| Extract known issues | project-manager | "Extract known issues from documentation in lib/{name}" |
 | Initialize ledger | project-manager | "Initialize empty ledger for '{name}'" |
 
 # Error Handling
 - **Invalid URL**: Report and ask for correction
-- **Name conflict**: Suggest alternative names
+- **Name conflict**: Report the existing registration (do not auto-suffix — a project maps 1:1 to a repo)
 - **Clone failure**: Report git error with suggestions
 - **No scope found**: Warn and default to all .sol files
+- **Non-kebab repo name**: Ask the user to confirm the upstream name rather than inventing an alias
 
 # Examples
 ```
-/add-project https://github.com/Behodler/phoenix-nft-staking nft-staking
-# Adds phoenix-nft-staking as submodule, registers as "nft-staking"
+/add-project https://github.com/Behodler/phoenix-nft-staking
+# Adds lib/phoenix-nft-staking, registers project "phoenix-nft-staking"
 
 /add-project https://github.com/Behodler/reflax-yield-vault
-# Adds repo, derives friendly name "reflax-yield-vault"
+# Adds lib/reflax-yield-vault, registers project "reflax-yield-vault"
 ```
 
 # Critical Rules
-1. **NEVER use --recursive** when adding submodules
-2. **NEVER modify source repos** after cloning
-3. **Validate friendly names** before registration
+1. **Project name == repo name == submodule dir** — never diverge; there is no alias argument
+2. **NEVER use --recursive** when adding submodules
+3. **NEVER modify source repos** after cloning
 4. **Preserve original state** of cloned repositories

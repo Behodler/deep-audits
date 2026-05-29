@@ -16,7 +16,7 @@
 - The contract pays out two streams to stakers:
   1. **phUSD APY stream** — newly *minted* phUSD, sized as a configured APY of `totalStaked` (`phUSDPerSecond = totalStaked * desiredAPYBps / 10000 / 365 days`).
   2. **Stable (reward token) stream** — an *externally funded* stream of `rewardToken` (a generic `IERC20`, treated as a stablecoin) that depletes linearly. The intended depletion-window invariant is "given a fixed `rewardBalance`, distribute it over `depletionDuration` seconds at `rewardPerSecond = rewardBalance * PRECISION / depletionDuration`".
-- Anyone may push reward funding in via `collectReward` (the contract is permissionless on the *deposit* side of rewards); the design comment names the "yield-accumulator" contract as the expected funder.
+- Anyone may push reward funding in via `collectReward` (the contract is permissionless on the *deposit* side of rewards); the design comment names the "stable-yield-accumulator" contract as the expected funder.
 - Accrual uses the classic SushiSwap MasterChef share/debt pattern: per-share accumulators (`accPhUSDPerShare`, `accStablePerShare`) scaled by `PRECISION = 1e18`, with per-user reward debts.
 
 **Known V1 issue (per submodule CLAUDE.md, treat as in-scope-but-acknowledged):** `rewardPerSecond` is recomputed on every `stake`/`withdraw`/`claim` (indirectly via `_updatePool`), which re-anchors the depletion window on every user interaction. V2 (`PhlimboV2.sol`) deliberately removes this recompute. This profile records the property objectively; the econ-scanner / invariant-generator should weigh whether unique user-impactful exploits remain over and above the documented "rewards never fully deplete" behavior.

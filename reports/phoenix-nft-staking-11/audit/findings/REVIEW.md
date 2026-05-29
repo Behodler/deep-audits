@@ -1,6 +1,6 @@
-# Final review — nft-staking-11 QA findings
+# Final review — phoenix-nft-staking-11 QA findings
 
-Independent second-opinion on `reports/nft-staking-11/audit/submissions/qa-report.md` (findings C-01, L-01, L-02). Source verified at `lib/phoenix-nft-staking/src/NFTStakerV2.sol` commit 9d71401.
+Independent second-opinion on `reports/phoenix-nft-staking-11/audit/submissions/qa-report.md` (findings C-01, L-01, L-02). Source verified at `lib/phoenix-nft-staking/src/NFTStakerV2.sol` commit 9d71401.
 
 ## C-01 — Combined migrator powers
 

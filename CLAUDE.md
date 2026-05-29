@@ -9,6 +9,7 @@ This repository contains the audit tooling used to review the Phoenix/Behodler s
 ## Terminology
 
 - **Source repo** - A repository containing the Solidity project to be audited. Source repos are added as git submodules in `lib/`.
+- **Project name** - Always the upstream repo name. The submodule dir (`lib/<name>`), the registry key in `registered-projects.json`, the report-dir family (`reports/<name>-XX/`), the ledger (`reports/ledgers/<name>.json`), and the workspace dir (`workspace/<name>/`) are all the **same canonical string**. There is no separate "friendly name" alias — project name and repo name must agree.
 
 ## Critical Rules
 

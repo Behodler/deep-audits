@@ -1,4 +1,4 @@
-# Contract Profiles — phoenix-vault (reflax-yield-vault)
+# Contract Profiles — reflax-yield-vault (reflax-yield-vault)
 
 Profile timestamp: 2026-05-25
 Pragma: `^0.8.13` (no solc pin in foundry.toml; checked arithmetic by compiler default)

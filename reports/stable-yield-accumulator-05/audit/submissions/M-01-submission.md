@@ -91,7 +91,7 @@ The PoC demonstrates the vulnerability in three phases:
 3. **Phase 3**: `execute()` reverts because Step 3 approves USDC but `claim()` pulls `newStable`.
 4. **Phase 4**: Confirms the DoS is permanent -- even with sufficient `newStable` balance on ClaimArbitrage, the hardcoded USDC approval prevents execution.
 
-PoC file: `workspace/yield-accumulator/test/poc-M-01-v05.t.sol`
+PoC file: `workspace/stable-yield-accumulator/test/poc-M-01-v05.t.sol`
 
 ### Tools Used
 

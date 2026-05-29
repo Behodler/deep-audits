@@ -1,4 +1,4 @@
-# Classification Summary - nft-staking-11
+# Classification Summary - phoenix-nft-staking-11
 
 **Mode:** C4 Regular Audit
 **Input:** 3 sanitized findings (all sanitizer-tagged Low)

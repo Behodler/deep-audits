@@ -1,4 +1,4 @@
-# Deduplicated Findings — phoenix-vault (reflax-yield-vault)
+# Deduplicated Findings — reflax-yield-vault (reflax-yield-vault)
 
 Reconciled across `code-scan.md`, `econ-scan.md`, `static-analysis.md`, `pattern-matches.md`, `invariant-results.md`, `symbolic-results.md`. Severity below is a dedup-stage estimate; final HM-vs-QA is the severity-classifier's call.
 

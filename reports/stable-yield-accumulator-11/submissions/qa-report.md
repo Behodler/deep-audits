@@ -3,7 +3,7 @@
 **Project:** stable-yield-accumulator
 **Contract in scope:** `src/StableYieldAccumulator.sol`
 **Commit:** `71abe3e088559cb5d9c10e8475dc67e7cc57fac9`
-**Run:** yield-accumulator-11 (COLD)
+**Run:** stable-yield-accumulator-11 (COLD)
 
 This report bundles all Low-severity and Centralization findings for the audit run. There are **no High or Medium** findings. The tone is measured throughout: every item below is non-critical, owner-recoverable, dust-bounded, or cosmetic. An automated 4naly3er QA/gas baseline is attached as an appendix.
 
@@ -28,7 +28,7 @@ This report bundles all Low-severity and Centralization findings for the audit r
 
 ## Low Risk Findings
 
-### [L-01] `claim()` charges 0 payment while delivering skimmed yield <!-- id: ya11l1 -->
+### [L-01] `claim()` charges 0 payment while delivering skimmed yield <!-- id: sya11l1 -->
 
 **Location:** [`StableYieldAccumulator.sol#L494-L509`](https://github.com/Behodler/stable-yield-accumulator/blob/71abe3e088559cb5d9c10e8475dc67e7cc57fac9/src/StableYieldAccumulator.sol#L494-L509) (zero-payment guard L494; floor mechanics L617-L640)
 
@@ -58,7 +58,7 @@ if (actualPayment == 0) revert ZeroAmount();
 
 ---
 
-### [L-02] Phlimbo allowance depletion bricks permissionless `claim()` until owner re-approves <!-- id: ya11l2 -->
+### [L-02] Phlimbo allowance depletion bricks permissionless `claim()` until owner re-approves <!-- id: sya11l2 -->
 
 > **Verified.** The external pull semantics are confirmed: `lib/stable-yield-accumulator/lib/phlimbo-ea/src/Phlimbo.sol:277` shows `collectReward(uint256 amount)` doing `rewardToken.safeTransferFrom(msg.sender, address(this), amount)` — a fixed-amount pull (not a full-balance / max-allowance pull) that draws down SYA's never-replenished `forceApprove` allowance. The root cause is SYA's own fixed-allowance pattern at L369-L374, which is in-scope under the per-repo audit rule. The depletion is therefore real and the finding is LIVE at Low severity (owner-recoverable in a single `approvePhlimbo` tx, atomic, no fund loss).
 
@@ -81,7 +81,7 @@ Each `claim()` consumes allowance through the `IPhlimbo(phlimbo).collectReward(p
 
 ---
 
-### [L-03] `claim()` NatSpec says pay-then-skim; code skims-then-pays <!-- id: ya11l3 -->
+### [L-03] `claim()` NatSpec says pay-then-skim; code skims-then-pays <!-- id: sya11l3 -->
 
 **Location:** [`StableYieldAccumulator.sol#L426-L434`](https://github.com/Behodler/stable-yield-accumulator/blob/71abe3e088559cb5d9c10e8475dc67e7cc57fac9/src/StableYieldAccumulator.sol#L426-L434) (docstring) and interface comment `IStableYieldAccumulator.sol#L314-L323`, vs implementation order (skim L484, pay L509)
 
@@ -91,7 +91,7 @@ Each `claim()` consumes allowance through the `IPhlimbo(phlimbo).collectReward(p
 
 ## Centralization Risks
 
-### [C-01] Owner configuration guardrails (Ownable2Step, discount cap) <!-- id: ya11c1 -->
+### [C-01] Owner configuration guardrails (Ownable2Step, discount cap) <!-- id: sya11c1 -->
 
 **Location:**
 - `Ownable` declaration — [`StableYieldAccumulator.sol#L57`](https://github.com/Behodler/stable-yield-accumulator/blob/71abe3e088559cb5d9c10e8475dc67e7cc57fac9/src/StableYieldAccumulator.sol#L57)
@@ -127,7 +127,7 @@ The following angles were considered during the audit and are **deliberately not
 
 The full markdown output is saved alongside this report at:
 
-**`reports/yield-accumulator-11/submissions/4naly3er-report.md`**
+**`reports/stable-yield-accumulator-11/submissions/4naly3er-report.md`**
 
 Headline automated counts (informational; these are tool-generated style/gas/centralization observations, not manual findings):
 

@@ -116,7 +116,7 @@ Step 3 was simply not updated to follow the same pattern as Step 5.
 
 ### PoC Validation
 
-The PoC at `<repo>/workspace/yield-accumulator/test/poc-M-01-v05.t.sol` correctly demonstrates:
+The PoC at `<repo>/workspace/stable-yield-accumulator/test/poc-M-01-v05.t.sol` correctly demonstrates:
 - Phase 1: `execute()` succeeds when `rewardToken == USDC`
 - Phase 2: SYA owner changes `rewardToken` via `setRewardToken()`
 - Phase 3: `execute()` reverts due to approval mismatch

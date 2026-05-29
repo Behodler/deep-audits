@@ -9,7 +9,7 @@ Update <submodule-dirname> to latest (<short-sha>)
 # Arguments
 - `$ARGUMENTS` format: `[name] [--recursive]` (both optional)
 - `name` may be either:
-  - a friendly name from `registered-projects.json` (e.g., `yield-claim-nft`, `phoenix-vault`), resolved to its `submodule` field, OR
+  - a friendly name from `registered-projects.json` (e.g., `yield-claim-nft`, `reflax-yield-vault`), resolved to its `submodule` field, OR
   - a raw submodule directory under `lib/` (e.g., `yield-claim-nft`, `reflax-yield-vault`)
 - `--recursive` (optional flag): when present, also initialize/update the submodule's own nested submodules. **Default is non-recursive** — nested submodules are left untouched unless this flag is given. Accept common spellings (`--recursive`, `recursive`, `(recursively)`) and strip the flag from the value before resolving `name`.
 - If `name` is omitted, the orchestrator MUST prompt the user to either:
@@ -109,7 +109,7 @@ All git operations (fetch, checkout, pull, add, commit), filesystem inspection o
 /update-lib yield-claim-nft
 # Same as above — friendly name resolved via registered-projects.json -> submodule "yield-claim-nft"
 
-/update-lib phoenix-vault
+/update-lib reflax-yield-vault
 # Friendly name -> lib/reflax-yield-vault
 # Commits: "Update reflax-yield-vault to latest (<new-short-sha>)"
 

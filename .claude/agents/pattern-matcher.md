@@ -68,8 +68,8 @@ For each match, create a finding:
 
 ```json
 {
-  "project": "nft-staking",
-  "reportDir": "reports/nft-staking-12",
+  "project": "phoenix-nft-staking",
+  "reportDir": "reports/phoenix-nft-staking-12",
   "scope": ["src/Staking.sol", "src/RewardVault.sol", ...]
 }
 ```
@@ -82,7 +82,7 @@ Write to: `<reportDir>/pattern-matches.json`
 
 ```json
 {
-  "project": "nft-staking",
+  "project": "phoenix-nft-staking",
   "scanTimestamp": "2026-05-24T10:00:00Z",
   "scanType": "pattern-matching",
   "patternsChecked": 22,

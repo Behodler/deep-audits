@@ -1,12 +1,12 @@
 <!--
-ID: pv7m4
+ID: ryv7m4
 C4 Submission Metadata
 Label: M-04
 Title: [M-04] Slippage amplification under per-client setAsideBuffer breaches NAV-anchored minOut acceptance bound
 Severity: Medium
 Root Cause Link: https://github.com/Behodler/reflax-yield-vault/blob/master/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L432-L451
 Supporting Code Link: https://github.com/Behodler/reflax-yield-vault/blob/master/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L503-L521
-PoC File: workspace/phoenix-vault/test/poc-M04-buffer-amplifies-slippage.t.sol
+PoC File: workspace/reflax-yield-vault/test/poc-M04-buffer-amplifies-slippage.t.sol
 Related: M-02 (acknowledged) — this finding is a distinct, parametrically-activated breach of M-02's acceptance bound, not a duplicate.
 -->
 
@@ -96,7 +96,7 @@ Story-042 invalidates that ground state. With `f > 0` the recipient's take is st
 
 ### Impact — f-sweep from the PoC
 
-The PoC (`workspace/phoenix-vault/test/poc-M04-buffer-amplifies-slippage.t.sol`) instantiates the real in-scope `ERC4626MarketYieldStrategy` against a deterministic AMM that fills at exactly `minOut` (the worst-case price the slippage tolerance still admits — i.e. the worst case the M-02 acceptance memo's parametric bound is supposed to cover). It scans `f ∈ {0%, 25%, 50%, 75%}` with `slippageToleranceBps = 100` (1%), and measures `effectiveBps(recipient) = absoluteLeak / recipientPrincipal`:
+The PoC (`workspace/reflax-yield-vault/test/poc-M04-buffer-amplifies-slippage.t.sol`) instantiates the real in-scope `ERC4626MarketYieldStrategy` against a deterministic AMM that fills at exactly `minOut` (the worst-case price the slippage tolerance still admits — i.e. the worst case the M-02 acceptance memo's parametric bound is supposed to cover). It scans `f ∈ {0%, 25%, 50%, 75%}` with `slippageToleranceBps = 100` (1%), and measures `effectiveBps(recipient) = absoluteLeak / recipientPrincipal`:
 
 | Aggregate buffer fraction `f` | Configured `slippageToleranceBps` | Predicted `slippageBps / (1 - f)` | Measured effective bps against recipient principal | M-02 bound (`bps × recipientPrincipal`) |
 |---|---|---|---|---|
@@ -115,12 +115,12 @@ Held at Medium because (a) the absolute per-swap leak remains bounded by the AMM
 
 ### Proof of Concept
 
-A runnable Foundry PoC is provided at `workspace/phoenix-vault/test/poc-M04-buffer-amplifies-slippage.t.sol`. It imports the in-scope `ERC4626MarketYieldStrategy` directly (the real contract at `lib/reflax-yield-vault@5f9abdd`), uses faithful `MockERC4626Vault` (standard proportional share math) and `MockERC20` mocks, and a `SlippageAtMinOutAMM` adapter that genuinely enforces `amountOut >= minAmountOut` — the strategy's own `minOut` derivation and `_distributeBuffer` path are the components under test.
+A runnable Foundry PoC is provided at `workspace/reflax-yield-vault/test/poc-M04-buffer-amplifies-slippage.t.sol`. It imports the in-scope `ERC4626MarketYieldStrategy` directly (the real contract at `lib/reflax-yield-vault@5f9abdd`), uses faithful `MockERC4626Vault` (standard proportional share math) and `MockERC20` mocks, and a `SlippageAtMinOutAMM` adapter that genuinely enforces `amountOut >= minAmountOut` — the strategy's own `minOut` derivation and `_distributeBuffer` path are the components under test.
 
 Run:
 
 ```bash
-cd workspace/phoenix-vault
+cd workspace/reflax-yield-vault
 forge test --match-path 'test/poc-M04-buffer-amplifies-slippage.t.sol' -vv
 ```
 

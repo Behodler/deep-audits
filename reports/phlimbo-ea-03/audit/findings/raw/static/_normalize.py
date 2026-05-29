@@ -248,8 +248,8 @@ def main():
     filtered_count = (slither_raw + aderyn_raw + semgrep_raw) - len(all_findings)
 
     out = {
-        "project": "phlimbo-linear",
-        "reportDir": "reports/phlimbo-linear-03",
+        "project": "phlimbo-ea",
+        "reportDir": "reports/phlimbo-ea-03",
         "contractPath": "lib/phlimbo-ea/src/Phlimbo.sol",
         "scanCommit": "1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301",
         "scanTimestamp": datetime.now(timezone.utc).isoformat(),

@@ -1,6 +1,6 @@
 ## QA Report — phoenix-nft-staking (NFTStakerV2)
 
-This QA report covers the new `NFTStakerV2` surface introduced for the BalancerPoolerV3 + NFTStakerV2 migration (story-012). The audit scope was: validate that `NFTStakerV2` correctly implements *its piece* of the broader migration plan at `scratchpad/planning-docs/phoenix/phase2/nft-staking/v2/balancer-pooler-v3-and-staker-v2-migration-plan.md`. The piece the staker owns is:
+This QA report covers the new `NFTStakerV2` surface introduced for the BalancerPoolerV3 + NFTStakerV2 migration (story-012). The audit scope was: validate that `NFTStakerV2` correctly implements *its piece* of the broader migration plan at `scratchpad/planning-docs/phoenix/phase2/phoenix-nft-staking/v2/balancer-pooler-v3-and-staker-v2-migration-plan.md`. The piece the staker owns is:
 
 - Add `stakeFor(beneficiary, amount)` and `withdrawRewardToken(to, amount)`.
 - Keep all `totalStaked == 0` decommissioning guards intact.
@@ -15,7 +15,7 @@ The combined effect is a single privileged role (migrator) that can both withdra
 
 Canonical paths:
 - Source: `lib/phoenix-nft-staking/src/NFTStakerV2.sol` (commit 9d71401)
-- Plan: `scratchpad/planning-docs/phoenix/phase2/nft-staking/v2/balancer-pooler-v3-and-staker-v2-migration-plan.md`
+- Plan: `scratchpad/planning-docs/phoenix/phase2/phoenix-nft-staking/v2/balancer-pooler-v3-and-staker-v2-migration-plan.md`
 - Tests: `lib/phoenix-nft-staking/test/NFTStakerV2*.sol`
 
 ### Plan compliance summary
@@ -100,7 +100,7 @@ Wider pattern: the implementation diverges from the plan on two adjacent functio
 
 **Code reference**:
 - `lib/phoenix-nft-staking/src/NFTStakerV2.sol:521-541` — `stakeFor` with `onlyMigrator` gate (https://github.com/Behodler/phoenix-nft-staking/blob/9d71401/src/NFTStakerV2.sol#L521-L541).
-- Plan: `scratchpad/planning-docs/phoenix/phase2/nft-staking/v2/balancer-pooler-v3-and-staker-v2-migration-plan.md` — NFTStakerV2 deltas / `stakeFor`.
+- Plan: `scratchpad/planning-docs/phoenix/phase2/phoenix-nft-staking/v2/balancer-pooler-v3-and-staker-v2-migration-plan.md` — NFTStakerV2 deltas / `stakeFor`.
 
 **Recommended mitigation**: Pick one of:
 

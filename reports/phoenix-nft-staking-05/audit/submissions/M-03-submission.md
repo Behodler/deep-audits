@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-03] rewardRate sized against aggregate minted-NFT notional has no upper ceiling, letting a lone staker capture the full T-derived stream at N x targetAPY and breaking runway predictability
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/66af47d/src/NFTStaker.sol#L340-L379
-PoC File: workspace/nft-staking/test/poc-M-03.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-M-03.t.sol
 -->
 
 ## Finding description and impact
@@ -74,7 +74,7 @@ This is a **value-leak with stated assumptions** rather than theft. All emission
 
 ### Proof of Concept
 
-The standalone test file lives at `workspace/nft-staking/test/poc-M-03.t.sol` and imports the real `NFTStaker` contract unmodified. Three tests run to green:
+The standalone test file lives at `workspace/phoenix-nft-staking/test/poc-M-03.t.sol` and imports the real `NFTStaker` contract unmodified. Three tests run to green:
 
 | Test | Scenario | Result |
 |------|----------|--------|

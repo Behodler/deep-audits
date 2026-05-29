@@ -9,16 +9,16 @@ projects and runs, so a finding can be copy-pasted instead of referenced by abso
 <project-acronym><report#><type><issue#>
 ```
 
-All lowercase, no separators. Example: `pv5m2` = phoenix-vault, report 05, **M**-02.
+All lowercase, no separators. Example: `ryv5m2` = reflax-yield-vault, report 05, **M**-02.
 
 ## Derivation (deterministic, from the run-dir name + the finding label)
 
 Given a submission living at `reports/<run-dir>/submissions/...` with a C4 label like `M-02`:
 
 1. **project-acronym** — split the run-dir name into family + run number by stripping the
-   trailing `-<digits>` (`phoenix-vault-05` → family `phoenix-vault`, run `05`). Take the
+   trailing `-<digits>` (`reflax-yield-vault-05` → family `reflax-yield-vault`, run `05`). Take the
    first letter of each hyphen-separated word of the **family name**, **dropping any
-   pure-numeric word**. (`phoenix-phase-2` → `pp`, not `pp2`.)
+   pure-numeric word**. (`phoenix-phase-2-staging` → `pps`, not `pp2s`.)
 2. **report#** — the stripped run number with leading zeros removed (`05` → `5`, `10` → `10`).
    A bare family dir with no `-NN` suffix (legacy/seed run) is report `0`.
 3. **type** — the label letter, lowercased: `h` (High), `m` (Medium), `l` (Low),
@@ -29,36 +29,35 @@ Given a submission living at `reports/<run-dir>/submissions/...` with a C4 label
 
 | ID | Resolves to |
 |----|-------------|
-| `pv5m2` | `reports/phoenix-vault-05/submissions/M-02-*.md` |
-| `pv5m1` | `reports/phoenix-vault-05/submissions/M-01-*.md` |
-| `pv5c1` | the `### [C-01]` section inside `reports/phoenix-vault-05/submissions/qa-report.md` |
-| `pv5l2` | the `### [L-02]` section inside `reports/phoenix-vault-05/submissions/qa-report.md` |
-| `ya9c1` | first `[C-01]` of `reports/yield-accumulator-09/` |
+| `ryv5m2` | `reports/reflax-yield-vault-05/submissions/M-02-*.md` |
+| `ryv5m1` | `reports/reflax-yield-vault-05/submissions/M-01-*.md` |
+| `ryv5c1` | the `### [C-01]` section inside `reports/reflax-yield-vault-05/submissions/qa-report.md` |
+| `ryv5l2` | the `### [L-02]` section inside `reports/reflax-yield-vault-05/submissions/qa-report.md` |
+| `sya9c1` | first `[C-01]` of `reports/stable-yield-accumulator-09/` |
 
 ## Current project acronyms
 
-| Project (report-dir family) | Acronym |
+| Project (= repo / submodule / report-dir family) | Acronym |
 |---|---|
-| phoenix-vault | `pv` |
-| yield-accumulator | `ya` |
-| yield-claim-nft | `ycn` |
-| nft-staking | `ns` |
-| phlimbo-linear | `pl` |
+| reflax-yield-vault | `ryv` |
 | stable-yield-accumulator | `sya` |
-| phoenix-phase-2 | `pp` |
+| yield-claim-nft | `ycn` |
+| phoenix-nft-staking | `pns` |
+| phlimbo-ea | `pe` |
+| phoenix-phase-2-staging | `pps` |
 
-The acronym keys off the **report-dir family name**, not the upstream repo name (e.g.
-`yield-accumulator` audits the `stable-yield-accumulator` repo but its ID acronym is `ya`).
+Project names, submodule directories, and report-dir family names are all the same string
+now (the upstream repo name), so the acronym derives from that single canonical name.
 
 ## Edge cases
 
 - **Numeric words in a name** — dropped from the acronym so they never collide with the
-  report number (`phoenix-phase-2` → `pp`).
+  report number (`phoenix-phase-2-staging` → `pps`).
 - **Acronym collision** — none today. If two families ever produce the same acronym, extend
   the acronym by the next letter of the first differing word, and record the override here.
 - **Where the stamp lives** — H/M findings carry the ID in the `ID:` line of their submission
   file's metadata comment. L/C findings have no own file, so the ID is an inline
-  `<!-- id: pvNcM -->` comment on their `### [L-0x]` / `### [C-0x]` section header in
+  `<!-- id: ryvNcM -->` comment on their `### [L-0x]` / `### [C-0x]` section header in
   `qa-report.md`.
 
 ## Resolving an ID back to a finding

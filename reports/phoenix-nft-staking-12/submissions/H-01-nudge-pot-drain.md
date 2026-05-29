@@ -1,5 +1,5 @@
 <!--
-ID: ns12h1
+ID: pns12h1
 C4 Submission Metadata
 Title: [H-01] Value-blind nudge gate lets any caller drain the entire nudge pot for a fraction of its value (incomplete fix of the prior nudge-drain exploit)
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/main/src/BatchNFTMinter.sol#L214-L226

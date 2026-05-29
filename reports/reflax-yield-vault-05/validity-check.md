@@ -1,4 +1,4 @@
-# Validity Check — phoenix-vault-05
+# Validity Check — reflax-yield-vault-05
 
 Screened the submission-effective set (M-01, M-02 [with folded-in M-03], L-01, L-02, C-01) against the C4 known-invalid patterns. Source verified against `lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol` (`_skimSurplusBatch` L462-L488, `_withdrawInternal` L302-L339). All root causes sit in this in-scope contract — no OOS parent/forked-contract dependency.
 

@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-01] Sandwich attack on auto-compound due to missing slippage protection
 Root Cause Link: https://github.com/Behodler/stable-yield-accumulator/blob/main/src/UniswapV4Hooks/AutoCompoundPositionHook.sol#L275-L338
-PoC File: workspace/yield-accumulator/test/poc-M-01-sandwich.t.sol
+PoC File: workspace/stable-yield-accumulator/test/poc-M-01-sandwich.t.sol
 -->
 
 ## Finding description and impact
@@ -63,7 +63,7 @@ The hook's liquidity providers (protocol users whose fees are being compounded) 
 
 ### Proof of Concept
 
-The PoC file at `workspace/yield-accumulator/test/poc-M-01-sandwich.t.sol` demonstrates:
+The PoC file at `workspace/stable-yield-accumulator/test/poc-M-01-sandwich.t.sol` demonstrates:
 
 1. **Setup**: Hook has 1,000 token0 and 1,000 token1 in accumulated fees at a fair 1:1 price
 2. **Front-run**: Attacker swaps 3,000 token0 to manipulate price

@@ -1,7 +1,7 @@
-# QA Report (Regression Update) — phoenix-vault (reflax-yield-vault)
+# QA Report (Regression Update) — reflax-yield-vault (reflax-yield-vault)
 
-**Run:** `phoenix-vault-06` — **REGRESSION** scan
-**Baseline:** `phoenix-vault-05` @ `7d11f66c9ac9b70a947f8a023872e424f4632ab9`
+**Run:** `reflax-yield-vault-06` — **REGRESSION** scan
+**Baseline:** `reflax-yield-vault-05` @ `7d11f66c9ac9b70a947f8a023872e424f4632ab9`
 **This run:** `043ff2cb5ee9808961b50311fb5ecb742b63a6e9` (story-041 — skim path rewrite)
 **Scope:** `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol`, `src/AMMAdapters/CurveAMMAdapter.sol`, `src/AMMAdapters/IAMMAdapter.sol`, `src/AMMAdapters/ICurveRouterNG.sol`
 
@@ -10,7 +10,7 @@ This is a regression QA update bundling all carried-forward Low-severity and Cen
 ### Regression context
 
 - **M-01 — CONFIRMED FIXED this run** (not included below; referenced only). story-041 removed the caller-supplied `clients[]` list — the only skim entry point is now `skimSurplus(token, recipient)` iterating an owner-managed `EnumerableSet _authorizedClients`, so duplicates are structurally unconstructible — and added a loud aggregate-surplus ceiling at `ERC4626MarketYieldStrategy.sol#L434`. Fix-verification PoC passes 4/4 against `043ff2c`. See the run summary; M-01's over-skim primitive no longer exists.
-- The Low / Centralization items below **carry forward from phoenix-vault-05**, reconciled against the current commit with the **story-041** updates noted inline (L-02 restated/narrowed; C-01 sub-points appended). M-02 (NAV-anchored `minOut` sandwich leak, with M-03 merged in) remains OPEN at Medium and is handled in the H/M track, not here.
+- The Low / Centralization items below **carry forward from reflax-yield-vault-05**, reconciled against the current commit with the **story-041** updates noted inline (L-02 restated/narrowed; C-01 sub-points appended). M-02 (NAV-anchored `minOut` sandwich leak, with M-03 merged in) remains OPEN at Medium and is handled in the H/M track, not here.
 
 ## Summary
 
@@ -82,7 +82,7 @@ function setSlippageTolerance(uint256 _bps) external onlyOwner {
 
 ### [L-02] `skimSurplus` iterates the owner-grown authorized-client set with no pagination
 
-**Status this run:** **RESTATED / NARROWED** at `043ff2c`. The phoenix-vault-05 entry (titled around `_skimSurplusBatch`) bundled two sub-vectors; story-041 resolved one and transformed the other:
+**Status this run:** **RESTATED / NARROWED** at `043ff2c`. The reflax-yield-vault-05 entry (titled around `_skimSurplusBatch`) bundled two sub-vectors; story-041 resolved one and transformed the other:
 
 - **Sub-vector (1) — zero-address whole-batch revert: RESOLVED.** The caller no longer supplies the client list; the skim API is now `skimSurplus(token, recipient)` over the owner-managed set. `setClient` rejects the zero address so it can never enter the set, and the in-loop zero-address check at [`ERC4626MarketYieldStrategy.sol#L421`](https://github.com/Behodler/reflax-yield-vault/blob/043ff2cb5ee9808961b50311fb5ecb742b63a6e9/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L421) is now unreachable defense-in-depth (the code comment at L410 acknowledges the `EnumerableSet` already guarantees distinctness). No further action on this sub-vector.
 - **Sub-vector (2) — unbounded iteration: PERSISTS, transformed.** This is the live remainder of the finding and the scope of L-02 below.

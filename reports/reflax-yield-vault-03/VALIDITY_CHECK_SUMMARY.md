@@ -1,4 +1,4 @@
-# Validity Check Summary -- phoenix-vault-03
+# Validity Check Summary -- reflax-yield-vault-03
 
 **Date**: 2026-03-25
 **Checker**: validity-checker agent

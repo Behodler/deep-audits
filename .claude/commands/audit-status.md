@@ -33,7 +33,7 @@ The project-manager performs the following for every entry in `registered-projec
 ### 2c. Determine last-audited commit
 - Load `reports/ledgers/<friendly>.json` if it exists and read `lastAuditedCommit`.
 - If the ledger is absent or has no `lastAuditedCommit`: record `(no ledger)` and skip the behind-count for that row. Do **not** fall back to the parent repo's submodule pointer — the pointer can be bumped without an audit, so it is not authoritative.
-- Also surface `lastRun` from the ledger if present (e.g., `phoenix-vault-06`) so the row links to a specific report directory.
+- Also surface `lastRun` from the ledger if present (e.g., `reflax-yield-vault-06`) so the row links to a specific report directory.
 
 ### 2d. Compute behind / ahead
 For rows that have both an audited commit and a remote HEAD:
@@ -51,9 +51,9 @@ Print one table to stdout. Columns:
 ```
 project              submodule                 branch    audited    upstream   behind        last run
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
-phoenix-vault        reflax-yield-vault        master    043ff2c    5f9abdd     7 behind     phoenix-vault-06
-yield-accumulator    stable-yield-accumulator  master    71abe3e    71abe3e    up-to-date    yield-accumulator-11
-nft-staking          phoenix-nft-staking       master    (no ledger)  9d71401   —            nft-staking-11
+reflax-yield-vault        reflax-yield-vault        master    043ff2c    5f9abdd     7 behind     reflax-yield-vault-06
+stable-yield-accumulator    stable-yield-accumulator  master    71abe3e    71abe3e    up-to-date    stable-yield-accumulator-11
+phoenix-nft-staking          phoenix-nft-staking       master    (no ledger)  9d71401   —            phoenix-nft-staking-11
 …
 ```
 

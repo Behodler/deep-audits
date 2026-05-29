@@ -200,8 +200,8 @@ function check_depositWithdrawRoundTrip(uint256 assets) public {
 
 ```json
 {
-  "project": "nft-staking",
-  "reportDir": "reports/nft-staking-12",
+  "project": "phoenix-nft-staking",
+  "reportDir": "reports/phoenix-nft-staking-12",
   "criticalFunctions": [
     {"contract": "RewardVault", "function": "deposit"},
     {"contract": "RewardVault", "function": "calculateShares"}
@@ -215,7 +215,7 @@ Write to: `<reportDir>/symbolic-results.json` (symbolic tests live in `workspace
 
 ```json
 {
-  "project": "nft-staking",
+  "project": "phoenix-nft-staking",
   "runTimestamp": "2026-05-24T10:00:00Z",
   "tool": "halmos",
   "toolVersion": "0.3.3",

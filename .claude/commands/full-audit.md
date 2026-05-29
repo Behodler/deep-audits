@@ -24,11 +24,11 @@ Invoke **project-manager**: "Check if workspace exists, create if needed"
 
 Present a summary and confirm:
 ```
-Full Audit: nft-staking
+Full Audit: phoenix-nft-staking
 ━━━━━━━━━━━━━━━━━━━━━━━
 Submodule:   lib/phoenix-nft-staking
-Report dir:  reports/nft-staking-12/
-Workspace:   workspace/nft-staking/
+Report dir:  reports/phoenix-nft-staking-12/
+Workspace:   workspace/phoenix-nft-staking/
 Scope:       6 contracts        Known issues: 5
 Ledger:      3 open · 7 fixed · 2 acknowledged
 Run mode:    REGRESSION (2 files changed) — pass --full for a cold scan
@@ -87,15 +87,15 @@ For each finding: invoke **validity-checker** (invalid patterns) and **severity-
 ```
 Final Review
 ────────────
-H-01 ✓ valid, severity confirmed (regression — was fixed in nft-staking-08)
+H-01 ✓ valid, severity confirmed (regression — was fixed in phoenix-nft-staking-08)
 M-02 ⚠ severity questioned (might be Low)
 ```
 
 ## 8. Final Summary
 ```
-Full Audit Complete: nft-staking
+Full Audit Complete: phoenix-nft-staking
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Run: reports/nft-staking-12/   Mode: REGRESSION
+Run: reports/phoenix-nft-staking-12/   Mode: REGRESSION
 
 Submissions ready:
   High:   1 report (1 regression)
@@ -103,15 +103,15 @@ Submissions ready:
   QA:     1 report (Low + Centralization + 4naly3er output)
   Carryover: 3 still-open from prior runs (M-01, L-02, L-04) — stubs in submissions/carryover/
 
-Reports:  reports/nft-staking-12/submissions/*.md
-PoCs:     workspace/nft-staking/test/poc-*.t.sol
-Ledger:   reports/ledgers/nft-staking.json (updated)
+Reports:  reports/phoenix-nft-staking-12/submissions/*.md
+PoCs:     workspace/phoenix-nft-staking/test/poc-*.t.sol
+Ledger:   reports/ledgers/phoenix-nft-staking.json (updated)
 
 Action items:
   ⚠ M-02: review severity classification
-  ⚠ H-01: REGRESSION of a finding marked fixed in nft-staking-08 — confirm the fix regressed
+  ⚠ H-01: REGRESSION of a finding marked fixed in phoenix-nft-staking-08 — confirm the fix regressed
 
-Triage: record decisions with /ledger nft-staking (ack / fixed / reopen).
+Triage: record decisions with /ledger phoenix-nft-staking (ack / fixed / reopen).
 ```
 
 # Agent Delegation

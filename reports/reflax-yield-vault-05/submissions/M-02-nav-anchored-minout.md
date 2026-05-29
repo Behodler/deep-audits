@@ -77,7 +77,7 @@ Two runnable Foundry PoCs are provided. Both import the real in-scope `ERC4626Ma
 Run:
 
 ```bash
-cd workspace/phoenix-vault
+cd workspace/reflax-yield-vault
 forge test --match-path 'test/poc-M02-nav-sandwich.t.sol' -vv
 forge test --match-path 'test/poc-M03-socialized-slippage.t.sol' -vv
 ```

@@ -52,7 +52,7 @@ If 4naly3er is unavailable, note the gap and proceed with the manual QA bundle.
 
 ## Low Risk Findings
 
-### [L-01] Missing zero-address validation in constructor <!-- id: ya9l1 -->
+### [L-01] Missing zero-address validation in constructor <!-- id: sya9l1 -->
 
 **Location**: [Contract.sol#L25](link)
 
@@ -67,7 +67,7 @@ require(_treasury != address(0), "Invalid treasury");
 
 ---
 
-### [L-02] Event not emitted for critical state change <!-- id: ya9l2 -->
+### [L-02] Event not emitted for critical state change <!-- id: sya9l2 -->
 
 **Location**: [Pool.sol#L100](link)
 
@@ -89,7 +89,7 @@ function setFeeRate(uint256 newRate) external onlyOwner {
 
 ## Centralization Risks
 
-### [C-01] Single owner can pause protocol indefinitely <!-- id: ya9c1 -->
+### [C-01] Single owner can pause protocol indefinitely <!-- id: sya9c1 -->
 
 **Location**: [Pool.sol#L50](link)
 
@@ -101,7 +101,7 @@ function setFeeRate(uint256 newRate) external onlyOwner {
 
 ---
 
-### [C-02] Owner can change critical parameters without timelock <!-- id: ya9c2 -->
+### [C-02] Owner can change critical parameters without timelock <!-- id: sya9c2 -->
 
 **Location**: [Config.sol#L30](link)
 
@@ -122,11 +122,11 @@ function setFeeRate(uint256 newRate) external onlyOwner {
 
 ### Global Issue ID stamp
 Every L/C section header carries an inline `<!-- id: ... -->` comment with the finding's
-globally-unique ID: `<project-acronym><report#><type><issue#>` (e.g. `ya9c1` = yield-accumulator,
+globally-unique ID: `<project-acronym><report#><type><issue#>` (e.g. `sya9c1` = stable-yield-accumulator,
 report 09, C-01). Derive it from the run-dir name and the label:
 1. **project-acronym** — strip trailing `-<NN>` from the run-dir name to get the family, then
    take the first letter of each hyphen word, **dropping pure-numeric words**
-   (`phoenix-phase-2` → `pp`). Keyed off the report-dir family name, not the repo name.
+   (`phoenix-phase-2-staging` → `pps`). The family name equals the repo/submodule name.
 2. **report#** — the `NN` with leading zeros removed (`09` → `9`; bare family dir = `0`).
 3. **type** — `l` for Low, `c` for Centralization.
 4. **issue#** — the label number with leading zeros removed (`C-01` → `1`).

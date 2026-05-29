@@ -13,7 +13,7 @@
 
 ### [L-01] MainRewarder.stake() Return Value Not Checked
 
-**Location**: [AutoDolaYieldStrategy.sol#L213](https://github.com/code-423n4/phoenix-vault/blob/main/src/concreteYieldStrategies/AutoDolaYieldStrategy.sol#L213)
+**Location**: [AutoDolaYieldStrategy.sol#L213](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/concreteYieldStrategies/AutoDolaYieldStrategy.sol#L213)
 
 **Description**: In the `deposit()` function, the call to `mainRewarder.stake()` does not verify success. The `IMainRewarder.stake()` interface defines the function as returning `void`, but the actual Tokemak MainRewarder implementation may silently fail without reverting under certain edge conditions. Additionally, there is no balance verification after the staking operation to confirm the shares were actually staked.
 
@@ -50,7 +50,7 @@ require(
 
 ### [L-02] SurplusWithdrawer Configuration Stores Unused Vault Address
 
-**Location**: [SurplusWithdrawer.sol#L62-L74](https://github.com/code-423n4/phoenix-vault/blob/main/src/SurplusWithdrawer.sol#L62-L74) and [SurplusWithdrawer.sol#L91-L122](https://github.com/code-423n4/phoenix-vault/blob/main/src/SurplusWithdrawer.sol#L91-L122)
+**Location**: [SurplusWithdrawer.sol#L62-L74](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/SurplusWithdrawer.sol#L62-L74) and [SurplusWithdrawer.sol#L91-L122](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/SurplusWithdrawer.sol#L91-L122)
 
 **Description**: The `SurplusWithdrawer` contract stores both `vault` and `yieldStrategy` addresses in its configuration, but only `yieldStrategy` is actually used in the `withdrawSurplusPercent()` function. The `vault` address is stored, validated for non-zero, and emitted in events, but never used in any calculation or external call.
 

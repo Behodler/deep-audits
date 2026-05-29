@@ -1,6 +1,6 @@
 # QA Report for Phoenix NFT Staking
 
-Run: `nft-staking-13` · Submodule: `phoenix-nft-staking` · Commit: [`031ffda`](https://github.com/Behodler/phoenix-nft-staking/tree/031ffdab5bf1995026ca7a47391a19f7634e7d78)
+Run: `phoenix-nft-staking-13` · Submodule: `phoenix-nft-staking` · Commit: [`031ffda`](https://github.com/Behodler/phoenix-nft-staking/tree/031ffdab5bf1995026ca7a47391a19f7634e7d78)
 
 ## Summary
 
@@ -20,7 +20,7 @@ An automated QA/gas baseline produced by **4naly3er** over the in-scope contract
 
 ## Low Risk Findings
 
-### [L-01] `batchMint` lacks `nonReentrant`; ERC1155 `onERC1155Received` fires mid-loop <!-- id: ns13l1 -->
+### [L-01] `batchMint` lacks `nonReentrant`; ERC1155 `onERC1155Received` fires mid-loop <!-- id: pns13l1 -->
 
 **Location**: [`BatchNFTMinter.sol#L238-L240`](https://github.com/Behodler/phoenix-nft-staking/blob/031ffdab5bf1995026ca7a47391a19f7634e7d78/src/BatchNFTMinter.sol#L238-L240), [`#L236`](https://github.com/Behodler/phoenix-nft-staking/blob/031ffdab5bf1995026ca7a47391a19f7634e7d78/src/BatchNFTMinter.sol#L236), [`#L246-L257`](https://github.com/Behodler/phoenix-nft-staking/blob/031ffdab5bf1995026ca7a47391a19f7634e7d78/src/BatchNFTMinter.sol#L246-L257)
 
@@ -48,7 +48,7 @@ contract BatchNFTMinter is /* ... */ ReentrancyGuard {
 
 ---
 
-### [L-02] Uncapped `count` loop in `batchMint` <!-- id: ns13l2 -->
+### [L-02] Uncapped `count` loop in `batchMint` <!-- id: pns13l2 -->
 
 **Location**: [`BatchNFTMinter.sol#L238-L240`](https://github.com/Behodler/phoenix-nft-staking/blob/031ffdab5bf1995026ca7a47391a19f7634e7d78/src/BatchNFTMinter.sol#L238-L240)
 
@@ -71,7 +71,7 @@ if (count > maxBatchSize) revert BatchMint__CountTooLarge();
 
 ---
 
-### [L-03] Nudge-token equality guard reverts even when the nudge is size-disabled <!-- id: ns13l3 -->
+### [L-03] Nudge-token equality guard reverts even when the nudge is size-disabled <!-- id: pns13l3 -->
 
 **Location**: [`BatchNFTMinter.sol#L230-L233`](https://github.com/Behodler/phoenix-nft-staking/blob/031ffdab5bf1995026ca7a47391a19f7634e7d78/src/BatchNFTMinter.sol#L230-L233)
 
@@ -90,9 +90,9 @@ if (_nudgeSize != 0 && _nudgeTokenEntry != address(0) && _nudgeTokenEntry == add
 
 ---
 
-### [L-04] Design note: value-blind, count-gated full-pot nudge payout <!-- id: ns13l4 -->
+### [L-04] Design note: value-blind, count-gated full-pot nudge payout <!-- id: pns13l4 -->
 
-> **This is a design / hardening note, NOT a claimed vulnerability for this run.** The permissionless drain vector that made this a valid High in run nft-staking-12 was **FIXED by story-014**. It is retained only as optional defense-in-depth.
+> **This is a design / hardening note, NOT a claimed vulnerability for this run.** The permissionless drain vector that made this a valid High in run phoenix-nft-staking-12 was **FIXED by story-014**. It is retained only as optional defense-in-depth.
 
 **Location**: [`BatchNFTMinter.sol#L246-L257`](https://github.com/Behodler/phoenix-nft-staking/blob/031ffdab5bf1995026ca7a47391a19f7634e7d78/src/BatchNFTMinter.sol#L246-L257)
 

@@ -1,6 +1,6 @@
-# Pattern-Matcher Report — phoenix-vault (reflax-yield-vault)
+# Pattern-Matcher Report — reflax-yield-vault (reflax-yield-vault)
 
-- Project: phoenix-vault (maps to `lib/reflax-yield-vault`)
+- Project: reflax-yield-vault (maps to `lib/reflax-yield-vault`)
 - Scan type: pattern-matching (historical vulnerability pattern DB)
 - Patterns checked: 22
 - Scan timestamp: 2026-05-25

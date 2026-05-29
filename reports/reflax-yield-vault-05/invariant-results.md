@@ -1,6 +1,6 @@
-# Invariant Test Results — phoenix-vault (reflax-yield-vault)
+# Invariant Test Results — reflax-yield-vault (reflax-yield-vault)
 
-- Project: phoenix-vault (maps to `lib/reflax-yield-vault`)
+- Project: reflax-yield-vault (maps to `lib/reflax-yield-vault`)
 - Run timestamp: 2026-05-25
 - Target: `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol` (+ `src/AMMAdapters/CurveAMMAdapter.sol` via mock)
 - Harness: deterministic, mock-based (no mainnet fork). Mocks used:
@@ -9,11 +9,11 @@
 
 ## Files produced (workspace, all absolute)
 
-- Stateful invariant harness (Foundry): `workspace/phoenix-vault/test/invariant/PhoenixVaultInvariant.t.sol`
-- Deterministic isolation PoC (Foundry): `workspace/phoenix-vault/test/invariant/CODE001_Poc.t.sol`
-- Medusa fuzz target: `workspace/phoenix-vault/test/invariant/MedusaPhoenixVault.sol`
-- Medusa config: `workspace/phoenix-vault/medusa.json`
-- Foundry invariant profile added to `workspace/phoenix-vault/foundry.toml` (`[invariant] runs=256 depth=50 fail_on_revert=false`)
+- Stateful invariant harness (Foundry): `workspace/reflax-yield-vault/test/invariant/PhoenixVaultInvariant.t.sol`
+- Deterministic isolation PoC (Foundry): `workspace/reflax-yield-vault/test/invariant/CODE001_Poc.t.sol`
+- Medusa fuzz target: `workspace/reflax-yield-vault/test/invariant/MedusaPhoenixVault.sol`
+- Medusa config: `workspace/reflax-yield-vault/medusa.json`
+- Foundry invariant profile added to `workspace/reflax-yield-vault/foundry.toml` (`[invariant] runs=256 depth=50 fail_on_revert=false`)
 
 ## Harness design notes (fidelity)
 
@@ -117,7 +117,7 @@ seen-set), or bound `totalShares` by an independently recomputed aggregate surpl
 ## Reproduce
 
 ```bash
-cd workspace/phoenix-vault
+cd workspace/reflax-yield-vault
 # Foundry: stateful invariants (2 break) + deterministic PoC (passes)
 forge test --match-path 'test/invariant/*' -vv
 # Medusa: primary stateful fuzzer (property_shareBackingCoversPrincipal fails)

@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-01] emergencyWithdraw skips _updatePool, retroactively repricing the prior accrual window at the post-withdrawal denominator and over-paying surviving stakers
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/b11e49d/src/NFTStaker.sol#L538-L561
-PoC File: workspace/nft-staking/test/poc-M-01.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-M-01.t.sol
 -->
 
 ## Finding description and impact
@@ -71,7 +71,7 @@ The implementation does the opposite: the in-flight slice is repriced at a small
 
 #### PoC numerical results
 
-The PoC at `workspace/nft-staking/test/poc-M-01.t.sol` (passing) deploys two independent fresh `NFTStaker` instances and runs both scenarios end-to-end against the real contract:
+The PoC at `workspace/phoenix-nft-staking/test/poc-M-01.t.sol` (passing) deploys two independent fresh `NFTStaker` instances and runs both scenarios end-to-end against the real contract:
 
 - **Scenario A (bug)**: Bob `emergencyWithdraw` at `t = 100`, Alice `claim` at `t = 200`. Alice receives `(T1 + T2) * R = 200 * R`.
 - **Scenario B (counterfactual)**: owner triggers `pullAndRefresh()` at `t = 100` — settling `[0, 100]` at the correct denominator of 20 — *before* Bob's exit, then Alice claims at `t = 200`. Alice receives `T1*R/2 + T2*R = 150 * R`.

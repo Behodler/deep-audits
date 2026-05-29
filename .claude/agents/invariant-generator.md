@@ -179,8 +179,8 @@ function invariant_noStuckFunds() public view {
 
 ```json
 {
-  "project": "nft-staking",
-  "reportDir": "reports/nft-staking-12",
+  "project": "phoenix-nft-staking",
+  "reportDir": "reports/phoenix-nft-staking-12",
   "profiles": ["src/Staking.sol", "src/RewardVault.sol"]
 }
 ```
@@ -194,9 +194,9 @@ function invariant_noStuckFunds() public view {
 
 ```json
 {
-  "project": "nft-staking",
+  "project": "phoenix-nft-staking",
   "invariantsGenerated": 8,
-  "testFile": "workspace/nft-staking/test/Invariant.t.sol",
+  "testFile": "workspace/phoenix-nft-staking/test/Invariant.t.sol",
   "invariants": [
     {
       "name": "invariant_balanceConservation",
@@ -211,7 +211,7 @@ function invariant_noStuckFunds() public view {
 
 ```json
 {
-  "project": "nft-staking",
+  "project": "phoenix-nft-staking",
   "runTimestamp": "2026-05-24T10:00:00Z",
   "runners": { "forge": true, "medusa": true, "echidna": false },
   "passed": 7,

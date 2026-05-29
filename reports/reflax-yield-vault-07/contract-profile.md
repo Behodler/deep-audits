@@ -1,9 +1,9 @@
-# phoenix-vault-07 — Contract Profile (Tier 1, regression mode)
+# reflax-yield-vault-07 — Contract Profile (Tier 1, regression mode)
 
 - **Target commit:** `5f9abdd` (story-042)
-- **Baseline:** `043ff2c` (phoenix-vault-06)
+- **Baseline:** `043ff2c` (reflax-yield-vault-06)
 - **Story-042 surface:** `_skimSurplus` rewrite with per-client `setAsideBuffer` distribution
-- **Canonical artefact:** `reports/phoenix-vault-07/contract-profile.json`
+- **Canonical artefact:** `reports/reflax-yield-vault-07/contract-profile.json`
 
 ## In-scope contracts
 
@@ -35,7 +35,7 @@
 - New per-client `safeTransfer(clients[i], buf)` external calls in the buffered path. Each `clients[i]` is owner-authorized via the `_authorizedClients` EnumerableSet (so attacker cannot inject arbitrary `clients[]`).
 - The `SurplusSkimmed` event still reports the **snapshot** surplus with `recipient` as the receiver — under the buffered path the actual underlying flow per client diverges from this. Flagged as LOCAL-005 for code-scanner.
 
-## Carry-forward findings (from phoenix-vault-06)
+## Carry-forward findings (from reflax-yield-vault-06)
 
 | Label | Title | Behaviour under story-042 |
 |---|---|---|

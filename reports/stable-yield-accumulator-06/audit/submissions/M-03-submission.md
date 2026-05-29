@@ -3,7 +3,7 @@ C4 Submission Metadata
 Title: [M-03] Raw approve() call in ClaimArbitrage and StableYieldAccumulator permanently blocks execution for USDT-like reward tokens
 Severity: Medium
 Root Cause: src/ClaimArbitrage.sol#L184
-PoC File: workspace/yield-accumulator/test/poc-M-03.t.sol
+PoC File: workspace/stable-yield-accumulator/test/poc-M-03.t.sol
 -->
 
 ## Finding description and impact

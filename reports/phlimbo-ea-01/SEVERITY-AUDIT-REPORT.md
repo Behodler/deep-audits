@@ -1,6 +1,6 @@
-# Severity Audit Report: phlimbo-linear
+# Severity Audit Report: phlimbo-ea
 
-**Project:** phlimbo-linear
+**Project:** phlimbo-ea
 **Audit Date:** 2026-01-15
 **Auditor:** severity-auditor agent
 **Scope:** Second-opinion severity validation for M-01, M-03, M-04

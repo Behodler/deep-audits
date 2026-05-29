@@ -1,11 +1,11 @@
-# PoC Validation — phoenix-vault-05 (poc-validator)
+# PoC Validation — reflax-yield-vault-05 (poc-validator)
 
 Independent validation of the three Medium-finding PoCs. All run against the real in-scope
 `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol`, which is **byte-identical** to the
 read-only `lib/reflax-yield-vault` version (verified via `diff -q`). PoCs import the real contract
 directly — no shadow reimplementation.
 
-Run command: `cd workspace/phoenix-vault && forge test --match-path 'test/poc-M0X-*.t.sol' -vv`
+Run command: `cd workspace/reflax-yield-vault && forge test --match-path 'test/poc-M0X-*.t.sol' -vv`
 
 ## Mock fidelity (shared across all three)
 - `MockAMMAdapter.swap` genuinely enforces `require(amountOut >= minAmountOut)` (line 63). So the

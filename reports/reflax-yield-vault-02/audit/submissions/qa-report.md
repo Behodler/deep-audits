@@ -14,7 +14,7 @@
 
 ### [L-01] `_withdrawFrom` Rounding Edge Cases May Report Zero Surplus
 
-**Location**: [AutoDolaYieldStrategy.sol#L399-L406](https://github.com/code-423n4/phoenix-vault/blob/main/src/concreteYieldStrategies/AutoDolaYieldStrategy.sol#L399-L406)
+**Location**: [AutoDolaYieldStrategy.sol#L399-L406](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/concreteYieldStrategies/AutoDolaYieldStrategy.sol#L399-L406)
 
 **Description**: The surplus calculation in `_withdrawFrom()` computes available yield as `totalBalanceOf - principalOf`. Due to ERC4626 rounding behavior in `convertToAssets()`, this calculation may report zero surplus even when yield exists, particularly for small balances or when the share price has only marginally increased.
 
@@ -45,7 +45,7 @@ uint256 surplus = totalBalance + 1 > principal ? totalBalance - principal : 0;
 
 ### [L-02] `clientDeposits` Mapping Not Cleared on Migration
 
-**Location**: [AYieldStrategy.sol#L360-L377](https://github.com/code-423n4/phoenix-vault/blob/main/src/AYieldStrategy.sol#L360-L377)
+**Location**: [AYieldStrategy.sol#L360-L377](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/AYieldStrategy.sol#L360-L377)
 
 **Description**: The `_executeWithdrawal()` function in the two-phase withdrawal process clears the withdrawal state and calls `_totalWithdraw()`, which in `AutoDolaYieldStrategy` resets `clientBalances[token][client]` to zero and decrements `totalDeposited`. However, if a migration pattern were to involve reusing the contract after `totalWithdrawal()`, stale `clientBalances` entries for other clients would remain.
 
@@ -76,7 +76,7 @@ function principalOf(address token, address account) external view override retu
 
 ### [L-03] External Calls Before State Updates in `deposit()`
 
-**Location**: [AutoDolaYieldStrategy.sol#L213-L217](https://github.com/code-423n4/phoenix-vault/blob/main/src/concreteYieldStrategies/AutoDolaYieldStrategy.sol#L213-L217)
+**Location**: [AutoDolaYieldStrategy.sol#L213-L217](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/concreteYieldStrategies/AutoDolaYieldStrategy.sol#L213-L217)
 
 **Description**: In the `deposit()` function, the external call to `mainRewarder.stake()` is made before updating the internal state variables `clientBalances` and `totalDeposited`:
 
@@ -108,7 +108,7 @@ mainRewarder.stake(address(this), sharesReceived);
 
 ### [L-04] Two-Phase Withdrawal Balance Caching May Orphan Yield
 
-**Location**: [AYieldStrategy.sol#L333-L351](https://github.com/code-423n4/phoenix-vault/blob/main/src/AYieldStrategy.sol#L333-L351) and [AYieldStrategy.sol#L360-L377](https://github.com/code-423n4/phoenix-vault/blob/main/src/AYieldStrategy.sol#L360-L377)
+**Location**: [AYieldStrategy.sol#L333-L351](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/AYieldStrategy.sol#L333-L351) and [AYieldStrategy.sol#L360-L377](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/AYieldStrategy.sol#L360-L377)
 
 **Description**: The two-phase withdrawal mechanism caches the client's balance at Phase 1 initiation and uses this cached value when executing Phase 2 (24-72 hours later):
 
@@ -162,7 +162,7 @@ function _executeWithdrawal(...) internal {
 
 ### [C-01] Owner Has Unrestricted Control Over Funds
 
-**Location**: [AYieldStrategy.sol (all owner functions)](https://github.com/code-423n4/phoenix-vault/blob/main/src/AYieldStrategy.sol)
+**Location**: [AYieldStrategy.sol (all owner functions)](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/AYieldStrategy.sol)
 
 **Description**: The owner has complete control over the protocol through several privileged functions:
 
@@ -184,7 +184,7 @@ While the two-phase withdrawal provides a 24-hour notice period for major fund m
 
 ### [C-02] Authorized Withdrawers Have Access to All Client Balances
 
-**Location**: [AYieldStrategy.sol#L234-L253](https://github.com/code-423n4/phoenix-vault/blob/main/src/AYieldStrategy.sol#L234-L253)
+**Location**: [AYieldStrategy.sol#L234-L253](https://github.com/code-423n4/reflax-yield-vault/blob/main/src/AYieldStrategy.sol#L234-L253)
 
 **Description**: The `withdrawFrom()` function allows any authorized withdrawer to extract surplus from ANY client's balance without per-client restrictions:
 

@@ -1,6 +1,6 @@
-# Econ-Scan Report — phoenix-vault (reflax-yield-vault)
+# Econ-Scan Report — reflax-yield-vault (reflax-yield-vault)
 
-- Project: phoenix-vault (maps to `lib/reflax-yield-vault`)
+- Project: reflax-yield-vault (maps to `lib/reflax-yield-vault`)
 - Scan type: economic / protocol-wide (Tier 2)
 - Scan timestamp: 2026-05-25
 - In-scope: `ERC4626MarketYieldStrategy.sol`, `CurveAMMAdapter.sol`, `IAMMAdapter.sol`, `ICurveRouterNG.sol` (context: `AYieldStrategy.sol`, `IYieldStrategy.sol`)

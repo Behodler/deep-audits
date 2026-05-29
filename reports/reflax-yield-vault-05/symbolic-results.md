@@ -1,12 +1,12 @@
-# Symbolic-Analyzer Results — phoenix-vault (reflax-yield-vault)
+# Symbolic-Analyzer Results — reflax-yield-vault (reflax-yield-vault)
 
-- Project: phoenix-vault (maps to `lib/reflax-yield-vault`)
+- Project: reflax-yield-vault (maps to `lib/reflax-yield-vault`)
 - Tool: Halmos 0.3.3 (SMT: yices 2.6.5 / z3 — bitwuzla unavailable offline), forge 1.5.1 fuzz corroboration
 - Run timestamp: 2026-05-25
 - Target: `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol` (share/principal accounting math)
 - Harnesses (writable workspace, NOT in lib/):
-  - `workspace/phoenix-vault/test/symbolic/AccountingSymbolic.t.sol` (Halmos `check_` properties)
-  - `workspace/phoenix-vault/test/symbolic/AccountingFuzz.t.sol` (forge fuzz corroboration of division-heavy properties Halmos cannot close)
+  - `workspace/reflax-yield-vault/test/symbolic/AccountingSymbolic.t.sol` (Halmos `check_` properties)
+  - `workspace/reflax-yield-vault/test/symbolic/AccountingFuzz.t.sol` (forge fuzz corroboration of division-heavy properties Halmos cannot close)
 
 ## Method / why a harness
 
@@ -137,12 +137,12 @@ consistent with the code-scan's Medium estimate. Final severity is the classifie
   solvers (yices, z3). bitwuzla (which handles bitvector division far better) could not be used:
   the environment blocks solver downloads (`HALMOS_ALLOW_DOWNLOAD` unset, per the offline-safe
   toolchain policy). These were closed via 50k-run forge fuzzing plus closed-form proofs instead.
-- No `lib/` files were modified; all artifacts live under `workspace/phoenix-vault/test/symbolic/`.
+- No `lib/` files were modified; all artifacts live under `workspace/reflax-yield-vault/test/symbolic/`.
 
 ## Reproduce
 
 ```bash
-cd workspace/phoenix-vault
+cd workspace/reflax-yield-vault
 # Halmos-tractable properties (CODE-001 refutation + ECON-02 + dedup control):
 PATH="$HOME/.foundry/bin:$PATH" ~/.local/bin/halmos --contract AccountingSymbolic \
   --solver-timeout-assertion 60000 --statistics \

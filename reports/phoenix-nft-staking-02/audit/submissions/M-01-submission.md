@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-01] `ownerOrNotGriefed` guard is bypassed via `claim()`, re-enabling the prior ES-01 rate-dilution grief
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/5062553/src/NFTStaker.sol#L281
-PoC File: workspace/nft-staking/test/poc-M-01.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-M-01.t.sol
 -->
 
 ## Finding description and impact
@@ -96,7 +96,7 @@ Assets are not directly stolen or permanently frozen — the budgeted rewards ev
 
 ### Proof of Concept
 
-Full PoC at [`workspace/nft-staking/test/poc-M-01.t.sol`](../../../../workspace/nft-staking/test/poc-M-01.t.sol). Run with:
+Full PoC at [`workspace/phoenix-nft-staking/test/poc-M-01.t.sol`](../../../../workspace/phoenix-nft-staking/test/poc-M-01.t.sol). Run with:
 
 ```bash
 forge test --match-contract PocM01 -vv

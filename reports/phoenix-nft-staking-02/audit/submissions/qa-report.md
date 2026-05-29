@@ -1,8 +1,8 @@
-# QA Report — NFTStaker (Phoenix nft-staking re-audit)
+# QA Report — NFTStaker (Phoenix phoenix-nft-staking re-audit)
 
 ## Intro
 
-This QA bundle covers the second-round audit of `NFTStaker.sol` in the Phoenix `nft-staking` submodule (pinned commit `5062553`). The contract is a masterchef-style single-ID ERC1155 staking pool that emits phUSD over a configurable depletion window and pulls additional budget from the `BalancerPoolerMintDebtHook` dispatcher. The findings below are residual hardening opportunities on top of the story-001 / story-002 / story-003 remediations delivered since the prior audit: minor accounting drifts, view-consistency issues, UX regressions introduced by the prior-audit fix, spec-vs-implementation divergences, and one centralization / setter-ordering defect. None rise to Medium individually; collectively they map out the remaining polish work.
+This QA bundle covers the second-round audit of `NFTStaker.sol` in the Phoenix `phoenix-nft-staking` submodule (pinned commit `5062553`). The contract is a masterchef-style single-ID ERC1155 staking pool that emits phUSD over a configurable depletion window and pulls additional budget from the `BalancerPoolerMintDebtHook` dispatcher. The findings below are residual hardening opportunities on top of the story-001 / story-002 / story-003 remediations delivered since the prior audit: minor accounting drifts, view-consistency issues, UX regressions introduced by the prior-audit fix, spec-vs-implementation divergences, and one centralization / setter-ordering defect. None rise to Medium individually; collectively they map out the remaining polish work.
 
 ## Summary
 

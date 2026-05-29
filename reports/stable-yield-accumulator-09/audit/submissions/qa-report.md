@@ -1,4 +1,4 @@
-# Quality Assurance Report — yield-accumulator
+# Quality Assurance Report — stable-yield-accumulator
 
 ## Executive Summary
 

@@ -1,6 +1,6 @@
 # Severity Audit Report - Phoenix Vault
 
-**Project:** phoenix-vault
+**Project:** reflax-yield-vault
 **Audit Date:** 2026-01-23
 **Auditor:** Severity Auditor Agent
 
@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This report provides an independent severity assessment of 4 findings in the phoenix-vault project. The goal is to validate severity classifications against C4 criteria and identify any overstatement or understatement.
+This report provides an independent severity assessment of 4 findings in the reflax-yield-vault project. The goal is to validate severity classifications against C4 criteria and identify any overstatement or understatement.
 
 | Finding | Claimed Severity | Assessed Severity | Agreement | Confidence |
 |---------|------------------|-------------------|-----------|------------|

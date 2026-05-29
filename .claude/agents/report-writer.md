@@ -146,12 +146,12 @@ PoC File: H-01-poc.t.sol
 ## GLOBAL ISSUE ID
 
 Every submission is stamped with a short, separator-free, globally-unique ID of the form
-`<project-acronym><report#><type><issue#>` (e.g. `pv5m2` = phoenix-vault, report 05, M-02).
+`<project-acronym><report#><type><issue#>` (e.g. `ryv5m2` = reflax-yield-vault, report 05, M-02).
 
 Derive it from the run-dir name and the finding's C4 label:
 1. **project-acronym** — strip the trailing `-<NN>` from the run-dir name to get the family
-   (`phoenix-vault-05` → `phoenix-vault`); take the first letter of each hyphen-separated word
-   of the family, **dropping pure-numeric words** (`phoenix-phase-2` → `pp`).
+   (`reflax-yield-vault-05` → `reflax-yield-vault`); take the first letter of each hyphen-separated word
+   of the family, **dropping pure-numeric words** (`phoenix-phase-2-staging` → `pps`).
 2. **report#** — the `NN` with leading zeros removed (`05` → `5`); a bare family dir with no
    `-NN` is report `0`.
 3. **type** — the label letter lowercased: `h`/`m`/`l`/`c`/`g`.

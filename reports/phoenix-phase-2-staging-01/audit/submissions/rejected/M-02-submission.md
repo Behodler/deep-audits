@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-02] Missing Slippage Protection in claim() allows front-running and rate manipulation
 Root Cause Link: https://github.com/Behodler/stable-yield-accumulator/blob/main/src/StableYieldAccumulator.sol#L420-L460
-PoC File: workspace/phoenix-phase-2/test/poc-M-02.t.sol
+PoC File: workspace/phoenix-phase-2-staging/test/poc-M-02.t.sol
 -->
 
 ## Finding description and impact

@@ -1,6 +1,6 @@
 # QA Report for Phoenix NFT Staking
 
-Run: `nft-staking-12` · Submodule: `phoenix-nft-staking` · Commit: [`ab07199`](https://github.com/Behodler/phoenix-nft-staking/tree/ab07199a658b58d0162c3914e4b32384d3a59a7b)
+Run: `phoenix-nft-staking-12` · Submodule: `phoenix-nft-staking` · Commit: [`ab07199`](https://github.com/Behodler/phoenix-nft-staking/tree/ab07199a658b58d0162c3914e4b32384d3a59a7b)
 
 ## Summary
 
@@ -18,7 +18,7 @@ An automated QA/gas baseline produced by **4naly3er** over the in-scope contract
 
 ## Low Risk Findings
 
-### [L-01] `batchMint` lacks `nonReentrant`; ERC1155 `onERC1155Received` fires mid-loop <!-- id: ns12l1 -->
+### [L-01] `batchMint` lacks `nonReentrant`; ERC1155 `onERC1155Received` fires mid-loop <!-- id: pns12l1 -->
 
 **Location**: [`BatchNFTMinter.sol#L184`](https://github.com/Behodler/phoenix-nft-staking/blob/ab07199a658b58d0162c3914e4b32384d3a59a7b/src/BatchNFTMinter.sol#L184), [`#L205`](https://github.com/Behodler/phoenix-nft-staking/blob/ab07199a658b58d0162c3914e4b32384d3a59a7b/src/BatchNFTMinter.sol#L205), [`#L207-L211`](https://github.com/Behodler/phoenix-nft-staking/blob/ab07199a658b58d0162c3914e4b32384d3a59a7b/src/BatchNFTMinter.sol#L207-L211)
 
@@ -46,7 +46,7 @@ contract BatchNFTMinter is /* ... */ ReentrancyGuard {
 
 ---
 
-### [L-02] Uncapped `count` loop in `batchMint` <!-- id: ns12l2 -->
+### [L-02] Uncapped `count` loop in `batchMint` <!-- id: pns12l2 -->
 
 **Location**: [`BatchNFTMinter.sol#L207-L209`](https://github.com/Behodler/phoenix-nft-staking/blob/ab07199a658b58d0162c3914e4b32384d3a59a7b/src/BatchNFTMinter.sol#L207-L209)
 
@@ -69,7 +69,7 @@ if (count > maxBatchSize) revert BatchMint__CountTooLarge();
 
 ---
 
-### [L-03] Nudge-token equality guard reverts even when the nudge is size-disabled <!-- id: ns12l3 -->
+### [L-03] Nudge-token equality guard reverts even when the nudge is size-disabled <!-- id: pns12l3 -->
 
 **Location**: [`BatchNFTMinter.sol#L199-L201`](https://github.com/Behodler/phoenix-nft-staking/blob/ab07199a658b58d0162c3914e4b32384d3a59a7b/src/BatchNFTMinter.sol#L199-L201)
 

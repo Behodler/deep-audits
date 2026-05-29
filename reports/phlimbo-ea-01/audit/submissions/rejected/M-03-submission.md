@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-03] Zero total staked state enables reward loss griefing
 Root Cause Link: https://github.com/Behodler/phlimbo-ea/blob/main/src/Phlimbo.sol#L415-L418
-PoC File: workspace/phlimbo-linear/test/poc-M-03.t.sol
+PoC File: workspace/phlimbo-ea/test/poc-M-03.t.sol
 -->
 
 ## Finding description and impact

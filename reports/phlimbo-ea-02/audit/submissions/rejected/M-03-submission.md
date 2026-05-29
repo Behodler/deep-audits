@@ -45,7 +45,7 @@ There is no per-user or aggregate cap inside the migrator that would soften the 
 
 ### Proof of Concept
 
-The PoC at `reports/phlimbo-linear-02/audit/pocs/poc-M-03.t.sol` follows the documented migration flow exactly, with V1 left in its on-chain operating state, and demonstrates the issue across three tests:
+The PoC at `reports/phlimbo-ea-02/audit/pocs/poc-M-03.t.sol` follows the documented migration flow exactly, with V1 left in its on-chain operating state, and demonstrates the issue across three tests:
 
 1. `test_M03_UnpausedV1Withdrawal` — V1 is left unpaused. Between `seedObligations` and `migrateDeposits`, the user calls `Phlimbo.withdraw`. Final wallet balance asserts at `2 * ALICE_DEPOSIT`.
 2. `test_M03_PausedV1NotDrained` — owner pauses V1 (a partial mitigation an operator might attempt) but does *not* call `emergencyTransfer`. The user calls `Phlimbo.pauseWithdraw`, which is `whenPaused`. Final wallet balance asserts at `2 * ALICE_DEPOSIT`. This shows pausing V1 alone is insufficient.

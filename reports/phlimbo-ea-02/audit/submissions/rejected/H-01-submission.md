@@ -3,7 +3,7 @@ C4 Submission Metadata
 Title: [H-01] Partial `pauseWithdraw` leaves `rewardDebt` stale, permanently bricking `stake`/`withdraw`/`claim` via arithmetic underflow
 Severity: High
 Root Cause Link: lib/phlimbo-ea/src/PhlimboV2.sol:285
-PoC File: reports/phlimbo-linear-02/audit/pocs/poc-H-01.t.sol
+PoC File: reports/phlimbo-ea-02/audit/pocs/poc-H-01.t.sol
 -->
 
 ## Finding description and impact
@@ -85,7 +85,7 @@ Alice's remaining `1e18` phUSD is permanently locked.
 
 ### Proof of Concept
 
-A runnable Foundry PoC is provided at `reports/phlimbo-linear-02/audit/pocs/poc-H-01.t.sol` (workspace path: `workspace/phlimbo-linear/test/poc-H-01.t.sol`). Three tests, all passing:
+A runnable Foundry PoC is provided at `reports/phlimbo-ea-02/audit/pocs/poc-H-01.t.sol` (workspace path: `workspace/phlimbo-ea/test/poc-H-01.t.sol`). Three tests, all passing:
 
 - **`test_H01_partialPauseWithdraw_locksUser_claimUnderflows`** — primary PoC. Executes the sequence above and asserts that `claim`, `pendingStable`, `withdraw`, and `stake` each revert with `stdError.arithmeticError` (Panic(0x11)). Intermediate assertions confirm `user.amount` shrank from `1000e18` to `1e18` while `user.stableDebt` was unchanged by `pauseWithdraw`.
 - **`test_H01_partialPauseWithdraw_pendingPhUSDViewUnderflows`** — auxiliary PoC for the phUSD-debt path: activates a non-zero phUSD APY via the two-step `setDesiredAPY(500)`, then shows that `pendingPhUSD(alice)` also reverts with arithmetic underflow after a partial pause-withdraw. Confirms both `phUSDDebt` and `stableDebt` are affected by the same invariant break.

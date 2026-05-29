@@ -1,4 +1,4 @@
-# Validity Check Summary: yield-accumulator-05
+# Validity Check Summary: stable-yield-accumulator-05
 
 ## M-01: ClaimArbitrage Step 3 hardcodes USDC approval but SYA rewardToken is mutable
 

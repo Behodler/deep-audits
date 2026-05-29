@@ -1,4 +1,4 @@
-# Deduplicated Findings — StableYieldAccumulator (run yield-accumulator-11)
+# Deduplicated Findings — StableYieldAccumulator (run stable-yield-accumulator-11)
 
 Submodule: `lib/stable-yield-accumulator` @ 71abe3e
 **23 raw candidates → 4 canonical findings** (11 refuted/no-finding dropped). **No High or Medium survives.**

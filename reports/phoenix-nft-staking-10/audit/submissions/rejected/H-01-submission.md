@@ -2,7 +2,7 @@
 title: Nudge payout sweeps full balance to caller-supplied recipient — deterministic frontrun, refill arbitrage, recipient asymmetry, and threshold gaming
 root_cause_link: https://github.com/Behodler/phoenix-nft-staking/blob/24b3f58/src/BatchNFTMinter.sol#L137-L155
 severity: High
-poc_file: workspace/nft-staking/test/poc-H-01.t.sol
+poc_file: workspace/phoenix-nft-staking/test/poc-H-01.t.sol
 -->
 
 ## Finding description and impact
@@ -37,7 +37,7 @@ Three structural decisions compound:
 2. **Threshold inequality with no scaling.** The qualifier is `count >= nudgeSize`. A batch of 5 (assuming `nudgeSize == 5`) and a batch of 1,000 receive identical nudges, so rational callers converge on the cheapest qualifying batch.
 3. **`recipient` decoupled from `msg.sender`.** The dispatcher payment is pulled from `msg.sender` and the dust refund is returned to `msg.sender`, but the nudge transfer is sent to the caller-supplied `recipient`. The payer and the nudge beneficiary need not be the same account.
 
-The PoC at `workspace/nft-staking/test/poc-H-01.t.sol` demonstrates three concrete attack vectors driven by this single broken invariant. All three tests pass under `forge test --match-path test/poc-H-01.t.sol -vv`.
+The PoC at `workspace/phoenix-nft-staking/test/poc-H-01.t.sol` demonstrates three concrete attack vectors driven by this single broken invariant. All three tests pass under `forge test --match-path test/poc-H-01.t.sol -vv`.
 
 #### (A) Mempool-race full-pool drain — `test_PoC_H01_AttackerDrainsFullNudgePool`
 
@@ -86,12 +86,12 @@ The asset at risk is the full `nudgePaymentToken` balance of `BatchNFTMinter` at
 
 ### Proof of Concept
 
-A standalone Foundry test is provided at `workspace/nft-staking/test/poc-H-01.t.sol`. The file contains three tests, one per attack vector, and is self-contained against the existing `BatchNFTMinter` source plus the in-tree `MockITokenMinterV2`, `MockERC1155`, and `MockERC20` helpers used elsewhere in the test suite.
+A standalone Foundry test is provided at `workspace/phoenix-nft-staking/test/poc-H-01.t.sol`. The file contains three tests, one per attack vector, and is self-contained against the existing `BatchNFTMinter` source plus the in-tree `MockITokenMinterV2`, `MockERC1155`, and `MockERC20` helpers used elsewhere in the test suite.
 
 To reproduce:
 
 ```bash
-cd workspace/nft-staking
+cd workspace/phoenix-nft-staking
 forge test --match-path test/poc-H-01.t.sol -vv
 ```
 

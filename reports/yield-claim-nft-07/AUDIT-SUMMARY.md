@@ -4,7 +4,7 @@
 
 **Delta vs. previously reviewed commit (`c67d3c9`):** Purely additive (`git diff c67d3c9..1bb956c -- src/`). `BalancerPoolerV2.sol` gains one import (`INFTMinterV2`), two internal constants (`OLD_NFT_ID = 4` at L35, `NEW_NFT_INDEX = 6` at L40), and one external function (`migrateMint(uint256, address)` at L335-344). No other in-scope source file changed; line numbers on existing report-6 findings shift by approximately +11 for code below the insertion point, but bodies are byte-identical.
 
-**Reference plan:** [`balancer-pooler-v3-and-staker-v2-migration-plan.md`](/home/justin/code/product-owner/scratchpad/planning-docs/phoenix/phase2/nft-staking/v2/balancer-pooler-v3-and-staker-v2-migration-plan.md)
+**Reference plan:** [`balancer-pooler-v3-and-staker-v2-migration-plan.md`](/home/justin/code/product-owner/scratchpad/planning-docs/phoenix/phase2/phoenix-nft-staking/v2/balancer-pooler-v3-and-staker-v2-migration-plan.md)
 
 **Pipeline run:** code-scanner + econ-scanner in parallel → deduplicator (merged cross-scanner duplicates, sanitized cross-repo concerns, severity-classified per C4 regular-audit criteria). 14 raw findings → 4 Medium (all carry-forward) + 5 Low (all new) + 1 out-of-scope.
 

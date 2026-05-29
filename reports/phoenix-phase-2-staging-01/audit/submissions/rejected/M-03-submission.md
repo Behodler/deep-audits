@@ -87,7 +87,7 @@ The vulnerability is particularly severe because:
 
 ### PoC
 
-See standalone PoC at: `workspace/phoenix-phase-2/test/poc-M-03.t.sol`
+See standalone PoC at: `workspace/phoenix-phase-2-staging/test/poc-M-03.t.sol`
 
 The PoC demonstrates three test cases:
 - `test_M03_SandwichAttackOnStake`: Attacker earned 522,228 bps APY vs expected 800 bps

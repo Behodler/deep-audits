@@ -1,6 +1,6 @@
-# Code-Scanner Report — phoenix-vault (reflax-yield-vault)
+# Code-Scanner Report — reflax-yield-vault (reflax-yield-vault)
 
-- Project: phoenix-vault (maps to `lib/reflax-yield-vault`)
+- Project: reflax-yield-vault (maps to `lib/reflax-yield-vault`)
 - Scan type: code (Tier 2 interaction-level manual reasoning over Tier 1 profiles)
 - Scan timestamp: 2026-05-25
 - In-scope files:

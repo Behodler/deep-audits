@@ -1,8 +1,8 @@
-# Severity Audit Report -- phoenix-vault-03
+# Severity Audit Report -- reflax-yield-vault-03
 
 **Auditor:** severity-auditor
 **Date:** 2026-03-25
-**Project:** phoenix-vault (ERC4626YieldStrategy)
+**Project:** reflax-yield-vault (ERC4626YieldStrategy)
 
 ---
 

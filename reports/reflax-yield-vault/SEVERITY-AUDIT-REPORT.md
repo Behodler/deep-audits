@@ -1,6 +1,6 @@
 # Severity Audit Report - Phoenix Vault Sanitizer Review
 
-**Project:** phoenix-vault (reflax-yield-vault)
+**Project:** reflax-yield-vault (reflax-yield-vault)
 **Audit Date:** 2026-01-26
 **Auditor:** Severity Auditor Agent
 **Purpose:** Second-opinion validation of sanitizer decisions

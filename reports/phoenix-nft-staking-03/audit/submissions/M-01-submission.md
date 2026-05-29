@@ -6,7 +6,7 @@ Root Cause Link: lib/phoenix-nft-staking/src/NFTStaker.sol#L206-L220
 Secondary Location: lib/phoenix-nft-staking/src/NFTStaker.sol#L281-L290
 Default-Interval Location: lib/phoenix-nft-staking/src/NFTStaker.sol#L86
 Commit: 960e20d
-PoC File: workspace/nft-staking/test/poc-M-01.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-M-01.t.sol
 PoC Tests: testM01_PostFixCooldownDoesNotStopGrief, testM01_DefaultZeroIntervalAllowsEveryBlockGrief
 -->
 
@@ -87,7 +87,7 @@ A correct fix reinstates monotonic-upward behavior of `rewardRate` on user paths
 
 ### PoC results (validated)
 
-File: `workspace/nft-staking/test/poc-M-01.t.sol`.
+File: `workspace/phoenix-nft-staking/test/poc-M-01.t.sol`.
 
 **`testM01_PostFixCooldownDoesNotStopGrief`** (`minPullInterval = 1 hour`):
 - 10,000 hourly ticks (~416 simulated days); `rewardRate` 231,481 → 113,227 (2.04× collapse), strictly monotonic-decreasing every tick.

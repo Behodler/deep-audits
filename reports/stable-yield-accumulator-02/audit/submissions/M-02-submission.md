@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-02] ExactOut swaps completely bypass hook fee due to negative delta check
 Root Cause Link: https://github.com/Behodler/stable-yield-accumulator/blob/main/src/UniswapV4Hooks/AutoCompoundPositionHook.sol#L229-L256
-PoC File: workspace/yield-accumulator/test/poc-M-02-exactout-fee-bypass.t.sol
+PoC File: workspace/stable-yield-accumulator/test/poc-M-02-exactout-fee-bypass.t.sol
 -->
 
 ## Finding description and impact
@@ -73,7 +73,7 @@ The fees were intended to be compounded into the hook's liquidity position to be
 
 ### Proof of Concept
 
-The PoC file at `workspace/yield-accumulator/test/poc-M-02-exactout-fee-bypass.t.sol` demonstrates:
+The PoC file at `workspace/stable-yield-accumulator/test/poc-M-02-exactout-fee-bypass.t.sol` demonstrates:
 
 ```solidity
 function test_M02_ExactOutSwapsBypassHookFees() public {

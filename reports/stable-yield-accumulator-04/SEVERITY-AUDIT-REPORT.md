@@ -1,6 +1,6 @@
-# Severity Audit Report: yield-accumulator-04
+# Severity Audit Report: stable-yield-accumulator-04
 
-**Project**: yield-accumulator (re-audit after mitigations)
+**Project**: stable-yield-accumulator (re-audit after mitigations)
 **Auditor**: severity-auditor
 **Date**: 2026-02-11
 **Mode**: C4 Regular Audit

@@ -1,10 +1,10 @@
-# phoenix-vault-04 Audit Summary
+# reflax-yield-vault-04 Audit Summary
 
-**Project:** phoenix-vault (lib/reflax-yield-vault)
+**Project:** reflax-yield-vault (lib/reflax-yield-vault)
 **Submodule commit:** `f328d52` ([story-039] Correct pool2 coin indices from mainnet verification)
 **Mode:** Regular audit
-**Audit run:** phoenix-vault-04
-**Workspace:** `workspace/phoenix-vault-04/`
+**Audit run:** reflax-yield-vault-04
+**Workspace:** `workspace/reflax-yield-vault-04/`
 **Date:** 2026-04-07
 
 ## Scope (focused per user request)
@@ -59,28 +59,28 @@ Both should be reviewed manually before being added to the submission set.
 ## Files
 
 ### Submissions (Details field for each C4 form)
-- `reports/phoenix-vault-04/audit/submissions/H-01-submission.md`
-- `reports/phoenix-vault-04/audit/submissions/H-02-submission.md`
-- `reports/phoenix-vault-04/audit/submissions/H-03-submission.md`
-- `reports/phoenix-vault-04/audit/submissions/M-01-submission.md`
-- `reports/phoenix-vault-04/audit/submissions/M-02-submission.md`
-- `reports/phoenix-vault-04/audit/submissions/M-03-submission.md`
+- `reports/reflax-yield-vault-04/audit/submissions/H-01-submission.md`
+- `reports/reflax-yield-vault-04/audit/submissions/H-02-submission.md`
+- `reports/reflax-yield-vault-04/audit/submissions/H-03-submission.md`
+- `reports/reflax-yield-vault-04/audit/submissions/M-01-submission.md`
+- `reports/reflax-yield-vault-04/audit/submissions/M-02-submission.md`
+- `reports/reflax-yield-vault-04/audit/submissions/M-03-submission.md`
 
 ### PoCs (canonical, runnable in workspace)
-- `workspace/phoenix-vault-04/test/poc-H-01.t.sol` (slippage anchor — now M-02 severity)
-- `workspace/phoenix-vault-04/test/poc-H-02.t.sol` (bank run — now H-01 ID)
-- `workspace/phoenix-vault-04/test/poc-H-03.t.sol` (deposit dilution — now H-02 ID)
-- `workspace/phoenix-vault-04/test/poc-H-04.t.sol` (cache desync — now M-03 severity)
-- `workspace/phoenix-vault-04/test/poc-H-05.t.sol` (cross-client surplus — now H-03 ID)
-- `workspace/phoenix-vault-04/test/poc-M-01.t.sol` (emergency withdraw — unchanged)
+- `workspace/reflax-yield-vault-04/test/poc-H-01.t.sol` (slippage anchor — now M-02 severity)
+- `workspace/reflax-yield-vault-04/test/poc-H-02.t.sol` (bank run — now H-01 ID)
+- `workspace/reflax-yield-vault-04/test/poc-H-03.t.sol` (deposit dilution — now H-02 ID)
+- `workspace/reflax-yield-vault-04/test/poc-H-04.t.sol` (cache desync — now M-03 severity)
+- `workspace/reflax-yield-vault-04/test/poc-H-05.t.sol` (cross-client surplus — now H-03 ID)
+- `workspace/reflax-yield-vault-04/test/poc-M-01.t.sol` (emergency withdraw — unchanged)
 
-The workspace files use the original filenames (since renaming would require renaming the test contracts and re-running). For C4 form submission, use the renamed copies under `reports/phoenix-vault-04/audit/pocs/` which match the new finding IDs:
-- `reports/phoenix-vault-04/audit/pocs/H-01-poc.t.sol`
-- `reports/phoenix-vault-04/audit/pocs/H-02-poc.t.sol`
-- `reports/phoenix-vault-04/audit/pocs/H-03-poc.t.sol`
-- `reports/phoenix-vault-04/audit/pocs/M-01-poc.t.sol`
-- `reports/phoenix-vault-04/audit/pocs/M-02-poc.t.sol`
-- `reports/phoenix-vault-04/audit/pocs/M-03-poc.t.sol`
+The workspace files use the original filenames (since renaming would require renaming the test contracts and re-running). For C4 form submission, use the renamed copies under `reports/reflax-yield-vault-04/audit/pocs/` which match the new finding IDs:
+- `reports/reflax-yield-vault-04/audit/pocs/H-01-poc.t.sol`
+- `reports/reflax-yield-vault-04/audit/pocs/H-02-poc.t.sol`
+- `reports/reflax-yield-vault-04/audit/pocs/H-03-poc.t.sol`
+- `reports/reflax-yield-vault-04/audit/pocs/M-01-poc.t.sol`
+- `reports/reflax-yield-vault-04/audit/pocs/M-02-poc.t.sol`
+- `reports/reflax-yield-vault-04/audit/pocs/M-03-poc.t.sol`
 
 ### PoC verification
 
@@ -93,14 +93,14 @@ Ran 6 test suites: 10 tests passed, 0 failed, 0 skipped (10 total tests)
 To re-run from the workspace:
 
 ```bash
-cd workspace/phoenix-vault-04
+cd workspace/reflax-yield-vault-04
 forge test --match-path "test/poc-*" -vvv
 ```
 
 ### Validation reports
-- `reports/phoenix-vault-04/audit/REPORT-VALIDATION.md` (mechanical validation; issues fixed)
-- `reports/phoenix-vault-04/audit/SEVERITY-AUDIT.md` (second-opinion severity review; downgrades applied)
-- `reports/phoenix-vault-04/audit/VALIDITY-CHECK.md` (C4 known-invalid filter; all 6 valid)
+- `reports/reflax-yield-vault-04/audit/REPORT-VALIDATION.md` (mechanical validation; issues fixed)
+- `reports/reflax-yield-vault-04/audit/SEVERITY-AUDIT.md` (second-opinion severity review; downgrades applied)
+- `reports/reflax-yield-vault-04/audit/VALIDITY-CHECK.md` (C4 known-invalid filter; all 6 valid)
 
 ## C4 Form Mapping
 

@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-01] `_recomputeSchedule` re-inflates `rewardBudget` to full balance, double-counting already-committed accrual and DoSing late claimers
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/66af47d/src/NFTStaker.sol#L375
-PoC File: workspace/nft-staking/test/poc-M-01.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-M-01.t.sol
 -->
 
 ## Finding description and impact

@@ -3,7 +3,7 @@ C4 Submission Metadata
 Title: [M-02] Positive residual deltas in _settleResidualDelta() are taken from PoolManager but stranded in ClaimArbitrage instead of contributing to caller profit
 Severity: Medium
 Root Cause: src/ClaimArbitrage.sol#L372-L378
-PoC File: workspace/yield-accumulator/test/poc-M-02.t.sol
+PoC File: workspace/stable-yield-accumulator/test/poc-M-02.t.sol
 -->
 
 ## Finding description and impact

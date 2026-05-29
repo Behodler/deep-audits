@@ -2,7 +2,7 @@
 title: Nudge incentive subsidizes uneconomic minting — inflates ERC1155 supply and degrades NFTStaker runway via the latestPrice ladder
 root_cause_link: https://github.com/Behodler/phoenix-nft-staking/blob/24b3f58/src/BatchNFTMinter.sol#L137-L155
 severity: Medium
-poc_file: workspace/nft-staking/test/poc-M-01.t.sol
+poc_file: workspace/phoenix-nft-staking/test/poc-M-01.t.sol
 -->
 
 ## Finding description and impact
@@ -58,10 +58,10 @@ The PoC does not model `ATokenDispatcherV2.dispatch(...)`'s effect of routing a 
 
 ### Proof of Concept
 
-A standalone Foundry test is provided at `workspace/nft-staking/test/poc-M-01.t.sol`. Run with:
+A standalone Foundry test is provided at `workspace/phoenix-nft-staking/test/poc-M-01.t.sol`. Run with:
 
 ```
-cd workspace/nft-staking && forge test --match-path test/poc-M-01.t.sol -vv
+cd workspace/phoenix-nft-staking && forge test --match-path test/poc-M-01.t.sol -vv
 ```
 
 The test:

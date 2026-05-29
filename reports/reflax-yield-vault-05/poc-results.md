@@ -1,23 +1,23 @@
-# PoC Results — phoenix-vault (reflax-yield-vault)
+# PoC Results — reflax-yield-vault (reflax-yield-vault)
 
-- Project: phoenix-vault (maps to `lib/reflax-yield-vault`)
+- Project: reflax-yield-vault (maps to `lib/reflax-yield-vault`)
 - Target: `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol`
 - Harness: deterministic, mock-based (no mainnet fork). Mocks:
   `test/mocks/MockERC4626Vault.sol`, `test/mocks/MockAMMAdapter.sol`, `src/mocks/MockERC20.sol`.
-- Run: `cd workspace/phoenix-vault && forge test --match-path 'test/poc-*.t.sol' -vv`
+- Run: `cd workspace/reflax-yield-vault && forge test --match-path 'test/poc-*.t.sol' -vv`
 - Result: **5/5 tests PASS** (the bug-demonstrating assertions pass, proving the findings).
 
 | Finding | File | Status |
 |---|---|---|
-| M-01 | `workspace/phoenix-vault/test/poc-M01-overskim.t.sol` | compiles, runs, PASSES |
-| M-02 | `workspace/phoenix-vault/test/poc-M02-nav-sandwich.t.sol` | compiles, runs, PASSES |
-| M-03 | `workspace/phoenix-vault/test/poc-M03-socialized-slippage.t.sol` | compiles, runs, PASSES |
+| M-01 | `workspace/reflax-yield-vault/test/poc-M01-overskim.t.sol` | compiles, runs, PASSES |
+| M-02 | `workspace/reflax-yield-vault/test/poc-M02-nav-sandwich.t.sol` | compiles, runs, PASSES |
+| M-03 | `workspace/reflax-yield-vault/test/poc-M03-socialized-slippage.t.sol` | compiles, runs, PASSES |
 
 ---
 
 ## M-01 — `_skimSurplusBatch` over-skim via duplicate `clients[]`
 
-File: `workspace/phoenix-vault/test/poc-M01-overskim.t.sol`
+File: `workspace/reflax-yield-vault/test/poc-M01-overskim.t.sol`
 Vulnerable code: `ERC4626MarketYieldStrategy.sol#L462-L488` (loop `:468-478`, ceiling `:481`).
 
 Ported and cleaned from the confirmed invariant PoC (`test/invariant/CODE001_Poc.t.sol`).
@@ -45,7 +45,7 @@ isolated as a **pure accounting defect** (no slippage economics).
 
 ## M-02 — NAV-anchored `minOut` is execution-price-blind
 
-File: `workspace/phoenix-vault/test/poc-M02-nav-sandwich.t.sol`
+File: `workspace/reflax-yield-vault/test/poc-M02-nav-sandwich.t.sol`
 Vulnerable code: deposit `:276-277`, withdraw `:321-322`, skim `:435-436`/`:482-483`.
 
 The PoC sets `slippageToleranceBps = 50` (0.5%) and configures the MockAMMAdapter to deliver
@@ -72,7 +72,7 @@ the entire tolerance is extractable per swap by an MEV sandwich.
 
 ## M-03 — requested-not-received decrement socialises slippage → last-withdrawer shortfall
 
-File: `workspace/phoenix-vault/test/poc-M03-socialized-slippage.t.sol`
+File: `workspace/reflax-yield-vault/test/poc-M03-socialized-slippage.t.sol`
 Vulnerable code: `_withdrawInternal` `:302-339` (shares from NAV `:314`, cap `:316-318`,
 requested-amount debit `:335-336`).
 
@@ -116,7 +116,7 @@ primitive — consistent with the classifier's "closest call / defensible as M-0
 ## Reproduce
 
 ```bash
-cd workspace/phoenix-vault
+cd workspace/reflax-yield-vault
 forge test --match-path 'test/poc-*.t.sol' -vv
 # or per finding:
 forge test --match-contract M01PoCTest -vv

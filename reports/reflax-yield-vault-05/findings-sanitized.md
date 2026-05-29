@@ -1,8 +1,8 @@
-# Sanitized Findings — phoenix-vault (reflax-yield-vault)
+# Sanitized Findings — reflax-yield-vault (reflax-yield-vault)
 
 Stage: known-issue / design-decision / system-assumption reconciliation + C4 known-invalid filtering. Input: `findings-deduped.md` (DD-01..DD-06). Ledger: NONE (cold scan) — every survivor is `origin: new`.
 
-## Authoritative reference set (registered-projects.json → phoenix-vault)
+## Authoritative reference set (registered-projects.json → reflax-yield-vault)
 
 `knownIssuesCount: 0`. Reconciliation runs against:
 

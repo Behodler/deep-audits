@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-01] Partial `_safePay` shortfall in `claim`/`stake`/`unstake` silently forfeits user rewards by advancing `rewardDebt` to the full accrual
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/2e56588fd9cc81f43edf42914638d6a122164b3e/src/NFTStaker.sol#L313-L316
-PoC File: workspace/nft-staking/test/poc-CS-01.t.sol
+PoC File: workspace/phoenix-nft-staking/test/poc-CS-01.t.sol
 -->
 
 ## Finding description and impact
@@ -50,7 +50,7 @@ Additionally, `claim` only updates `user.rewardDebt` inside the `if (pending > 0
 Users who transact while the contract's on-chain reward balance is below their accrued `pending` permanently forfeit the shortfall. The loss is not bounded to dust; it equals `pending - balance` at the moment of the call, which can be an arbitrary fraction of the user's earnings (the accompanying PoC demonstrates a 40% loss on a single claim). The shortfall is unrecoverable because `rewardDebt` has already advanced past it - a later `pull()` or `topUp` that restores the balance does not re-credit the user. This is a direct, deterministic loss of earned rewards under ordinary multi-staker operation, and qualifies as High severity under C4 criteria (assets lost via a valid attack path without extraordinary assumptions).
 
 ### Proof of concept
-A runnable Foundry PoC asserting exact-wei loss lives at `workspace/nft-staking/test/poc-CS-01.t.sol` and is reproduced in the separate PoC form field. Run with `forge test --match-contract CS01PoCTest -vv`. It exercises two paths:
+A runnable Foundry PoC asserting exact-wei loss lives at `workspace/phoenix-nft-staking/test/poc-CS-01.t.sol` and is reproduced in the separate PoC form field. Run with `forge test --match-contract CS01PoCTest -vv`. It exercises two paths:
 
 - `test_CS01_PartialSafePayForfeitsShortfallPermanently` - Alice stakes 10 NFT units and accrues 10,000 phUSD; the contract balance is reduced to 6,000 phUSD; Alice calls `claim()` and receives 6,000; the contract is then topped back up to 1,000,000 phUSD; Alice calls `claim()` again and receives `0`. The forfeited shortfall is asserted at exactly 4,000 phUSD.
 - `test_CS01_UnstakePathAlsoForfeitsShortfall` - identical scenario exercised through `unstake()`, confirming the root cause is shared across payout paths.

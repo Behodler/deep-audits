@@ -2,7 +2,7 @@
 C4 Submission Metadata
 Title: [M-01] EMA manipulation via claim timing allows attackers to inflate or suppress reward distribution rate
 Root Cause Link: https://github.com/Behodler/phlimbo-ea/blob/main/src/Phlimbo.sol#L288-L311
-PoC File: workspace/phoenix-phase-2/test/poc-M-01.t.sol
+PoC File: workspace/phoenix-phase-2-staging/test/poc-M-01.t.sol
 -->
 
 ## Finding description and impact
@@ -75,7 +75,7 @@ Three test cases demonstrate the vulnerability:
 | `test_M01_EMASuppression` | Rate suppressed by delayed claims |
 | `test_M01_EMACompoundingEffect` | 7x rate inflation via multiple rapid claims |
 
-The PoC is located at: `workspace/phoenix-phase-2/test/poc-M-01.t.sol`
+The PoC is located at: `workspace/phoenix-phase-2-staging/test/poc-M-01.t.sol`
 
 ## Recommended mitigation steps
 

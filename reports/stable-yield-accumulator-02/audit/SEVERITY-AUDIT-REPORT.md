@@ -1,4 +1,4 @@
-# Severity Audit Report: yield-accumulator-02
+# Severity Audit Report: stable-yield-accumulator-02
 
 **Audit Date:** 2026-02-05
 **Auditor:** Severity-Auditor Agent

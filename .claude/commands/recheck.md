@@ -12,9 +12,9 @@ Mechanism is **PoC-replay first**: if the finding has a runnable PoC, re-run it 
 - Finding selector: a ledger label (`M-01`) or a unique fingerprint prefix (`9addc2`).
 - `--commit <ref>` re-verifies against a specific submodule commit instead of current HEAD (default: HEAD).
 - Examples:
-  - `phoenix-vault M-01` — re-verify M-01 against the freshly-pulled submodule HEAD
-  - `phoenix-vault 9addc2` — same, selected by fingerprint prefix
-  - `phoenix-vault M-02 --commit 7d11f66` — re-verify against a pinned commit
+  - `reflax-yield-vault M-01` — re-verify M-01 against the freshly-pulled submodule HEAD
+  - `reflax-yield-vault 9addc2` — same, selected by fingerprint prefix
+  - `reflax-yield-vault M-02 --commit 7d11f66` — re-verify against a pinned commit
 
 # THE INVARIANT THAT MAKES THIS SAFE
 **recheck is baseline-preserving and single-entry.** Discovery scans (`/analyze`, `/full-audit`) earn the right to advance the regression baseline because they look at the whole scope; recheck does not. Therefore recheck:
@@ -39,10 +39,10 @@ Invoke **finding-manager**: "Load the ledger entry for this selector"
 - If the selector matches a `merged` entry (e.g. M-03 → M-02), report the merge and recheck the surviving entry instead.
 
 ```
-Recheck: phoenix-vault  M-01
+Recheck: reflax-yield-vault  M-01
 ─────────────────────────────
 Finding:  _skimSurplusBatch over-skim via duplicate clients[]  (medium, status: open)
-Owner run: phoenix-vault-05
+Owner run: reflax-yield-vault-05
 Baseline:  lastAuditedCommit 7d11f66 (unchanged — recheck will NOT move it)
 Target:    HEAD 7d11f66  →  (resolve actual)
 ```
@@ -111,18 +111,18 @@ Invoke **finding-manager**: "Record recheck result on the target entry only — 
 
 ## 7. Summary
 ```
-Recheck Complete: phoenix-vault  M-01
+Recheck Complete: reflax-yield-vault  M-01
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Target commit:  a1b2c3d  (baseline 7d11f66 left UNCHANGED)
 Scope:          NARROW (1 file, within finding's contract)
-Mechanism:      PoC-replay — workspace/phoenix-vault/test/poc-M01-overskim.t.sol
+Mechanism:      PoC-replay — workspace/reflax-yield-vault/test/poc-M01-overskim.t.sol
 Result:         STILL-LIVE  ✓ exploit assertion still passes
 
-Record:  reports/phoenix-vault-05/reverify/M-01-a1b2c3d.md
+Record:  reports/reflax-yield-vault-05/reverify/M-01-a1b2c3d.md
 Ledger:  M-01 recheck fields updated (lastSeenRun / lastAuditedCommit NOT touched)
 
 Proposed action: none — finding confirmed still open.
-Note: recheck does not look for NEW issues. For coverage of the whole change, run /full-audit phoenix-vault.
+Note: recheck does not look for NEW issues. For coverage of the whole change, run /full-audit reflax-yield-vault.
 ```
 
 # Agent Delegation

@@ -1,13 +1,13 @@
-# phoenix-vault-06 — Run Summary
+# reflax-yield-vault-06 — Run Summary
 
-- **Project:** phoenix-vault (submodule `lib/reflax-yield-vault`)
+- **Project:** reflax-yield-vault (submodule `lib/reflax-yield-vault`)
 - **Mode:** REGRESSION
-- **Baseline:** phoenix-vault-05 @ `7d11f66` → this run @ `043ff2c` (`043ff2cb5ee9808961b50311fb5ecb742b63a6e9`)
+- **Baseline:** reflax-yield-vault-05 @ `7d11f66` → this run @ `043ff2c` (`043ff2cb5ee9808961b50311fb5ecb742b63a6e9`)
 - **Story:** story-041 (skim path rewrite: `skimSurplusBatch(token, clients[], recipient)` → `skimSurplus(token, recipient)` over an owner-managed `EnumerableSet _authorizedClients`, single aggregate swap)
 - **NEW findings:** 0
 - **Run date:** 2026-05-26
 
-This run is ledger reconciliation against the prior audit. No new findings were produced. Verdicts below reflect convergent code-scanner + econ-scanner + deduplicator output reconciled against `reports/ledgers/phoenix-vault.json`.
+This run is ledger reconciliation against the prior audit. No new findings were produced. Verdicts below reflect convergent code-scanner + econ-scanner + deduplicator output reconciled against `reports/ledgers/reflax-yield-vault.json`.
 
 ---
 
@@ -23,7 +23,7 @@ This run is ledger reconciliation against the prior audit. No new findings were 
   3. Loud aggregate-surplus ceiling (defense-in-depth) at `ERC4626MarketYieldStrategy.sol#L434`:
      `require(totalShares <= vault.convertToShares(totalValue - totalDeposited), "ERC4626MarketYieldStrategy: skim exceeds aggregate surplus")`.
 - **Arithmetic bound (both scanners):** Σfloor(convertToShares(surplus_i)) ≤ floor(convertToShares(Σsurplus_i)) ≤ floor(k·aggregateSurplus) — the ceiling is tight (no spurious revert, no principal breach). The duplicate-driven over-skim is structurally unconstructible.
-- **PoC evidence:** `workspace/phoenix-vault/test/poc-M01-fix-verification.t.sol` — **PASSING 4/4** against `043ff2c` (verified this run):
+- **PoC evidence:** `workspace/reflax-yield-vault/test/poc-M01-fix-verification.t.sol` — **PASSING 4/4** against `043ff2c` (verified this run):
   - `test_M01_callerCannotSupplyClientList_apiIsTwoArgsOnly`
   - `test_M01_setClientIsIdempotent_noDuplicatesInSkimSet`
   - `test_M01_skimTakesOnlyTrueSurplus_principalPreserved`
@@ -77,19 +77,19 @@ Static analysis (Slither / Aderyn / Semgrep) and pattern-matching on the story-0
 
 ## Run artifacts (co-located in this run dir)
 
-These intermediate artifacts were generated this run (against `043ff2c`, story-041 focus) but had been misfiled into `reports/phoenix-vault-05/`; relocated here so the run's artifacts are co-located (05's May-25 report submissions were left untouched):
+These intermediate artifacts were generated this run (against `043ff2c`, story-041 focus) but had been misfiled into `reports/reflax-yield-vault-05/`; relocated here so the run's artifacts are co-located (05's May-25 report submissions were left untouched):
 
-- `reports/phoenix-vault-06/static-analysis-findings.json` (`targetCommit: 043ff2c`)
-- `reports/phoenix-vault-06/pattern-matches.json` (`submoduleCommit: 043ff2c…`, 6 hits)
-- `reports/phoenix-vault-06/aderyn-report.json`
-- `reports/phoenix-vault-06/semgrep-output.json`
-- `reports/phoenix-vault-06/slither-ERC4626MarketYieldStrategy.json`
-- `reports/phoenix-vault-06/slither-CurveAMMAdapter.json`
-- `reports/phoenix-vault-06/slither-IAMMAdapter.json`
-- `reports/phoenix-vault-06/slither-ICurveRouterNG.json`
+- `reports/reflax-yield-vault-06/static-analysis-findings.json` (`targetCommit: 043ff2c`)
+- `reports/reflax-yield-vault-06/pattern-matches.json` (`submoduleCommit: 043ff2c…`, 6 hits)
+- `reports/reflax-yield-vault-06/aderyn-report.json`
+- `reports/reflax-yield-vault-06/semgrep-output.json`
+- `reports/reflax-yield-vault-06/slither-ERC4626MarketYieldStrategy.json`
+- `reports/reflax-yield-vault-06/slither-CurveAMMAdapter.json`
+- `reports/reflax-yield-vault-06/slither-IAMMAdapter.json`
+- `reports/reflax-yield-vault-06/slither-ICurveRouterNG.json`
 
-PoC evidence for M-01: `workspace/phoenix-vault/test/poc-M01-fix-verification.t.sol` (passing 4/4 @ 043ff2c).
+PoC evidence for M-01: `workspace/reflax-yield-vault/test/poc-M01-fix-verification.t.sol` (passing 4/4 @ 043ff2c).
 
 ## Ledger
 
-`reports/ledgers/phoenix-vault.json` upserted: `lastAuditedCommit → 043ff2c`, `lastRun → phoenix-vault-06`, `updatedAt → 2026-05-26T10:12:03Z`. No human-set triage statuses (acknowledged / wont-fix / false-positive) were present or touched.
+`reports/ledgers/reflax-yield-vault.json` upserted: `lastAuditedCommit → 043ff2c`, `lastRun → reflax-yield-vault-06`, `updatedAt → 2026-05-26T10:12:03Z`. No human-set triage statuses (acknowledged / wont-fix / false-positive) were present or touched.

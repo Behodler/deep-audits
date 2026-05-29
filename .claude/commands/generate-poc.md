@@ -4,7 +4,7 @@ Orchestrate creation and validation of a coded PoC that proves a vulnerability.
 
 # Arguments
 - `$ARGUMENTS` format: `<project-name> <finding-label>`
-- Example: `nft-staking H-01`
+- Example: `phoenix-nft-staking H-01`
 
 # Critical Path Rules
 

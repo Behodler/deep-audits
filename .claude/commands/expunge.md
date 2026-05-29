@@ -93,9 +93,9 @@ All file operations, git operations, and directory deletion MUST be performed by
 
 # Examples
 ```
-/expunge nft-staking
-# Removes lib/phoenix-nft-staking, all reports/nft-staking* dirs,
-# reports/ledgers/nft-staking.json, workspace/nft-staking/, and registration
+/expunge phoenix-nft-staking
+# Removes lib/phoenix-nft-staking, all reports/phoenix-nft-staking* dirs,
+# reports/ledgers/phoenix-nft-staking.json, workspace/phoenix-nft-staking/, and registration
 ```
 
 # Critical Rules

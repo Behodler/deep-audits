@@ -20,7 +20,7 @@ Friendly names are **case-insensitive** and stored as **lowercase-kebab**. On ev
 ```json
 {
   "projects": {
-    "nft-staking": {
+    "phoenix-nft-staking": {
       "submodule": "phoenix-nft-staking",
       "addedAt": "2025-01-15T10:30:00Z",
       "repoUrl": "https://github.com/Behodler/phoenix-nft-staking",

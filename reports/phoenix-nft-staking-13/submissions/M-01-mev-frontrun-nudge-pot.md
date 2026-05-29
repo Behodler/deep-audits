@@ -1,5 +1,5 @@
 <!--
-ID: ns13m1
+ID: pns13m1
 C4 Submission Metadata
 Title: [M-01] MEV / first-claimer front-running lets a searcher steal the entire nudge bonus from honest batch-minters
 Root Cause Link: https://github.com/Behodler/phoenix-nft-staking/blob/main/src/BatchNFTMinter.sol#L245-L258
@@ -85,7 +85,7 @@ It demonstrates the searcher front-running an honest qualifier and capturing the
 Run:
 
 ```
-cd workspace/nft-staking && forge test --match-path test/poc-MevFrontrunNudge.t.sol -vv
+cd workspace/phoenix-nft-staking && forge test --match-path test/poc-MevFrontrunNudge.t.sol -vv
 ```
 
 Exact output:

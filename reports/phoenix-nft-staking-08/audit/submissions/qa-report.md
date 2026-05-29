@@ -1,6 +1,6 @@
-# QA Report — phoenix-nft-staking (nft-staking-08)
+# QA Report — phoenix-nft-staking (phoenix-nft-staking-08)
 
-This QA report bundles all Low-severity findings identified in the nft-staking-08 audit run. No Centralization-risk findings were raised in this run (the project's owner-trust model is documented in prior known-issue submissions and was not amplified by the new code paths under review).
+This QA report bundles all Low-severity findings identified in the phoenix-nft-staking-08 audit run. No Centralization-risk findings were raised in this run (the project's owner-trust model is documented in prior known-issue submissions and was not amplified by the new code paths under review).
 
 ## Summary
 

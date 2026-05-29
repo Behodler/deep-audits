@@ -3,7 +3,7 @@ C4 Submission Metadata
 Title: [M-01] `_skimSurplusBatch` over-skims surplus when `clients[]` contains duplicates, under-backing client principal
 Severity: Medium
 Root Cause Link: https://github.com/Behodler/reflax-yield-vault/blob/master/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L462-L488
-PoC File: workspace/phoenix-vault/test/poc-M01-overskim.t.sol
+PoC File: workspace/reflax-yield-vault/test/poc-M01-overskim.t.sol
 -->
 
 # [M-01] `_skimSurplusBatch` over-skims surplus when `clients[]` contains duplicates, under-backing client principal
@@ -58,12 +58,12 @@ The strategy becomes under-collateralized against recorded principal. Clients wh
 
 ## Proof of Concept
 
-A runnable, deterministic Foundry PoC is provided at `workspace/phoenix-vault/test/poc-M01-overskim.t.sol`. It imports the real in-scope `ERC4626MarketYieldStrategy` (verified byte-identical to the read-only `lib/reflax-yield-vault` copy) and uses faithful ERC4626 / AMM mocks. Critically, the AMM adapter's execution price is synced to fair vault NAV before each swap, so all slippage/sandwich economics are removed and the over-skim is isolated as a pure accounting defect.
+A runnable, deterministic Foundry PoC is provided at `workspace/reflax-yield-vault/test/poc-M01-overskim.t.sol`. It imports the real in-scope `ERC4626MarketYieldStrategy` (verified byte-identical to the read-only `lib/reflax-yield-vault` copy) and uses faithful ERC4626 / AMM mocks. Critically, the AMM adapter's execution price is synced to fair vault NAV before each swap, so all slippage/sandwich economics are removed and the over-skim is isolated as a pure accounting defect.
 
 Run:
 
 ```bash
-cd workspace/phoenix-vault
+cd workspace/reflax-yield-vault
 forge test --match-contract M01PoCTest -vv
 ```
 

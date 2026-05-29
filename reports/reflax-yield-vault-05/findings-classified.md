@@ -1,4 +1,4 @@
-# Classified Findings — phoenix-vault (reflax-yield-vault)
+# Classified Findings — reflax-yield-vault (reflax-yield-vault)
 
 Cold scan, no ledger, no regressions. All 6 survivors are `origin: new`. Verified against `lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol` (skim loop `:462-488`, withdraw accounting `:302-339`, slippage state `:40` / setter `:190-195`).
 

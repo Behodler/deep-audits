@@ -1,4 +1,4 @@
-# Severity Audit — phoenix-vault-05 (severity-auditor)
+# Severity Audit — reflax-yield-vault-05 (severity-auditor)
 
 Independent second-opinion review against the C4 severity bar. Verdicts are formed from a fresh
 read of the in-scope contract (`ERC4626MarketYieldStrategy.sol`, skim loop `:462-488`, withdraw

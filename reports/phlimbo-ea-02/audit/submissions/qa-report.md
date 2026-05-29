@@ -34,7 +34,7 @@ This is Low rather than Medium because M-01 already carries the full economic lo
 
 **Recommendation**
 
-Add `whenNotPaused` to `collectReward`. The pause state is intended to suspend all yield flows; accepting new reward deposits during a pause is operationally unnecessary. If the design genuinely requires accepting rewards during a pause (e.g., a fixed-cadence yield-accumulator bot that cannot easily back off), gate `_updatePool()` itself on the paused flag instead. Best fixed jointly with M-01 (invoke `_updatePool()` inside `pauseWithdraw`) for layered safety.
+Add `whenNotPaused` to `collectReward`. The pause state is intended to suspend all yield flows; accepting new reward deposits during a pause is operationally unnecessary. If the design genuinely requires accepting rewards during a pause (e.g., a fixed-cadence stable-yield-accumulator bot that cannot easily back off), gate `_updatePool()` itself on the paused flag instead. Best fixed jointly with M-01 (invoke `_updatePool()` inside `pauseWithdraw`) for layered safety.
 
 **Code Reference**
 
@@ -64,7 +64,7 @@ function collectReward(uint256 amount) external nonReentrant {
 
 `setDesiredAPY` is gated by `onlyOwner` and uses a two-step preview/commit pattern: the first call previews `bps` and starts a 100-block window, the second call (with the same `bps` inside the window) commits. The two-step provides a notice window, but it does not impose any upper bound on the `bps` argument. The commit branch unconditionally assigns `desiredAPYBps = bps` and recomputes `phUSDPerSecond = (totalStaked * desiredAPYBps) / 10000 / SECONDS_PER_YEAR`. There is no cap on `bps`, no cap on `phUSDPerSecond`, no cap on cumulative minted phUSD per epoch, and no rate-limit on how often APY can be re-committed beyond the 100-block window.
 
-Owner trust is documented as a known issue, and this finding is **not** alleging owner malice. It is a defense-in-depth observation: the sibling project `nft-staking` in the same ecosystem defines `MAX_TARGET_APY = 0.5e18` as a hard constant, establishing a clear in-ecosystem precedent for a structural magnitude cap. PhlimboV2 has no equivalent. Because phUSD is both the staked asset and the minted reward, any APY commit propagates through the staking loop without an upper bound on phUSD inflation enforced at the contract level.
+Owner trust is documented as a known issue, and this finding is **not** alleging owner malice. It is a defense-in-depth observation: the sibling project `phoenix-nft-staking` in the same ecosystem defines `MAX_TARGET_APY = 0.5e18` as a hard constant, establishing a clear in-ecosystem precedent for a structural magnitude cap. PhlimboV2 has no equivalent. Because phUSD is both the staked asset and the minted reward, any APY commit propagates through the staking loop without an upper bound on phUSD inflation enforced at the contract level.
 
 This is filed as Centralization rather than reckless-admin (which C4 treats as invalid): a reckless-admin issue covers an admin picking a wrong-but-sensible-looking value within an existing bound. C-01 documents the absence of any bound at all on a parameter that controls native-token minting.
 
@@ -76,7 +76,7 @@ The action is irreversible (minted phUSD cannot be clawed back), the affected su
 
 **Recommendation**
 
-Add a hard upper bound to `setDesiredAPY`, matching the `nft-staking` precedent:
+Add a hard upper bound to `setDesiredAPY`, matching the `phoenix-nft-staking` precedent:
 
 ```solidity
 uint256 public constant MAX_APY_BPS = 100_000; // 1000% APY
