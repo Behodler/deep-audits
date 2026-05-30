@@ -21,9 +21,9 @@ Invoke **project-manager**: "Check if project name already registered"
 - If URL already added: Report existing registration.
 
 ## 3. Add Submodule
-Invoke **project-manager**: "Add submodule without recursive flag"
-- Command: `git submodule add <repo-url> lib/<repo-name>`
-- **CRITICAL**: Never use --recursive flag
+Invoke **project-manager**: "Add submodule and initialize its nested tree recursively"
+- Command: `git submodule add <repo-url> lib/<repo-name>` then `git -C lib/<repo-name> submodule update --init --recursive`
+- **CRITICAL**: Pull the full nested submodule tree — we audit the latest version of the repo *and* its dependencies, not a frozen pin
 - The `lib/` directory name MUST equal the derived project name.
 - Verify submodule added successfully
 - Report any errors (repo not found, permission denied, etc.)
@@ -91,7 +91,7 @@ All file operations, git operations, and data extraction MUST be performed by th
 | Task | Agent | Prompt Pattern |
 |------|-------|----------------|
 | Check conflicts | project-manager | "Check if project '{name}' or URL '{url}' already registered" |
-| Add submodule | project-manager | "Add submodule {url} to lib/{name} without --recursive flag" |
+| Add submodule | project-manager | "Add submodule {url} to lib/{name} and run `git -C lib/{name} submodule update --init --recursive`" |
 | Register project | project-manager | "Register project '{name}' with submodule '{name}' and URL '{url}'" |
 | Discover scope | project-manager | "Discover contracts and scope for project in lib/{name}" |
 | Extract known issues | project-manager | "Extract known issues from documentation in lib/{name}" |
@@ -115,6 +115,6 @@ All file operations, git operations, and data extraction MUST be performed by th
 
 # Critical Rules
 1. **Project name == repo name == submodule dir** — never diverge; there is no alias argument
-2. **NEVER use --recursive** when adding submodules
+2. **ALWAYS use --recursive** when adding submodules — audit the latest of the repo and its nested deps
 3. **NEVER modify source repos** after cloning
 4. **Preserve original state** of cloned repositories

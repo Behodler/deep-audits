@@ -99,7 +99,7 @@ Per C4 rules, these are typically OOS:
 
 ## LEDGER RECONCILIATION (run after known-issue filtering)
 
-After removing known/OOS issues, reconcile each surviving finding against the persistent ledger `reports/ledgers/<project>.json` (provided by project-manager). Compute a stable `fingerprint = sha256(contract:function:rootCauseClass)` for each finding and compare:
+After removing known/OOS issues, reconcile each surviving finding against the persistent ledger `reports/ledgers/<project>.json` (provided by project-manager). Compute a stable `fingerprint = sha256(contract:function:rootCauseClass[:entryPoint])` for each finding and compare. The optional `entryPoint` (set on `/audit-script` findings, `null`/absent on contract-scan findings) is folded into the hash, so reconciliation is **per entry point automatically** — a script-audit finding reconciles only against prior findings from the same script, never against contract-scan findings on the same `contract:function`, and an empty `entryPoint` reproduces the legacy hash byte-for-byte. Then compare:
 
 - Matches an **`open`** entry → mark `origin: "still-open"`, bump `lastSeenRun`; **do not** regenerate a report this run.
 - Matches **`acknowledged` / `wont-fix` / `false-positive`** → suppress (treat like a known issue); record the suppression.

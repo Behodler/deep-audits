@@ -15,6 +15,8 @@ This repository contains the audit tooling used to review the Phoenix/Behodler s
 
 **Source repos are strictly read-only.** Never modify files in source repos. Never commit to source repos. They must remain exactly as cloned from the upstream Behodler-org repository.
 
+**Submodules are initialized recursively.** This project audits the *living latest* of each repo **and its nested dependencies** — we are not crystallizing a pinned ABI, we are reviewing the code as it actually is today. Adding (`/add-project`), updating (`/update-lib`), and the SessionStart hook all init `--recursive` by default. Read-only still applies: pull the full nested tree, but never modify it. `/update-lib` accepts `--no-recursive` as an explicit per-run opt-out.
+
 ## Architecture
 
 ### Directory Structure
@@ -44,6 +46,13 @@ Re-running `/analyze <project>` or `/full-audit <project>` defaults to a **regre
 `/recheck <project> <label-or-fingerprint>` re-proves **one** finding against the current submodule HEAD without running discovery. It is **PoC-replay first**: it syncs the writable `workspace/` source to the target commit (preserving the PoC), re-runs the finding's PoC, and classifies the result as **STILL-LIVE** / **LIKELY-FIXED** / **INCONCLUSIVE** (a PoC that no longer *compiles* is inconclusive bit-rot, not a fix). Use it for a localized post-fix re-check; the command itself bounces you to `/full-audit` when the change is broader than the finding's contract.
 
 `/recheck` is deliberately **baseline-preserving and single-entry**: it never writes `lastAuditedCommit`, never bumps `lastSeenRun`, never moves `lastRun`, and never auto-flips a status — it records its outcome in recheck-only fields (`lastRecheckedCommit`/`lastRecheckedAt`/`recheckResult`) on the one entry and *proposes* the `/ledger` command for any status change. Pick `/recheck` to answer "is this specific finding still real?"; pick the regression `/full-audit` to also catch issues the fix may have introduced — `/recheck` is blind to new bugs by design.
+
+### Auditing a script entry point (`/audit-script`)
+For integration mega-repos (e.g. `phoenix-phase-2-staging`) that stage dozens of one-shot deployment/migration scripts over nested submodules, auditing the whole project is wasteful — but a **specific operational script** often needs review. `/audit-script <project> <npm-script-name> [--full] [--no-fork]` scopes the audit to a single `package.json` script entry point and the precise slice it cuts across, answering: does it do what it intends, does it introduce unintended side effects, and have other problems surfaced because of it.
+
+It resolves the **transitive closure** of the entry point — the forge/JS command chain, the Solidity import graph (via `foundry.toml` remappings), the deployed on-chain addresses it mutates (mapped back to nested-submodule source), the off-chain state files the JS chain writes, and a ranked **cluster** of sibling scripts that touch the same contracts (shared addresses / story tag / skipped-step / `Temp`/`Fix` evidence). It then verifies side effects empirically by running the script's **preview** variant against a mainnet fork (from `workspace/`, never `lib/`) and diffing observed state writes against the script's stated intent and its own `require`/assert pre/post-conditions. Output is **both** a narrative `review.md` and structured findings fed through the normal dedup → sanitize → classify → ledger pipeline.
+
+Findings carry an `entryPoint` discriminator that is folded into the fingerprint (`sha256(contract:function:rootCauseClass[:entryPoint])`), so script-audit findings reconcile **per entry point**, never collide with contract-scan findings on the same `contract:function`, and an empty `entryPoint` reproduces the legacy hash byte-for-byte (so `/analyze` and `/full-audit` are unaffected). Fork-based verification reads `RPC_MAINNET`/`ETHERSCAN_API_KEY` from the repo-root `.envrc`; a failed RPC liveness probe **alerts the user** (possible expired key) rather than silently degrading — pass `--no-fork` for static-only reasoning. New agents: **script-closure-mapper** (scope resolution) and **script-auditor** (intent + side-effect + cluster lens).
 
 ### Agent Delegation Policy (MANDATORY)
 

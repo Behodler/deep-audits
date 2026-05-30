@@ -46,7 +46,8 @@ PoCs/tests live in `workspace/<project>/test/` (preferred) or `reports/<project>
   "contract": "src/RewardVault.sol",
   "function": "withdrawRewardToken",
   "line": 245, "lineStart": 240, "lineEnd": 252,
-  "fingerprint": "<sha256(contract:function:rootCauseClass)>",
+  "entryPoint": null,
+  "fingerprint": "<sha256(contract:function:rootCauseClass[:entryPoint])>",
   "origin": "new | regression | still-open",
   "description": "...",
   "impact": "...",
@@ -59,6 +60,9 @@ PoCs/tests live in `workspace/<project>/test/` (preferred) or `reports/<project>
 
 ### Location & link fields
 `contract` is relative to the submodule root; `lineStart`/`lineEnd` drive GitHub range links built by report-writer (`<repoUrl>/blob/<branch>/<contract>#L<start>-L<end>`).
+
+### Entry-point scope (`entryPoint`)
+`entryPoint` namespaces a finding to the package.json script that surfaced it (e.g. `"RestoreMintAtIndex4"`), set by `/audit-script` runs. It is **optional and nullable**: contract-scan findings from `/analyze` and `/full-audit` leave it `null`. When present it is folded into the fingerprint — `sha256(contract:function:rootCauseClass:entryPoint)` — so the *same* code issue surfaced via two different scripts stays distinct, and a script-audit finding never collides with a contract-scan finding on the same `contract:function`. When absent/empty, the hash is exactly `sha256(contract:function:rootCauseClass)` as before (byte-identical to legacy findings — backward compatible). Regression reconciliation in the ledger therefore happens per entry point automatically.
 
 ## OPERATIONS
 All finding operations take the versioned `reportDir`. Core operations:
@@ -84,7 +88,7 @@ Ledger entry shape:
   "firstSeenRun": "phoenix-nft-staking-09", "lastSeenRun": "phoenix-nft-staking-12",
   "fixedAtCommit": null, "regressionOf": null,
   "contract": "src/RewardVault.sol", "function": "withdrawRewardToken",
-  "lineStart": 240, "lineEnd": 252,
+  "lineStart": 240, "lineEnd": 252, "entryPoint": null,
   "reportPath": "reports/phoenix-nft-staking-12/submissions/H-01-submission.md"
 }
 ```

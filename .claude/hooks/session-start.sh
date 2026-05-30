@@ -43,10 +43,10 @@ arch_token() { # $1=style: "rust" (x86_64/aarch64) | "go" (x64/arm64)
   esac
 }
 
-# --- source submodules (non-recursive; read-only audit references) ---
+# --- source submodules (recursive; we audit the living latest of each repo + its nested deps) ---
 if [ -f .gitmodules ]; then
-  log "initializing submodules"
-  git submodule update --init >/dev/null 2>&1 || log "WARN: submodule init failed"
+  log "initializing submodules (recursive)"
+  git submodule update --init --recursive >/dev/null 2>&1 || log "WARN: submodule init failed"
 fi
 
 # --- Foundry (forge, cast, anvil) ---
