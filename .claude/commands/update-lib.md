@@ -1,3 +1,6 @@
+---
+model: claude-sonnet-4-6
+---
 Update a git submodule to its latest remote commit and commit the pointer bump at the repo root
 # Purpose
 Keep `lib/` submodules aligned with upstream by fetching the latest commit on the tracked branch, moving the submodule pointer, and recording the change in a root-level commit using the project's standard message format:

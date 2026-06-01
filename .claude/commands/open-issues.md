@@ -1,3 +1,6 @@
+---
+model: claude-sonnet-4-6
+---
 List a project's undealt-with findings, filtered by a severity floor (default Medium and above)
 
 # Purpose
