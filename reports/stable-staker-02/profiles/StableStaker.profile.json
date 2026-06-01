@@ -1,0 +1,191 @@
+{
+  "contract": "src/StableStaker.sol",
+  "profileTimestamp": "2026-06-01T00:00:00Z",
+  "solidityVersion": "^0.8.20 (project pins 0.8.28)",
+  "regression": {
+    "baselineCommit": "f524cc361ac6c5dbba12ca69f3559c61a7997022",
+    "headCommit": "081216778e70d41909a9f0b03d80c3823edfaa3e",
+    "changedFunctions": ["migrateOut"],
+    "diffSummary": "Single commit [story-003] 'Fix M-01: pro-rata re-credit on underwater migration'. Adds a below-par re-credit loop to migrateOut: after redeeming `payout = _routeExit(token, totalPrincipal, false)`, if payout < totalPrincipal, each returned amounts[i] is scaled to amounts[i] * payout / totalPrincipal (floored). At/above par the scaling is skipped (identity).",
+    "ledgerLinkage": {
+      "fixesFinding": "3d61c9552fcdf7787458ff4863032ea07ae92d672b7af5df80a4bfd352044f4c",
+      "fixedFindingTitle": "Underwater-pool migration is bricked by requested-vs-received accounting mismatch",
+      "priorStatus": "acknowledged (owner: 'I accept this and will work on a fix')"
+    }
+  },
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {
+      "value": false,
+      "confidence": "verified",
+      "note": "migrateOut iterates over caller-supplied `users` and now runs a SECOND loop over the same array on the below-par branch; both bounded only by migrator-supplied batch length. Migrator is permissioned (onlyMigrator), and ledger L 'Unbounded per-user external-call loop in migrateOut/migrate' (open, low) already tracks this. getStakersRange is bounded/paged."
+    },
+    "checkedArithmetic": {
+      "value": true,
+      "confidence": "verified",
+      "note": "solc 0.8.x checked arithmetic throughout; no `unchecked` blocks; no inline assembly."
+    },
+    "reentrancyGuarded": {
+      "value": ["stake", "withdraw", "claim", "emergencyWithdraw", "migrateOut", "depositFor"],
+      "confidence": "verified",
+      "note": "All principal-/reward-moving externals carry nonReentrant. rescueERC20 intentionally omits it (trailing safeTransfer, owner-only, no post-transfer state)."
+    },
+    "accessControlled": {
+      "value": {
+        "onlyOwner": ["addToken", "phUSDPerDay", "setMigrator", "setPauser", "setYieldStrategy", "rescueERC20"],
+        "onlyMigrator": ["migrateOut", "depositFor"],
+        "onlyPauser": ["pause"],
+        "ownerOrPauser": ["unpause"],
+        "none_permissionless": ["stake", "withdraw", "claim", "emergencyWithdraw", "pendingReward", "getStakers", "getStakersRange", "stakerCount", "getStakedTokens", "withdrawDisabled"]
+      },
+      "confidence": "verified"
+    },
+    "initializerProtected": {
+      "value": "n/a",
+      "confidence": "verified",
+      "note": "Non-upgradeable; constructor-initialized. phUSD is immutable and zero-checked."
+    },
+    "pausable": {
+      "value": true,
+      "confidence": "verified",
+      "note": "OZ Pausable. whenNotPaused on stake/withdraw/claim. INTENTIONALLY callable while paused: emergencyWithdraw, migrateOut, depositFor, rescueERC20, setYieldStrategy and all owner config."
+    }
+  },
+
+  "stateVariables": [
+    {"name": "ACC_PRECISION", "type": "uint256 constant (1e18)", "mutators": [], "readers": ["_updatePool", "stake", "withdraw", "claim", "_settle", "migrateOut", "depositFor", "pendingReward"]},
+    {"name": "SECONDS_PER_DAY", "type": "uint256 constant (86400)", "mutators": [], "readers": ["phUSDPerDay"]},
+    {"name": "phUSD", "type": "IFlax immutable", "mutators": ["constructor"], "readers": ["_settle", "withdraw", "claim", "migrateOut"], "trust": "trusted (protocol mint target; this contract must be authorized minter)"},
+    {"name": "pauser", "type": "address", "mutators": ["setPauser"], "readers": ["onlyPauser", "unpause"]},
+    {"name": "migrator", "type": "address", "mutators": ["setMigrator"], "readers": ["onlyMigrator"]},
+    {"name": "poolInfo", "type": "mapping(address => PoolInfo)", "mutators": ["addToken", "phUSDPerDay", "_updatePool", "stake", "withdraw", "emergencyWithdraw", "migrateOut", "depositFor"], "readers": ["pendingReward", "rescueERC20", "*"]},
+    {"name": "userInfo", "type": "mapping(address => mapping(address => UserInfo))", "mutators": ["stake", "withdraw", "claim", "emergencyWithdraw", "migrateOut", "depositFor"], "readers": ["pendingReward", "*"]},
+    {"name": "_stakers", "type": "mapping(address => EnumerableSet.AddressSet) private", "mutators": ["stake", "withdraw", "emergencyWithdraw", "migrateOut", "depositFor"], "readers": ["getStakers", "getStakersRange", "stakerCount"]},
+    {"name": "_registeredTokens", "type": "EnumerableSet.AddressSet private", "mutators": ["addToken"], "readers": ["poolExists", "getStakedTokens"]},
+    {"name": "yieldStrategy", "type": "mapping(address => IYieldStrategy)", "mutators": ["setYieldStrategy"], "readers": ["_routeDeposit", "_routeExit", "_isUnderwater", "withdrawDisabled", "rescueERC20"], "trust": "semi-trusted (owner-set per token; custodies principal)"}
+  ],
+
+  "invariants": [
+    {
+      "id": "INV-EMISSION-CAP",
+      "statement": "Over any window, total minted phUSD for a token <= phusdPerSecond * elapsed. Sole writer of accPhusdPerShare is _updatePool; dust rounds DOWN; empty-pool windows accrue nothing (lastRewardTime fast-forwarded); flash stake (elapsed==0) earns 0; phUSDPerDay settles at old rate before changing.",
+      "confidence": "verified",
+      "note": "Unchanged by the diff. Core safety property per docs/test/EmissionCap.t.sol."
+    },
+    {
+      "id": "INV-TOTALSTAKED",
+      "statement": "poolInfo[token].totalStaked == Σ userInfo[token][u].amount over all u. Every amount mutation moves both in lockstep (stake/withdraw/emergencyWithdraw/migrateOut/depositFor).",
+      "confidence": "verified"
+    },
+    {
+      "id": "INV-PRINCIPAL-CUSTODY",
+      "statement": "Accounted principal (totalStaked) is decremented by the REQUESTED amount on exit, while the user is paid the RECEIVED balance-delta. Sub-amount differences (yield/loss) remain protocol-owned inside/around the strategy. Yield is never credited to stakers; reward accounting never reads totalBalanceOf.",
+      "confidence": "verified"
+    },
+    {
+      "id": "INV-MIGRATE-CONSERVATION",
+      "statement": "After the M-01 fix: Σ amounts[i] <= payout transferred to the migrator (below par, due to floored pro-rata scaling). Therefore the migrator's subsequent forceApprove(total) and depositFor redeposits can never exceed funds it actually received. At/above par Σ amounts[i] == totalPrincipal == payout.",
+      "confidence": "likely",
+      "note": "Floor of each term guarantees Σ floor(a_i*p/T) <= floor(p) <= p; verify the migrator does not assume Σ amounts[i] == totalPrincipal (cross-contract — defer to interaction analysis). DUST: payout - Σ scaled is left stranded in the migrator as protocol-owned. The pre-existing withdrawn-position state (info.amount=0) is finalized BEFORE payout is known, so a below-par migration realizes the haircut irreversibly for the user; this is documented/intended (escape-hatch semantics)."
+    },
+    {
+      "id": "INV-RESCUE-PRINCIPAL-SAFE",
+      "statement": "rescueERC20 cannot remove idle user principal: when no strategy, reserved == totalStaked and require(bal >= reserved + amount). When a strategy is set, reserved == 0 (principal lives in strategy) so the full contract balance (buffer+dust) is rescuable.",
+      "confidence": "verified",
+      "note": "Ledger L (open) flags that the strategy-set branch lets owner sweep the underwater buffer; local accounting itself is internally consistent."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "addToken(address)", "accessControl": "onlyOwner", "stateChanges": ["_registeredTokens", "poolInfo.lastRewardTime"], "externalCalls": [], "reentrancyGuard": false, "whenNotPaused": false},
+      {"function": "phUSDPerDay(address,uint256)", "accessControl": "onlyOwner+poolExists", "stateChanges": ["poolInfo.phusdPerSecond", "poolInfo(via _updatePool)"], "externalCalls": [], "reentrancyGuard": false, "whenNotPaused": false},
+      {"function": "setMigrator(address)", "accessControl": "onlyOwner", "stateChanges": ["migrator"], "externalCalls": [], "reentrancyGuard": false},
+      {"function": "setPauser(address)", "accessControl": "onlyOwner", "stateChanges": ["pauser"], "externalCalls": [], "reentrancyGuard": false},
+      {"function": "setYieldStrategy(address,IYieldStrategy)", "accessControl": "onlyOwner+poolExists", "stateChanges": ["yieldStrategy"], "externalCalls": ["token.forceApprove(old,0)", "token.forceApprove(new,max)", "token.balanceOf(this)", "strategy.deposit(token,idle,this)"], "reentrancyGuard": false, "whenNotPaused": false, "notes": "Sweeps idle balance into new strategy. Replacing in-use strategy does NOT migrate funds out of old (documented)."},
+      {"function": "pause()", "accessControl": "onlyPauser", "externalCalls": [], "reentrancyGuard": false},
+      {"function": "unpause()", "accessControl": "owner||pauser", "externalCalls": [], "reentrancyGuard": false},
+      {"function": "stake(address,uint256)", "accessControl": "none", "stateChanges": ["userInfo.amount", "userInfo.rewardDebt", "poolInfo", "_stakers"], "externalCalls": ["phUSD.mint(_settle)", "token.safeTransferFrom", "token.balanceOf", "strategy.deposit"], "reentrancyGuard": true, "whenNotPaused": true},
+      {"function": "withdraw(address,uint256)", "accessControl": "none", "stateChanges": ["userInfo", "poolInfo", "_stakers"], "externalCalls": ["phUSD.mint(pending)", "strategy.totalBalanceOf/principalOf", "strategy.withdraw OR buffer", "token.balanceOf", "token.safeTransfer"], "reentrancyGuard": true, "whenNotPaused": true, "notes": "Blocked when strategy underwater unless buffer covers `amount` (guardUnderwater=true)."},
+      {"function": "claim(address)", "accessControl": "none", "stateChanges": ["userInfo.rewardDebt", "poolInfo(_updatePool)"], "externalCalls": ["phUSD.mint(pending)"], "reentrancyGuard": true, "whenNotPaused": true},
+      {"function": "emergencyWithdraw(address)", "accessControl": "none", "stateChanges": ["userInfo", "poolInfo.totalStaked", "_stakers"], "externalCalls": ["strategy.withdraw OR identity", "token.balanceOf", "token.safeTransfer"], "reentrancyGuard": true, "whenNotPaused": false, "notes": "guardUnderwater=false: accepts haircut. Forfeits pending reward. No poolExists modifier (works on any token with a position)."},
+      {"function": "migrateOut(address,address[])", "accessControl": "onlyMigrator+poolExists", "returns": "uint256[] amounts", "stateChanges": ["userInfo(zeroed)", "poolInfo.totalStaked", "_stakers", "poolInfo(_updatePool)"], "externalCalls": ["phUSD.mint(per user)", "strategy.withdraw(aggregate) OR identity", "token.balanceOf", "token.safeTransfer(migrator)"], "reentrancyGuard": true, "whenNotPaused": false, "changedInDiff": true, "notes": "Settles+zeroes each user, transfers aggregate `payout` to migrator. NEW below-par branch scales each amounts[i] to realized pro-rata share. guardUnderwater=false."},
+      {"function": "depositFor(address,address,uint256)", "accessControl": "onlyMigrator+poolExists", "stateChanges": ["userInfo", "poolInfo.totalStaked", "_stakers"], "externalCalls": ["phUSD.mint(_settle)", "token.safeTransferFrom(migrator)", "token.balanceOf", "strategy.deposit"], "reentrancyGuard": true, "whenNotPaused": false},
+      {"function": "rescueERC20(address,address,uint256)", "accessControl": "onlyOwner", "stateChanges": [], "externalCalls": ["token.balanceOf", "token.safeTransfer"], "reentrancyGuard": false, "whenNotPaused": false},
+      {"function": "pendingReward(address,address) view", "accessControl": "none"},
+      {"function": "getStakers(address) view", "accessControl": "none"},
+      {"function": "getStakersRange(address,uint256,uint256) view", "accessControl": "none", "notes": "end clamped to len; bounded paging."},
+      {"function": "stakerCount(address) view", "accessControl": "none"},
+      {"function": "getStakedTokens() view", "accessControl": "none"},
+      {"function": "withdrawDisabled(address) view", "accessControl": "none", "externalCalls": ["strategy.totalBalanceOf", "strategy.principalOf"]}
+    ],
+
+    "externalCalls": [
+      {"target": "IFlax phUSD", "methods": ["mint"], "trustLevel": "trusted", "notes": "Immutable, zero-checked. This contract must be an authorized minter. mint is the emission sink; emission-cap invariant bounds amounts. A reverting/broken mint cannot trap principal because emergencyWithdraw never mints."},
+      {"target": "IYieldStrategy yieldStrategy[token]", "methods": ["deposit", "withdraw", "principalOf", "totalBalanceOf"], "trustLevel": "semi-trusted", "notes": "Owner-set per token (reflax-yield-vault AYieldStrategy/ERC4626YieldStrategy). Custodies principal. Reentrancy across nonReentrant guards mitigated. principalOf/totalBalanceOf drive the underwater guard and (in withdraw) which branch is taken — manipulation of these views is an INTERACTION concern (defer). withdraw/deposit revert if farm not authorized as client."},
+      {"target": "IERC20 token (pool token)", "methods": ["safeTransferFrom", "safeTransfer", "balanceOf", "forceApprove"], "trustLevel": "semi-trusted", "notes": "Balance-delta measurement (_pullToken, _routeExit) tolerates fee-on-transfer mechanically, but project scope lists fee-on-transfer / weird ERC20 as known-invalid. Assumes standard ERC20."},
+      {"target": "address migrator", "methods": ["(callee of migrateOut/depositFor; receives aggregate payout)"], "trustLevel": "semi-trusted (permissioned, owner-set)", "notes": "Receives below-par dust as stranded protocol-owned funds; must not assume Σ amounts[i] == totalPrincipal (cross-contract — see StableStakerMigrator profile)."}
+    ],
+
+    "events": ["TokenAdded", "RewardRateSet", "MigratorSet", "PauserUpdated", "YieldStrategySet", "Staked", "Withdrawn", "Claimed", "EmergencyWithdrawn", "MigratedOut", "DepositedFor", "BufferWithdrawn", "ERC20Rescued"],
+    "modifiers": ["onlyPauser", "onlyMigrator", "poolExists", "onlyOwner (OZ)", "nonReentrant (OZ)", "whenNotPaused (OZ)"]
+  },
+
+  "trustAssumptions": [
+    "phUSD (IFlax) is the trusted protocol token and this contract is an authorized minter; if minter authorization is revoked, claim/withdraw/migrateOut reward-mint reverts but emergencyWithdraw still returns principal.",
+    "Pool tokens are standard ERC20 (no hooks, no fee-on-transfer per project scope; balance-delta accounting is defensive but FoT is out of scope).",
+    "yieldStrategy[token] is an honest, owner-vetted reflax-yield-vault adapter; principalOf/totalBalanceOf are truthful and not attacker-manipulable (interaction-level — defer).",
+    "migrator is a trusted, owner-set contract (StableStakerMigrator) that respects the returned `amounts` and does not redeposit more than it received.",
+    "Owner is trusted for config: addToken, emission rate, setYieldStrategy (incl. the documented hazard of replacing an in-use strategy without draining), rescueERC20 (cannot touch idle principal by construction).",
+    "Pauser is trusted to pause; owner-or-pauser to unpause (Behodler3 pattern)."
+  ],
+
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPausable"],
+
+  "complexity": {
+    "loc": 541,
+    "externalFunctions": 19,
+    "internalFunctions": 6,
+    "externalCallSites": "phUSD.mint (4 sites), strategy deposit/withdraw/views, token transfer/approve/balanceOf",
+    "stateVariables": 10,
+    "assemblyBlocks": 0,
+    "uncheckedBlocks": 0
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-001",
+      "type": "diff-observation / accounting",
+      "severity": "local-info",
+      "function": "migrateOut",
+      "line": "341-347",
+      "description": "M-01 fix (the only change since baseline). Below-par pro-rata re-credit: amounts[i] = amounts[i] * payout / totalPrincipal, floored. Σ scaled <= payout holds (floor of each term). Locally correct and conserves funds vs the migrator. Two local notes: (1) floored division leaves dust = payout - Σ scaled stranded in the migrator as protocol-owned — acceptable, documented. (2) The user's position is zeroed (info.amount=0) BEFORE payout is observed, so a below-par migration realizes the haircut irreversibly; this matches the intended escape-hatch / guardUnderwater=false semantics. Whether the migrator correctly consumes amounts[i] (e.g. does not assume sum==totalPrincipal) is CROSS-CONTRACT — defer to interaction analysis / StableStakerMigrator profile.",
+      "recommendation": "Confirm downstream (migrator) uses returned amounts and not totalPrincipal for redeposit totals (it does: forceApprove(total=Σamounts) then depositFor(amounts[i]))."
+    },
+    {
+      "id": "LOCAL-002",
+      "type": "unbounded-loop / gas-griefing",
+      "severity": "local-low",
+      "function": "migrateOut",
+      "line": "312-347",
+      "description": "Two sequential loops over caller-supplied `users` (settle/mint loop + new below-par scaling loop), unbounded by length. Caller is permissioned (onlyMigrator) so this is a batch-sizing/DoS-of-self concern, not an external attack surface. The new scaling loop is pure arithmetic (no external calls) so it adds negligible incremental gas vs the existing mint loop. Matches existing OPEN ledger finding 59eebbf… (low).",
+      "recommendation": "Migrator batches sized off-chain via getStakersRange; no code change required (existing low)."
+    },
+    {
+      "id": "LOCAL-003",
+      "type": "observation / access-control",
+      "severity": "local-info",
+      "function": "emergencyWithdraw",
+      "line": "280",
+      "description": "emergencyWithdraw lacks the poolExists modifier (intentional — escape hatch must work even for a token mid-deregistration). Safe because it only acts on the caller's own non-zero position; totalStaked-- would underflow-revert if state were inconsistent.",
+      "recommendation": "None (intended)."
+    }
+  ],
+
+  "deferredToInteraction": [
+    "Whether StableStakerMigrator correctly handles the new below-par `amounts` (sum < totalPrincipal) and does not strand/misallocate funds — see StableStakerMigrator profile.",
+    "Manipulation of strategy principalOf/totalBalanceOf to force par/underwater branch selection in withdraw and _routeExit.",
+    "Reentrancy exploitability of strategy.deposit/withdraw callbacks (guards present locally; callback behavior is cross-contract).",
+    "Economic fairness of the below-par haircut distribution and stranded dust (econ-scanner)."
+  ]
+}
