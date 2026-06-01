@@ -45,6 +45,7 @@ Given a submission living at `reports/<run-dir>/submissions/...` with a C4 label
 | phoenix-nft-staking | `pns` |
 | phlimbo-ea | `pe` |
 | phoenix-phase-2-staging | `pps` |
+| stable-staker | `ss` |
 
 Project names, submodule directories, and report-dir family names are all the same string
 now (the upstream repo name), so the acronym derives from that single canonical name.
