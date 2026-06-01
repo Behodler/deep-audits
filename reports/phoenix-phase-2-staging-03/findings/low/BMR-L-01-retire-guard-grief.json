@@ -1,0 +1,40 @@
+{
+  "id": "BMR-L-01",
+  "project": "phoenix-phase-2-staging",
+  "status": "ready",
+  "severity": "low",
+  "title": "Old-minter retirement guard require(USDC.balanceOf(OLD)==0) can be griefed to abort the entire migration mid-broadcast, leaving an inconsistent half-cutover",
+  "contract": "script/ReplaceBatchNFTMinter.s.sol",
+  "function": "_retireOld",
+  "line": 419,
+  "lineStart": 419,
+  "lineEnd": 427,
+  "entryPoint": "batch-minter-replace",
+  "fingerprint": "22fc436d9483c95c1462e3775839e6da2ac3757ffd86155d587ad9a0d96791fe",
+  "origin": "new",
+  "rootCauseClass": "FragileInvariantOrdering",
+  "category": "intent-mismatch",
+  "description": "_retireOld() runs AFTER deploy/configure/repoint/seed and asserts require(IERC20(USDC).balanceOf(OLD_BATCH_MINTER) == 0, \"old contract still holds USDC\"). The OLD BatchNFTMinter is the exploited contract with a permissionless full-balance USDC sweep (per DisableNudgeAndDivertDonations header: anyone can sweep it). Because USDC.balanceOf is externally writable by anyone (a 1-wei USDC transfer to OLD_BATCH_MINTER griefs the check), an adversary watching the mainnet mempool can front-run the broadcast and dust the old contract with 1 wei USDC, making this require revert. Since this require sits at step 7 of 8 inside the single broadcast, the revert aborts the whole transaction: in broadcast mode the new minter is never persisted (progress JSON written only after stopBroadcast), so the cutover half-lands on-chain (new minter deployed+configured, SYA + pooler already repointed in earlier steps that DID execute) while the script reports failure and the post-JS never rewrites mainnet-addresses.ts. The guard's intent (\"old contract is drained\") is also not what it actually proves: balance==0 at this instant does not mean the contract is permanently drained or safe.",
+  "impact": "A cheap (1 wei) griefing vector can repeatedly abort the migration. Worse, because the abort happens after the on-chain repoints in _repoint() are mined within the same tx, a forge-script broadcast that reverts at _retireOld rolls the whole tx back (single tx) — so on-chain state is consistent, BUT the operator is forced to re-attempt and an attacker can hold the cutover hostage indefinitely for the cost of dust. If any step were split across txs (e.g. --slow with nonce gaps or a resumed broadcast), partial application risk increases. The guard also gives false assurance about the old contract being safe.",
+  "attackPath": [
+    "Attacker watches the mainnet mempool for the cutover broadcast.",
+    "Attacker front-runs with a 1-wei USDC transfer to OLD_BATCH_MINTER.",
+    "_retireOld()'s require(balanceOf(OLD)==0) reverts; the whole single tx rolls back.",
+    "Operator must re-attempt; attacker can repeat for dust cost, holding the cutover hostage."
+  ],
+  "recommendation": "Move the retirement neutralization to be independent of an externally-griefable balance check, or change the guard to a non-blocking warning. If a balance assertion is desired, snapshot/sweep the old contract's USDC to a safe address as part of the script rather than asserting someone else has done it, and gate retirement on the contract's own config (nudgePaymentToken/nudgeSize already 0) which is not attacker-writable. Document that balance==0 is a point-in-time observation, not a permanent-drain proof.",
+  "evidence": "script/ReplaceBatchNFTMinter.s.sol L420-422. DisableNudgeAndDivertDonations.s.sol L35-42 documents the old contract's permissionless USDC sweep. Fork preview (block ~25207560) observed OLD USDC balance == 0 so the guard passed this run, but the value is attacker-controllable. require ordering: _retireOld is called at run() L273, after _repoint L271.",
+  "verified": true,
+  "qaBundleCandidate": true,
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-05-30T00:00:00Z",
+    "updatedAt": "2026-05-30T00:00:00Z",
+    "forkBlock": 25207560,
+    "scanOrigin": "audit-script:batch-minter-replace",
+    "classificationOrigin": "CLASS-BMR-003",
+    "dedupOrigin": "DEDUP-003",
+    "plausibility": "plausible",
+    "flaggedForHumanReview": false
+  }
+}

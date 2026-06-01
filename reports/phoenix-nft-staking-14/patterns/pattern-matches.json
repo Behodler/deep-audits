@@ -1,0 +1,105 @@
+{
+  "project": "phoenix-nft-staking",
+  "commit": "9be4a87",
+  "scanTimestamp": "2026-05-29T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scope": ["src/BatchNFTMinter.sol"],
+  "focus": "batchMint() + story-015 minReward slippage guard over a balance-based winner-take-all nudge pot",
+  "patternsChecked": 22,
+  "findingsCount": 4,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC777",
+      "type": "reentrancy-receiver-callback",
+      "severity": "potential-high",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 257,
+      "description": "batchMint mints `count` ERC1155 units to a caller-controlled `recipient` inside a loop (nftMinter.mint, lines 257-259). ERC1155 _mint invokes onERC1155Received on a contract recipient, handing control to attacker code AFTER funds have been pulled (line 254) but BEFORE the balance-based reward is read (line 271) and the pot is paid out (line 283). The function is permissionless (whenNotPaused only, line 232) and carries NO ReentrancyGuard (contract inherits only Ownable, Pausable, IPausable, line 56). Classic Checks-Effects-Interactions violation: an external callback sits between the value-determining read and the payout, and re-entry into batchMint is unguarded. The hardening narrative (lines 20-31) addresses only the caller-supplied-minter drain vector and explicitly does NOT introduce a reentrancy guard.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "for (uint256 i; i < count; ++i) { nftMinter.mint(_dispatcherIndex, recipient); }",
+        "IERC20(_nudgeTokenEntry).safeTransfer(recipient, nudgeAmount)",
+        "safeTransferFrom(msg.sender, address(this), paymentAmount)"
+      ],
+      "missingMitigations": [
+        "No ReentrancyGuard / nonReentrant modifier on batchMint",
+        "Reward read (balanceOf, line 271) and payout (line 283) occur after the attacker-reachable ERC1155 receiver callback",
+        "recipient is fully caller-controlled, so the receiver callback is attacker-controlled"
+      ],
+      "notes": "Token type is ERC1155 (receiver hook), not literally ERC777, but the pattern is identical: a standard-mandated transfer/mint callback to attacker code enables re-entry. Manual review must confirm the V2 minter's mint() path actually performs an ERC1155 safe-mint that calls onERC1155Received (out-of-scope minter), and whether a nested batchMint re-entry can be used to double-read the balance-based pot or interleave with the dust sweep.",
+      "references": ["https://blog.openzeppelin.com/reentrancy-after-istanbul"]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE",
+      "type": "balance-based-reward-accounting",
+      "severity": "potential-high",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 271,
+      "description": "The nudge reward is the ENTIRE live token balance read on the fly: `nudgeAmount = IERC20(_nudgeTokenEntry).balanceOf(address(this))` (line 271), gated purely on a numeric `count >= nudgeSize` (line 270) and paid winner-take-all to recipient (line 283). Using a live balanceOf as a value-bearing decision input in the same transaction is the balance-snapshot anti-pattern: the pot has no per-claim accounting, no escrow, and no commitment — it is whatever sits in the contract at the instant of the call. Whoever qualifies first in block order takes 100% of the funnel-accumulated USDC. This is a first-claimer / MEV race: a searcher monitoring the funding inflow (or the mempool) front-runs honest qualifiers to sweep the pot, and the contract's own comments (lines 43-47, 222-224) confirm the balance is externally mutable and the payout is winner-take-all.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "balanceOf(address(this))",
+        "nudgeAmount = IERC20(_nudgeTokenEntry).balanceOf(address(this))"
+      ],
+      "missingMitigations": [
+        "No per-claimer accounting / escrow — reward = whole live balance",
+        "Reward read in the same tx it is paid, with no commit-reveal or snapshot",
+        "Eligibility is a pure numeric gate (count >= nudgeSize), independent of contribution",
+        "No anti-MEV ordering protection; pot is publicly observable"
+      ],
+      "notes": "Not a literal AMM flash-loan price manipulation, but the same root cause class: a critical payout derived from a manipulable/observable spot balance read and consumed in-tx. Severity hinges on the size of the accumulating pot relative to the cost of count>=nudgeSize real mints at the dispatcher's ramping price; the minReward floor (PATTERN-003) does NOT close this race.",
+      "references": ["C4 balance-snapshot / reward-griefing findings"]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "incomplete-slippage-guard",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 278,
+      "description": "story-015 added a user-supplied `minReward` floor: if the deliverable reward (the live balance) is below it, the whole batch reverts (lines 278-280). The slippage check IS present, so this is NOT a clean missing-slippage match. The contextual finding is that the guard is structurally INCOMPLETE for the threat it appears to address: per the contract's own NatSpec (lines 221-224), minReward only stops a LOSER from minting for less reward than declared — it does NOT stop a front-runner from winning the entire pot. A caller can also be griefed: an attacker who drains/reduces the pot (or any reorg of funding vs claim) makes honest minReward>0 callers revert, a denial-of-reward / wasted-intent grief (the mints and payment pull roll back, but the caller's transaction slot and gas are burned, and the intended reward is gone).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "uint256 minReward (parameter)",
+        "if (nudgeAmount < minReward) revert BatchMint__RewardBelowMinimum(minReward, nudgeAmount)"
+      ],
+      "missingMitigations": [
+        "Guard defends declared value-floor only, NOT pot ownership — front-running winner still takes all (PATTERN-002)",
+        "minReward == 0 default disables the floor entirely (line 219), reproducing unguarded prior behaviour",
+        "No mechanism couples eligibility/payout to the caller's actual contribution"
+      ],
+      "notes": "Down-weighted to medium because the mitigation is genuinely present and works for its stated narrow purpose. Surfaced for manual review specifically because the slippage guard may create a false sense of MEV protection while the winner-take-all race (PATTERN-002) is untouched.",
+      "references": []
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "FIRST-DEPOSITOR-ATTACK",
+      "type": "first-claimer-race",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 270,
+      "description": "Structural (not signature) match to the first-claimer / front-running race family. Reward eligibility is the bare numeric gate `count >= nudgeSize` (line 270) and the payout is the full live balance (line 271, PATTERN-002), so the first transaction in block order that clears nudgeSize captures the entire accumulated pot. As the external funnel tops the pot up, this is a recurring, predictable race that favours whoever can pay for nudgeSize mints first and order their tx ahead of others (MEV / mempool sniping). The contract acknowledges the winner-take-all dynamic in NatSpec (lines 222-224).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "if (_nudgeSize != 0 && count >= _nudgeSize && _nudgeTokenEntry != address(0))"
+      ],
+      "missingMitigations": [
+        "No proportional / pro-rata distribution across qualifying claimers",
+        "No accrual or per-participant claim accounting",
+        "Eligibility decoupled from amount/timing of pot funding"
+      ],
+      "notes": "The canonical signatures (totalSupply()==0 / if (supply==0)) are absent — this is the same economic race re-skinned onto a balance-based bounty rather than a vault share-price. Folds into PATTERN-002 for triage; reported separately to capture the eligibility-gate angle (count>=nudgeSize) distinct from the balance-read angle.",
+      "references": ["C4 2023-01-pooltogether findings"]
+    }
+  ]
+}

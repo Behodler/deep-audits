@@ -1,0 +1,132 @@
+{
+  "entryPoint": "batch-minter-replace",
+  "classificationReport": {
+    "timestamp": "2026-05-30T00:00:00Z",
+    "project": "phoenix-phase-2-staging",
+    "classifier": "severity-classifier",
+    "inputFindings": 4,
+    "classifiedFindings": 4,
+    "criteriaSource": "CLAUDE.md C4 Severity Classifications",
+    "labelScheme": {
+      "decision": "per-entryPoint namespaced",
+      "prefix": "BMR (batch-minter-replace)",
+      "rationale": "Fingerprint reconciliation is per-entryPoint (entryPoint folded into the fingerprint), and the existing ledger M-01/M-02/L-01 belong to a DIFFERENT entry point (RestoreMintAtIndex4). Plain M-01/L-01 here would visually collide with the ledger's RestoreMintAtIndex4 labels in any merged report. Namespacing with the BMR- prefix and restarting numbering at 01 keeps this run's labels unambiguous against the existing global ledger while staying human-readable.",
+      "severityTotals": { "high": 0, "medium": 2, "low": 2 }
+    }
+  },
+  "findings": [
+    {
+      "classifiedFinding": {
+        "id": "CLASS-BMR-001",
+        "originalId": "DEDUP-001",
+        "fingerprint": "f474129a96ee602a6b66acaf7fcd6cdd18aca2d4836cff80122bbb5aa0811b2a",
+        "label": "BMR-M-01",
+        "severity": "medium",
+        "plausibility": "plausible",
+        "regression": false,
+        "auditorEstimate": "medium",
+        "agreesWithEstimate": true,
+        "classification": {
+          "assetImpact": "No assets stolen or lost. The migrated nudge incentive mechanism is left non-functional: after the one-time ~50.4 USDC seed is consumed, the new BatchNFTMinter receives 0% of every subsequent SYA.claim() because nudgeSplit stays at the stop-gap value 0.",
+          "attackPath": [
+            "1. Predecessor stop-gap DisableNudgeAndDivertDonations set SYA.setNudgeSplit(0) to cut funding to the exploited minter.",
+            "2. ReplaceBatchNFTMinter (the supersede script) repoints SYA.nudge = newMinter and pooler.batchMinter = newMinter and seeds ~50.4 USDC.",
+            "3. Script never calls SYA.setNudgeSplit(N) — verified live: only setNudgeAddress is issued.",
+            "4. SYA.claim() routes nudgeSplit% (=0) to nudge, so nudgeAmount=0 forever.",
+            "5. Script reports success, mainnet-addresses.ts rewritten — operator believes cutover is complete while the nudge feature is dead after the seed."
+          ],
+          "likelihood": "certain — this is a deterministic state outcome of the script as written, not an attack; verified live on the fork (nudgeSplit()==0 before and after the run).",
+          "assumptions": "Restoring the split is not intentionally deferred to a documented separate broadcast (the script header/progress JSON claim a complete cutover, so this is treated as an unintended omission, not a documented two-step).",
+          "externalRequirements": "A separate owner-only setNudgeSplit(N) tx is required to make the migrated mechanism functional; until then the feature is inert."
+        },
+        "justification": "Maps cleanly to the C4 Medium definition: assets are NOT at direct risk, but 'the function of the protocol or its availability could be impacted.' The redeployed nudge mechanism is silently non-functional going forward — a post-migration availability gap, not a theft or loss. It does not reach High because no asset can be stolen, lost, or compromised. It is above QA/Low because it is more than a benign state/spec nit: it is an intent-vs-claim mismatch (the script states it makes 'the nudge work again' but leaves the split that makes the pointer meaningful at 0), verified live, defeating the stated purpose of the redeploy. Medium confirmed.",
+        "flaggedForHumanReview": false
+      }
+    },
+    {
+      "classifiedFinding": {
+        "id": "CLASS-BMR-002",
+        "originalId": "DEDUP-002",
+        "fingerprint": "3216feb8ce07ed5eefb06a02b2039eb22087907a1e042b270c8a47653683ee03",
+        "label": "BMR-M-02",
+        "severity": "medium",
+        "plausibility": "plausible",
+        "regression": false,
+        "auditorEstimate": "medium",
+        "agreesWithEstimate": true,
+        "borderline": true,
+        "classification": {
+          "assetImpact": "Value leak via MEV/sandwich on the seed swap. The proportional BPT exit uses minAmountsOut=[0,0]; the only floor is a single downstream MIN_USDC_OUT=47e6 covering ONLY the sUSDS->USDC leg (~6.8% extractable slack at the observed 50.4e6 output). The phUSD leg (54.13e18 burned) has NO floor at all and its exposure is therefore not bounded by the 6.8% figure.",
+          "attackPath": [
+            "1. Owner broadcasts the cutover on the public mainnet mempool (--slow, no private-mempool / flashbots noted).",
+            "2. A searcher front-runs to move the WeightedPool reserves around removeLiquidityProportional, skewing the leg split.",
+            "3. Searcher separately moves the StablePool around the SeedSwapHelper sUSDS->USDC swap.",
+            "4. Searcher back-runs; extracts up to the ~6.8% USDC-leg margin (above the 47e6 floor) plus an unbounded share on the unfloored phUSD leg.",
+            "5. New pot is seeded with less value than intended for the same BPT burned."
+          ],
+          "likelihood": "medium — requires an active sandwicher and a public broadcast; both are realistic for an owner-signed mainnet tx, but exploitation is opportunistic and one-shot.",
+          "assumptions": "Transaction is broadcast on the public mempool (stated: --slow, no private mempool); attacker can manipulate the WeightedPool and StablePool within the broadcast window.",
+          "externalRequirements": "An MEV searcher / sandwich infrastructure observing the mempool; sufficient pool liquidity to make manipulation profitable above gas."
+        },
+        "justification": "Fits the C4 Medium 'leak value with a hypothetical attack path with stated assumptions, but external requirements' clause: assets are not directly stolen from a vault, but value leaks on an owner broadcast via a sandwich whose external requirement (a mempool searcher) and assumption (public broadcast) are explicit. BORDERLINE between Low and Medium and flagged as such per the auditor's prompt. At the as-run calibrated size the absolute loss on the FLOORED USDC leg is small (~6.8% of ~50 USDC, dust-adjacent), which alone would argue Low. What holds it at Medium is NOT the 6.8% USDC haircut but: (a) the phUSD leg is entirely unfloored, so its loss is genuinely unbounded rather than capped at 6.8%; (b) SEED_USDS_TARGET and the slice are env-overridable and a prior default was ~4x larger, so exposure scales linearly with no new guard; and (c) it directly violates the repo's stated NON-NEGOTIABLE Configuration Safety gate ('a zero slippage bound is an open invitation to sandwich/MEV'). It does NOT reach High: no direct theft from protocol-held assets and the blast radius at calibrated size is bounded. Medium confirmed, with the explicit caveat that the as-run direct loss is small and the Medium rests on the unfloored leg + env-scalability rather than the observed haircut. Recommend human review given the borderline nature.",
+        "flaggedForHumanReview": true,
+        "reviewReason": "Bounded, owner-calibrated, one-shot ~50 USDC swap. As-run direct loss on the floored leg is small; Medium rests on the unfloored phUSD leg and env-scalability. A judge could reasonably land this at Low if the phUSD-leg loss is shown to be de-minimis at the calibrated size and env-overrides are out of scope."
+      }
+    },
+    {
+      "classifiedFinding": {
+        "id": "CLASS-BMR-003",
+        "originalId": "DEDUP-003",
+        "fingerprint": "22fc436d9483c95c1462e3775839e6da2ac3757ffd86155d587ad9a0d96791fe",
+        "label": "BMR-L-01",
+        "severity": "low",
+        "plausibility": "plausible",
+        "regression": false,
+        "auditorEstimate": "low",
+        "agreesWithEstimate": true,
+        "classification": {
+          "assetImpact": "None directly. A 1-wei USDC dust transfer to OLD_BATCH_MINTER reverts require(USDC.balanceOf(OLD)==0), aborting the migration broadcast. Because the finding's own evidence confirms this is a SINGLE tx, the revert rolls back atomically — on-chain state stays consistent, no funds at risk. The guard also does not prove permanent drain of the old contract (point-in-time observation only).",
+          "attackPath": [
+            "1. Attacker watches the mainnet mempool for the cutover broadcast.",
+            "2. Attacker front-runs with a 1-wei USDC transfer to OLD_BATCH_MINTER.",
+            "3. _retireOld()'s require(balanceOf(OLD)==0) reverts; the whole single tx rolls back.",
+            "4. Operator must re-attempt; attacker can repeat for dust cost, holding the cutover hostage."
+          ],
+          "likelihood": "low-to-medium as a grief, but trivially defeated by the operator using a private mempool / flashbots; no persistent damage under the actual atomic-tx path.",
+          "assumptions": "Broadcast on a public mempool; the split-tx 'half-cutover' inconsistency only arises under hypothetical --slow nonce-gap / resumed-broadcast conditions the finding itself marks as conditional, not the as-run single-tx path.",
+          "externalRequirements": "Attacker monitoring the mempool and willing to pay gas + 1 wei repeatedly."
+        },
+        "justification": "Classified QA/Low. The C4 Medium 'availability impacted' clause is for protocol function/availability to users; here the affected 'availability' is a one-shot, owner-operated migration script, and the grief is atomic (no inconsistent state lands), trivially defeated by a private mempool, and risks no assets. It is a fragile-invariant / script-robustness defect plus a guard that does not prove what it claims (balance==0 != permanently drained). That places it squarely in QA/Low ('state handling, function incorrect as to spec'). It is not High (no asset risk, no valid theft path) and does not clear Medium (no protocol-level availability loss, no value leak; the only persistent-damage scenario is explicitly conditional on hypothetical split-tx behavior). Low confirmed; suitable for the QA bundle.",
+        "flaggedForHumanReview": false
+      }
+    },
+    {
+      "classifiedFinding": {
+        "id": "CLASS-BMR-004",
+        "originalId": "DEDUP-004",
+        "fingerprint": "7e3bd86b09aa39f1b6f0b08c9e2da036b2e92aed31f748c49cfa166949c4f72f",
+        "label": "BMR-L-02",
+        "severity": "low",
+        "plausibility": "implausible-without-misconfig",
+        "regression": false,
+        "auditorEstimate": "low",
+        "agreesWithEstimate": true,
+        "verified": false,
+        "classification": {
+          "assetImpact": "None this run (helper floor MIN_USDC_OUT=47e6 held; seed landed 50418020). Defense-in-depth gap: usdcOut delta is logged but never require()d at the script level, and MIN_USDC_OUT is env-overridable with no floor-on-floor (no require(minUsdcOut > 0)). A 0/degenerate seed could pass silently only if an operator overrode the floor to 0 (or the helper path changed).",
+          "attackPath": [
+            "1. Operator (mis)sets MIN_USDC_OUT=0 via env, OR the helper floor is later removed/changed.",
+            "2. A sandwiched or degenerate swap seeds near-zero USDC.",
+            "3. Script's postflight treats any outcome as success, retires the old minter and persists progress / rewrites addresses.",
+            "4. Migration looks complete while the new minter holds ~0 USDC, compounding the unfunded-pot problem in DEDUP-001."
+          ],
+          "likelihood": "low — unverified this run; requires operator env misconfiguration (MIN_USDC_OUT=0) or a future helper change to materialize.",
+          "assumptions": "An operator overrides the default floor to 0, or the helper-level floor is removed; absent that, the existing helper floor prevents the impact.",
+          "externalRequirements": "Operator misconfiguration of MIN_USDC_OUT (and, for value loss, a concurrent sandwich per DEDUP-002)."
+        },
+        "justification": "Classified QA/Low. This is explicitly a weak-postcondition / defense-in-depth hardening gap, unverified this run, whose impact is gated on operator env-misconfiguration (overriding the floor to 0) — adjacent to a reckless-admin-mistake precondition — and only then compounds DEDUP-001. Per C4 this is 'function incorrect as to spec' (the repo's Configuration Safety gate mandates require(floors > 0); the script omits it) with no demonstrated live impact. It is not Medium: no value leak or availability loss occurs without an additional misconfiguration that the existing helper floor currently prevents, and the finding is unverified. Low confirmed; already flagged qaBundleCandidate and a natural pairing with BMR-M-01 in the report narrative.",
+        "flaggedForHumanReview": false
+      }
+    }
+  ]
+}

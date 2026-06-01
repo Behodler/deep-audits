@@ -1,0 +1,102 @@
+{
+  "entryPoint": "batch-minter-replace",
+  "dedupSummary": {
+    "inputCount": 4,
+    "keptCount": 4,
+    "mergedCount": 0,
+    "droppedCount": 0,
+    "flaggedForHumanReview": 0,
+    "rationale": "No exact, near, pattern, or inherited duplicates among the four. All four sit at distinct contract:line:function tuples with distinct rootCauseClass values and require separate mitigations. None is a generic automated-tool / 'Known Invalid' style finding (no floating-pragma, missing-event, missing-NatSpec, or bare zero-address checks) — every finding is specific to this script entry point and tied to the repo's NON-NEGOTIABLE Configuration Safety gate. Findings #1 and #4 were specifically assessed for merge and kept separate (see relationships). Ledger cross-collapse intentionally NOT performed: existing ledger entries are entryPoint 'RestoreMintAtIndex4'; per the fingerprint discriminator they reconcile per entry point and the sanitizer handles ledger reconciliation next."
+  },
+  "relationships": [
+    {
+      "ids": ["DEDUP-001", "DEDUP-004"],
+      "decision": "KEEP-SEPARATE",
+      "reasoning": "Related but distinct. DEDUP-001 (nudgeSplit left at 0) is a config-OMISSION with live on-chain impact today: rootCauseClass MissingPostStepConfiguration in _repoint(), verified live (SYA.nudgeSplit()==0, claim() L506-516 routes 0% to the new pot). DEDUP-004 (seed delta never asserted) is a defense-in-depth POSTCONDITION gap: rootCauseClass WeakPostcondition in _seedFromBpt/_postflight, verified:false, NOT triggered this run (helper floor held). Different root cause class, different code location, different mitigation (add setNudgeSplit call + restore-assertion vs add seed-floor require + minUsdcOut>0 guard). They are causally linked — a degenerate seed (#4) would compound the unfunded-pot condition (#1) — and that linkage is cross-referenced in each, but collapsing them would erase one of two independently-required fixes. CLAUDE.md / spec 'Keep both when: same area but different root causes / separate mitigation required' applies."
+    },
+    {
+      "ids": ["DEDUP-002", "DEDUP-004"],
+      "decision": "KEEP-SEPARATE",
+      "reasoning": "Both touch _seedFromBpt and both relate to slippage, but DEDUP-002 is UnboundedSlippage on the proportional BPT exit legs (minAmountsOut=[0,0], L367-371) — a present, hardcoded zero bound. DEDUP-004 is a WeakPostcondition that the helper's USDC floor (minUsdcOut) and the measured pot delta are never re-asserted at script level and minUsdcOut itself is env-overridable to 0. Different defect (a hardcoded-zero bound that exists vs an absent script-level guard on an env-overridable value), different fix. Not a duplicate."
+    }
+  ],
+  "dropped": [],
+  "flaggedForHumanReview": [],
+  "findings": [
+    {
+      "id": "DEDUP-001",
+      "originalIds": ["candidate-1"],
+      "title": "Cutover leaves SYA.nudgeSplit at 0 — new nudge pot is repointed but never refunded by the StableYieldAccumulator claim path (incomplete migration)",
+      "severity": "medium",
+      "contract": "lib/stable-yield-accumulator/src/StableYieldAccumulator.sol",
+      "function": "claim / nudgeSplit",
+      "lineStart": 385,
+      "lineEnd": 406,
+      "entryPoint": "batch-minter-replace",
+      "rootCauseClass": "MissingPostStepConfiguration",
+      "category": "cluster-interaction",
+      "description": "The predecessor stop-gap DisableNudgeAndDivertDonations cut funding to the exploited BatchNFTMinter by setting SYA.setNudgeSplit(0) (its PRIMARY lever — the SYA.claim() path routes nudgeSplit% of each claim's USDC to SYA.nudge). ReplaceBatchNFTMinter is the script that is meant to supersede that stop-gap: it repoints SYA.nudge = newMinter and pooler.batchMinter = newMinter, and one-time-seeds ~50.4 USDC into the new pot. But it never restores SYA.nudgeSplit. Verified live on the fork: SYA.nudgeSplit() == 0 before the run, and the script issues no setNudgeSplit call (full trace inspected — only setNudgeAddress is called on SYA). So after the cutover the new minter is fully wired yet receives 0% of every subsequent claim. The script's own stated purpose (\"repoint its two real funders ... so the nudge works again\") is only half-achieved: the pointer is restored but the split that makes the pointer meaningful is left at the stop-gap value.",
+      "impact": "The new BatchNFTMinter nudge incentive is funded only by the single ~50.4 USDC bootstrap seed and never replenished through the SYA claim path. The nudge feature (count >= nudgeSize=40 triggers a full-balance payout) is effectively dead after the seed is consumed, defeating the purpose of redeploying the fixed minter. No funds are lost, but the migrated mechanism is non-functional going forward until a separate owner-only setNudgeSplit(N) tx is sent. This is a silent post-migration availability gap: the script reports success, mainnet-addresses.ts is rewritten, and an operator reading the logs would believe the cutover is complete.",
+      "evidence": "Fork preview (block ~25207560) ran successfully with no setNudgeSplit call; on-chain reads at block 25207599: SYA.nudgeSplit()==0, SYA.nudge()==0x4ef0...41f3 (old) pre-run; post-run trace sets SYA.nudge=newMinter but nudgeSplit untouched. DisableNudgeAndDivertDonations.s.sol lines 132-137 perform the setNudgeSplit(0) this script fails to reverse. StableYieldAccumulator.claim() lines 506-516: nudge funding gated entirely by nudgeSplit; at 0, nudgeAmount=0 (confirmed at src L506 `if (nudgeSplit > 0 && nudge == address(0)) revert` and L512 `nudgeAmount = (actualPayment * nudgeSplit) / 100`).",
+      "recommendation": "Add an explicit SYA.setNudgeSplit(<intended %>) call to _repoint() (sourcing the intended split — e.g. the pre-stop-gap 30% — from the operator/spec per Configuration Safety), plus a post-condition require(SYA.nudgeSplit() == intended, \"nudgeSplit not restored\"). If restoring the split is intentionally deferred to a separate broadcast, the script header and progress JSON must say so explicitly so the cutover is not mistaken for complete.",
+      "verified": true,
+      "relatedTo": ["DEDUP-004"]
+    },
+    {
+      "id": "DEDUP-002",
+      "originalIds": ["candidate-2"],
+      "title": "Proportional BPT exit uses minAmountsOut=[0,0] — sUSDS/phUSD legs are unprotected; only a single downstream USDC floor guards the seed swap",
+      "severity": "medium",
+      "contract": "script/ReplaceBatchNFTMinter.s.sol",
+      "function": "_seedFromBpt",
+      "lineStart": 366,
+      "lineEnd": 391,
+      "entryPoint": "batch-minter-replace",
+      "rootCauseClass": "UnboundedSlippage",
+      "category": "unintended-side-effect",
+      "description": "removeLiquidityProportional(LP_POOL, bptSlice, [0,0], false, \"\") is called with both per-leg minAmountsOut hardcoded to 0 — directly contrary to the repo's NON-NEGOTIABLE Configuration Safety rule (\"a zero slippage bound is an open invitation to sandwich and MEV attacks\"). The only slippage floor in the entire seed path is the single MIN_USDC_OUT=47e6 check inside SeedSwapHelper, applied AFTER the V3 sUSDS->waUSDC swap and waUSDC->USDC unwrap. That one floor only covers the sUSDS-leg-to-USDC conversion. The phUSD leg is taken with no floor and then burned, and the proportional exit itself (a separate transaction step from the swap) has no protection: a sandwicher can move the WeightedPool reserves around the removeLiquidityProportional call to skew the leg split, and separately move the StablePool around the swap. Because this runs as an owner-signed mainnet broadcast (--slow, no private mempool noted), it is a public, sandwichable transaction sequence.",
+      "impact": "MEV/sandwich exposure on the seed swap. The blast radius is bounded by the size of the slice (~50 USDC notional in the fork run), so direct loss is small in absolute terms — but the pattern is a latent footgun: SEED_USDS_TARGET and the slice are env-overridable, and a larger seed (the comment notes a prior 190e18 default ~4x larger) scales the exposure linearly. More importantly the single MIN_USDC_OUT floor is set to 47e6 against an observed ~50.4e6 output — only a ~6.8% haircut is rejected, so an attacker can extract up to that margin on the USDC leg, and the phUSD leg (54.13e18 burned) has no floor at all (a manipulated exit could release less phUSD-equivalent value than intended for the same BPT burned).",
+      "evidence": "script/ReplaceBatchNFTMinter.s.sol L367-371 minAmountsOut[0]=0, minAmountsOut[1]=0. SeedSwapHelper L200 single floor `if (usdcReceived < minUsdcOut) revert UsdcSlippage(...)`. Fork trace: LiquidityRemoved amountsRemovedRaw [45.999e18 sUSDS, 54.134e18 phUSD] swapFee [0,0]; Swap sUSDS 46.0e18 -> waUSDC 42965402, final 50418020 USDC (floor 47000000 -> only 6.8% slack). Block ~25207560.",
+      "recommendation": "Set per-leg minAmountsOut to non-zero floors derived from the Vault live balances already read in _seedFromBpt (e.g. a bounded % below the proportional expectation for both sUSDS and phUSD legs), and tighten MIN_USDC_OUT to a small slack over the freshly-quoted expected output rather than a fixed 47e6. Per Configuration Safety, the script should require() both leg floors and the USDC floor are > 0 before broadcasting. Consider executing via a private mempool / flashbots for the seed swap.",
+      "verified": true
+    },
+    {
+      "id": "DEDUP-003",
+      "originalIds": ["candidate-3"],
+      "title": "Old-minter retirement guard require(USDC.balanceOf(OLD)==0) can be griefed to abort the entire migration mid-broadcast, leaving an inconsistent half-cutover",
+      "severity": "low",
+      "contract": "script/ReplaceBatchNFTMinter.s.sol",
+      "function": "_retireOld",
+      "lineStart": 419,
+      "lineEnd": 427,
+      "entryPoint": "batch-minter-replace",
+      "rootCauseClass": "FragileInvariantOrdering",
+      "category": "intent-mismatch",
+      "description": "_retireOld() runs AFTER deploy/configure/repoint/seed and asserts require(IERC20(USDC).balanceOf(OLD_BATCH_MINTER) == 0, \"old contract still holds USDC\"). The OLD BatchNFTMinter is the exploited contract with a permissionless full-balance USDC sweep (per DisableNudgeAndDivertDonations header: anyone can sweep it). Because USDC.balanceOf is externally writable by anyone (a 1-wei USDC transfer to OLD_BATCH_MINTER griefs the check), an adversary watching the mainnet mempool can front-run the broadcast and dust the old contract with 1 wei USDC, making this require revert. Since this require sits at step 7 of 8 inside the single broadcast, the revert aborts the whole transaction: in broadcast mode the new minter is never persisted (progress JSON written only after stopBroadcast), so the cutover half-lands on-chain (new minter deployed+configured, SYA + pooler already repointed in earlier steps that DID execute) while the script reports failure and the post-JS never rewrites mainnet-addresses.ts. The guard's intent (\"old contract is drained\") is also not what it actually proves: balance==0 at this instant does not mean the contract is permanently drained or safe.",
+      "impact": "A cheap (1 wei) griefing vector can repeatedly abort the migration. Worse, because the abort happens after the on-chain repoints in _repoint() are mined within the same tx, a forge-script broadcast that reverts at _retireOld rolls the whole tx back (single tx) — so on-chain state is consistent, BUT the operator is forced to re-attempt and an attacker can hold the cutover hostage indefinitely for the cost of dust. If any step were split across txs (e.g. --slow with nonce gaps or a resumed broadcast), partial application risk increases. The guard also gives false assurance about the old contract being safe.",
+      "evidence": "script/ReplaceBatchNFTMinter.s.sol L420-422. DisableNudgeAndDivertDonations.s.sol L35-42 documents the old contract's permissionless USDC sweep. Fork preview observed OLD USDC balance == 0 so the guard passed this run, but the value is attacker-controllable. require ordering: _retireOld is called at run() L273, after _repoint L271.",
+      "recommendation": "Move the retirement neutralization to be independent of an externally-griefable balance check, or change the guard to a non-blocking warning. If a balance assertion is desired, snapshot/sweep the old contract's USDC to a safe address as part of the script rather than asserting someone else has done it, and gate retirement on the contract's own config (nudgePaymentToken/nudgeSize already 0) which is not attacker-writable. Document that balance==0 is a point-in-time observation, not a permanent-drain proof.",
+      "verified": true
+    },
+    {
+      "id": "DEDUP-004",
+      "originalIds": ["candidate-4"],
+      "title": "Seed amount is not asserted against the pot delta at the script level — a 0/short seed would pass silently if the helper floor were misconfigured",
+      "severity": "low",
+      "contract": "script/ReplaceBatchNFTMinter.s.sol",
+      "function": "_seedFromBpt / _postflight",
+      "lineStart": 388,
+      "lineEnd": 435,
+      "entryPoint": "batch-minter-replace",
+      "rootCauseClass": "WeakPostcondition",
+      "category": "intent-mismatch",
+      "description": "The script measures usdcOut = USDC.balanceOf(newMinter) - potBefore and logs it, but never require()s that the measured delta is > 0 or >= minUsdcOut at the script level. The only enforcement is inside SeedSwapHelper (usdcReceived < minUsdcOut reverts). minUsdcOut is env-overridable (MIN_USDC_OUT) and could be set to 0 by an operator (the DEFAULT is 47e6, but vm.envOr lets a 0 override through with no floor-on-the-floor guard). The script's success/postflight path treats any outcome as success and proceeds to retire the old contract and (in broadcast) persist progress + rewrite addresses. There is also no script-level require that minUsdcOut and minBptWei are themselves non-zero before broadcasting, despite the repo's Configuration Safety gate explicitly requiring such guards.",
+      "impact": "Defense-in-depth gap rather than a live exploit (the helper floor caught it this run). If MIN_USDC_OUT were overridden to 0 (or the helper path changed), a sandwiched/degenerate swap could seed near-zero USDC and the cutover would still report success, compounding the unfunded-pot problem in DEDUP-001. The migration would look complete while the new minter holds ~0 USDC.",
+      "evidence": "script/ReplaceBatchNFTMinter.s.sol L394 usdcOut computed but never asserted; L257 minUsdcOut = vm.envOr(\"MIN_USDC_OUT\", DEFAULT) with no require(minUsdcOut > 0). Fork run seeded 50418020 (helper floor held), so impact unrealized this run.",
+      "recommendation": "Add require(minUsdcOut > 0 && minBptWei > 0, \"slippage floors unset\") at the top of run() (mainnet branch), and require(usdcOut >= minUsdcOut, \"seed below floor\") as a script-level post-condition after _seedFromBpt, so the script refuses to retire/persist on a degenerate seed.",
+      "verified": false,
+      "relatedTo": ["DEDUP-001"],
+      "qaBundleCandidate": true
+    }
+  ]
+}

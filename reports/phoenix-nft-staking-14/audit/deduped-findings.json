@@ -1,0 +1,157 @@
+{
+  "project": "phoenix-nft-staking",
+  "run": "phoenix-nft-staking-14",
+  "commit": "9be4a87",
+  "baselineCommit": "031ffda",
+  "scanMode": "regression",
+  "story": "story-015 (minReward slippage guard added to batchMint)",
+  "agent": "deduplicator",
+  "generatedAt": "2026-05-29T21:20:00Z",
+  "fingerprintScheme": "sha256(contract:function:rootCauseClass[:entryPoint]); entryPoint empty for contract-scan findings (legacy byte-for-byte hash)",
+  "summary": {
+    "rawInputCount": 12,
+    "consolidatedCount": 2,
+    "rawSources": [
+      "CODE-001 (code-scan.md)",
+      "PATTERN-001 (pattern-matches.json)",
+      "SLITHER-001 (static reentrancy-events)",
+      "ECON-001 (econ-scan.md)",
+      "PATTERN-002 (pattern-matches.json)",
+      "PATTERN-004 (pattern-matches.json)",
+      "PATTERN-003 (pattern-matches.json)",
+      "ECON-002 (econ-scan.md)",
+      "ECON-003 (econ-scan.md, negative result)",
+      "ECON-004 (econ-scan.md, defers to LOCAL-002)",
+      "SLITHER-002 / SLITHER-003 / SLITHER-004 (static, informational)"
+    ]
+  },
+  "deduplicatedFindings": [
+    {
+      "id": "DEDUP-001",
+      "title": "batchMint missing nonReentrant: ERC1155 onERC1155Received mint hook enables cross-contract reentrancy that re-routes an in-flight payment via the balance-based dust refund",
+      "severityEstimate": "high (escalation candidate) — see ledgerDecision; pending Tier-3 PoC confirmation",
+      "severityPrior": "low (L-01, submitted as defense-in-depth QA)",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "lineStart": 254,
+      "lineEnd": 293,
+      "keyLocations": {
+        "paymentPull": "L254 safeTransferFrom(msg.sender, address(this), paymentAmount)",
+        "liveMaxApproval": "L255 forceApprove(nftMinter, max) ... L261 forceApprove(0)",
+        "reentrantCallbackSite": "L257-259 loop: nftMinter.mint(_dispatcherIndex, recipient) -> ERC1155 _mint -> recipient.onERC1155Received",
+        "nonIdempotentLever": "L287-289 remaining = balanceOf(this); safeTransfer(msg.sender, remaining)"
+      },
+      "rootCauseClass": "missing-reentrancy-guard",
+      "fingerprint": "9135cf7947c212b0930bbce58ad9254327eb2d7fb355c4ac913f452ce15608fe",
+      "fingerprintBasis": "sha256('src/BatchNFTMinter.sol:batchMint:missing-reentrancy-guard') — verified to reproduce L-01's ledger fingerprint exactly. SAME root-cause tuple as ledger L-01; reuse the fingerprint so this reconciles against the existing entry instead of creating a ledger duplicate.",
+      "ledgerEntry": "L-01 (currently status=submitted, severity=low)",
+      "ledgerDecision": "ESCALATION / RE-ADJUDICATION OF L-01 — NOT a new finding. See ledgerDecisionDetail.",
+      "humanReviewFlag": "Escalating a finding the prior run deliberately adjudicated NOT-exploitable. Requires a confirming Tier-3 PoC (victim batch with contract recipient + reentrant inner sweep) before the severity flip is committed. Flag for human review.",
+      "mergedSourceIds": ["CODE-001", "PATTERN-001", "SLITHER-001", "ECON-004"],
+      "dedupNotes": [
+        "PATTERN-001 (REENTRANCY-ERC777 pattern, potential-high): exact duplicate of CODE-001's mechanism (ERC1155 receiver callback mid-loop, no guard). Folded in — same contract:function:rootCauseClass.",
+        "SLITHER-001 (reentrancy-events, L284, potential-low): corroborating static signal (NudgePaid emitted after external calls, no nonReentrant). Tool-grade; same root cause. Folded in as corroboration, not a separate finding.",
+        "ECON-004 (informational): economic-lens restatement of the same reentrancy surface; explicitly defers to profile LOCAL-002 and concludes the NUDGE-POT leg is not double-spendable. Folded in — it corroborates the negative result on the pot leg but does NOT cover the payment-refund leg that CODE-001 newly identifies.",
+        "Aderyn HIGH reentrancy at NFTStaker.sol:445 was already excluded by the static scanner as out-of-scopeFocus (context contract, not the story-015 change) — not carried."
+      ],
+      "novelInsightVsL01": "L-01 was adjudicated NOT-exploitable because the analysis treated every value-out path as balanceOf-driven and idempotent-to-zero (true for the NUDGE POT: first safeTransfer zeroes it, a re-entrant qualifying batch reads 0). CODE-001 identifies a DIFFERENT, non-idempotent value-out path the prior adjudication did not analyse: the PAYMENT-TOKEN dust refund at L287-289 sweeps the whole live balanceOf(this) to the CURRENT frame's msg.sender. A re-entrant inner frame's sweep therefore pays out the OUTER (victim) frame's still-unspent paymentAmount to the attacker. This is the concrete third-party value-extraction path that was missing from L-01, and it is what would justify escalation Low -> High.",
+      "exploitabilityCaveats": [
+        "Requires a non-attacker balance to be present in the contract at callback time, i.e. an honest caller's in-flight paymentAmount or an externally pre-funded balance. If every caller mints only to their own EOA and no third party pre-loads value, the attacker only churns their own funds (self-pay, no theft).",
+        "CODE-001's cited realistic trigger is the integration context: BalancerPoolerV2 (story-031) pushing USDC into a batchMinter address, and front-ends batching mints to arbitrary recipient contracts. That integration assumption lives OUTSIDE this submodule and must be validated for the High to stand — otherwise this is the defense-in-depth Low as originally filed.",
+        "Severity is 'potential-high' in the source scan and MUST be treated as escalation-CANDIDATE only until a Tier-3 PoC demonstrates cross-party extraction with a realistic deployment config (nudge funded, victim batch whose recipient is a contract). Absent that PoC, the validated state remains L-01 Low.",
+        "C4 note: if the only way to place a third party's funds in the contract is the out-of-submodule BalancerPoolerV2 integration, confirm the root cause is in-scope (the missing guard IS in this contract) and that the funding pattern is not a user-input/integration mistake on the known-invalid list."
+      ],
+      "recommendation": "Add OZ ReentrancyGuard and mark batchMint nonReentrant (parity with sibling NFTStaker, which guards every entrypoint). This closes the entire class regardless of whether the High exploitability holds. Cheap and decisive."
+    },
+    {
+      "id": "DEDUP-002",
+      "title": "Winner-take-all balance-based nudge pot remains MEV-capturable; story-015 minReward protects the loser's spend but does not stop a front-runner winning the pot (residual of M-01)",
+      "severityEstimate": "medium (residual; M-01 was High framing, partially mitigated -> Medium)",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "lineStart": 268,
+      "lineEnd": 285,
+      "keyLocations": {
+        "balanceBasedReward": "L271 nudgeAmount = balanceOf(this) — full live pot",
+        "countOnlyGate": "L270 _nudgeSize != 0 && count >= _nudgeSize",
+        "minRewardFloor": "L278-280 if (nudgeAmount < minReward) revert — loser-protection only",
+        "winnerTakeAllPayout": "L282-285 safeTransfer(recipient, nudgeAmount)"
+      },
+      "rootCauseClass": "mev-frontrun-winner-take-all-nudge-pot",
+      "fingerprint": "521c20ad48b388ea37eea906fb5e5495885952fcd944a3377fee24f274434d60",
+      "fingerprintBasis": "Reused verbatim from ledger M-01 (C4 id pns13m1). This finding IS the residual of M-01, so it must reconcile against M-01's existing entry. Do NOT recompute.",
+      "ledgerEntry": "M-01 (currently status=acknowledged, severity=medium, C4 id pns13m1)",
+      "ledgerDecision": "RESIDUAL OF M-01 — partially-mitigated by story-015, NOT fixed, NOT a regression. story-015's minReward is the triage's own accepted remedy and is correctly implemented; it closes the victim-overpay leg but the MEV-capture-of-the-pot leg is unchanged. Keep M-01 open/acknowledged as a narrowed Medium; do not re-escalate, do not mark fixed.",
+      "humanReviewFlag": null,
+      "mergedSourceIds": ["ECON-001", "PATTERN-002", "PATTERN-004", "PATTERN-003"],
+      "dedupNotes": [
+        "ECON-001 (potential-medium): the canonical statement of the residual MEV race. Primary source / most complete analysis.",
+        "PATTERN-002 (FLASH-LOAN-PRICE / balance-based-reward, potential-high): same economic root cause (live balanceOf as winner-take-all payout, no per-claim accounting). Folded in — the 'high' weight is the pattern bot's; the manual econ adjudication is Medium.",
+        "PATTERN-004 (FIRST-DEPOSITOR-ATTACK / first-claimer-race, potential-medium): same race, re-skinned on the count>=nudgeSize eligibility gate. The pattern file itself notes it 'Folds into PATTERN-002 for triage.' Folded in.",
+        "PATTERN-003 (MISSING-SLIPPAGE / incomplete-slippage-guard, potential-medium): commentary that the minReward guard is structurally incomplete for the MEV threat. This is the same observation as ECON-001's 'minReward protects the loser, not the pot.' Folded in as supporting commentary."
+      ],
+      "recommendation": "Per ECON-001: a slippage floor cannot fix a winner-take-all race because the value is binary and fully visible. Design-level fix needed — (a) per-qualifying-mint pull-style accrual, (b) cap per-call payout to a fixed amount rather than sweeping balanceOf, or (c) commit-reveal/auction settlement. At minimum, re-document M-01 as a known accepted MEV exposure rather than 'resolved'."
+    }
+  ],
+  "filteredOut": [
+    {
+      "id": "ECON-002",
+      "title": "minReward == 0 default silently opts out of the M-01 slippage fix (integration footgun)",
+      "severity": "low",
+      "disposition": "KEEP as standalone QA/Low — NOT folded into DEDUP-002",
+      "reason": "Distinct root cause from the MEV residual: this is an opt-in-default footgun (the guard exists but the backward-compatible default value bypasses it), not the winner-take-all structure itself. Separate mitigation (off-chain default minReward = expected pot, or on-chain require minReward>0 when nudge active). Candidate for the run-14 QA report as a new Low. No matching ledger fingerprint yet; would be a NEW Low (rootCauseClass e.g. 'minreward-default-opt-out'). Flagged here so the classifier/finding-manager files it rather than dropping it.",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "lineStart": 277,
+      "lineEnd": 280
+    },
+    {
+      "id": "ECON-003",
+      "title": "Forced-revert guard does not create a permanent denial-of-reward / lock",
+      "severity": "informational",
+      "disposition": "DROP (negative result)",
+      "reason": "Explicit negative result: confirms minReward reverts cannot brick the pot or be weaponised into a permanent lock. No vulnerability. Recorded by the econ scanner only to close the question. Not a finding."
+    },
+    {
+      "id": "SLITHER-002",
+      "title": "Return value of nftMinter.mint() ignored in loop",
+      "severity": "informational",
+      "disposition": "DROP (tool noise / mitigated)",
+      "reason": "Mitigated by design: the trusted owner-pinned minter reverts on a faked/mismatched paymentToken and rolls back the batch (mint() does not return a silent no-op status that matters here). Tool-grade unused-return on a trusted owner-pinned dependency. No HM exploit path."
+    },
+    {
+      "id": "SLITHER-003",
+      "title": "Tuple return of configs() partially ignored (only dispatcher destructured)",
+      "severity": "informational",
+      "disposition": "DROP (tool noise)",
+      "reason": "Intentional — only the dispatcher field is needed to derive primeToken. No impact. The scanner itself rated it low/for-completeness."
+    },
+    {
+      "id": "SLITHER-004",
+      "title": "Local nudgeAmount never explicitly initialized (defaults to 0)",
+      "severity": "informational",
+      "disposition": "DROP (not-a-bug)",
+      "reason": "Default-zero is the intended semantics the minReward guard relies on (feature disabled / threshold not met -> nudgeAmount stays 0 -> floor treats reward as zero). Behaviorally correct. Tool false-positive."
+    },
+    {
+      "id": "static-filtered-18",
+      "title": "18 static results dropped by the static scanner pre-dedup",
+      "severity": "qa/info",
+      "disposition": "DROP (already filtered upstream)",
+      "reason": "missing-zero-check x4, cyclomatic-complexity, Aderyn Centralization/PUSH0/Unspecific-Pragma/Address-Without-Checks (owner-trust by-design), 7 Semgrep INFO style results. Tool noise / known-by-design per CLAUDE.md known-invalid list. Aderyn HIGH reentrancy at NFTStaker.sol:445 dropped as out-of-scopeFocus (context contract)."
+    }
+  ],
+  "ledgerDecisionDetail": {
+    "question": "Is CODE-001 the SAME finding as ledger L-01 (escalated), or a DISTINCT new finding?",
+    "answer": "SAME finding as L-01, re-adjudicated and escalated. NOT a new/distinct finding.",
+    "fingerprintToUse": "9135cf7947c212b0930bbce58ad9254327eb2d7fb355c4ac913f452ce15608fe (reuse L-01's)",
+    "reasoning": [
+      "Identical mechanical root cause: batchMint has no nonReentrant guard, and the ERC1155 onERC1155Received mint hook (fired by nftMinter.mint to a caller-chosen recipient mid-loop) hands control to attacker code while paymentAmount is held and max approval is live. L-01, CODE-001, PATTERN-001 and SLITHER-001 all describe this one defect.",
+      "The ledger fingerprint scheme keys on contract:function:rootCauseClass. I verified sha256('src/BatchNFTMinter.sol:batchMint:missing-reentrancy-guard') reproduces L-01's stored fingerprint 9135cf... byte-for-byte. CODE-001 maps to the identical tuple, so it MUST reuse that fingerprint or it would create a ledger duplicate of an already-open finding.",
+      "What changed is the SEVERITY ADJUDICATION, not the finding. L-01 was filed Low (defense-in-depth) because the prior run concluded no reentrant frame could extract third-party value. That conclusion was reached by analysing the nudge-pot leg (correctly idempotent-to-zero). CODE-001 supplies the missing piece: the payment-token dust-refund sweep (L287-289) is NOT idempotent across frames — it pays balanceOf(this) to the current frame's msg.sender, so a re-entrant inner frame can carry an outer victim's paymentAmount out to the attacker. That is a new exploitability insight on the SAME root cause, i.e. an escalation.",
+      "Per the deduplicator rules: 'Same vulnerability pattern with same root cause' => consolidate, and 'Conflicting Severity: Preserve highest severity instance.' Treating CODE-001 as a new finding would double-report the same contract:function:rootCauseClass and split the ledger history of an open submission.",
+      "Operationally this is a REOPEN + RE-CLASSIFY of L-01: L-01 is currently status=submitted at Low. The finding-manager should keep fingerprint 9135cf..., update severity Low -> High (or High-candidate), append the CODE-001 payment-refund exploit path as the new exploitability evidence, and bump lastSeenRun to phoenix-nft-staking-14. Because the prior run DELIBERATELY adjudicated this NOT-exploitable, the severity flip is gated on a Tier-3 PoC and is flagged for human review (humanReviewFlag on DEDUP-001)."
+    ],
+    "notARegression": "Not a REGRESSION in the ledger sense: L-01 was never marked fixed (status=submitted). The escalation is new analysis on an open finding, not the reappearance of a fixed one."
+  }
+}

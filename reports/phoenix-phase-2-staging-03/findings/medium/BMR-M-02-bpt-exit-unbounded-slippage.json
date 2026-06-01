@@ -1,0 +1,70 @@
+{
+  "id": "BMR-M-02",
+  "project": "phoenix-phase-2-staging",
+  "status": "ready",
+  "severity": "medium",
+  "title": "Proportional BPT exit uses minAmountsOut=[0,0] — sUSDS/phUSD legs are unprotected; only a single downstream USDC floor guards the seed swap",
+  "contract": "script/ReplaceBatchNFTMinter.s.sol",
+  "function": "_seedFromBpt",
+  "line": 366,
+  "lineStart": 366,
+  "lineEnd": 391,
+  "entryPoint": "batch-minter-replace",
+  "fingerprint": "3216feb8ce07ed5eefb06a02b2039eb22087907a1e042b270c8a47653683ee03",
+  "origin": "new",
+  "rootCauseClass": "UnboundedSlippage",
+  "category": "unintended-side-effect",
+  "description": "removeLiquidityProportional(LP_POOL, bptSlice, [0,0], false, \"\") is called with both per-leg minAmountsOut hardcoded to 0 — directly contrary to the repo's NON-NEGOTIABLE Configuration Safety rule (\"a zero slippage bound is an open invitation to sandwich and MEV attacks\"). The only slippage floor in the entire seed path is the single MIN_USDC_OUT=47e6 check inside SeedSwapHelper, applied AFTER the V3 sUSDS->waUSDC swap and waUSDC->USDC unwrap. That one floor only covers the sUSDS-leg-to-USDC conversion. The phUSD leg is taken with no floor and then burned, and the proportional exit itself (a separate transaction step from the swap) has no protection: a sandwicher can move the WeightedPool reserves around the removeLiquidityProportional call to skew the leg split, and separately move the StablePool around the swap. Because this runs as an owner-signed mainnet broadcast (--slow, no private mempool noted), it is a public, sandwichable transaction sequence.",
+  "impact": "MEV/sandwich exposure on the seed swap. The blast radius is bounded by the size of the slice (~50 USDC notional in the fork run), so direct loss is small in absolute terms — but the pattern is a latent footgun: SEED_USDS_TARGET and the slice are env-overridable, and a larger seed (the comment notes a prior 190e18 default ~4x larger) scales the exposure linearly. More importantly the single MIN_USDC_OUT floor is set to 47e6 against an observed ~50.4e6 output — only a ~6.8% haircut is rejected, so an attacker can extract up to that margin on the USDC leg, and the phUSD leg (54.13e18 burned) has no floor at all (a manipulated exit could release less phUSD-equivalent value than intended for the same BPT burned).",
+  "attackPath": [
+    "Owner broadcasts the cutover on the public mainnet mempool (--slow, no private-mempool / flashbots noted).",
+    "A searcher front-runs to move the WeightedPool reserves around removeLiquidityProportional, skewing the leg split.",
+    "Searcher separately moves the StablePool around the SeedSwapHelper sUSDS->USDC swap.",
+    "Searcher back-runs; extracts up to the ~6.8% USDC-leg margin (above the 47e6 floor) plus an unbounded share on the unfloored phUSD leg.",
+    "New pot is seeded with less value than intended for the same BPT burned."
+  ],
+  "recommendation": "Set per-leg minAmountsOut to non-zero floors derived from the Vault live balances already read in _seedFromBpt (e.g. a bounded % below the proportional expectation for both sUSDS and phUSD legs), and tighten MIN_USDC_OUT to a small slack over the freshly-quoted expected output rather than a fixed 47e6. Per Configuration Safety, the script should require() both leg floors and the USDC floor are > 0 before broadcasting. Consider executing via a private mempool / flashbots for the seed swap.",
+  "evidence": "script/ReplaceBatchNFTMinter.s.sol L367-371 minAmountsOut[0]=0, minAmountsOut[1]=0. SeedSwapHelper L200 single floor `if (usdcReceived < minUsdcOut) revert UsdcSlippage(...)`. Fork trace (block ~25207560): LiquidityRemoved amountsRemovedRaw [45.999e18 sUSDS, 54.134e18 phUSD] swapFee [0,0]; Swap sUSDS 46.0e18 -> waUSDC 42965402, final 50418020 USDC (floor 47000000 -> only 6.8% slack).",
+  "verified": true,
+  "borderline": true,
+  "pocAttached": true,
+  "poc": {
+    "file": "workspace/phoenix-phase-2-staging/test/poc-BMR-M-02.t.sol",
+    "status": "passing",
+    "validationVerdict": "VALID/PARTIAL-but-sound",
+    "validatedBy": "poc-validator",
+    "forkBlock": 25207560,
+    "runCommand": "cd workspace/phoenix-phase-2-staging && forge test --match-path test/poc-BMR-M-02.t.sol -vv",
+    "tests": [
+      {
+        "name": "test_BMR_M_02_zeroFloorExit_isAccepted",
+        "result": "pass",
+        "proves": "minAmountsOut=[0,0] is accepted by the real Balancer V3 Vault on both legs (sUSDS 45.999e18, phUSD 54.134e18)."
+      },
+      {
+        "name": "test_BMR_M_02_nonZeroFloor_isEnforced_soZeroDisablesIt",
+        "result": "pass",
+        "proves": "Identical slice with a +1-wei floor reverts per-leg on both legs, proving [0,0] disables a working protection (the disabled-floor root cause)."
+      }
+    ],
+    "provenValues": {
+      "sUSDSLegRemoved": "45.999e18",
+      "phUSDLegRemoved": "54.134e18",
+      "zeroFloorAccepted": true,
+      "plusOneWeiFloorRevertsPerLeg": true
+    },
+    "scopeNote": "VALID / PARTIAL-but-sound. The disabled-floor root cause (minAmountsOut=[0,0] disables a working per-leg slippage protection) is empirically proven on real on-chain contracts at pinned fork block 25207560. A full profitable end-to-end sandwich is honestly NOT claimed by the PoC; the finding rests on the demonstrated disabled-protection root cause plus env-scalability, consistent with the record's flaggedForHumanReview/borderline note.",
+    "lastRun": "2026-05-30T00:00:00Z"
+  },
+  "metadata": {
+    "createdAt": "2026-05-30T00:00:00Z",
+    "updatedAt": "2026-05-30T12:55:00Z",
+    "forkBlock": 25207560,
+    "scanOrigin": "audit-script:batch-minter-replace",
+    "classificationOrigin": "CLASS-BMR-002",
+    "dedupOrigin": "DEDUP-002",
+    "plausibility": "plausible",
+    "flaggedForHumanReview": true,
+    "reviewReason": "Bounded, owner-calibrated, one-shot ~50 USDC swap. As-run direct loss on the floored leg is small; Medium rests on the unfloored phUSD leg and env-scalability. A judge could reasonably land this at Low if the phUSD-leg loss is shown to be de-minimis at the calibrated size and env-overrides are out of scope."
+  }
+}
