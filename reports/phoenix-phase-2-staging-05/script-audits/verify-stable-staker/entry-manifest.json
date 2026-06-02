@@ -1,0 +1,114 @@
+{
+  "entryPoint": "verify-stable-staker",
+  "runnableKey": "test:stable-staker",
+  "intentComment": "Story 051 — end-to-end StableStaker config verification (deploy, stake, evm_increaseTime 1 day, claim+withdraw, assert ~10 phUSD reward + principal/baseline restored). NOT a unit test: it is a config/smoke check where a clean no-revert run IS the verification.",
+  "command": "./verify-stable-staker.sh",
+  "kind": "shell-orchestrator",
+  "scriptFile": "verify-stable-staker.sh",
+  "variants": {
+    "default": {
+      "key": "test:stable-staker",
+      "command": "./verify-stable-staker.sh",
+      "broadcasts": true,
+      "note": "Single variant. Broadcasts to a LOCAL Anvil (chain-id 31337) only — never mainnet. No :preview/:dry/:broadcast siblings exist. `set -e` aborts on first failure; a cleanup trap on EXIT tears down the spawned Anvil."
+    }
+  },
+  "chainId": 31337,
+  "network": "local-anvil",
+  "rpcUrl": "http://localhost:8545",
+  "preconditions": {
+    "envVars": [
+      {
+        "name": "ANVIL_PRIVATE_KEY",
+        "consumedBy": ["script/interactions/StakeStableStaker.s.sol", "script/interactions/ClaimWithdrawStableStaker.s.sol"],
+        "via": "vm.envUint(\"ANVIL_PRIVATE_KEY\")",
+        "source": "repo-root /home/justin/code/audits/.envrc sets ANVIL_PRIVATE_KEY=0xac0974...ff80 (Anvil default account #0). The shell ALSO hardcodes the same key as PRIVATE_KEY but does NOT export ANVIL_PRIVATE_KEY itself — the forge scripts rely on it being present in the environment (direnv/.envrc). If ANVIL_PRIVATE_KEY is unset, STEP 1 reverts in vm.envUint before any staking.",
+        "resolved": true
+      }
+    ],
+    "tools": ["anvil", "cast", "forge (all on PATH via $HOME/.foundry/bin)", "npm"],
+    "assumesRunningAnvil": false,
+    "note": "The script spins up its OWN Anvil in the background (does not assume a pre-running node) and tears it down on exit. It does assume foundry + npm are installed and ANVIL_PRIVATE_KEY is in the environment."
+  },
+  "steps": [
+    {
+      "order": 0,
+      "phase": "setup",
+      "command": "cd \"$(dirname \"$0\")\" ; set -e ; trap cleanup EXIT",
+      "intent": "chdir into the submodule root (so relative paths like server/deployments/progress.31337.json and script/ resolve), fail-fast on any error, and register a cleanup trap that kills the spawned Anvil pid on exit.",
+      "broadcasts": false
+    },
+    {
+      "order": 1,
+      "phase": "clean",
+      "command": "npm run clean:local",
+      "expands": "rm -rf broadcast/*/31337 server/deployments/progress.31337.json server/deployments/local.json",
+      "intent": "Delete prior local deployment artifacts and broadcast caches so the run starts from a clean slate (no stale progress.31337.json addresses).",
+      "broadcasts": false,
+      "writes": ["broadcast/*/31337 (removed)", "server/deployments/progress.31337.json (removed)", "server/deployments/local.json (removed)"]
+    },
+    {
+      "order": 2,
+      "phase": "anvil-bringup",
+      "command": "anvil --host 0.0.0.0 --port 8545 --chain-id 31337 > /tmp/anvil-stable-staker.log 2>&1 & ; ANVIL_PID=$! ; wait-loop: poll `cast block-number --rpc-url http://localhost:8545` up to 30x (1s sleep) until ready",
+      "intent": "Start a fresh local Anvil (chain-id 31337) in the background and block until its JSON-RPC answers block-number. ANVIL_PID is captured for the cleanup trap.",
+      "broadcasts": false
+    },
+    {
+      "order": 3,
+      "phase": "deploy",
+      "command": "npm run deploy:local",
+      "expands": "npm run clean:local && forge script script/DeployMocks.s.sol:DeployMocks --rpc-url http://localhost:8545 --broadcast --slow",
+      "intent": "Deploy and wire the full mock stack to Anvil, including (Phase 3.7, story 051) the StableStaker farm with 3 pools — DOLA & USDe at 10 phUSD/day, USDC at 5 phUSD/day — each pool's ERC4626YieldStrategy authorized two-sided (staker as client on strategy + strategy on staker), and StableStaker authorized as a phUSD minter. Writes all deployed addresses to server/deployments/progress.31337.json.",
+      "broadcasts": true,
+      "forgeTarget": { "file": "script/DeployMocks.s.sol", "contract": "DeployMocks", "entryFn": "run" },
+      "writes": ["server/deployments/progress.31337.json"],
+      "note": "deploy:local re-runs clean:local internally, so progress.31337.json is removed then rewritten by DeployMocks._writeProgressFile()."
+    },
+    {
+      "order": 4,
+      "phase": "step-1-stake",
+      "command": "forge script script/interactions/StakeStableStaker.s.sol:StakeStableStaker --rpc-url http://localhost:8545 --broadcast -vv",
+      "intent": "STEP 1 — Stake 1,000 DOLA into the StableStaker DOLA pool as the deployer. Reads StableStaker + MockDola addresses from progress.31337.json; asserts the DOLA pool rate == 10 ether/86400; approves + stake(); asserts userInfo.amount == 1000e18, totalStaked increased by 1000e18, deployer DOLA debited by 1000e18. Records the pre-stake totalStaked baseline implicitly (re-derived in STEP 3).",
+      "broadcasts": true,
+      "forgeTarget": { "file": "script/interactions/StakeStableStaker.s.sol", "contract": "StakeStableStaker", "entryFn": "run" },
+      "reads": ["server/deployments/progress.31337.json"]
+    },
+    {
+      "order": 5,
+      "phase": "step-2-advance-time",
+      "command": "cast rpc evm_increaseTime 86400 --rpc-url http://localhost:8545 ; cast rpc evm_mine --rpc-url http://localhost:8545",
+      "intent": "STEP 2 — Advance the LIVE Anvil clock by exactly one day (86400s) and mine a block so the new timestamp takes effect. Done out-of-band via cast rpc because vm.warp inside a --broadcast forge script does NOT move the live chain clock; reward accrual in StableStaker keys off block.timestamp, so this is the mechanism that makes ~10 phUSD/day accrue.",
+      "broadcasts": false
+    },
+    {
+      "order": 6,
+      "phase": "step-3-claim-withdraw-assert",
+      "command": "forge script script/interactions/ClaimWithdrawStableStaker.s.sol:ClaimWithdrawStableStaker --rpc-url http://localhost:8545 --broadcast -vv",
+      "intent": "STEP 3 — Claim phUSD reward, withdraw the full 1,000 DOLA principal, and assert the three story-051 invariants: (a) reward credited within [9.9, 10.1] phUSD; (b) full principal returned to wallet (within <=10 wei ERC4626 rounding dust kept by the strategy); (c) pool totalStaked returns to the pre-stake baseline. All assertions are Solidity require() statements — a revert fails the whole shell run via set -e.",
+      "broadcasts": true,
+      "forgeTarget": { "file": "script/interactions/ClaimWithdrawStableStaker.s.sol", "contract": "ClaimWithdrawStableStaker", "entryFn": "run" },
+      "reads": ["server/deployments/progress.31337.json"]
+    },
+    {
+      "order": 7,
+      "phase": "teardown",
+      "command": "echo PASSED ; (trap cleanup EXIT) -> kill $ANVIL_PID ; wait",
+      "intent": "Print the success banner and tear down the spawned Anvil. A clean run with no reverts is the verification.",
+      "broadcasts": false
+    }
+  ],
+  "jsChain": {
+    "pre": [
+      { "key": "clean:local", "type": "shell-rm", "writes": ["server/deployments/progress.31337.json", "server/deployments/local.json", "broadcast/*/31337"] },
+      { "key": "deploy:local", "type": "forge-script", "forgeTarget": "script/DeployMocks.s.sol:DeployMocks", "writes": ["server/deployments/progress.31337.json"] }
+    ],
+    "post": []
+  },
+  "assertionSummary": {
+    "stage": "STEP 3 (ClaimWithdrawStableStaker.run)",
+    "reward": "rewardCredited in [EXPECTED_DAILY_PHUSD*0.99, EXPECTED_DAILY_PHUSD*1.01] = [9.9e18, 10.1e18] phUSD",
+    "principal": "userInfo.amount == 0 AND (STAKE_AMOUNT - returned) <= 10 wei AND returned <= STAKE_AMOUNT",
+    "baseline": "poolInfo.totalStaked == pre-stake baseline (totalStakedNow - STAKE_AMOUNT)"
+  }
+}

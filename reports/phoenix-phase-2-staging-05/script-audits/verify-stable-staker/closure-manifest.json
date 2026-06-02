@@ -1,0 +1,218 @@
+{
+  "entryPoint": "verify-stable-staker",
+  "runnableKey": "test:stable-staker",
+  "chainId": 31337,
+  "network": "local-anvil",
+  "forkAvailable": false,
+  "forkNote": "Pure local Anvil flow (chain-id 31337) — no mainnet fork, no etherscan corroboration applicable. All addresses are freshly deployed mocks read from server/deployments/progress.31337.json; there are NO mainnet on-chain constants to map. forkAvailable=false reflects this is a local deploy-and-exercise smoke check, not an on-chain mutation script.",
+  "solidity": {
+    "scriptFiles": [
+      { "path": "script/DeployMocks.s.sol", "contract": "DeployMocks", "class": "in-src", "role": "deploy+wire StableStaker (Phase 3.7)" },
+      { "path": "script/interactions/StakeStableStaker.s.sol", "contract": "StakeStableStaker", "class": "in-src", "role": "stake" },
+      { "path": "script/interactions/ClaimWithdrawStableStaker.s.sol", "contract": "ClaimWithdrawStableStaker", "class": "in-src", "role": "claim+withdraw+assert" }
+    ],
+    "imports": [
+      { "path": "lib/forge-std/src/Script.sol", "via": "remap:@forge-std/", "class": "external-lib", "resolved": true },
+      { "path": "lib/forge-std/src/console.sol", "via": "remap:@forge-std/", "class": "external-lib", "resolved": true },
+      { "path": "lib/phUSD-stable-minter/lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol", "via": "remap:@openzeppelin/contracts/", "class": "external-lib", "resolved": true },
+      { "path": "lib/stable-staker/src/StableStaker.sol", "via": "remap:stable-staker/", "class": "nested-submodule", "resolved": true, "note": "stable-staker is a top-level pinned submodule under lib/ of phoenix-phase-2-staging; remappings canonicalize stable-staker/ -> lib/stable-staker/src/. Imported by both interaction scripts and (as `new StableStaker(...)`) by DeployMocks." },
+      { "path": "lib/vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol", "via": "remap:@vault/", "class": "nested-submodule", "resolved": true, "note": "Imported by DeployMocks to deploy the 3 ERC4626 yield strategies wired into StableStaker." },
+      { "path": "lib/flax-token-v2/src/IFlax.sol", "via": "remap:flax-token/", "class": "nested-submodule", "resolved": true, "note": "Aliased in DeployMocks as IFlaxStaker; StableStaker constructor takes IFlax (MockPhUSD satisfies it)." }
+    ],
+    "stableStakerSource": {
+      "path": "lib/stable-staker/src/StableStaker.sol",
+      "class": "nested-submodule",
+      "submodule": "lib/stable-staker (Behodler/stable-staker)",
+      "resolved": true,
+      "checkedOut": true,
+      "imports": [
+        "@openzeppelin/contracts/access/Ownable.sol",
+        "@openzeppelin/contracts/utils/Pausable.sol",
+        "@openzeppelin/contracts/utils/ReentrancyGuard.sol",
+        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
+        "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol",
+        "@openzeppelin/contracts/utils/structs/EnumerableSet.sol",
+        "flax-token/IFlax.sol",
+        "pauser/interfaces/IPausable.sol",
+        "reflax-yield-vault/interfaces/IYieldStrategy.sol"
+      ],
+      "functionsExercised": {
+        "stake(address,uint256)": "StableStaker.sol:238 — STEP 1. nonReentrant/whenNotPaused/poolExists. Pulls principal, routes into yieldStrategy[token], updates userInfo.amount + poolInfo.totalStaked.",
+        "withdraw(address,uint256)": "StableStaker.sol:258 — STEP 3. Decrements userInfo.amount + totalStaked, routes exit through strategy via _routeExit (ERC4626 assets->shares->assets rounding, protocol-favoured).",
+        "claim(address)": "StableStaker.sol:287 — STEP 3. Settles pool via _updatePool and mints accrued phUSD reward to the user (StableStaker is an authorized phUSD minter).",
+        "pendingReward(address,address)": "StableStaker.sol:543 — STEP 3 read; reward = elapsed * phusdPerSecond accrued via accPhusdPerShare.",
+        "poolInfo(address)": "StableStaker.sol:62 (struct) — read for phusdPerSecond + totalStaked baseline in both scripts.",
+        "userInfo(address,address)": "read for staked principal (amount) assertions.",
+        "_updatePool(address)": "StableStaker.sol:604 — internal; accPhusdPerShare += elapsed*phusdPerSecond*ACC_PRECISION/totalStaked, dust rounds down.",
+        "_routeExit(address,uint256,bool)": "StableStaker.sol:669 — internal; ERC4626 strategy.withdraw round-trip, returns actual balanceDelta (<= requested; dust kept by strategy)."
+      },
+      "rewardAccounting": "MasterChef-style accPhusdPerShare. Emission rate phusdPerSecond = phUSDPerDay/86400 (floored). _updatePool folds in elapsed*phusdPerSecond per update; dust always rounds DOWN so realized emission <= phUSDPerDay over any window (invariant noted in source header).",
+      "baselinePrincipalAccounting": "poolInfo.totalStaked tracks aggregate principal; userInfo.amount tracks per-user principal. Principal lives inside the ERC4626 strategy when one is set; on withdraw, totalStaked decrements by the requested amount (returns to baseline) while tokens forwarded to wallet may be a few wei short due to ERC4626 share rounding (kept protocol-side)."
+    },
+    "wiringInDeployMocks": {
+      "where": "script/DeployMocks.s.sol Phase 3.7 (lines ~654-685)",
+      "steps": [
+        "new StableStaker(IFlaxStaker(address(phUSD)), deployer) — phUSD=MockPhUSD as IFlax, deployer as owner",
+        "phUSD.setMinter(StableStaker, true) — authorize reward minting",
+        "per token [DOLA, USDC(rewardToken), USDe]: stableStaker.addToken(token); strategy.setClient(StableStaker, true); stableStaker.setYieldStrategy(token, strategy); stableStaker.phUSDPerDay(token, rate)",
+        "rates: DOLA=10e18/day, USDe=10e18/day, USDC=5e18/day"
+      ],
+      "strategies": ["yieldStrategyDola (ERC4626YieldStrategy wrapping MockAutoDOLA)", "yieldStrategyUSDC (wrapping MockAutoUSDC)", "yieldStrategyUSDe (wrapping the USDe vault)"]
+    },
+    "reachable": [
+      "lib/vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol (the concrete strategy behind IYieldStrategy that StableStaker._routeExit drives; source of the principal rounding-dust behaviour the assertion tolerates)",
+      "lib/vault/src/interfaces/IYieldStrategy.sol",
+      "lib/flax-token-v2/src/IFlax.sol",
+      "lib/pauser/src/interfaces/IPausable.sol",
+      "src/mocks/MockPhUSD.sol (IFlax-satisfying reward token, minted by StableStaker on claim)",
+      "src/mocks/MockDola.sol (staked token; deployer minted 1,000,000 at deploy)"
+    ],
+    "inlineInterfaces": []
+  },
+  "onChain": [
+    {
+      "constant": "StableStaker (progress.31337.json .contracts.StableStaker.address)",
+      "address": "freshly-deployed-local (not fixed)",
+      "role": "mutated",
+      "calls": ["addToken (deploy)", "setYieldStrategy (deploy)", "phUSDPerDay (deploy)", "stake(DOLA, 1000e18) (step1)", "claim(DOLA) (step3)", "withdraw(DOLA, 1000e18) (step3)"],
+      "sourcePath": "lib/stable-staker/src/StableStaker.sol",
+      "sourceResolved": true,
+      "codeMatchesSource": "skipped",
+      "note": "Local mock deployment — no mainnet bytecode to corroborate."
+    },
+    {
+      "constant": "MockDola (progress.31337.json .contracts.MockDola.address)",
+      "address": "freshly-deployed-local",
+      "role": "mutated",
+      "calls": ["approve(StableStaker, 1000e18)", "transferFrom on stake", "transfer on withdraw"],
+      "sourcePath": "src/mocks/MockDola.sol",
+      "sourceResolved": true
+    },
+    {
+      "constant": "MockPhUSD (progress.31337.json .contracts.MockPhUSD.address)",
+      "address": "freshly-deployed-local",
+      "role": "mutated",
+      "calls": ["minted to deployer on claim (StableStaker is authorized minter)"],
+      "sourcePath": "src/mocks/MockPhUSD.sol",
+      "sourceResolved": true,
+      "note": "Read by ClaimWithdrawStableStaker to measure reward credited; mutated indirectly via StableStaker.claim -> phUSD.mint."
+    },
+    {
+      "constant": "YieldStrategyDola (ERC4626YieldStrategy)",
+      "address": "freshly-deployed-local",
+      "role": "mutated",
+      "calls": ["deposit on stake route", "withdraw on _routeExit (step3)"],
+      "sourcePath": "lib/vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "sourceResolved": true,
+      "note": "Wired as DOLA pool's strategy; source of the <=10 wei principal rounding dust the withdraw assertion tolerates."
+    }
+  ],
+  "offChainState": [
+    {
+      "path": "server/deployments/progress.31337.json",
+      "writtenBy": "script/DeployMocks.s.sol _writeProgressFile() via vm.writeFile (deploy:local)",
+      "removedBy": "clean:local (rm) — runs before deploy",
+      "readBy": ["StakeStableStaker.run (vm.readFile + parseJsonAddress .contracts.StableStaker/.MockDola)", "ClaimWithdrawStableStaker.run (StableStaker/MockDola/MockPhUSD)"],
+      "fsPermission": "foundry.toml grants read-write on ./server/deployments",
+      "role": "address-handoff between deploy and interaction scripts"
+    },
+    {
+      "path": "server/deployments/local.json",
+      "writtenBy": "(not written by this flow)",
+      "removedBy": "clean:local (rm)",
+      "role": "stale artifact cleaned at start"
+    },
+    {
+      "path": "broadcast/*/31337",
+      "writtenBy": "forge --broadcast (DeployMocks + both interaction scripts)",
+      "removedBy": "clean:local (rm)",
+      "role": "forge broadcast transaction logs"
+    },
+    {
+      "path": "/tmp/anvil-stable-staker.log",
+      "writtenBy": "verify-stable-staker.sh (anvil stdout/stderr redirect)",
+      "role": "anvil node log"
+    }
+  ],
+  "assertions": {
+    "enforcedIn": "Solidity require() in the interaction scripts (a revert -> non-zero exit -> shell `set -e` aborts). There are NO shell-level numeric assertions; the shell only checks process exit codes.",
+    "stake": [
+      { "file": "script/interactions/StakeStableStaker.s.sol", "check": "phusdPerSecond == 10 ether / 86400", "intent": "DOLA pool configured at 10 phUSD/day" },
+      { "file": "script/interactions/StakeStableStaker.s.sol", "check": "userAmount == STAKE_AMOUNT (1000e18)" },
+      { "file": "script/interactions/StakeStableStaker.s.sol", "check": "totalStakedAfter == totalStakedBefore + STAKE_AMOUNT" },
+      { "file": "script/interactions/StakeStableStaker.s.sol", "check": "dolaBefore - dolaAfter == STAKE_AMOUNT" }
+    ],
+    "rewardThreshold": {
+      "file": "script/interactions/ClaimWithdrawStableStaker.s.sol",
+      "constant": "EXPECTED_DAILY_PHUSD = 10 * 10**18",
+      "band": "lowerBound = 9.9e18 (EXPECTED - EXPECTED/100), upperBound = 10.1e18 (EXPECTED + EXPECTED/100)",
+      "checks": [
+        "require(pending > 0, \"no reward accrued - did time advance via evm_increaseTime?\")",
+        "require(rewardCredited >= 9.9e18, \"reward below ~10 phUSD/day lower bound\")",
+        "require(rewardCredited <= 10.1e18, \"reward above ~10 phUSD/day upper bound\")"
+      ],
+      "rationale": "~10 phUSD = one full day at the DOLA pool rate; 1% upper band absorbs the handful of extra seconds (block mining between stake and claim), small lower band absorbs integer-division dust."
+    },
+    "principalRestored": {
+      "file": "script/interactions/ClaimWithdrawStableStaker.s.sol",
+      "checks": [
+        "require(userAmount == 0, \"principal not fully withdrawn\")",
+        "require(returned <= STAKE_AMOUNT, \"strategy over-paid principal\")",
+        "require(principalDust <= 10, \"principal returned short by more than rounding dust\") where principalDust = STAKE_AMOUNT - returned"
+      ],
+      "rationale": "ERC4626 assets->shares->assets round-trip in ERC4626YieldStrategy rounds in the protocol's favour, so the wallet may be <=10 wei short; userInfo principal is nonetheless fully cleared."
+    },
+    "baselineRestored": {
+      "file": "script/interactions/ClaimWithdrawStableStaker.s.sol",
+      "check": "require(totalStakedFinal == baseline) where baseline = totalStakedNow - STAKE_AMOUNT (re-derived pre-stake total)"
+    }
+  },
+  "cluster": [
+    {
+      "script": "script/DeployMocks.s.sol",
+      "entryPoint": "deploy:local",
+      "relation": "predecessor",
+      "sharedAddresses": ["StableStaker", "MockDola", "MockPhUSD", "YieldStrategyDola/USDC/USDe"],
+      "storyTag": "Story 051 (Phase 3.7)",
+      "note": "Deploys + wires StableStaker (3 pools, rates, two-sided strategy auth, phUSD minter). REQUIRED predecessor — the interaction scripts read every address it writes. The 10/day vs 5/day rate split that the assertion depends on is set here."
+    },
+    {
+      "script": "script/interactions/StakeStableStaker.s.sol",
+      "entryPoint": "(in-flow STEP 1)",
+      "relation": "predecessor",
+      "sharedAddresses": ["StableStaker", "MockDola"],
+      "storyTag": "Story 051",
+      "note": "First half of the verification; establishes the totalStaked baseline + staked principal that STEP 3 asserts against."
+    },
+    {
+      "script": "script/interactions/ClaimWithdrawStableStaker.s.sol",
+      "entryPoint": "(in-flow STEP 3)",
+      "relation": "successor",
+      "sharedAddresses": ["StableStaker", "MockDola", "MockPhUSD"],
+      "storyTag": "Story 051",
+      "note": "Second half; holds all three numeric assertions (reward band, principal restoration, baseline)."
+    },
+    {
+      "script": "simulate-yield.sh",
+      "entryPoint": "dev (npm run dev calls ./simulate-yield.sh)",
+      "relation": "sibling-orchestration",
+      "sharedAddresses": ["(same deploy:local mock stack incl. StableStaker + ERC4626 strategies)"],
+      "note": "Orchestration precedent explicitly cited by verify-stable-staker.sh header (anvil-up-in-background / run-flow / tear-down). The `dev` flow runs deploy:local -> simulate-yield.sh, so it deploys+wires the SAME StableStaker the verify script exercises. Cross-reference target requested by the user for the dev-flow audit."
+    },
+    {
+      "script": "package.json test:nudge-payout",
+      "entryPoint": "test:nudge-payout",
+      "relation": "sibling-orchestration",
+      "sharedAddresses": ["(same deploy:local stack)"],
+      "storyTag": "Story 045.5",
+      "note": "Cited as the orchestration precedent (clean:local -> anvil -> deploy:local -> forge interaction script -> kill). Same harness shape, different target contract (TestNudgePayout). Useful as a structural sibling; does not touch StableStaker accounting."
+    }
+  ],
+  "unresolved": [
+    {
+      "item": "ANVIL_PRIVATE_KEY for the forge interaction scripts",
+      "status": "resolved-via-envrc",
+      "detail": "verify-stable-staker.sh exports PRIVATE_KEY (hardcoded Anvil acct #0) but does NOT export ANVIL_PRIVATE_KEY, which StakeStableStaker/ClaimWithdrawStableStaker read via vm.envUint. It is supplied by the repo-root /home/justin/code/audits/.envrc (ANVIL_PRIVATE_KEY=0xac0974...ff80, same key). When run standalone outside a direnv-loaded shell with that var unset, STEP 1 reverts in vm.envUint. Flagged for the auditor as an environment-coupling observation, not a mapping gap."
+    }
+  ]
+}

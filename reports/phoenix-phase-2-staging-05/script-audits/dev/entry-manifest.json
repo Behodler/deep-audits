@@ -1,0 +1,72 @@
+{
+  "entryPoint": "dev",
+  "intentComment": "Story 003 — composite local Anvil dev bring-up. clean -> anvil -> deploy mocks (DeployMocks.s.sol) -> simulate yield -> extract addresses -> generate TS -> serve API. The StableStaker introduction (Story 051) rides inside deploy:local (DeployMocks Phase 3.7); simulate-yield.sh and the front-end tail do NOT touch StableStaker.",
+  "scope": "stable-staker-introduction-only",
+  "variants": {
+    "dev": {
+      "key": "dev",
+      "command": "npm run clean:local && npm run start:anvil & sleep 3 && npm run deploy:local && ./simulate-yield.sh && npm run extract:addresses && npm run generate:ts-anvil && npm run serve",
+      "broadcasts": true,
+      "note": "Shell precedence: `A && B & sleep 3 && C && ...` backgrounds `clean:local && start:anvil` (anvil keeps running) and foregrounds `sleep 3 && deploy:local && simulate-yield.sh && extract && generate && serve`."
+    }
+  },
+  "chainId": 31337,
+  "rpcUrl": "http://localhost:8545",
+  "chain": [
+    {
+      "step": "clean:local",
+      "kind": "shell",
+      "command": "rm -rf broadcast/*/31337 server/deployments/progress.31337.json server/deployments/local.json",
+      "touchesStableStaker": false,
+      "note": "Deletes prior anvil broadcast artifacts and the progress/local deployment JSON. Forces a fresh StableStaker deploy each run (no checkpoint resume on anvil)."
+    },
+    {
+      "step": "start:anvil",
+      "kind": "shell",
+      "command": "anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --block-time 2",
+      "touchesStableStaker": false,
+      "note": "Backgrounded. 2s block time. Default anvil mnemonic; ANVIL_PRIVATE_KEY (0xac09...ff80, anvil acct 0) is the deployer/owner."
+    },
+    {
+      "step": "deploy:local",
+      "kind": "forge+shell",
+      "command": "npm run clean:local && forge script script/DeployMocks.s.sol:DeployMocks --rpc-url http://localhost:8545 --broadcast --slow",
+      "forgeTarget": { "file": "script/DeployMocks.s.sol", "contract": "DeployMocks", "entryFn": "run" },
+      "touchesStableStaker": true,
+      "stableStakerPhase": "Phase 3.7 (lines 654-685): deploy StableStaker(IFlax(phUSD), deployer); authorize as phUSD minter; per-token (DOLA, USDC, USDe) addToken + strategy.setClient(staker,true) + staker.setYieldStrategy + staker.phUSDPerDay. DOLA/USDe = 10e18/day, USDC = 5e18/day.",
+      "note": "THE step that deploys + wires StableStaker. Re-runs clean:local internally. --slow for anvil ordering. Reads ANVIL_PRIVATE_KEY via vm.envUint. Writes server/deployments/progress.31337.json (vm.writeFile, DeployMocks._writeProgressFile line 1196-1222)."
+    },
+    {
+      "step": "./simulate-yield.sh",
+      "kind": "shell",
+      "command": "cast send MockDola mint(MockAutoDOLA, 2300e18) ; reads MockDola/MockAutoDOLA from progress.31337.json",
+      "touchesStableStaker": false,
+      "note": "OUT OF STABLE-STAKER SCOPE. Mints 2300 DOLA directly into the MockAutoDOLA vault to inflate totalAssets() (fake yield) for the StableYieldAccumulator/Phlimbo path. Does NOT reference or touch StableStaker, its pools, or its DOLA yield-strategy client wiring."
+    },
+    {
+      "step": "extract:addresses",
+      "kind": "node",
+      "command": "node server/extract-addresses.js 31337",
+      "touchesStableStaker": "consumes",
+      "note": "Reads server/deployments/progress.31337.json, flattens .contracts.* (incl. StableStaker) into server/deployments/local.json."
+    },
+    {
+      "step": "generate:ts-anvil",
+      "kind": "node",
+      "command": "node server/generate-ts-addresses.js 31337",
+      "touchesStableStaker": "consumes",
+      "note": "Emits server/deployments/addresses.ts (interface incl. `StableStaker: string` field, line 44) + local-addresses.ts for the front-end."
+    },
+    {
+      "step": "serve",
+      "kind": "node",
+      "command": "node server/index.js",
+      "touchesStableStaker": "consumes",
+      "note": "Express API on :3001 serving the deployment JSON (incl. StableStaker address). No state mutation."
+    }
+  ],
+  "jsChain": {
+    "pre": [],
+    "post": ["server/extract-addresses.js", "server/generate-ts-addresses.js", "server/index.js"]
+  }
+}
