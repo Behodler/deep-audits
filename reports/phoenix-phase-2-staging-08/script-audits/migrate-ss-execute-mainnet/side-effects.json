@@ -1,0 +1,99 @@
+{
+  "entryPoint": "migrate:ss-execute-mainnet",
+  "mode": "fork-preview",
+  "forkBlock": 25234535,
+  "forkBlockTimestamp": 1780461647,
+  "rpcEnv": "RPC_MAINNET",
+  "executed": [
+    {
+      "variant": "preview (live state, no warp)",
+      "command": "PREVIEW_MODE=true forge script script/MigrateStableStakerMainnet.s.sol:MigrateStableStakerMainnet --rpc-url $RPC_MAINNET --slow -vvv",
+      "reverted": true,
+      "revertReason": "Phase A STOP: withdrawal not Executable (in 24h wait, Expired >72h, or None). Re-run story 054 if needed; do NOT proceed.",
+      "note": "EXPECTED. The story-054 windows on-chain were initiated only ~44 min before the fork block (initiatedAt DOLA=1780458971, USDC=1780458995, USDe=1780459007; now=1780461647), so the 24h waiting period is not elapsed. Global pre-flight (all owners == OWNER_ADDRESS, non-zero, rates, buffer) PASSED. The executability gate is working as designed."
+    },
+    {
+      "variant": "full-preview via fork test, time-warped to 1780545527 (latest initiatedAt + 24h + 120s, all 3 windows open)",
+      "harness": "test/AuditMigrateStableStakerExec.t.sol",
+      "reverted": true,
+      "revertReason": "Tokemak/Chainlink oracle staleness during the DOLA (and USDC) vault redeem under time-warp: AutopoolETH.redeem -> CurveConvexDestinationVaultV2.getUnderlyerFloorPrice -> CustomSetOracle.getPriceInEth(reUSD) -> InvalidAge(89496); and at the tighter warp -> RootPriceOracle ETH_IN_USD feed custom error 0x8d54ba1f (Chainlink staleness).",
+      "note": "FORK ARTIFACT, not a script bug. Warping block.timestamp ~23h forward makes the DOLA/USDC Tokemak Autopool price oracles (frozen at the fork block) stale. USDe (sUSDe/Ethena, no oracle dependency) redeems cleanly. See unintendedEffects[] for the real-world liveness coupling this exposes."
+    },
+    {
+      "variant": "USDe path END-TO-END (real drain+deploy+cutover+SYA+StableStaker+successor stake/claim) against live contracts, warp 1780545527",
+      "harness": "test/AuditMigrateUSDeE2E.t.sol",
+      "reverted": false,
+      "revertReason": null,
+      "note": "PASSED. Empirically proves Phases A,B,C,D,F for the USDe leg and the successor interactions."
+    }
+  ],
+  "preconditionResults": [
+    { "check": "block.chainid == 1", "passed": true, "verified": "fork-preview" },
+    { "check": "OLD_YS_DOLA.owner() == OWNER_ADDRESS", "passed": true, "verified": "fork-preview" },
+    { "check": "OLD_YS_USDC.owner() == OWNER_ADDRESS", "passed": true, "verified": "fork-preview" },
+    { "check": "OLD_YS_USDE.owner() == OWNER_ADDRESS", "passed": true, "verified": "fork-preview" },
+    { "check": "PHUSD_STABLE_MINTER.owner() == OWNER_ADDRESS", "passed": true, "verified": "fork-preview" },
+    { "check": "SYA.owner() == OWNER_ADDRESS", "passed": true, "verified": "fork-preview" },
+    { "check": "daily rates == 5e18/4e18/1e18 and buffer == 10", "passed": true, "verified": "static (constants)" },
+    { "check": "Phase A window open (status/initiatedAt)", "passed": false, "verified": "fork-preview", "detail": "All 3 in status Initiated(1) with <24h elapsed at fork block -> gate correctly STOPs." },
+    { "check": "Phase B: oldYS.underlyingToken()/vault() == constants", "passed": true, "verified": "closure-manifest on-chain corroboration + USDe E2E" },
+    { "check": "Phase C: minter.exchangeRate == 1e18 && decimals match", "passed": true, "verified": "USDe E2E (rate read 1e18, dec 18)" },
+    { "check": "PHUSD.owner() == OWNER_ADDRESS (NOT asserted by script)", "passed": true, "verified": "fork (cast call) — present but unguarded" },
+    { "check": "PAUSER.owner() == OWNER_ADDRESS (NOT asserted by script)", "passed": true, "verified": "fork (cast call) — present but unguarded" }
+  ],
+  "stateWrites": [
+    { "contract": "OLD_YS_{DOLA,USDC,USDe} (ERC4626YieldStrategy)", "slotDesc": "withdrawalStates[token][minter].status/balance -> 0; vault shares redeemed to OWNER", "from": "Initiated/principal", "to": "executed/0", "intended": true, "verified": "USDe E2E (DOLA/USDC oracle-blocked under warp)" },
+    { "contract": "OWNER_ADDRESS (EOA)", "slotDesc": "ERC20 balance of DOLA/USDC/USDe", "from": "B", "to": "B + received", "intended": true, "verified": "USDe E2E: +3762.379 USDe" },
+    { "contract": "new ERC4626YieldStrategy x3", "slotDesc": "CREATE (Phase B), order DOLA->USDC->USDe", "from": "n/a", "to": "deployed", "intended": true, "verified": "USDe E2E (1 deployed); DOLA/USDC by source symmetry" },
+    { "contract": "new ERC4626YieldStrategy", "slotDesc": "authorizedClients[minter]=true; authorizedClients[stableStaker]=true; withdrawers[SYA]=true; setAsideBuffer[stableStaker]=10; clientBalances[token][minter]=received; vault shares (deposit)", "from": "0", "to": "set", "intended": true, "verified": "USDe E2E" },
+    { "contract": "PHUSD_STABLE_MINTER", "slotDesc": "stablecoinConfigs[token].yieldStrategy -> newYS (rate/decimals preserved); ERC20 approval token->newYS", "from": "oldYS", "to": "newYS", "intended": true, "verified": "USDe E2E: config repointed, rate 1e18 preserved" },
+    { "contract": "SYA (StableYieldAccumulator)", "slotDesc": "registered strategy set: + newYS x3 then - oldYS x3 (net count unchanged at 3)", "from": "{old x3}", "to": "{new x3}", "intended": true, "verified": "USDe E2E: add new + remove old, count stays 3" },
+    { "contract": "PHUSD (FlaxToken)", "slotDesc": "_authorizedMinters[stableStaker] = {canMint:true, mintVersion:0}", "from": "{false,0}", "to": "{true,0}", "intended": true, "verified": "USDe E2E: successor claim minted phUSD" },
+    { "contract": "PAUSER", "slotDesc": "register(stableStaker)", "from": "unregistered", "to": "registered", "intended": true, "verified": "USDe E2E (register succeeded)" },
+    { "contract": "StableStaker (new)", "slotDesc": "CREATE; pauser=PAUSER; poolInfo[token] added; yieldStrategy[token]=newYS; phusdPerSecond[token]=rate/86400", "from": "n/a", "to": "deployed+wired", "intended": true, "verified": "USDe E2E: perSec=57870370370370 (5e18/86400), buffer=10" },
+    { "contract": "server/deployments/mainnet-addresses.ts (OFF-CHAIN, post-JS)", "slotDesc": "YieldStrategy{Dola,USDC,USDe} overwritten; StableStaker zero-only written", "from": "old addrs / 0x0", "to": "new addrs", "intended": true, "verified": "static (JS read)" }
+  ],
+  "events": [
+    { "event": "Withdrawn/redeem (old YS Phase A)", "verified": "USDe E2E" },
+    { "event": "Deposited (new YS Phase C)", "verified": "USDe E2E" },
+    { "event": "MinterSet(stableStaker, true, 0) (phUSD)", "verified": "USDe E2E" },
+    { "event": "TokenAdded / RewardRateSet / YieldStrategySet / PauserUpdated (StableStaker)", "verified": "USDe E2E" }
+  ],
+  "externalCalls": [
+    { "target": "OLD_YS_USDE.totalWithdrawal(USDe,minter)", "reverted": false, "verified": "USDe E2E" },
+    { "target": "OLD_YS_DOLA/USDC.totalWithdrawal(...) [vault redeem]", "reverted": "under-warp-only (stale oracle)", "verified": "fork-preview; NOT reproducible without a fresh oracle 24h in the future" },
+    { "target": "minter.registerStablecoin(4-arg) / approveYS", "reverted": false, "verified": "USDe E2E" },
+    { "target": "SYA.addYieldStrategy / removeYieldStrategy", "reverted": false, "verified": "USDe E2E" },
+    { "target": "PHUSD.setMinter(stableStaker,true)", "reverted": false, "verified": "USDe E2E" },
+    { "target": "StableStaker.stake/claim (successor smoke)", "reverted": false, "verified": "USDe E2E: 4.99999e18 phUSD minted, under 5e18 daily cap" }
+  ],
+  "unintendedEffects": [
+    {
+      "id": "oracle-liveness-coupling",
+      "severity-hint": "medium",
+      "description": "Phase A drain of the DOLA and USDC legs depends on a chain of LIVE external oracles being fresh at execution time: the AutoDOLA and AutoUSDC vaults are Tokemak AutopoolETH proxies whose redeem path prices the underlying via CurveConvexDestinationVaultV2.getUnderlyerFloorPrice -> CustomSetOracle (InvalidAge ceiling ~89496s) and RootPriceOracle (Chainlink ETH/USD staleness). If totalWithdrawal is broadcast while any of these is stale, the redeem reverts and Phase A aborts the whole single-broadcast migration.",
+      "why-unintended": "The script's stated purpose is a deterministic owner-gated cutover; it has no awareness of, retry around, or pre-check for the third-party oracle freshness that the redeem transitively requires. The 24-72h execution window does NOT guarantee oracle freshness inside it.",
+      "verified": "fork-preview (InvalidAge(89496) on DOLA, 0x8d54ba1f Chainlink on tighter warp); USDe (no oracle dep) drained cleanly to prove the contrast"
+    },
+    {
+      "id": "principal-shrink-on-cutover",
+      "severity-hint": "low",
+      "description": "Re-deposited principal == actual vault redeem proceeds, which can be LESS than the snapshot principal (USDe E2E: snapshot 3763.927 USDe, received 3762.379 -> minter's recorded backing principal drops by ~1.55 USDe per leg). The exchangeRate is preserved at 1e18, so the minter's accounted collateral is marginally reduced. This is the documented 'use actual received' behaviour (ERC4626 redeem rounding/cost) and is correct, but it is a real reduction in the minter's recorded principal that is neither asserted nor logged-with-tolerance.",
+      "why-unintended": "Not a clobber of unrelated state, but a state change (reduced minter principal) beyond the literal 'preserve' framing in the NatSpec.",
+      "verified": "USDe E2E"
+    }
+  ],
+  "postconditionResults": [
+    { "check": "minter.stablecoinConfigs(USDe).yieldStrategy == newYS", "passed": true, "verified": "USDe E2E", "note": "script does NOT self-assert this" },
+    { "check": "newYS.principalOf(USDe,minter) == received", "passed": true, "verified": "USDe E2E" },
+    { "check": "SYA contains newYS && !contains oldYS (USDe)", "passed": true, "verified": "USDe E2E" },
+    { "check": "phUSD._authorizedMinters[stableStaker].canMint == true", "passed": true, "verified": "USDe E2E (successor claim minted)" },
+    { "check": "pre-existing minter (PHUSD_STABLE_MINTER) still authorized after setMinter(ss) -> NO revocation", "passed": true, "verified": "fork: setMinter is per-address additive; mintVersion unchanged (0)" },
+    { "check": "StableStaker daily rate == 5e18/86400 for USDe", "passed": true, "verified": "USDe E2E (57870370370370)" }
+  ],
+  "clusterFindings": {
+    "predecessor": "InitiateYieldStrategyWithdrawal (Story 054) opens the window via totalWithdrawal phase-1. This script's Phase A gate correctly consumes the [initiatedAt+24h, initiatedAt+72h] window (verified: gate STOPs before 24h, executes after). Story 054 doc says run 055 in [executableAt, executableAt+48h] = [init+24h, init+72h], matching TOTAL_DURATION=72h. Symmetric across all 3 strategies. Withdrawal-amount drift handled by re-reading balance delta, not the snapshot.",
+    "successors": "StakeStableStaker / ClaimWithdrawStableStaker — empirically FUNCTIONAL after this script alone (USDe E2E: stake routed principal into newYS, claim minted phUSD under the daily cap). The required wiring (phUSD.setMinter(ss), newYS.setClient(ss), pool addToken+rate) is all done in Phase F. NO skipped step blocks the successors.",
+    "migrator-not-set": "StableStaker.migrator is never set by this script; only the StableStakerMigrator flow needs it, which is not among the listed successors. Informational."
+  }
+}
