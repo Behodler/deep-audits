@@ -1,0 +1,56 @@
+{
+  "entryPoint": "batch-minter-migrate",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-11",
+  "fork": { "rpc": "mainnet", "block": 25248523 },
+  "dedupStage": "deduplicator",
+  "inputCount": 3,
+  "keptCount": 1,
+  "droppedCount": 2,
+  "mergedCount": 0,
+  "scriptVerdict": "Migration script itself is clean: 7/7 stated purposes achieved, 6/6 pre + 7/7 post conditions pass, zero unintended on-chain writes. Surviving finding is a knock-on cluster-interaction issue (sibling funder breakage), not a defect in the migration logic.",
+  "findings": [
+    {
+      "title": "Migration silently bricks the mint-sell-donate funder: its hardcoded BATCH_MINTER constant still points at the retired old minter",
+      "severity": "medium",
+      "contract": "lib/phoenix-phase-2-staging/script/MintSellAndDonateToBatchMinter.s.sol",
+      "function": "run",
+      "lineStart": 279,
+      "lineEnd": 308,
+      "entryPoint": "batch-minter-migrate",
+      "rootCauseClass": "StaleHardcodedSiblingConstant",
+      "category": "cluster-interaction",
+      "description": "mint-sell-donate is the ongoing operational funder that tops up the BatchNFTMinter USDC pot (mint phUSD -> sUSDS -> USDS -> USDC via PSM buyGem). Its donation target `address constant BATCH_MINTER = 0x6e98...5071` (the OLD minter) is a compile-time constant with NO env override. It self-checks `require(IPoolerCfg(LIVE_POOLER).batchMinter() == BATCH_MINTER, \"batchMinter != live pooler\")` at line 308. This migration repoints `POOLER.batchMinter()` to the NEW minter. Consequently, the very next mint-sell-donate run reverts at line 308 before any funds move.",
+      "impact": "Fail-SAFE, not fail-dangerous: the require aborts the run, so USDC is NEVER donated into the dead old contract (no stranded funds). BUT the protocol's only documented pot-refill path is rendered inoperable until someone edits the source constant, recompiles, and re-runs. The new minter's nudge pot stops being topped up beyond the one-time 128.57 USDC seed + per-mint donate-forward, degrading the nudge incentive over time. The migration ships no accompanying patch to this sibling and the closure has no automated linkage between them.",
+      "evidence": "side-effects.json clusterChecks[0]; grep confirms BATCH_MINTER is `constant` at line 279 (not vm.envOr); preview trace shows POOLER.setBatchMinter(new) + post-flight pooler.batchMinter == new minter; mint-sell-donate line 308 asserts equality against the stale OLD constant.",
+      "recommendation": "Either (a) make mint-sell-donate's BATCH_MINTER env/config-driven (read from live pooler.batchMinter() and assert it has code) so it tracks migrations automatically, or (b) include a source-bump of MintSellAndDonateToBatchMinter.s.sol (BATCH_MINTER -> new minter) as an explicit post-migration checklist/cluster step. Document the ordering dependency in the Story 057 plan.",
+      "dedupNote": "Distinct root cause, contract, and attack/availability vector from all other candidates. Highest uniqueness + genuine protocol-availability impact via demonstrated cross-script causal chain. Severity-classifier should confirm Medium vs Low: impact is explicitly fail-safe (no fund loss); the Medium rests solely on the 'protocol function/availability impacted' limb of the C4 Medium definition."
+    }
+  ],
+  "dropped": [
+    {
+      "title": "MigrateBatchNFTMinter lacks a chainid guard, unlike its sibling funder",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/MigrateBatchNFTMinter.s.sol",
+      "function": "run",
+      "rootCauseClass": "MissingNetworkGuard",
+      "originalIndex": 1,
+      "dropReason": "common-tool-noise / QA-at-best, no demonstrated HM exploit path",
+      "rationale": "Missing chainid guard is a textbook common finding. Self-described mitigations defeat it: a wrong-chain broadcast 'would mostly revert on the first external call to a non-existent contract' and the broadcast already requires a Ledger signature. No security impact, no exploit path. Per CLAUDE.md, common findings without a demonstrated HM exploit path are OOS, and non-critical issues are discouraged. Eligible for the QA bundle only (cluster-consistency / config-safety nit), not the substantive submission set.",
+      "humanReview": false
+    },
+    {
+      "title": "New BatchNFTMinter is deployed unpausable (pauser left at address(0))",
+      "severity": "low",
+      "contract": "lib/nft-staking/src/BatchNFTMinter.sol",
+      "function": "setPauser",
+      "rootCauseClass": "MissingPostStepConfiguration",
+      "originalIndex": 2,
+      "dropReason": "pre-existing / no regression, centralization-intent observation = QA at best",
+      "rationale": "The finding itself states the condition is 'largely pre-existing' and 'does not regress security posture' — the old live instance was equally unpausable (pauser == 0x0), so the migration introduces no new risk; the root cause predates this entry point. This is an intent/centralization observation with no demonstrated exploit path. Per CLAUDE.md, centralization risks are QA/Low and issues whose root cause is pre-existing/OOS are out of scope for HM. Belongs in the QA bundle as an 'accepted-risk to confirm with operator' note, not the substantive set.",
+      "humanReview": true,
+      "humanReviewNote": "Borderline. Drop from HM set is clear, but the operator should explicitly confirm whether unpausable-by-design is intended for a fund-holding contract, or wire the global Phoenix Pauser. Surface as a QA/centralization item rather than discarding outright."
+    }
+  ],
+  "merges": []
+}

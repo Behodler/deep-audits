@@ -1,0 +1,54 @@
+{
+  "entryPoint": "batch-minter-migrate",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-11",
+  "fork": { "rpc": "mainnet", "block": 25248523 },
+  "scriptVerdict": "Migration script itself is clean: 7/7 stated purposes achieved, 6/6 pre + 7/7 post conditions pass, zero unintended on-chain writes. Exact full-balance USDC drain (128.572549) OLD->new, batchDonationSize restored 0->10, SYA nudge + pooler batchMinter repointed to new minter, old minter retired (nudge zeroed). All candidate findings are knock-on cluster/config issues, not defects in the migration logic.",
+  "candidates": [
+    {
+      "title": "Migration silently bricks the mint-sell-donate funder: its hardcoded BATCH_MINTER constant still points at the retired old minter",
+      "severity": "medium",
+      "contract": "lib/phoenix-phase-2-staging/script/MintSellAndDonateToBatchMinter.s.sol",
+      "function": "run",
+      "lineStart": 279,
+      "lineEnd": 308,
+      "entryPoint": "batch-minter-migrate",
+      "rootCauseClass": "StaleHardcodedSiblingConstant",
+      "category": "cluster-interaction",
+      "description": "mint-sell-donate is the ongoing operational funder that tops up the BatchNFTMinter USDC pot (mint phUSD -> sUSDS -> USDS -> USDC via PSM buyGem). Its donation target `address constant BATCH_MINTER = 0x6e98...5071` (the OLD minter) is a compile-time constant with NO env override. It self-checks `require(IPoolerCfg(LIVE_POOLER).batchMinter() == BATCH_MINTER, \"batchMinter != live pooler\")` at line 308. This migration repoints `POOLER.batchMinter()` to the NEW minter. Consequently, the very next mint-sell-donate run reverts at line 308 before any funds move.",
+      "impact": "Fail-SAFE, not fail-dangerous: the require aborts the run, so USDC is NEVER donated into the dead old contract (no stranded funds). BUT the protocol's only documented pot-refill path is rendered inoperable until someone edits the source constant, recompiles, and re-runs. The new minter's nudge pot stops being topped up beyond the one-time 128.57 USDC seed + per-mint donate-forward, degrading the nudge incentive over time. The migration ships no accompanying patch to this sibling and the closure has no automated linkage between them.",
+      "evidence": "side-effects.json clusterChecks[0]; grep confirms BATCH_MINTER is `constant` at line 279 (not vm.envOr); preview trace shows POOLER.setBatchMinter(new) + post-flight pooler.batchMinter == new minter; mint-sell-donate line 308 asserts equality against the stale OLD constant.",
+      "recommendation": "Either (a) make mint-sell-donate's BATCH_MINTER env/config-driven (read from live pooler.batchMinter() and assert it has code) so it tracks migrations automatically, or (b) include a source-bump of MintSellAndDonateToBatchMinter.s.sol (BATCH_MINTER -> new minter) as an explicit post-migration checklist/cluster step. Document the ordering dependency in the Story 057 plan."
+    },
+    {
+      "title": "MigrateBatchNFTMinter lacks a chainid guard, unlike its sibling funder",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/MigrateBatchNFTMinter.s.sol",
+      "function": "run",
+      "lineStart": 114,
+      "lineEnd": 140,
+      "entryPoint": "batch-minter-migrate",
+      "rootCauseClass": "MissingNetworkGuard",
+      "category": "drift",
+      "description": "run() has no `require(block.chainid == 1)`; it relies solely on --rpc-url $RPC_MAINNET and hardcoded mainnet address constants. The sibling MintSellAndDonateToBatchMinter pins chainid (line 289), so this is an inconsistency in the same cluster. A misconfigured RPC env or a fat-fingered --fork-url would let the broadcast path execute against the wrong chain.",
+      "impact": "Low: a broadcast against a non-mainnet chain would mostly revert on the first external call to a non-existent contract, and the broadcast requires a Ledger signature. But it removes a cheap, standard fail-fast guard the rest of the cluster relies on, and the repo CLAUDE.md Configuration-Safety section mandates an explicit network guard for real-network scripts.",
+      "evidence": "intent.md access section; script lines 114-140 contain no chainid check; sibling MintSellAndDonateToBatchMinter.s.sol:289 `require(block.chainid == 1, ...)`.",
+      "recommendation": "Add `require(block.chainid == 1, \"expected mainnet (1)\")` at the top of run() (or gate behind PREVIEW for local), matching the sibling and the repo's Configuration-Safety gate."
+    },
+    {
+      "title": "New BatchNFTMinter is deployed unpausable (pauser left at address(0))",
+      "severity": "low",
+      "contract": "lib/nft-staking/src/BatchNFTMinter.sol",
+      "function": "setPauser",
+      "lineStart": 150,
+      "lineEnd": 153,
+      "entryPoint": "batch-minter-migrate",
+      "rootCauseClass": "MissingPostStepConfiguration",
+      "category": "intent-mismatch",
+      "description": "The migration deliberately does NOT call setPauser, leaving the new minter's `pauser == address(0)` to 'match the current live instance' (verified on fork: old minter pauser == 0x0). The new minter holds the full nudge pot and its batchMint nudge payout is gated only on a numeric `count >= nudgeSize` threshold. With pauser == 0, pause()/unpause() are permanently unusable, so there is no circuit breaker.",
+      "impact": "Low and largely pre-existing (the old instance was equally unpausable, so this migration does not regress security posture). Flagged as an intent/centralization-safety observation: 'match current' silently re-adopts a no-circuit-breaker config for a fund-holding contract.",
+      "evidence": "BatchNFTMinter.sol:150-153 (setPauser) and modifier onlyPauser at 112-115; migration _deployAndConfigure (lines 154-168) omits setPauser by design; cast confirms OLD minter pauser == 0x0.",
+      "recommendation": "Confirm with the operator whether the global Phoenix Pauser should be wired into the new minter. If unpausable-by-design is intentional, document the accepted risk explicitly; otherwise add setPauser(globalPauser) to the migration."
+    }
+  ]
+}

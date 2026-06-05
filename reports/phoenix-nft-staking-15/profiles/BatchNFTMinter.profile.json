@@ -1,0 +1,223 @@
+{
+  "contract": "src/BatchNFTMinter.sol",
+  "profileTimestamp": "2026-06-05T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "scanMode": "regression",
+  "regressionContext": {
+    "story": "story-016",
+    "commit": "5f863d2",
+    "summary": "Snapshot the nudge pot BEFORE the mint loop (previously after) so a qualifying batcher receives only the PRIOR accumulated pot; its own per-mint nudge-token donations now stay in the contract to seed the next claimant ('donate forward') instead of self-refunding in the same tx.",
+    "diffLocus": "batchMint, nudge-pot accounting region ~lines 254-306",
+    "changeShape": "Pure code-motion of the nudgeAmount snapshot block: moved from after the mint loop + allowance revoke to before the payment pull + loop. No new state. NatSpec + inline comment reworded."
+  },
+
+  "inheritanceChain": ["Ownable", "Pausable", "IPausable"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {
+      "value": false,
+      "confidence": "verified",
+      "note": "batchMint loops `count` times over caller-supplied `count` (lines 280-282). Bound is gas + economic only: every iteration calls the real trusted minter and the dispatcher charges a ramping price, so a large count must be paid for. Not a free-DoS loop, but caller-controlled iteration count."
+    },
+    "checkedArithmetic": {
+      "value": true,
+      "confidence": "verified",
+      "note": "Solidity ^0.8.20, no unchecked blocks, no assembly. Only arithmetic is `remaining / DUST_THRESHOLD` (div, safe) and `paymentAmount - remaining` guarded by a `>` ternary (line 302)."
+    },
+    "reentrancyGuarded": {
+      "value": [],
+      "confidence": "verified",
+      "note": "No ReentrancyGuard inherited and no nonReentrant modifier anywhere. batchMint makes multiple external calls (transferFrom, forceApprove, mint xN, safeTransfer x2). Reentrancy SURFACE exists; exploitability deferred to interaction analysis (depends on trusted-minter and ERC20 behaviour). See trustAssumptions."
+    },
+    "accessControlled": {
+      "value": ["setTokenMinter", "setDispatcherIndex", "setNudgeSize", "setNudgePaymentToken", "setPauser", "rescueERC20", "pause", "unpause"],
+      "confidence": "verified",
+      "note": "All admin setters are onlyOwner. pause/unpause are onlyPauser. batchMint is permissionless (only whenNotPaused + input guards)."
+    },
+    "initializerProtected": {
+      "value": true,
+      "confidence": "verified",
+      "note": "Not upgradeable. Constructor-only init (Ownable(initialOwner)). No initializer pattern."
+    },
+    "pausable": {
+      "value": true,
+      "confidence": "verified",
+      "note": "OZ Pausable + IPausable hybrid. Only batchMint is whenNotPaused. All admin setters and rescueERC20 stay callable while paused (intentional, mirrors NFTStaker)."
+    }
+  },
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "batchMint(uint256 count, address recipient, uint256 paymentAmount, uint256 minReward) returns (uint256 totalPaid)",
+        "visibility": "external",
+        "accessControl": "none (whenNotPaused only)",
+        "reentrancyGuard": false,
+        "callerControlledInputs": ["count", "recipient", "paymentAmount", "minReward"],
+        "stateReads": ["tokenMinter", "dispatcherIndex", "nudgePaymentToken", "nudgeSize"],
+        "stateChanges": ["none persistent (ERC20 allowance set then revoked to 0; token balances move)"],
+        "externalCalls": [
+          "INFTMinterV2(tokenMinter).configs(dispatcherIndex) [view]",
+          "ITokenDispatcherV2(dispatcher).primeToken() [view]",
+          "IERC20(nudgePaymentToken).balanceOf(this) [view, only if nudge active+qualifying]",
+          "paymentToken.safeTransferFrom(msg.sender, this, paymentAmount)",
+          "paymentToken.forceApprove(tokenMinter, max)",
+          "tokenMinter.mint(dispatcherIndex, recipient)  [x count]",
+          "paymentToken.forceApprove(tokenMinter, 0)",
+          "IERC20(nudgePaymentToken).safeTransfer(recipient, nudgeAmount)  [if nudgeAmount != 0]",
+          "paymentToken.safeTransfer(msg.sender, remaining)  [if remaining/DUST_THRESHOLD != 0]"
+        ],
+        "reverts": [
+          "BatchMint__ZeroCount (count==0)",
+          "BatchMint__ZeroRecipient (recipient==0)",
+          "BatchMint__MinterNotConfigured (tokenMinter==0)",
+          "BatchMint__DispatcherNotConfigured (dispatcherIndex==0 OR resolved dispatcher==0)",
+          "BatchMint__NudgeTokenMatchesPaymentToken (nudgeToken set && == derived paymentToken)",
+          "BatchMint__RewardBelowMinimum (snapshotted nudgeAmount < minReward)"
+        ]
+      },
+      {
+        "function": "rescueERC20(IERC20 token, address to, uint256 amount)",
+        "visibility": "external",
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": false,
+        "stateChanges": ["none (moves arbitrary ERC20 out)"],
+        "externalCalls": ["token.safeTransfer(to, amount)"],
+        "reverts": ["Rescue__ZeroRecipient (to==0)"],
+        "note": "Owner can sweep ANY ERC20 including nudgePaymentToken / paymentToken. Acknowledged centralization (owner already controls nudge via setters)."
+      },
+      {
+        "function": "setTokenMinter(ITokenMinterV2 newMinter)",
+        "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["tokenMinter"], "externalCalls": []
+      },
+      {
+        "function": "setDispatcherIndex(uint256 newIndex)",
+        "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["dispatcherIndex"], "externalCalls": []
+      },
+      {
+        "function": "setNudgeSize(uint256 newSize)",
+        "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["nudgeSize"], "externalCalls": []
+      },
+      {
+        "function": "setNudgePaymentToken(address newToken)",
+        "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["nudgePaymentToken"], "externalCalls": []
+      },
+      {
+        "function": "setPauser(address newPauser)",
+        "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["pauser"], "externalCalls": []
+      },
+      {
+        "function": "pause()",
+        "visibility": "external", "accessControl": "onlyPauser",
+        "stateChanges": ["_paused"], "externalCalls": []
+      },
+      {
+        "function": "unpause()",
+        "visibility": "external", "accessControl": "onlyPauser",
+        "stateChanges": ["_paused"], "externalCalls": []
+      }
+    ],
+
+    "externalCalls": [
+      {
+        "target": "ITokenMinterV2 tokenMinter (owner-pinned)",
+        "methods": ["mint", "configs (via INFTMinterV2 cast)"],
+        "trustLevel": "trusted",
+        "notes": "Pinned to owner-set state, NOT a call parameter (story-013/014 hardening). The whole nudge-drain mitigation rests on this being trusted. Loop calls mint() count times; reentrancy via this contract is possible only if the trusted minter is malicious/buggy."
+      },
+      {
+        "target": "ITokenDispatcherV2 dispatcher (resolved from minter.configs)",
+        "methods": ["primeToken"],
+        "trustLevel": "trusted",
+        "notes": "Derived from the pinned minter's configs(dispatcherIndex). primeToken() defines the payment asset (no longer caller-supplied)."
+      },
+      {
+        "target": "IERC20 paymentToken (= dispatcher.primeToken())",
+        "methods": ["safeTransferFrom", "forceApprove", "safeTransfer", "balanceOf"],
+        "trustLevel": "semi-trusted",
+        "notes": "Standard-ERC20 assumed (no fee-on-transfer, no rebasing, no transfer hooks). Derived from trusted dispatcher so token identity is owner/protocol-governed, not attacker-chosen."
+      },
+      {
+        "target": "IERC20 nudgePaymentToken (owner-set)",
+        "methods": ["balanceOf", "safeTransfer"],
+        "trustLevel": "semi-trusted",
+        "notes": "Owner-set payout token (e.g. USDC). Must differ from paymentToken when nudge active (enforced at line 255). Standard-ERC20 assumed."
+      },
+      {
+        "target": "address recipient (caller-supplied)",
+        "methods": ["receives ERC1155 mint", "receives nudge ERC20 transfer"],
+        "trustLevel": "untrusted",
+        "notes": "Arbitrary non-zero address. Receives nudge via safeTransfer (no .call value). ERC1155 mint to recipient happens inside trusted minter — a recipient with an ERC1155 receiver hook could in principle re-enter, but mint dispatch is inside the trusted minter; flag for interaction analysis."
+      },
+      {
+        "target": "address msg.sender (caller-supplied)",
+        "methods": ["pays paymentAmount", "receives dust refund safeTransfer"],
+        "trustLevel": "untrusted",
+        "notes": "Receives the post-nudge dust refund. safeTransfer of a plain ERC20 (no callback unless token has a hook)."
+      }
+    ],
+
+    "stateVariables": [
+      {"name": "DUST_THRESHOLD", "type": "uint256 internal constant = 1e6", "mutators": [], "readers": ["batchMint"], "note": "Refund only fires when remaining >= 1e6 wei; sub-threshold residue intentionally retained."},
+      {"name": "tokenMinter", "type": "ITokenMinterV2 public", "mutators": ["setTokenMinter"], "readers": ["batchMint"], "note": "address(0) disables batchMint."},
+      {"name": "dispatcherIndex", "type": "uint256 public", "mutators": ["setDispatcherIndex"], "readers": ["batchMint"], "note": "0 = unconfigured/disabled sentinel (V2 nextIndex starts at 1)."},
+      {"name": "nudgeSize", "type": "uint256 public", "mutators": ["setNudgeSize"], "readers": ["batchMint"], "note": "Threshold count for nudge eligibility; 0 disables."},
+      {"name": "nudgePaymentToken", "type": "address public", "mutators": ["setNudgePaymentToken"], "readers": ["batchMint"], "note": "Nudge payout token; 0 disables. Must != paymentToken when set."},
+      {"name": "pauser", "type": "address public", "mutators": ["setPauser"], "readers": ["pause", "unpause (via onlyPauser)"], "note": "0 disables pausing."}
+    ],
+
+    "events": ["NudgeSizeChanged", "NudgePaymentTokenChanged", "NudgePaid", "TokenMinterSet", "DispatcherIndexSet", "Rescued", "PauserChanged"],
+    "modifiers": ["onlyOwner (OZ)", "onlyPauser (custom)", "whenNotPaused (OZ)"]
+  },
+
+  "nudgePotMechanism": {
+    "funding": "External / passive. The contract holds a balance of nudgePaymentToken funded out-of-band (e.g. a yield funnel directing USDC in) AND, per the design comments, the dispatcher donates the nudge token into this contract on every mint() during the loop. There is no explicit fund() function; balance accrues by inbound transfers + per-mint donations.",
+    "eligibilityGate": "count >= nudgeSize, with nudgeSize != 0 AND nudgePaymentToken != address(0). Purely numeric on count — historically a drain vector (a no-op caller-supplied minter could fake count); now closed because count mints must be genuinely paid for at the trusted dispatcher's ramping price (story-013/014).",
+    "snapshot": {
+      "location": "lines 271-275, BEFORE paymentToken pull (277) and BEFORE the mint loop (280-282).",
+      "value": "nudgeAmount = IERC20(nudgePaymentToken).balanceOf(address(this)) when (nudgeSize!=0 && count>=nudgeSize && nudgePaymentToken!=0), else 0.",
+      "regressionPoint": "story-016 MOVED this read from after the loop/allowance-revoke to here. The snapshot now captures ONLY the prior accumulated pot; per-mint donations that arrive during the loop accrue AFTER this read."
+    },
+    "slippageFloor": "After the loop (line 290): if nudgeAmount < minReward -> revert BatchMint__RewardBelowMinimum, rolling back mints + payment pull. minReward=0 never trips. NOTE: floor protects the loser from minting at a loss; it does NOT prevent a front-runner from winning the whole pot.",
+    "payout": "After loop + allowance revoke, BEFORE dust refund (lines 294-297): if nudgeAmount != 0, safeTransfer(recipient, nudgeAmount) + emit NudgePaid. Full snapshotted balance, winner-take-all, balance-based.",
+    "donateForwardInvariant": "Because the snapshot precedes the loop, the in-loop donations (delta between pre-loop balance and post-loop balance of nudgePaymentToken) are NOT included in nudgeAmount and are NOT transferred out this tx. They remain in the contract as the seed pot for the NEXT qualifying claimant.",
+    "accountingFlowBeforeVsAfterSnapshot": {
+      "BEFORE_story016": "snapshot read AFTER the mint loop -> nudgeAmount = prior pot + this-batch's own per-mint donations -> batcher self-refunded its own donations in the same tx (the bug).",
+      "AFTER_story016": "snapshot read BEFORE pull/loop -> nudgeAmount = prior pot ONLY -> own donations stay to seed next claimant."
+    },
+    "guardsThatProtectTheSnapshot": [
+      "nudgePaymentToken != paymentToken enforced up-front (line 255), so the paymentToken pull at 277 cannot inflate the nudgeAmount snapshot (different token).",
+      "No funds pulled before the up-front token-mismatch guard, so a misconfig reverts before any state movement."
+    ]
+  },
+
+  "localFindings": [],
+
+  "regressionObservationsForDownstream": [
+    "The change is pure code-motion of the snapshot; no new persistent state, no new external call. The donate-forward property now holds ONLY IF the dispatcher genuinely donates nudgePaymentToken into this contract during mint() (an assumption about the trusted minter/dispatcher, NOT verifiable in this contract). Downstream interaction analysis should confirm the dispatcher's donation path actually targets nudgePaymentToken and this contract address.",
+    "balanceOf-based winner-take-all payout is front-runnable by design (acknowledged in NatSpec). minReward only protects the loser from minting at a loss. Whether MEV extraction of the pot is a finding is an econ/interaction concern, not local.",
+    "Reentrancy surface: batchMint has NO reentrancy guard and performs balanceOf reads (snapshot at 274, dust at 299) interleaved with external calls. The snapshot is taken before any external transfer, so a reentrant call could only re-read AFTER funds move; but exploitability hinges on the trusted minter re-entering — defer to interaction analysis.",
+    "Dust-refund predicate is `remaining / DUST_THRESHOLD != 0` (i.e. remaining >= 1e6), equivalent to a >= comparison; not a rounding bug."
+  ],
+
+  "trustAssumptions": [
+    "tokenMinter and its resolved dispatcher are trusted, owner-pinned contracts (NOT caller-supplied) — the entire nudge-drain mitigation depends on this.",
+    "paymentToken (= dispatcher.primeToken()) and nudgePaymentToken are standard ERC20s: no fee-on-transfer, no rebasing, no reentrant transfer hooks. (Known-invalid per repo policy except USDT.)",
+    "The dispatcher donates nudgePaymentToken into this contract on each mint() — the 'donate forward' mechanic relies on this external behaviour, which lives in the trusted yield-claim-nft sibling and is OUT OF SCOPE for this contract's local profile.",
+    "Owner is trusted: can re-point minter/dispatcher/nudge knobs and sweep any ERC20 via rescueERC20 (acknowledged centralization).",
+    "pauser is a trusted address (typically the Phoenix global Pauser)."
+  ],
+
+  "complexity": {
+    "loc": 307,
+    "externalFunctions": 9,
+    "stateVariables": 6,
+    "externalCallSitesInBatchMint": 9,
+    "loops": 1
+  }
+}

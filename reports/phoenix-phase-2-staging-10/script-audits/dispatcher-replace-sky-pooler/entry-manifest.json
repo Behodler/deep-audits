@@ -1,0 +1,64 @@
+{
+  "entryPoint": "dispatcher-replace-sky-pooler",
+  "submoduleHead": "30775401304c1ff622206c19fc404c1a1d16ac53",
+  "priorRunSubmoduleHead": "0bbbe8ca1ed0cb57c38ea5bbfa0fa9a71642636f",
+  "regression": {
+    "scriptRewritten": true,
+    "diffVsPrior": "+250/-58 (approx) vs 0bbbe8ca",
+    "addressesFinding": "M-01: newPooler._minter never set to NFTMinterV2 -> mint(4) reverts 'ATokenDispatcherV2: caller is not minter'",
+    "fixObserved": "Step 6 (_step6_wireNewHook) now calls BalancerPoolerV2(newPooler).setMinter(NFT_MINTER_V2) and asserts the wiring by reading slot1 (vm.load) == NFT_MINTER_V2, refusing to proceed if unset. A NEW preview-only end-to-end mint (step 16) exercises NFTMinterV2.mint(4) through the onlyMinter gate to prove index-4 minting works post-cutover. script-auditor must verify the slot1 assumption and that the fix actually closes M-01."
+  },
+  "intentComment": "Story 056 — cut index-4 dispatcher over to a Sky-PSM BalancerPoolerV2 + new MintDebtHook (migrate BPT+sUSDS, manual Sky-route validation, final pool())",
+  "variants": {
+    "dry": {
+      "key": "dispatcher-replace-sky-pooler:dry",
+      "command": "PREVIEW_MODE=true forge script script/DispatcherReplaceSkyPoolerAtIndex4.s.sol:DispatcherReplaceSkyPoolerAtIndex4 --rpc-url $RPC_MAINNET --slow -vvv",
+      "broadcasts": false,
+      "envFlags": ["PREVIEW_MODE=true", "--slow"],
+      "note": "PREVIEW_MODE=true -> isPreview=true -> run() takes vm.startPrank(OWNER_ADDRESS) (impersonate owner), no broadcast. ADDITIONALLY enables the preview-only step 16 (deal USDS to owner, mint one id-4 NFT) and step 17 LP add. No node pre/post scripts on the dry variant."
+    },
+    "broadcast": {
+      "key": "dispatcher-replace-sky-pooler:broadcast",
+      "command": "node scripts/backup-mainnet-addresses.js && forge script script/DispatcherReplaceSkyPoolerAtIndex4.s.sol:DispatcherReplaceSkyPoolerAtIndex4 --rpc-url $RPC_MAINNET --broadcast --skip-simulation --slow --ledger --hd-paths \"m/44'/60'/46'/0/0\" -vvv && node scripts/patch-mainnet-addresses-dispatcher-replace-sky-pooler.js",
+      "broadcasts": true,
+      "envFlags": ["--broadcast", "--skip-simulation", "--slow", "--ledger", "--hd-paths m/44'/60'/46'/0/0"],
+      "note": "PREVIEW_MODE unset -> isPreview=false -> run() takes vm.startBroadcast() (ledger-signed, HD index 46). Step 16 (preview e2e mint, uses the deal cheatcode) is gated behind isPreview and NEVER runs on broadcast. --skip-simulation is required because (a) the final pool() relies on an offline-derived DEFAULT_MIN_BPT (Balancer V3 query path reverts NotStaticCall from a tx frame) and (b) forge's local broadcast-collection pass would otherwise abort on a too-high minBPT; the script self-guards via internal require/asserts and isolates pool() in try/catch."
+    }
+  },
+  "forgeTarget": {
+    "file": "script/DispatcherReplaceSkyPoolerAtIndex4.s.sol",
+    "contract": "DispatcherReplaceSkyPoolerAtIndex4",
+    "entryFn": "run",
+    "baseContracts": ["Script", "StdCheats"],
+    "stdCheatsNote": "StdCheats newly inherited (vs prior run) for forge-std's deal() used in the preview-only step 16 e2e mint."
+  },
+  "jsChain": {
+    "pre": [
+      {
+        "file": "scripts/backup-mainnet-addresses.js",
+        "appliesTo": ["broadcast"],
+        "reads": ["server/deployments/mainnet-addresses.ts"],
+        "writes": ["server/deployments/mainnet.backup.<ISO-timestamp>.ts"],
+        "mutates": "none — copyFileSync snapshot of mainnet-addresses.ts before the cutover; timestamp stamp = ISO with :/. replaced by -."
+      }
+    ],
+    "post": [
+      {
+        "file": "scripts/patch-mainnet-addresses-dispatcher-replace-sky-pooler.js",
+        "appliesTo": ["broadcast"],
+        "reads": [
+          "broadcast/DispatcherReplaceSkyPoolerAtIndex4.s.sol/1/run-latest.json",
+          "server/deployments/mainnet-addresses.ts"
+        ],
+        "writes": ["server/deployments/mainnet-addresses.ts"],
+        "mutates": [
+          "nftsV2.BalancerPooler: expected OLD 0x26f89f4b46eb164303985795ee20b15bb1edb38a (LIVE_INDEX4_POOLER) -> newPooler (BalancerPoolerV2 CREATE from broadcast)",
+          "BalancerPoolerMintDebtHook: expected OLD 0x14277a0bc38a6bb7eb732c3a49190030632f727e -> newHook (BalancerPoolerMintDebtHook CREATE from broadcast)"
+        ],
+        "selfValidating": "Walks broadcast.transactions[] for transactionType=='CREATE', requires EXACTLY 2 CREATEs matched by contractName (BalancerPoolerV2 + BalancerPoolerMintDebtHook). Refuses to patch unless the current on-file address matches the expected-OLD constant. Exit codes: 1 broadcast json missing/unparseable, 2 expected CREATE not found / count != 2, 3 unexpected old address (self-validation/double-run guard), 4 mainnet-addresses.ts missing."
+      }
+    ]
+  },
+  "chainId": 1,
+  "chainIdNote": "setUp() requires block.chainid == 1 (Mainnet) || 31337 (Anvil fork). _step17_finalPool enforces minBPT>0 on chainid!=31337; relaxes minBPT 0->1 only on 31337. minBPT overridable via MIN_BPT_WEI env (default DEFAULT_MIN_BPT=284e18)."
+}

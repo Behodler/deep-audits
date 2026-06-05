@@ -1,0 +1,100 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-06-05T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scanMode": "regression",
+  "scope": ["src/BatchNFTMinter.sol"],
+  "regressionContext": {
+    "story": "story-016",
+    "change": "Nudge pot snapshotted before mint loop to stop per-mint donation self-refund",
+    "clusterRegion": "lines 230-306 (nudge-pot snapshot/payout)",
+    "priorFindings": {
+      "H-01": "fixed - value-blind nudge gate (count-only payout)",
+      "M-01": "acknowledged - MEV front-run of winner-take-all nudge pot",
+      "L-01": "submitted - batchMint lacks nonReentrant; onERC1155Received mid-loop",
+      "L-02": "submitted - uncapped count loop",
+      "L-03": "submitted - nudge-token equality guard reverts when size-disabled",
+      "L-05": "wont-fix - minReward==0 silently opts out of slippage guard"
+    }
+  },
+  "patternsChecked": 22,
+  "findingsCount": 4,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC777",
+      "type": "reentrancy",
+      "severity": "potential-high",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 280,
+      "description": "Matches REENTRANCY-ERC777: batchMint loops nftMinter.mint(...) which routes ERC1155 mints to a caller-controlled `recipient` (onERC1155Received hook fires mid-loop), with no ReentrancyGuard. The post-loop nudge snapshot (nudgeAmount, line 274) is read BEFORE the loop, but the actual nudge transfer (line 295) and dust sweep (line 299-305) read/act on live balances AFTER the reentrancy surface. A reentrant call from within the mint hook could itself qualify for and drain the SAME snapshotted pot before the outer payout, or re-enter to manipulate the live `remaining` sweep.",
+      "confidence": "medium",
+      "matchedSignatures": ["nftMinter.mint(_dispatcherIndex, recipient)", "safeTransfer", "no ReentrancyGuard import"],
+      "missingMitigations": ["No nonReentrant modifier on batchMint", "snapshot mitigates self-refund but NOT cross-call pot drain via re-entry"],
+      "ledgerCorrelation": "L-01 (submitted): batchMint lacks nonReentrant; onERC1155Received fires mid-loop. Still live post story-016 — snapshot does not add a reentrancy guard.",
+      "references": ["https://blog.openzeppelin.com/reentrancy-after-istanbul"]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "dos-unbounded-loop",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 280,
+      "description": "Matches DOS-UNBOUNDED-LOOP: `for (uint256 i; i < count; ++i) nftMinter.mint(...)` iterates a caller-supplied `count` with no upper bound. Each iteration is a full external mint; a large `count` can exceed the block gas limit. Not a fund-loss DoS (caller pays their own gas) but the unbounded loop is the gate that the nudge payout (count >= nudgeSize) keys off, so it is in the cluster region.",
+      "confidence": "high",
+      "matchedSignatures": ["for (uint256 i; i < count; ++i)"],
+      "missingMitigations": ["No max-count cap", "No pagination"],
+      "ledgerCorrelation": "L-02 (submitted): uncapped count loop. Unchanged by story-016.",
+      "references": []
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "DOUBLE-VOTING",
+      "type": "snapshot-vs-live-mismatch",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 274,
+      "description": "Heuristic match to the DOUBLE-VOTING snapshot-vs-live class (the only snapshot-semantics pattern in the DB). story-016 snapshots `nudgeAmount = balanceOf(this)` BEFORE the loop (line 274) but the slippage check (line 290), the transfer (line 295) and the dust sweep `remaining = balanceOf(this)` (line 299) act on LIVE post-loop balances. The winner-take-all balance read remains front-runnable: a competing batcher mined first still claims the entire live pot, and the snapshot value `nudgeAmount` can diverge from what is actually transferable if the pot is drained between snapshot and transfer by a re-entrant or interleaved call. Snapshot fixes self-refund, NOT the live-balance race the acknowledged MEV finding describes.",
+      "confidence": "medium",
+      "matchedSignatures": ["balanceOf(address(this)) snapshot at line 274", "balanceOf(address(this)) live read at line 299", "winner-take-all full-balance payout"],
+      "missingMitigations": ["No per-claimant accounting (still reads full live/snapshot balance)", "No commit-reveal or per-tx pot reservation against front-running"],
+      "ledgerCorrelation": "M-01 (acknowledged): MEV / first-claimer front-run of winner-take-all nudge pot. story-016 explicitly does NOT close this (contract NatSpec lines 226-229 acknowledge the floor 'does NOT stop a front-runner from winning the pot'). Re-flagged as STILL-PRESENT, matches acknowledged status.",
+      "references": []
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "DIVISION-PRECISION",
+      "type": "rounding-dust-threshold",
+      "severity": "potential-low",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 300,
+      "description": "Weak match to DIVISION-PRECISION / rounding. The dust gate `if (remaining / DUST_THRESHOLD != 0)` uses integer division as a >= threshold test: any `remaining` in [DUST_THRESHOLD, inf) refunds, anything below is retained. Behaviour is intentional (NatSpec lines 61-64, donate-forward) and below-threshold residue is swept by the next batch, so not a precision-loss bug. Flagged only because the integer-division-as-comparison idiom trips the DB signature; mitigations present. Sub-low / informational.",
+      "confidence": "low",
+      "matchedSignatures": ["remaining / DUST_THRESHOLD != 0"],
+      "missingMitigations": ["none material — behaviour documented and intended"],
+      "ledgerCorrelation": "Adjacent to design notes; no open ledger finding. Below medium-confidence reporting bar.",
+      "references": []
+    }
+  ],
+  "patternsCheckedNotMatched": [
+    "ERC4626-INFLATION (no vault/share math)",
+    "ORACLE-STALE / ORACLE-ROUNDID (no Chainlink/oracle)",
+    "SIGNATURE-REPLAY / PERMIT-FRONTRUN / CROSS-CHAIN-REPLAY (no ecrecover/permit/bridge)",
+    "FRONTRUN-APPROVE (forceApprove to trusted minter, max then 0; not user approve race)",
+    "FLASH-LOAN-PRICE (no spot-price read)",
+    "UNSAFE-DOWNCAST (no narrowing casts)",
+    "UNPROTECTED-INIT / STORAGE-COLLISION (no proxy/initializer; plain constructor)",
+    "MISSING-SLIPPAGE (minReward floor present — see L-05 caveat)",
+    "RETURN-VALUE-IGNORE (SafeERC20 used throughout)",
+    "SELFDESTRUCT-FORCE-ETH (no address(this).balance ETH logic; only ERC20 balanceOf)",
+    "FIRST-DEPOSITOR-ATTACK (no totalSupply==0 branch)",
+    "INCORRECT-OPERATOR (count>=nudgeSize, remaining/DUST!=0 reviewed — boundary intentional)",
+    "TIMELOCK-BYPASS (no timelock)",
+    "CENTRALIZATION-ADMIN (onlyOwner setters + rescueERC20; DB note: QA-only unless rug — owner already trusted per NatSpec, no finding)"
+  ]
+}

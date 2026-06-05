@@ -1,0 +1,57 @@
+{
+  "id": "M-01",
+  "project": "phoenix-phase-2-staging",
+  "status": "ready",
+  "severity": "medium",
+  "title": "Sky-pooler cutover leaves index-4 unmintable: newPooler._minter never set to NFTMinterV2, mint(4) reverts",
+  "contract": "script/DispatcherReplaceSkyPoolerAtIndex4.s.sol",
+  "function": "run / _step16_postStateLog",
+  "line": 603,
+  "lineStart": 603,
+  "lineEnd": 657,
+  "entryPoint": "dispatcher-replace-sky-pooler",
+  "variant": "both",
+  "variantNote": "Affects both run variants. :dry (preview/dry-mode) produces a FALSE GREEN — _step16_postStateLog asserts configs(4)==newPooler, hook rotation, BPT migration, sUSDS drain, but never asserts mint(4)/_minter, so it reports 'All post-state invariants hold'. :broadcast then ACTUALLY breaks — steps 3-14 re-point the dispatcher and sweep funds but newPooler.setMinter(NFT_MINTER_V2) is never called, leaving ATokenDispatcher._minter == address(0) and mint(4) reverting for all users.",
+  "fingerprint": "85d794b386b15b201963dc03cdc36b8607f1a87b45e939323af0b1563d38aea7",
+  "origin": "new",
+  "description": "The Story-056 Sky-pooler cutover script (DispatcherReplaceSkyPoolerAtIndex4.s.sol) deploys a fresh BalancerPoolerV2 (the new index-4 pooler / ATokenDispatcher), re-points configs(4).dispatcher to it via replaceDispatcher(4, newPooler) (confirmed at script line 523), rotates the phUSD mint hook (setMinter at 333/534), migrates the BPT, and drains sUSDS. However, it never calls newPooler.setMinter(NFT_MINTER_V2). The freshly deployed ATokenDispatcher's internal _minter therefore stays at its default address(0) (ATokenDispatcher.sol:14). NFTMinterV2.mint(4) routes through dispatcher.dispatch(), which is gated by the onlyMinter modifier require(msg.sender == _minter, 'ATokenDispatcher: caller is not minter') (ATokenDispatcher.sol:25-26, 82). With _minter == address(0), that require can never pass, so mint(4) reverts for every caller from the moment the cutover broadcasts. The script's dry-mode post-condition epilogue _step16_postStateLog (lines 603-657) verifies the dispatcher pointer, hook rotation, BPT migration and sUSDS drain but contains NO mint(4) or _minter invariant, so a preview run reports all invariants holding (false green) while the broadcast path ships the break to production.",
+  "impact": "Complete availability break of the core, user-facing protocol function the cutover exists to preserve: index-4 NFT minting. From the instant the cutover broadcasts until a privileged owner follow-up transaction is sent, every NFTMinterV2.mint(4) call reverts 'ATokenDispatcher: caller is not minter'. No assets are stolen, lost, or compromised — user funds, BPT, and the migrated sUSDS/Sky-route positions remain safe and fully recoverable — but the primary product function for index 4 is fully bricked. Because the script's own dry-mode self-check passes green (no mint(4)/_minter assertion), the defect is likely to reach production undetected and is only discovered when the first user mint(4) reverts.",
+  "attackPath": [
+    "1. Operator runs the cutover in PREVIEW/dry mode; _step16_postStateLog asserts configs(4)==newPooler, hook rotation, BPT migration, sUSDS drain, but never asserts mint(4)/_minter, so it reports 'All post-state invariants hold' (false green).",
+    "2. Trusting the green dry run, the operator broadcasts; steps 3-14 apply (dispatcher re-pointed to newPooler, funds swept) but newPooler.setMinter(NFT_MINTER_V2) is never called, leaving ATokenDispatcher._minter == address(0).",
+    "3. Any user calls NFTMinterV2.mint(4); mint() invokes dispatcher.dispatch(), whose onlyMinter modifier requires msg.sender == _minter; with _minter == 0 the require always fails.",
+    "4. Index-4 minting is denied for all users until the owner sends a corrective newPooler.setMinter(NFT_MINTER_V2) transaction (the predecessor cutover's documented pattern, SetMinterOnIndex4Pooler.s.sol)."
+  ],
+  "evidence": {
+    "scriptMissingCall": "DispatcherReplaceSkyPoolerAtIndex4.s.sol contains setMinter only as phUSD.setMinter(newHook/oldHook) (lines 333, 534) and an interface declaration (656); there is no newPooler.setMinter(NFT_MINTER_V2) anywhere in the cutover sequence (steps 3-15).",
+    "dispatcherGate": "lib/yield-claim-nft/src/dispatchers/ATokenDispatcher.sol:14 declares 'address internal _minter' (defaults to 0); lines 25-26 'modifier onlyMinter { require(msg.sender == _minter, \"ATokenDispatcher: caller is not minter\"); }'; setMinter is owner-only (lines 61-62).",
+    "falseGreenPostCondition": "_step16_postStateLog (lines 603-657) asserts the dispatcher pointer (configs(4)==newPooler, line 523), hook rotation, BPT migration and sUSDS drain, but encodes no mint(4)/_minter invariant.",
+    "forkProof": "Verified on mainnet fork (block 25241930): cutover-then-mint(4) reverts with the exact error 'ATokenDispatcher: caller is not minter'; mint(4) succeeds only after newPooler.setMinter(NFT_MINTER_V2) is applied. PoC: workspace/phoenix-phase-2-staging/test/AuditSkyPoolerMintIndex4.t.sol."
+  },
+  "recommendation": "Add newPooler.setMinter(NFT_MINTER_V2) to the cutover sequence (mirroring SetMinterOnIndex4Pooler.s.sol) so the fresh dispatcher's _minter is authorized atomically as part of the broadcast, AND add a post-condition to _step16_postStateLog that asserts the index-4 mint path actually works (e.g. assert newPooler.minter()==NFT_MINTER_V2, or a static-call mint(4) probe) so the dry run can no longer report a false green over a bricked mint path.",
+  "poc": {
+    "file": "workspace/phoenix-phase-2-staging/test/AuditSkyPoolerMintIndex4.t.sol",
+    "status": "validated",
+    "pocStatus": "validated",
+    "forkBlock": 25241930,
+    "expectedRevert": "ATokenDispatcher: caller is not minter",
+    "lastRun": "2026-06-04T07:38:00Z"
+  },
+  "relatedTo": "5287ecfbc5e9080308227a08cada3439b708390ea6299806c46f3724dba4fd86",
+  "relatedNote": "Same root-cause class as the ledger's open RestoreMintAtIndex4 finding (skipped setMinter on a fresh index-4 pooler), different contract/script and different entryPoint. Not a regression: distinct per-entryPoint fingerprint, not previously marked fixed.",
+  "classification": {
+    "proposedSeverity": "high",
+    "finalSeverity": "medium",
+    "plausibility": "plausible",
+    "flaggedForHumanReview": true,
+    "flagReason": "Borderline High/Medium. Deliberate downgrade from proposed High: total availability break of a core function but zero asset risk and single-tx privileged recovery. Reasoning recorded in classification report (CLASS-001).",
+    "reasoning": "C4 High requires assets stolen/lost/compromised; here no assets are at risk (funds safe and fully recoverable) and the only outcome is a core-function availability break — C4 Medium. Not lowered to QA because the availability break is concrete, fork-verified, total for the affected function, and ships to production behind a false-green self-check."
+  },
+  "metadata": {
+    "createdAt": "2026-06-04T07:46:00Z",
+    "updatedAt": "2026-06-04T07:46:00Z",
+    "scanOrigin": "audit-script:dispatcher-replace-sky-pooler",
+    "classificationOrigin": "CLASS-001",
+    "originalId": "DSP-H-setminter"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-06-04T00:00:00Z",
+    "project": "phoenix-phase-2-staging",
+    "entryPoint": "dispatcher-replace-sky-pooler",
+    "classifier": "severity-classifier",
+    "criteria": "Code4rena severity (self-audit; C4 rigor as quality spec)",
+    "inputFindings": 2,
+    "classifiedFindings": 2,
+    "summary": {
+      "high": 0,
+      "medium": 1,
+      "low": 1
+    },
+    "notes": "The proposed High (DSP-H-setminter) is downgraded to Medium. It breaks the availability of a core protocol function (index-4 NFT minting) with NO loss, theft, or compromise of assets, recoverable by a single privileged owner transaction. Under C4, availability/function impact without asset risk is Medium, not High. The proposed Low (DSP-L-minbpt) is confirmed Low."
+  },
+  "classifiedFindings": [
+    {
+      "id": "CLASS-001",
+      "originalId": "DSP-H-setminter",
+      "label": "M-01",
+      "fingerprint": "85d794b386b15b201963dc03cdc36b8607f1a87b45e939323af0b1563d38aea7",
+      "proposedSeverity": "high",
+      "severity": "medium",
+      "plausibility": "plausible",
+      "regression": false,
+      "title": "Sky-pooler cutover leaves index-4 unmintable: newPooler._minter never set to NFTMinterV2, mint(4) reverts",
+      "classification": {
+        "assetImpact": "No assets are stolen, lost, or compromised. User funds, BPT, and the migrated sUSDS/Sky-route positions remain safe and fully recoverable. The impact is purely a loss of availability: NFTMinterV2.mint(4) reverts 'ATokenDispatcherV2: caller is not minter' for every caller because the freshly deployed BalancerPoolerV2's dispatcher _minter stays address(0).",
+        "functionImpact": "A core, user-facing protocol function (NFT minting at index 4 — the entire stated purpose of the cutover) is fully bricked from the moment the cutover broadcasts until a follow-up owner transaction is sent. This is a complete availability break of the primary product function for index 4.",
+        "attackPath": [
+          "1. Operator runs the cutover script in PREVIEW/dry mode; the script's own post-conditions (_step16_postStateLog) verify configs(4)==newPooler, hook rotation, BPT migration, sUSDS drain — but never assert mint(4)/_minter — so it reports 'All post-state invariants hold' (false green).",
+          "2. Trusting the green dry run, the operator broadcasts the cutover; steps 3-14 apply (dispatcher re-pointed to newPooler, funds swept) but newPooler.setMinter(NFT_MINTER_V2) is never called, leaving ATokenDispatcherV2._minter == address(0).",
+          "3. Any user calls NFTMinterV2.mint(4); mint() invokes dispatcher.dispatch(), whose onlyMinter modifier requires msg.sender == _minter; with _minter==0 the require always fails.",
+          "4. Index-4 minting is denied for all users until the owner sends a corrective newPooler.setMinter(NFT_MINTER_V2) transaction."
+        ],
+        "likelihood": "medium-high - no attacker required; the defect ships automatically whenever this script is broadcast, and the script's own dry-mode safety check passes green, so it is likely to reach production undetected. Verified on mainnet fork (block 25241930): the cutover-then-mint(4) reverts with the exact error; mint(4) succeeds only once setMinter is applied.",
+        "assumptions": "The cutover script is broadcast as written (the audited code path). No special or adversarial conditions are needed.",
+        "externalRequirements": "Recovery requires a privileged (owner-only) follow-up transaction: newPooler.setMinter(NFT_MINTER_V2). This is the predecessor cutover's documented pattern (SetMinterOnIndex4Pooler.s.sol).",
+        "operationalMitigant": "The break is fully recoverable by the owner with a single setMinter tx, and no funds are at risk during the outage. However, the script's green dry-mode post-conditions (no mint(4)/_minter invariant) mean the break can ship to production undetected and is only discovered when the first user mint(4) reverts."
+      },
+      "severityReasoning": "C4 High requires that assets can be stolen, lost, or compromised — directly or via a valid attack path. Here NO assets are at risk: funds remain safe and fully recoverable, and the only outcome is that a core function (index-4 minting) becomes unavailable. C4 places exactly this case — 'the function of the protocol or its availability could be impacted' — under Medium. The break is total for the affected function and ships via the audited code path with no attacker and no special conditions (which is why it was proposed High), but the absence of any asset loss/theft/compromise and the single-tx privileged recoverability keep it firmly within Medium under C4's definitions. It is not downgraded below Medium because the availability impact on a core function is concrete, verified on a fork, and reaches production undetected behind a false-green dry run — this is a genuine protocol-function/availability impact, not a mere spec/state-handling nit. Final: MEDIUM (plausible).",
+      "flaggedForHumanReview": true,
+      "flagReason": "Borderline High/Medium. Documented here as a deliberate downgrade from the proposed High: total availability break of a core function but zero asset risk and single-tx privileged recovery. If the judge weights 'core product function fully bricked on broadcast, shipped behind a false-green self-check' as severe enough to treat as High, the reasoning is recorded; the conservative C4-correct call is Medium.",
+      "relatedTo": "5287ecfbc5e9080308227a08cada3439b708390ea6299806c46f3724dba4fd86",
+      "relatedNote": "Same root-cause class as the ledger's open RestoreMintAtIndex4 finding (skipped setMinter on a fresh index-4 pooler), different script/entryPoint. Not a regression (distinct per-entry-point fingerprint; not previously marked fixed)."
+    },
+    {
+      "id": "CLASS-002",
+      "originalId": "DSP-L-minbpt",
+      "label": "L-01",
+      "fingerprint": "d32e99aa64bb082b2a761fabc74a6ad999f7a83db3a82a938214be7a1b2410f1",
+      "proposedSeverity": "low",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "title": "Broadcast uses --skip-simulation with an offline-derived stale-able minBPT; no live re-query enforced",
+      "classification": {
+        "assetImpact": "No direct asset theft. Two bounded tail risks: (a) a too-high stale minBPT reverts pool() after irreversible broadcasts (dispatcher already re-pointed, funds swept), stranding a half-applied cutover that needs manual owner repair; (b) a too-low minBPT weakens slippage protection on the single LP add, exposing it to sandwich/slippage value leak.",
+        "functionImpact": "A stale-too-high floor can abort the cutover mid-flight, leaving a partially-applied migration requiring manual repair — an operational availability concern, not a standing protocol-function break.",
+        "attackPath": [
+          "1. minBPT is derived offline (DEFAULT_MIN_BPT=284e18) for a snapshot seed/pool state and is not re-queried live at broadcast.",
+          "2. Pool composition or seed size drifts materially between derivation and broadcast.",
+          "3. Broadcast runs with --skip-simulation, so forge does not catch the stale floor; pool() either reverts (too-high, after steps 3-14 already applied) or under-protects the LP add (too-low)."
+        ],
+        "likelihood": "low - requires material pool/seed drift between offline derivation and broadcast; the seed is read live (partially self-correcting) and at audit block a ~1.4% margin held (seed 527.80 sUSDS, 287.9 BPT minted vs 284e18 floor). Bounded by owner-only one-shot execution and the documented operator instruction to re-query.",
+        "assumptions": "Operator broadcasts without re-running the documented live queryAddLiquidityUnbalanced for the actual current seed.",
+        "externalRequirements": "Pool state must drift beyond the held margin before broadcast; operator must skip the documented pre-broadcast re-query step."
+      },
+      "severityReasoning": "C4 Low/QA: this is a script-design / stale-offline-parameter observation. There is no demonstrated value leak under realistic conditions (margin held at audit block), the failure modes are operator-conditioned and recoverable, and the self-correcting live seed read plus the documented re-query instruction keep the realistic likelihood low. It does not meet Medium (no demonstrated standing function/availability break or value leak under stated assumptions — the only paths require operator drift/skip and remain bounded). Confirmed LOW.",
+      "flaggedForHumanReview": false,
+      "relatedTo": null
+    }
+  ]
+}
