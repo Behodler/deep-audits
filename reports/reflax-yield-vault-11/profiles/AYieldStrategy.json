@@ -1,0 +1,209 @@
+{
+  "contract": "src/AYieldStrategy.sol",
+  "profileTimestamp": "2026-06-06T00:00:00Z",
+  "solidityVersion": "^0.8.13",
+  "regressionNote": "story-044 changed the abstract deposit() signature to return uint256 creditedPrincipal. No logic changes; purely a signature update to propagate the return value defined in IYieldStrategy.",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": { "value": true, "confidence": "verified", "notes": "No loops. _uint256ToString uses a while loop bounded by digit count (max ~77 for uint256, practical bound)." },
+    "checkedArithmetic": { "value": true, "confidence": "verified", "notes": "Solidity 0.8+; no unchecked blocks or assembly." },
+    "reentrancyGuarded": {
+      "value": ["totalWithdrawal", "skimSurplus"],
+      "confidence": "verified",
+      "notes": "Both totalWithdrawal and skimSurplus use nonReentrant. deposit() and withdraw() are abstract (guards expected in concrete implementations). emergencyWithdraw does NOT have nonReentrant but delegates to _emergencyWithdraw which is also abstract."
+    },
+    "accessControlled": {
+      "value": ["setClient", "setWithdrawer", "setSetAsideBuffer", "setPauser", "emergencyWithdraw", "totalWithdrawal"],
+      "confidence": "verified",
+      "notes": "All admin functions are onlyOwner. pause() is onlyPauser. unpause() accepts either owner or pauser. skimSurplus is onlyAuthorizedWithdrawer."
+    },
+    "initializerProtected": { "value": "n/a", "confidence": "verified", "notes": "Not upgradeable. Constructor requires _owner != address(0)." },
+    "pauseMechanism": { "value": true, "confidence": "verified", "notes": "Inherits OZ Pausable. pause() requires onlyPauser. unpause() requires owner or pauser. IPausable interface implemented." }
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-001-AYIELD",
+      "type": "external-self-call",
+      "severity": "local-low",
+      "function": "_initiateWithdrawal",
+      "line": 468,
+      "description": "Uses `this.balanceOf(token, client)` — an external self-call — to read the client's balance. This resolves correctly (balanceOf delegates to principalOf in concrete implementations) but pays the external-call gas premium unnecessarily. No security impact: balanceOf is a view function, the nonReentrant guard on the caller (totalWithdrawal) only blocks re-entrant state-changing calls, and the mutex state is correctly checked.",
+      "recommendation": "Define and call a virtual internal `_principalOf(address token, address client)` helper that concrete contracts override, avoiding the external dispatch overhead and making the call intent explicit."
+    }
+  ],
+
+  "summary": "Abstract base contract providing security scaffolding for yield strategy adapters. Supplies: EnumerableSet-backed authorized-client registry (prevents duplicate skims), authorized-withdrawer registry, per-client set-aside buffer config, IPausable integration, two-phase timelocked totalWithdrawal, and reentrancy/pause guards. Concrete contracts (ERC4626MarketYieldStrategy, ERC4626YieldStrategy) override the abstract deposit/withdraw/_emergencyWithdraw/_totalWithdraw/_skimSurplus hooks.",
+
+  "keyStateVariables": [
+    {
+      "name": "_authorizedClients",
+      "type": "EnumerableSet.AddressSet (private)",
+      "mutators": ["setClient"],
+      "readers": ["authorizedClients (view)", "getAuthorizedClients", "authorizedClientCount", "onlyAuthorizedClient modifier", "skimSurplus (passes values() to _skimSurplus)"],
+      "invariant": "No duplicate entries guaranteed by EnumerableSet. Membership check is O(1). Only owner can add/remove. Used as the canonical skim-target set."
+    },
+    {
+      "name": "authorizedWithdrawers",
+      "type": "mapping(address => bool) public",
+      "mutators": ["setWithdrawer"],
+      "readers": ["onlyAuthorizedWithdrawer modifier"]
+    },
+    {
+      "name": "setAsideBufferSize",
+      "type": "mapping(address => uint256) public",
+      "mutators": ["setSetAsideBuffer"],
+      "readers": ["_accrueSurplusShares (in concrete)"],
+      "invariant": "Value is always 0-100 (percent). Validated by setSetAsideBuffer."
+    },
+    {
+      "name": "withdrawalStates",
+      "type": "mapping(address => mapping(address => WithdrawalState))",
+      "mutators": ["totalWithdrawal -> _initiateWithdrawal / _executeWithdrawal"],
+      "readers": ["totalWithdrawal -> _updateWithdrawalStatus"],
+      "invariant": "State machine: None/Expired -> Initiated -> Executable -> None. States are auto-advanced by _updateWithdrawalStatus based on block.timestamp. Expired resets automatically to allow re-initiation."
+    },
+    {
+      "name": "_pauser",
+      "type": "address (private)",
+      "mutators": ["setPauser"],
+      "readers": ["pauser()", "onlyPauser modifier", "unpause()"]
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "setClient(address client, bool _auth)",
+        "visibility": "external",
+        "stateChanges": ["_authorizedClients"],
+        "externalCalls": [],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": false
+      },
+      {
+        "function": "setWithdrawer(address withdrawer, bool _auth)",
+        "visibility": "external",
+        "stateChanges": ["authorizedWithdrawers"],
+        "externalCalls": [],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": false
+      },
+      {
+        "function": "setSetAsideBuffer(address client, uint256 bufferPercent)",
+        "visibility": "external",
+        "stateChanges": ["setAsideBufferSize"],
+        "externalCalls": [],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": false,
+        "notes": "bufferPercent must be 0–100. Emits SetAsideBufferSet with old and new values."
+      },
+      {
+        "function": "setPauser(address newPauser)",
+        "visibility": "external",
+        "stateChanges": ["_pauser"],
+        "externalCalls": [],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": false
+      },
+      {
+        "function": "pause()",
+        "visibility": "external",
+        "stateChanges": ["paused state"],
+        "externalCalls": [],
+        "accessControl": "onlyPauser"
+      },
+      {
+        "function": "unpause()",
+        "visibility": "external",
+        "stateChanges": ["paused state"],
+        "externalCalls": [],
+        "accessControl": "owner OR pauser"
+      },
+      {
+        "function": "emergencyWithdraw(uint256 amount)",
+        "visibility": "external",
+        "stateChanges": ["implementation-defined"],
+        "externalCalls": ["implementation-defined"],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": false,
+        "notes": "No nonReentrant and no whenNotPaused — intentional for emergency access. Delegates to _emergencyWithdraw() virtual."
+      },
+      {
+        "function": "totalWithdrawal(address token, address client)",
+        "visibility": "external",
+        "stateChanges": ["withdrawalStates", "implementation-defined client balances on Phase 2"],
+        "externalCalls": ["this.balanceOf(token, client) on Phase 1 (external self-call)", "implementation-defined on Phase 2"],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": true,
+        "whenNotPaused": true,
+        "notes": "State machine: first call initiates 24h wait, second call (after 24h, within 72h total) executes. Expired state resets automatically. State is zeroed before _totalWithdraw() virtual call (CEI pattern)."
+      },
+      {
+        "function": "skimSurplus(address token, address recipient) returns (uint256 underlyingReceived)",
+        "visibility": "external",
+        "stateChanges": ["implementation-defined (principal untouched)"],
+        "externalCalls": ["_skimSurplus virtual (implementation-defined)"],
+        "accessControl": "onlyAuthorizedWithdrawer",
+        "reentrancyGuard": true,
+        "whenNotPaused": true,
+        "notes": "Passes _authorizedClients.values() (snapshot) to _skimSurplus. Empty client set is a no-op (returns 0). Return value is amount delivered to recipient, reduced by set-aside buffers."
+      },
+      {
+        "function": "deposit(address token, uint256 amount, address recipient) returns (uint256 creditedPrincipal)",
+        "visibility": "external",
+        "stateChanges": ["implementation-defined"],
+        "externalCalls": ["implementation-defined"],
+        "accessControl": "implementation-defined (expected: onlyAuthorizedClient)",
+        "reentrancyGuard": "implementation-defined",
+        "notes": "REGRESSION CHANGE (story-044): signature now includes return value. Abstract; concrete contracts must add onlyAuthorizedClient and nonReentrant."
+      },
+      {
+        "function": "withdraw(address token, uint256 amount, address recipient)",
+        "visibility": "external",
+        "stateChanges": ["implementation-defined"],
+        "externalCalls": ["implementation-defined"],
+        "accessControl": "implementation-defined (expected: onlyAuthorizedClient)",
+        "reentrancyGuard": "implementation-defined"
+      }
+    ],
+
+    "externalCalls": [
+      {
+        "target": "address(this) (self)",
+        "methods": ["balanceOf"],
+        "trustLevel": "self",
+        "notes": "External self-call in _initiateWithdrawal (line 468). View-only, no reentrancy risk, but incurs external call gas cost."
+      }
+    ],
+
+    "events": [
+      "ClientAuthorizationSet",
+      "WithdrawerAuthorizationSet",
+      "SetAsideBufferSet",
+      "SurplusSkimmed",
+      "EmergencyWithdraw",
+      "PauserSet",
+      "WithdrawalInitiated",
+      "WithdrawalExecuted"
+    ],
+
+    "modifiers": ["onlyAuthorizedClient", "onlyAuthorizedWithdrawer", "onlyPauser", "nonReentrant", "whenNotPaused", "onlyOwner"]
+  },
+
+  "trustAssumptions": [
+    "Owner is trusted for admin operations (setClient, setWithdrawer, emergencyWithdraw, totalWithdrawal, setPauser).",
+    "Pauser address is a trusted protocol component or multisig.",
+    "Authorized withdrawers are trusted protocol components (e.g., SurplusYieldAccumulator).",
+    "block.timestamp is reliable within the bounds of miner manipulation (practical ~15 second window; negligible for 24h/48h timelock thresholds)."
+  ],
+
+  "inheritanceChain": ["IYieldStrategy", "IPausable", "Ownable", "ReentrancyGuard", "Pausable"],
+
+  "complexity": {
+    "loc": 527,
+    "functions": 22,
+    "externalCalls": 1,
+    "stateVariables": 7
+  }
+}

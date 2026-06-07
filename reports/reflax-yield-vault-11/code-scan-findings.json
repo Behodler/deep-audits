@@ -1,0 +1,185 @@
+{
+  "project": "reflax-yield-vault",
+  "scanTimestamp": "2026-06-06T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "contractsScanned": 5,
+  "scannerNotes": "Interaction-level analysis. Local findings already captured in Tier 1 profiles are not re-reported. All line references are to the in-scope contracts at commit 2306719.",
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "two-phase-withdrawal-bypass",
+      "severity": "potential-high",
+      "confidence": "high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_totalWithdraw",
+      "line": 414,
+      "lineStart": 404,
+      "lineEnd": 435,
+      "title": "_totalWithdraw ignores the cached `amount` parameter and re-reads live clientBalances, allowing the owner to withdraw more than was announced in Phase 1",
+      "description": "The two-phase totalWithdrawal mechanism in AYieldStrategy caches the client's balance at Phase 1 in `withdrawalStates[token][client].balance` (line 474 of AYieldStrategy.sol). This cached value is emitted in the WithdrawalInitiated event (the community's 24-hour notice) and passed to `_totalWithdraw` as the `amount` parameter in Phase 2 (AYieldStrategy.sol line 499). However, ERC4626MarketYieldStrategy._totalWithdraw completely ignores the passed `amount` argument. It re-reads `clientStoredBalance = clientBalances[token][client]` live (line 414) and uses that as the basis for share computation and the `totalDeposited` decrement (line 430). The `amount` parameter is only used for the guard `require(amount > 0)` at line 406.\n\nConsequence: if the owner (or the owner via depositAsOwner) increases clientBalances between Phase 1 and Phase 2, the amount actually extracted from the strategy in Phase 2 will exceed the balance announced in the WithdrawalInitiated event. The WithdrawalExecuted event at AYieldStrategy.sol line 501 emits `withdrawAmount` (the old cached value), not the actual shares sold or underlying transferred, so the on-chain record further obscures the discrepancy.\n\nThe 24-hour timelock in totalWithdrawal exists specifically as an anti-rugpull notice mechanism ('Provides community protection against rugpulls while allowing legitimate fund migrations' — NatSpec). Silently withdrawing a larger amount than announced undermines the entire purpose of the timelock.",
+      "attack_vector": "1. Owner calls totalWithdrawal(token, clientA) — Phase 1: caches balance=100, emits WithdrawalInitiated(balance=100), community sees '100 will be withdrawn in 24h'. 2. Owner calls depositAsOwner(token, 900, clientA) between Phase 1 and Phase 2, increasing clientBalances[token][clientA] to 1000. 3. After 24h, owner calls totalWithdrawal(token, clientA) — Phase 2: _totalWithdraw reads live clientStoredBalance=1000, sells proportional shares for 1000, transfers underlying to owner(). WithdrawalExecuted event emits the old cached 100, not 1000.",
+      "references": {
+        "AYieldStrategy_phase1_cache": "AYieldStrategy.sol:474",
+        "AYieldStrategy_phase2_execute": "AYieldStrategy.sol:491-499",
+        "totalWithdraw_ignores_amount": "ERC4626MarketYieldStrategy.sol:414-415",
+        "event_emits_old_amount": "AYieldStrategy.sol:501"
+      }
+    },
+    {
+      "id": "CODE-002",
+      "type": "timelock-bypass",
+      "severity": "potential-high",
+      "confidence": "high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "withdrawAsOwner",
+      "line": 279,
+      "lineStart": 279,
+      "lineEnd": 281,
+      "title": "withdrawAsOwner completely bypasses the totalWithdrawal 24-hour timelock, making the anti-rugpull mechanism ineffective",
+      "description": "AYieldStrategy.totalWithdrawal implements a two-phase, 24-hour timelock explicitly described as providing 'community protection against rugpulls while allowing legitimate fund migrations'. ERC4626MarketYieldStrategy adds a separate `withdrawAsOwner(client, recipient, amount)` function (line 279) that routes through `_withdrawInternal` and has no timelock, no cooldown, and no pre-announcement requirement. It can debit any client's full balance and send tokens to any `recipient` address in a single transaction.\n\nThe function is not defined in IYieldStrategy or AYieldStrategy — it is a concrete-level addition. It carries `nonReentrant` but not `whenNotPaused`, explicitly to allow owner use during emergencies. The `Withdrawn` event uses `msg.sender` as the `withdrawer` field, so a monitoring system could detect the owner address; however, the function provides no delay for community response.\n\nThe presence of this function means the totalWithdrawal timelock provides zero durable protection: a rogue owner simply calls withdrawAsOwner() instead of totalWithdrawal(). The two mechanisms exist in the same contract with the same access key (onlyOwner), making the timelock purely cosmetic.",
+      "attack_vector": "Rogue owner calls withdrawAsOwner(client=victimVault, recipient=ownerAddress, amount=type(uint256).max) — capped internally to availablePrincipal. All client principal is extracted to owner in one transaction with no prior notice. No timelock state is touched; totalWithdrawal.withdrawalStates remains None for the client.",
+      "references": {
+        "withdrawAsOwner_definition": "ERC4626MarketYieldStrategy.sol:279-281",
+        "totalWithdrawal_natspec": "AYieldStrategy.sol:313-317",
+        "timelock_comment": "AYieldStrategy.sol:319"
+      }
+    },
+    {
+      "id": "CODE-003",
+      "type": "accounting-corruption",
+      "severity": "potential-high",
+      "confidence": "high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_emergencyWithdraw",
+      "line": 394,
+      "lineStart": 386,
+      "lineEnd": 395,
+      "title": "emergencyWithdraw transfers vault shares to owner without updating clientBalances or totalDeposited, permanently corrupting the accounting ledger",
+      "description": "_emergencyWithdraw (lines 386-395) transfers vault shares directly to owner via `IERC20(address(vault)).safeTransfer(owner(), sharesToTransfer)`. It does not update `clientBalances[token][*]` or `totalDeposited[token]`. After the call, the strategy's share backing is reduced but the principal ledger still reflects full client balances.\n\nDown-stream impact across contracts:\n1. Any subsequent call to _withdrawInternal for any client computes `sharesToSell = vault.convertToShares(amount)` but then caps to `vault.balanceOf(address(this))` (the reduced actual balance). The underlying received will be less than the amount debited from clientBalances. The shortfall is treated as 'protocol yield' by design, so the client's principal is zeroed but they receive less than their credited amount.\n2. _totalWithdraw computes `sharesToSell = (totalShares * clientStoredBalance) / totalDeposited`. Since totalShares decreased (shares stolen) but totalDeposited is unchanged, the proportional shares assigned to each client are understated. Clients receive less than their fair share.\n3. _skimSurplus computes `totalValue = vault.convertToAssets(vault.balanceOf(this))`. If totalValue < totalDeposited (which occurs after share theft), no surplus exists for any client — all surplus skim calls become no-ops, permanently denying yield.\n4. The EmergencyWithdraw event (line 309 of AYieldStrategy.sol) emits the share count transferred, but no corresponding principal reduction is recorded, making on-chain reconciliation impossible.",
+      "attack_vector": "Owner calls emergencyWithdraw(totalShares). All vault shares are transferred to owner. clientBalances and totalDeposited remain unchanged. Clients subsequently attempting withdraw() receive zero or near-zero underlying despite their principal still being recorded. Surplus skim calls become permanent no-ops.",
+      "references": {
+        "emergencyWithdraw_no_accounting": "ERC4626MarketYieldStrategy.sol:386-395",
+        "base_emergencyWithdraw": "AYieldStrategy.sol:304-310",
+        "no_nonReentrant": "AYieldStrategy.sol:304",
+        "clientBalances_not_updated": "ERC4626MarketYieldStrategy.sol:386-395"
+      }
+    },
+    {
+      "id": "CODE-004",
+      "type": "reentrancy",
+      "severity": "potential-medium",
+      "confidence": "medium",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "emergencyWithdraw",
+      "line": 304,
+      "lineStart": 304,
+      "lineEnd": 309,
+      "title": "emergencyWithdraw lacks nonReentrant guard; if vault token implements ERC777 or transfer hooks, owner can repeatedly drain vault shares in a single transaction",
+      "description": "AYieldStrategy.emergencyWithdraw (line 304) is decorated with `onlyOwner` but not `nonReentrant`. It delegates to `_emergencyWithdraw` which in ERC4626MarketYieldStrategy calls `IERC20(address(vault)).safeTransfer(owner(), sharesToTransfer)`. If the vault token implements ERC777 `tokensReceived` hooks or any other transfer callback, the owner's contract receives control during the transfer with the reentrancy mutex NOT held.\n\nOn reentry:\n- `vault.balanceOf(address(this))` returns the updated (reduced) balance\n- The second invocation of _emergencyWithdraw reads `totalShares` again, which may still be > 0 if only a partial amount was specified\n- If `amount >= totalShares`, all remaining shares are transferred on first entry, making reentry a no-op\n- BUT if the owner specifies `amount=1` repeatedly, each reentry drains 1 share\n\nThe concrete sUSDe vault targeted by this strategy uses standard ERC20 without hooks, making this low-probability for the intended deployment. However, the pattern is exploitable against any hook-enabled vault and represents a latent risk for future vault integrations. All other state-changing external entry points (deposit, withdraw, withdrawAsOwner, depositAsOwner, totalWithdrawal, skimSurplus) use nonReentrant; the absence on emergencyWithdraw is an inconsistency.",
+      "attack_vector": "Owner deploys a malicious receiver contract with tokensReceived(). Owner calls emergencyWithdraw(1). Vault token triggers tokensReceived() in owner contract. Owner contract calls emergencyWithdraw(1) again. Repeat until all shares are drained with amounts inconsistent with what any single emergencyWithdraw call should extract.",
+      "references": {
+        "missing_nonReentrant": "AYieldStrategy.sol:304",
+        "external_transfer_to_owner": "ERC4626MarketYieldStrategy.sol:394",
+        "all_other_guards": "ERC4626MarketYieldStrategy.sol:229,248,265,279"
+      }
+    },
+    {
+      "id": "CODE-005",
+      "type": "cei-violation",
+      "severity": "potential-medium",
+      "confidence": "medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_withdrawInternal",
+      "line": 371,
+      "lineStart": 338,
+      "lineEnd": 375,
+      "title": "State updates (clientBalances, totalDeposited) occur after two external calls in _withdrawInternal, creating a cross-contract reentrancy exposure if nonReentrant is ever removed or if the vault token has hooks",
+      "description": "_withdrawInternal violates Checks-Effects-Interactions order. The sequence is:\n1. (line 364) `ammAdapter.swap(...)` — external call to CurveAMMAdapter, which calls CurveRouterNG.exchange\n2. (line 367) `underlyingToken.safeTransfer(recipient, underlyingReceived)` — external call to ERC20, potentially to an arbitrary recipient address\n3. (line 371) `clientBalances[token][balanceHolder] -= amount` — state update\n4. (line 372) `totalDeposited[token] -= amount` — state update\n\nThe nonReentrant guard on the calling functions (withdraw, withdrawAsOwner) currently prevents a direct same-function reentry. However:\n- If recipient is an ERC777 contract or an ERC20 with tokensReceived, it receives a callback at step 2 with stale state (clientBalances still reflects the pre-withdrawal balance)\n- At that point, clientBalances[token][recipient] has not yet been decremented, so if recipient == balanceHolder, a reentrant call to withdraw() would pass the `availablePrincipal` check with the un-decremented value — but nonReentrant blocks this\n- The real risk is cross-function: the recipient callback could call skimSurplus() (which has its own nonReentrant, but a different mutex slot — OZ ReentrancyGuard uses a single shared mutex) — so this is actually blocked by the shared OZ mutex\n\nThe finding stands as a latent design risk: if nonReentrant is ever relaxed or if future code modifies these functions, the unprotected state-after-interaction pattern enables double-withdrawal.",
+      "attack_vector": "If nonReentrant is removed or a future integration uses a different mutex: malicious recipient (ERC777) receives callback after ammAdapter.swap() at line 367, before state update at line 371. Recipient calls withdraw() again — clientBalances[token][recipient] still shows original balance — double withdrawal succeeds.",
+      "references": {
+        "external_call_1": "ERC4626MarketYieldStrategy.sol:364",
+        "external_call_2": "ERC4626MarketYieldStrategy.sol:367",
+        "state_update_1": "ERC4626MarketYieldStrategy.sol:371",
+        "state_update_2": "ERC4626MarketYieldStrategy.sol:372"
+      }
+    },
+    {
+      "id": "CODE-006",
+      "type": "event-integrity",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "_executeWithdrawal",
+      "line": 501,
+      "lineStart": 488,
+      "lineEnd": 502,
+      "title": "WithdrawalExecuted event emits the Phase-1 cached balance (state.balance) rather than the actual amount transferred, producing misleading on-chain records",
+      "description": "_executeWithdrawal at AYieldStrategy.sol line 501 emits `WithdrawalExecuted(token, client, withdrawAmount, currentTime)` where `withdrawAmount = state.balance` — the cached snapshot from Phase 1. As established in CODE-001, ERC4626MarketYieldStrategy._totalWithdraw ignores this value and operates on the live `clientStoredBalance`. The event therefore misrepresents the actual transfer:\n- If clientBalances grew between phases: event says less was withdrawn than actually was\n- If clientBalances shrank between phases (e.g., a prior withdrawAsOwner call): event says more was withdrawn than actually was\n\nOff-chain monitoring systems, accounting reconciliation, and users watching WithdrawalExecuted to verify fund safety will receive incorrect data. This compounds CODE-001 by making the discrepancy harder to detect.",
+      "attack_vector": "Owner increases clientA's balance between Phase 1 and Phase 2 (see CODE-001). Phase 2 extracts 1000 tokens but WithdrawalExecuted emits amount=100 (the Phase-1 cached value). Off-chain monitors, dashboards, and the protocol's own accounting systems record an incorrect withdrawal amount.",
+      "references": {
+        "event_emission": "AYieldStrategy.sol:501",
+        "cached_value_used": "AYieldStrategy.sol:491",
+        "actual_value_ignored": "ERC4626MarketYieldStrategy.sol:404-406"
+      }
+    },
+    {
+      "id": "CODE-007",
+      "type": "access-control-chain",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "withdrawAsOwner",
+      "line": 279,
+      "lineStart": 279,
+      "lineEnd": 281,
+      "title": "withdrawAsOwner permits client != recipient: owner can debit any client's principal while directing tokens to any address, including self, with no distinguishing event field",
+      "description": "withdrawAsOwner(client, recipient, amount) debits `clientBalances[token][client]` but transfers underlying to `recipient`, which can be any address (including the owner themselves or an unrelated address). The emitted Withdrawn event records `msg.sender` as `withdrawer` (revealing the owner called this) but does not record `client` as a separate indexed field — it only records `recipient`. There is no information in the event that directly ties the debit to the client whose balance was consumed.\n\nThe _withdrawInternal function also shares the same Withdrawn event with normal client-initiated withdrawals, making automated monitoring harder: an observer must compare the Withdrawn event's `withdrawer` (owner address) against the `recipient` to infer that a forced extraction occurred. The client whose balance was debited receives no notification whatsoever.\n\nIn a multi-client deployment where the authorized clients are protocol contracts (e.g., staking vaults), silently debiting one client's principal while sending tokens elsewhere could cause those downstream clients to have stale principal records that no longer match the strategy's ledger.",
+      "attack_vector": "Owner calls withdrawAsOwner(client=stakingVaultA, recipient=ownerEOA, amount=stakingVaultA.totalDeposit()). stakingVaultA's principal in the strategy is zeroed. stakingVaultA has no record of this extraction — its own internal accounting still reflects its user deposits. Users of stakingVaultA who try to withdraw observe a deficit.",
+      "references": {
+        "withdrawAsOwner": "ERC4626MarketYieldStrategy.sol:279-281",
+        "event_missing_client": "ERC4626MarketYieldStrategy.sol:374",
+        "client_not_in_event": "ERC4626MarketYieldStrategy.sol:81-84"
+      }
+    },
+    {
+      "id": "CODE-008",
+      "type": "call-sequence-ordering",
+      "severity": "potential-low",
+      "confidence": "medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_skimSurplus",
+      "line": 472,
+      "lineStart": 462,
+      "lineEnd": 487,
+      "title": "safeIncreaseAllowance on vault token to ammAdapter can accumulate residual approval if swap reverts mid-execution, enabling ammAdapter to pull more vault tokens than the strategy intends in a subsequent call",
+      "description": "In four separate code paths (_depositInternal line 315, _withdrawInternal line 361, _totalWithdraw line 423, _skimSurplus line 472), the strategy calls `IERC20(token).safeIncreaseAllowance(address(ammAdapter), amount)` before calling `ammAdapter.swap(...)`. safeIncreaseAllowance is additive — it increments the existing allowance rather than resetting it.\n\nIf a swap call fails for any reason AFTER the approval is set but BEFORE the adapter fully consumes the approved amount (e.g., a partial mid-execution revert in a complex router path, or an edge case where the adapter consumes less than amountIn), residual approval accumulates on subsequent calls. Over multiple failed-then-succeeded cycles, the accumulated approval could be larger than any single intended transfer.\n\nThe CurveAMMAdapter itself correctly uses `forceApprove` (reset-then-set) for its own approval of the router, so the current concrete adapter always consumes exactly amountIn from the strategy. However, the IAMMAdapter interface makes no guarantee about exact consumption, and a future adapter substitution (or direct swap() call from an attacker who somehow obtains the strategy's approval) could exploit accumulated allowance.\n\nNote: atomic transaction semantics mean a reverted safeTransferFrom also reverts the safeIncreaseAllowance in the same transaction. The residual risk only materializes if the adapter partially executes — which the current Curve adapter cannot do — or if gas limits cause unusual paths.",
+      "attack_vector": "Scenario requires a future non-standard IAMMAdapter or vault token that partially consumes allowances. After N partial executions leaving residual approvals, ammAdapter.swap() with a malicious tokenIn contract can pull more than the strategy approves in the current call by consuming accumulated prior allowances.",
+      "references": {
+        "deposit_approval": "ERC4626MarketYieldStrategy.sol:315",
+        "withdraw_approval": "ERC4626MarketYieldStrategy.sol:361",
+        "totalWithdraw_approval": "ERC4626MarketYieldStrategy.sol:423",
+        "skimSurplus_approval": "ERC4626MarketYieldStrategy.sol:472",
+        "adapter_uses_forceApprove": "CurveAMMAdapter.sol:135"
+      }
+    }
+  ],
+  "interactionGraphSummary": {
+    "callChains": [
+      "Client -> ERC4626MarketYieldStrategy.deposit() -> underlyingToken.safeTransferFrom() -> underlyingToken.safeIncreaseAllowance(ammAdapter) -> ammAdapter.swap() -> [CurveAMMAdapter: safeTransferFrom(strategy), forceApprove(router), router.exchange(_receiver=strategy)]",
+      "Client -> ERC4626MarketYieldStrategy.withdraw() -> vault.convertToShares() -> vault.balanceOf() -> vault.convertToAssets() -> vault.safeIncreaseAllowance(ammAdapter) -> ammAdapter.swap() -> underlyingToken.safeTransfer(recipient) -> [STATE UPDATE]",
+      "Owner -> AYieldStrategy.totalWithdrawal() [Phase 1] -> this.balanceOf() [external self-call] -> caches balance in withdrawalStates",
+      "Owner -> AYieldStrategy.totalWithdrawal() [Phase 2] -> ERC4626MarketYieldStrategy._totalWithdraw() -> [reads LIVE clientBalances, ignores cached amount] -> ammAdapter.swap() -> underlyingToken.safeTransfer(owner)",
+      "Owner -> ERC4626MarketYieldStrategy.withdrawAsOwner() -> _withdrawInternal() [no timelock]",
+      "Owner -> AYieldStrategy.emergencyWithdraw() [no nonReentrant] -> ERC4626MarketYieldStrategy._emergencyWithdraw() -> vault.safeTransfer(owner) [no accounting update]",
+      "AuthorizedWithdrawer -> AYieldStrategy.skimSurplus() -> ERC4626MarketYieldStrategy._skimSurplus() -> vault.convertToAssets(vault.balanceOf()) -> _accrueSurplusShares() -> ammAdapter.swap() -> [_distributeBuffer: underlyingToken.safeTransfer(clients[i]) and safeTransfer(recipient)]"
+    ],
+    "trustBoundaries": [
+      "Owner is single point of trust for all admin operations with no timelock on most paths",
+      "ammAdapter is semi-trusted immutable; route config is owner-controlled",
+      "vault is semi-trusted immutable; convertToAssets/convertToShares used as price oracle",
+      "Authorized clients are trusted protocol contracts; they can call deposit/withdraw but not owner functions",
+      "Authorized withdrawers (e.g. SurplusYieldAccumulator) can call skimSurplus"
+    ]
+  }
+}

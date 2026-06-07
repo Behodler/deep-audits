@@ -1,0 +1,509 @@
+{
+  "project": "reflax-yield-vault",
+  "dedupTimestamp": "2026-06-06T00:00:00Z",
+  "deduplicatorAgent": "claude-sonnet-4-6",
+
+  "summary": {
+    "rawInputCounts": {
+      "staticAnalysis": 44,
+      "patternMatches": 5,
+      "codeScanner": 8,
+      "econScanner": 12,
+      "invariantResults": 1,
+      "symbolicResults": 6,
+      "localFindings": 5
+    },
+    "totalRawFindings": 81,
+    "totalDedupedFindings": 22,
+    "reductionRatio": "73%",
+    "byEstimatedSeverity": {
+      "high": 3,
+      "medium": 6,
+      "low": 12,
+      "informational": 1
+    },
+    "filteredAsNoise": 22,
+    "consolidatedGroupCount": 7,
+    "standaloneCount": 15
+  },
+
+  "findings": [
+
+    {
+      "id": "DEDUP-001",
+      "title": "emergencyWithdraw transfers vault shares to owner without updating clientBalances or totalDeposited, permanently corrupting the accounting ledger and making the strategy insolvent",
+      "estimatedSeverity": "high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_emergencyWithdraw",
+      "lines": "386-395",
+      "sources": ["CODE-003", "ECON-007", "INV-2 (Medusa failure)", "SYMBOLIC-003 (Halmos)"],
+      "tier3Evidence": {
+        "medusaFailure": {
+          "invariant": "property_INV2_solvency",
+          "counterexample": "depositForClient(seed, amount) then emergencyWithdrawPartial(amount): heldValue=285969984088074546357438, totalDeposited=416102355444464034513528, deficit=130132371356389488156090 wei",
+          "shrunkSequenceLength": 2
+        },
+        "halmosFailure": {
+          "test": "check_emergencyWithdraw_doesNotBreakSolvency (SYMBOLIC-003)",
+          "counterexample": "totalDeposited=0x8000000000000000, emergencySharesRemoved=0x800000000000000; totalValueAfter < totalDeposited, solvency invariant violated",
+          "solverTime": "0.44-0.55s over 4 paths"
+        },
+        "forgeDirect": {
+          "test": "test_CODE003_emergencyWithdrawLeavesNonZeroPrincipal",
+          "result": "PASS — assertion confirmed: after 1000e18 deposit and full emergencyWithdraw, strategy holds 0 shares, principalOf returns 1000e18, heldValue (0) < totalDeposited (1000e18)"
+        }
+      },
+      "rootCause": "_emergencyWithdraw calls IERC20(address(vault)).safeTransfer(owner(), sharesToTransfer) without touching clientBalances[token][*] or totalDeposited[token]. The physical backing is removed but the principal ledger retains its pre-withdrawal values, making the strategy provably insolvent.",
+      "impact": "After emergencyWithdraw: (1) every subsequent client withdrawal receives less underlying than their credited principal; (2) _accrueSurplusShares finds totalValue < totalDeposited for all clients and returns zero surplus — yield collection is permanently bricked; (3) _totalWithdraw proportional calculations use stale totalDeposited as denominator, assigning inflated share fractions to remaining clients who then receive nothing because the shares are already gone.",
+      "consolidationNote": "CODE-003 and ECON-007 describe the same root cause in identical code locations. Medusa property_INV2_solvency failure and SYMBOLIC-003 are formal proofs of the CODE-003 scenario; they are attached as evidence, not separate findings."
+    },
+
+    {
+      "id": "DEDUP-002",
+      "title": "_totalWithdraw ignores the Phase-1 cached amount and re-reads live clientBalances, allowing inter-phase deposits to be silently extracted and causing underflow that bricks the two-phase withdrawal mechanism",
+      "estimatedSeverity": "high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_totalWithdraw",
+      "lines": "404-435",
+      "secondaryLocation": "src/AYieldStrategy.sol lines 464-502",
+      "sources": ["CODE-001", "ECON-002", "SYMBOLIC-002", "SYMBOLIC-004", "SYMBOLIC-005", "SYMBOLIC-006"],
+      "tier3Evidence": {
+        "halmos_SYMBOLIC_002": {
+          "test": "check_code001_deltaExtraction",
+          "counterexample": "cachedAmount=0x800000000000, liveBalance=0xc00000000000 (+50%); sharesToSellBuggy uses liveBalance not cachedAmount; inter-phase deposit delta extracted as yield, depositor receives nothing",
+          "solverTime": "1.76s over 4 paths"
+        },
+        "halmos_SYMBOLIC_004": {
+          "test": "check_totalWithdraw_usesLiveBalance",
+          "counterexample": "cachedAmount=0x800000000000000000000000, liveBalance=0xc00000000000000000000000 (50% larger); actualDecrement=liveBalance, correctDecrement=cachedAmount; over-decrement by delta",
+          "solverTime": "0.03s over 2 paths"
+        },
+        "halmos_SYMBOLIC_005": {
+          "test": "check_totalWithdraw_extracts_interPhaseDeposit",
+          "counterexample": "cachedAmount=interPhaseDeposit=otherClientBalance=0x800000000000; buggyRemainder=0 (double-counted), correctRemainder=2*otherClientBalance; inter-phase deposit principal vanishes from accounting",
+          "solverTime": "0.11s over 7 paths"
+        },
+        "halmos_SYMBOLIC_006": {
+          "test": "check_totalWithdraw_underflow_bricksWithdrawal",
+          "counterexample": "liveBalance=2*cachedAmount > totalDepositedStale=cachedAmount; totalDeposited -= clientStoredBalance reverts with Solidity 0.8 checked arithmetic, permanently bricking Phase 2",
+          "solverTime": "0.04s over 3 paths"
+        },
+        "forgeDirect": {
+          "test": "test_CODE001_depositAsOwnerBetweenPhasesAltersCachedBalance",
+          "result": "PASS — 1000e18 deposit, Phase 1 caches 1000, depositAsOwner(5000) interleaved, Phase 2 uses live balance 6000, owner receives 6000e18 not announced 1000e18"
+        }
+      },
+      "rootCause": "_totalWithdraw silently ignores its `amount` parameter (the Phase-1 cached balance) and re-reads `clientStoredBalance = clientBalances[token][client]` from live storage. Any principal added to the client between Phase 1 initiation and Phase 2 execution is included in the proportional share calculation and extracted by the owner without being covered by the 24-hour observation window. Additionally, if the live balance exceeds the stale totalDeposited (possible after inter-phase deposits that also incremented totalDeposited), the subtraction `totalDeposited -= clientStoredBalance` reverts, permanently bricking the withdrawal path.",
+      "impact": "Three distinct impact paths proved by Halmos: (1) silent extraction of inter-phase deposits beyond the announced amount (rug amplification via depositAsOwner); (2) double-counting of inter-phase deposits that causes depositors to lose principal with no recovery path; (3) underflow revert that permanently locks the client's funds in the strategy when the live balance exceeds the stale denominator. The 24-hour anti-rugpull notice mechanism is rendered ineffective for all cases.",
+      "consolidationNote": "CODE-001 and ECON-002 describe the same root cause. SYMBOLIC-002/004/005/006 are four independent Halmos proofs covering the extraction path, the principal-decrement mismatch, the double-counting corruption, and the underflow-revert brick condition respectively. All four are evidence for the same root cause; combined they constitute a complete formal proof of the CODE-001 class of bugs."
+    },
+
+    {
+      "id": "DEDUP-003",
+      "title": "withdrawAsOwner completely bypasses the totalWithdrawal 24-hour timelock, making the anti-rugpull mechanism cosmetically ineffective — owner can atomically drain all client principal in a single block",
+      "estimatedSeverity": "high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "withdrawAsOwner",
+      "lines": "279-281",
+      "sources": ["CODE-002", "ECON-008", "PATTERN-005 (partial)"],
+      "rootCause": "withdrawAsOwner routes through _withdrawInternal with no timelock, no whenNotPaused check, and no pre-announcement requirement, while totalWithdrawal in AYieldStrategy implements a 24-hour two-phase waiting period explicitly to provide community protection against rugpulls. Both functions are accessible by the same onlyOwner key. The timelock mechanism is therefore circumventable at will.",
+      "impact": "A rogue or compromised owner calls withdrawAsOwner(client, attackerEOA, type(uint256).max) once per client in the same block. All client principal is converted and sent to an arbitrary recipient address with no 24-hour notice, no pause-gate, and no event field that identifies the debited client. The WithdrawalExecuted event that communities monitor to detect rugpulls is never emitted because the two-phase path is not taken.",
+      "consolidationNote": "CODE-002 and ECON-008 cover the same contract:line:function with the same root cause. PATTERN-005 partially overlaps (centralization risk for setRoute/setSlippageTolerance/withdrawAsOwner combined); the withdrawAsOwner component is captured here at higher severity while the remaining PATTERN-005 content is redundant with other dedup entries or noise-level centralization."
+    },
+
+    {
+      "id": "DEDUP-004",
+      "title": "slippageToleranceBps defaults to 0 at deployment and accepts MAX_BPS (10000) as a valid setting — zero default over-credits depositor principal while MAX_BPS silently discards all principal credits",
+      "estimatedSeverity": "medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "setSlippageTolerance / _depositInternal / _creditedPrincipal",
+      "lines": "194, 212-214",
+      "sources": ["PATTERN-001", "ECON-009", "LOCAL-001 (ERC4626MarketYieldStrategy profile)", "SYMBOLIC-001 (Halmos — dust-loss edge case)"],
+      "tier3Evidence": {
+        "halmos_SYMBOLIC_001": {
+          "test": "check_creditedPrincipal_positiveAmountNeverZeroCredit",
+          "counterexample": "amount=4 wei, slippageBps=8192 (81.92%): 4*(10000-8192)/10000 = 7232/10000 = 0; depositor loses 4 wei with zero principal credited",
+          "solverTime": "0.63s over 4 paths",
+          "note": "Reachable at any slippage setting when amount < 10000/(10000-slippageBps). Also reachable trivially at MAX_BPS: amount*0/10000=0 for all amount."
+        }
+      },
+      "rootCause": "Two related but distinct issues sharing the same state variable: (1) Default value 0 means creditedPrincipal = full nominal amount — deposits at zero-tolerance produce a principal larger than the recoverable AMM value, making the strategy technically insolvent from block 1 of deployment. Withdrawal reverts on tight minOut floor when Curve quotes any discount. (2) setSlippageTolerance accepts values up to MAX_BPS (10000) inclusive; at MAX_BPS the formula amount*(10000-10000)/10000 = 0, so every deposit books zero principal while the underlying tokens are consumed by the AMM swap. Halmos (SYMBOLIC-001) further proves a dust-loss edge case: any sub-dust deposit (amount < 10000/(10000-slippageBps)) also yields zero credited principal at any non-trivial slippage setting.",
+      "impact": "Zero-default window (deployment gap): depositors are over-credited relative to recoverable value; withdrawals may brick on minOut. MAX_BPS setting path: all depositor principal is silently nullified — depositors' tokens are transferred in, converted via AMM, and the strategy retains the shares as yield-only with no principal record. Dust-loss path: deposits smaller than the truncation threshold lose principal entirely.",
+      "distinctionFromDEDUP003": "The zero-default is a deployment-time operational risk independent of any admin action. The MAX_BPS path requires an owner call to setSlippageTolerance and is a centralization concern. Both live on the same state variable and share the same remediation (constructor initialization + upper bound below MAX_BPS).",
+      "consolidationNote": "PATTERN-001 (missing slippage / MAX_BPS boundary) and ECON-009 (zero-default deployment gap) describe two attack surfaces on the same state variable. LOCAL-001 from the ERC4626MarketYieldStrategy profile focuses on the MAX_BPS boundary. SYMBOLIC-001 provides formal proof of the dust-loss sub-case. All four are merged here. PATTERN-001's notes also identify the MAX_BPS path as the more severe vector, which aligns with the Medium estimate."
+    },
+
+    {
+      "id": "DEDUP-005",
+      "title": "CEI violation in _withdrawInternal: state updates occur after two external calls, creating a latent reentrancy exposure that relies entirely on nonReentrant being preserved on all callers",
+      "estimatedSeverity": "medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_withdrawInternal",
+      "lines": "338-375",
+      "sources": ["SLITHE-002", "SLITHE-003", "PATTERN-002", "CODE-005"],
+      "rootCause": "Interactions-before-Effects ordering in _withdrawInternal: (1) ammAdapter.swap() external call at line 364, (2) underlyingToken.safeTransfer() to recipient at line 367, then (3) clientBalances decrement at line 371, (4) totalDeposited decrement at line 372. The nonReentrant modifier on all current public callers (withdraw, withdrawAsOwner) and the shared OZ mutex prevent immediate exploitation. However, the pattern represents a structural latent risk: any future refactoring that adds a new call path without nonReentrant, or any vault/underlying token with ERC777 hooks, would enable double-withdrawal.",
+      "impact": "Currently non-exploitable due to nonReentrant guards on all public entry points sharing the single OZ reentrancy mutex. Latent risk escalates to active if: (a) a new call path is added to _withdrawInternal without the guard, or (b) the vault or underlying token implements transfer callbacks. SLITHE-002 and SLITHE-003 are the same root cause on two different functions (_withdrawInternal and _totalWithdraw) — both delegate to the same interaction-before-effect pattern.",
+      "consolidationNote": "SLITHE-002 and SLITHE-003 are near-duplicate Slither reentrancy detections on the same internal function (_withdrawInternal) and a closely related internal function (_totalWithdraw); both are CEI violations in the same contract with the same nonReentrant mitigation. PATTERN-002 is the same issue identified by the pattern database with more context. CODE-005 is the Tier 2 analysis of the same pattern. All four merged into one finding."
+    },
+
+    {
+      "id": "DEDUP-006",
+      "title": "vault.convertToAssets / convertToShares used as price oracle across deposits, withdrawals, and surplus calculations — ERC4626 internal rate is manipulable by donating underlying to the vault, enabling DoS or over-extraction of surplus",
+      "estimatedSeverity": "medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_depositInternal / _withdrawInternal / _skimSurplus / _accrueSurplusShares",
+      "lines": "312, 358, 449-487, 501-527",
+      "sources": ["ECON-003", "ECON-004"],
+      "rootCause": "All four economically sensitive computations (deposit minOut, withdrawal minOut, surplus totalValue snapshot, per-client surplus shares) trust vault.convertToAssets/convertToShares as an accurate price oracle. For vaults whose exchange rate is determined by totalAssets/totalSupply, a same-block donation of underlying to the vault inflates totalAssets without minting shares, inflating convertToAssets. This also inflates the surplus ceiling check (require totalShares <= convertToShares(aggregateSurplus)) since the ceiling is itself computed from the manipulated rate.",
+      "impact": "Primary realistic risk is DoS of deposit, withdrawal, and skimSurplus operations during a manipulated price spike (minOut becomes unsatisfiable, swap reverts). Secondary risk for skimSurplus: if the Curve pool tracks the vault's inflated rate, the swap executes against inflated shares, extracting more underlying than the real yield warrants and depleting principal-backing shares. ECON-004 adds the observation that the deposit solvency invariant is in share-terms not underlying-terms, meaning an AMM discount to the vault rate allows clients to be credited more principal than is recoverable at current AMM prices.",
+      "consolidationNote": "ECON-003 (vault oracle manipulation enabling DoS/over-extraction) and ECON-004 (deposit solvency invariant is share-denominated not underlying-denominated, leaving a gap at AMM discount) share the same root cause: blind trust in vault.convertToAssets/convertToShares as both oracle and price floor. Different attack vectors but same remediation approach. Merged into one finding."
+    },
+
+    {
+      "id": "DEDUP-007",
+      "title": "safeIncreaseAllowance used unconditionally before every AMM swap without resetting to zero after completion — residual approvals accumulate under partial-revert conditions",
+      "estimatedSeverity": "medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_depositInternal / _withdrawInternal / _totalWithdraw / _skimSurplus",
+      "lines": "315, 361, 423, 472",
+      "sources": ["PATTERN-003", "CODE-008"],
+      "rootCause": "safeIncreaseAllowance is additive. Called unconditionally before every swap in four code paths, it increments the existing allowance rather than setting it. Under normal execution the residual is zero because each swap consumes exactly the approved amount. However, if a swap reverts after the approval is granted but before safeTransferFrom executes within the adapter, the residual persists across calls. Subsequent calls further accumulate it. The current CurveAMMAdapter uses forceApprove internally for its router approval — the inconsistency (forceApprove at adapter level, safeIncreaseAllowance at strategy level) is noted in PATTERN-003.",
+      "impact": "Under the current CurveAMMAdapter (which always consumes exactly amountIn in an atomic transaction), exploitability is near-zero — atomic revert semantics prevent partial approvals. Under a future IAMMAdapter substitution or any non-standard execution path where partial consumption is possible, accumulated allowances could allow the adapter to pull more than the strategy currently intends. Severity is Medium rather than High because current deployment assumptions prevent exploitation; it is an interface-level design weakness.",
+      "consolidationNote": "PATTERN-003 and CODE-008 are the same finding identified by different scanners. PATTERN-003 provides the wider call-site inventory; CODE-008 adds the nuanced note on atomic revert semantics. Merged."
+    },
+
+    {
+      "id": "DEDUP-008",
+      "title": "abi.encodePacked() with dynamic-type arguments passed to keccak256 — potential hash collision",
+      "estimatedSeverity": "medium",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "unknown (line 340)",
+      "line": 340,
+      "sources": ["ADERYN-013"],
+      "rootCause": "abi.encodePacked() with dynamic-length arguments produces ambiguous concatenations when passed to a hash function. Two distinct inputs can produce the same hash, enabling signature forgery or key collision depending on usage context.",
+      "impact": "Severity depends on how the keccak256 result is used. If it gates access control, validates state transitions, or identifies unique entities, collisions could allow spoofed authorization or duplicate-key attacks. Marked potential-medium pending manual confirmation of usage context.",
+      "consolidationNote": "Standalone finding. No other scanner flagged this specific location."
+    },
+
+    {
+      "id": "DEDUP-009",
+      "title": "CurveAMMAdapter.setRoute does not validate lastToken — uninitialized local variable accepted as route terminal token",
+      "estimatedSeverity": "medium",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "function": "setRoute",
+      "line": 74,
+      "sources": ["SLITHE-004"],
+      "rootCause": "The local variable `lastToken` in setRoute is declared but never initialized before being read as the route's terminal token validation anchor. An uninitialized local in Solidity defaults to 0 (address(0)). Depending on how lastToken is used in the validation logic, this could allow a route to be registered with a zero terminal address that bypasses input-output token matching checks.",
+      "impact": "If route validation relies on lastToken matching the expected output token, the uninitialized value (address(0)) would silently pass any check that compares lastToken to address(0), or silently fail any non-zero check — either case allows misconfigured routes to be committed on-chain by the owner. A misconfigured route could direct swaps to an incorrect pool or token pair.",
+      "consolidationNote": "Standalone finding. Reported only by Slither. Not flagged by Aderyn or other tools at this location."
+    },
+
+    {
+      "id": "DEDUP-010",
+      "title": "emergencyWithdraw lacks nonReentrant guard — inconsistent with all other state-changing entry points; latent risk if vault token implements transfer callbacks",
+      "estimatedSeverity": "low",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "emergencyWithdraw",
+      "line": 304,
+      "sources": ["CODE-004"],
+      "rootCause": "AYieldStrategy.emergencyWithdraw is decorated with onlyOwner but not nonReentrant. Every other state-changing external entry point (deposit, withdraw, depositAsOwner, withdrawAsOwner, totalWithdrawal, skimSurplus) uses nonReentrant. The asymmetry is noted in the profile as intentional (emergency access during paused state), but it creates a gap: if the vault token implements ERC777 tokensReceived hooks, the owner's receiver contract gets control mid-transfer with the reentrancy mutex NOT held.",
+      "impact": "Low probability for the intended sUSDe vault deployment (standard ERC20, no hooks). Escalates to concrete risk for any future vault integration with transfer hooks. The owner calling emergencyWithdraw with partial amounts repeatedly could extract more than the current balanceOf check implies across re-entrant calls.",
+      "consolidationNote": "Standalone finding from CODE-004. The SLITHE-011/SLITHE-012 reentrancy-benign/reentrancy-events findings in other functions are lower quality noise and handled separately."
+    },
+
+    {
+      "id": "DEDUP-011",
+      "title": "nonReentrant is not the first modifier in function declaration lists across multiple entry points — modifiers before nonReentrant can execute with reentrancy mutex not yet locked",
+      "estimatedSeverity": "low",
+      "contract": "src/AYieldStrategy.sol and src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "multiple (lines 319, 366 in AYieldStrategy.sol; lines 229, 248, 265, 279 in ERC4626MarketYieldStrategy.sol)",
+      "sources": ["ADERYN-024", "ADERYN-025", "ADERYN-026", "ADERYN-027", "ADERYN-028", "ADERYN-029"],
+      "rootCause": "Solidity applies modifiers in declaration order. If nonReentrant is not listed first, earlier modifiers (onlyOwner, whenNotPaused, onlyAuthorizedClient) execute before the reentrancy lock is acquired. A malicious modifier body (unlikely in this codebase given owner-controlled access) or a modifier with an external call could theoretically reenter the contract before the mutex is set.",
+      "impact": "Low severity in practice: the earlier modifiers (onlyOwner, whenNotPaused, onlyAuthorizedClient) do not make external calls and do not allow re-entry. The risk is purely structural — a future modifier added before nonReentrant could exploit the ordering.",
+      "consolidationNote": "Six Aderyn findings (ADERYN-024 through ADERYN-029) all report the same pattern (nonReentrant not first) across two contracts. Consolidated into one finding with all six instances noted."
+    },
+
+    {
+      "id": "DEDUP-012",
+      "title": "Constructor _owner shadowing across three contracts — local parameter hides inherited Ownable._owner state variable",
+      "estimatedSeverity": "low",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol, src/AYieldStrategy.sol, src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "constructor",
+      "lines": "CurveAMMAdapter.sol:48, AYieldStrategy.sol:171, ERC4626MarketYieldStrategy.sol:101",
+      "sources": ["SLITHE-009", "SLITHE-008", "SLITHE-007", "ADERYN-020", "ADERYN-021"],
+      "rootCause": "All three constructors declare a local parameter named `_owner` which shadows the inherited Ownable._owner state variable. Shadowing is benign here because the constructors immediately pass `_owner` to the Ownable initializer (which sets the state variable). However, if any future constructor logic were added that reads `_owner` expecting the state variable, it would silently read the parameter.",
+      "impact": "No current security impact. Flagged as a code quality finding to prevent future confusion.",
+      "consolidationNote": "Five findings (SLITHE-007/008/009 and ADERYN-020/021) all report the same shadowing pattern across the three constructors. Consolidated into one finding."
+    },
+
+    {
+      "id": "DEDUP-013",
+      "title": "Unbounded client loop in skimSurplus — no maximum client count enforced; sufficiently many clients cause OOG revert that permanently bricks surplus collection",
+      "estimatedSeverity": "low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_accrueSurplusShares / _distributeBuffer",
+      "lines": "509, 547",
+      "sources": ["LOCAL-002 (ERC4626MarketYieldStrategy profile)", "PATTERN-004", "ADERYN-033", "ADERYN-034", "SLITHE-010"],
+      "rootCause": "skimSurplus iterates over all authorized clients twice (once in _accrueSurplusShares at line 509, once in _distributeBuffer at line 547). The client set is managed via setClient (onlyOwner) with no on-chain cap on set size. A sufficiently large set causes OOG, bricking all surplus collection. Additionally, SLITHE-010 notes that _accrueSurplusShares makes an external call to vault.convertToShares inside the client loop.",
+      "impact": "Owner-controlled risk (requires owner misconfiguration or compromise). In current deployment the client set is expected to be 1-2 protocol contracts. If expanded, skimSurplus becomes permanently uncallable until a client is removed. Yield accumulates but cannot be extracted.",
+      "consolidationNote": "LOCAL-002 (profile), PATTERN-004 (pattern-db), ADERYN-033/034 (require-revert-in-loop), and SLITHE-010 (calls-loop) all point to the same unbounded iteration over the clients array. ADERYN-033/034 are about require statements inside the loops — a related but distinct sub-issue; included here rather than as a separate finding because the loops themselves are the root concern. Merged."
+    },
+
+    {
+      "id": "DEDUP-014",
+      "title": "WithdrawalExecuted event emits the Phase-1 cached balance rather than the actual amount transferred — produces misleading on-chain records that compound the CODE-001 discrepancy",
+      "estimatedSeverity": "low",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "_executeWithdrawal",
+      "line": 501,
+      "sources": ["CODE-006"],
+      "rootCause": "WithdrawalExecuted(token, client, withdrawAmount, currentTime) at line 501 emits withdrawAmount = state.balance (Phase-1 cached snapshot). ERC4626MarketYieldStrategy._totalWithdraw ignores this value and operates on the live clientStoredBalance. When clientBalances grew between phases, the event records a smaller amount than actually transferred; when it shrank, the event records a larger amount.",
+      "impact": "Off-chain monitoring systems and accounting reconciliation tools receive incorrect withdrawal amounts. The misleading event compresses the observability of the DEDUP-002 bug — community members watching for rugpull signals cannot detect inter-phase enlargement from the WithdrawalExecuted event alone.",
+      "consolidationNote": "Standalone finding from CODE-007 in the code scanner. Directly related to DEDUP-002 as a secondary impact amplifier; kept as a separate finding because the remediation is distinct (fix the event emission independently of the cached-amount logic fix)."
+    },
+
+    {
+      "id": "DEDUP-015",
+      "title": "withdrawAsOwner debits client's principal while allowing tokens to be sent to an arbitrary recipient — no event field identifies which client was drained",
+      "estimatedSeverity": "low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "withdrawAsOwner",
+      "line": 279,
+      "sources": ["CODE-007"],
+      "rootCause": "withdrawAsOwner(client, recipient, amount) debits clientBalances[token][client] but routes underlying to recipient, which can be any address including owner. The emitted Withdrawn event records msg.sender (owner) as withdrawer and recipient as the destination, but omits client as an indexed field. Automated monitoring cannot determine which client's balance was debited without additional storage reads.",
+      "impact": "In a multi-client deployment, a forced extraction from one client (e.g., a staking vault) leaves that client's internal user accounting inconsistent with the strategy's ledger, with no on-chain signal linking the Withdrawn event to the debited client address. Downstream protocols cannot detect the extraction from events alone.",
+      "consolidationNote": "Standalone finding from CODE-007. Distinct from DEDUP-003 (timelock bypass) despite affecting the same function — different root cause (event opacity vs. missing timelock) and different remediation."
+    },
+
+    {
+      "id": "DEDUP-016",
+      "title": "Ownable used instead of Ownable2Step across all three contracts — ownership transfer is irreversible if the new owner address is incorrect",
+      "estimatedSeverity": "low",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol, src/AYieldStrategy.sol",
+      "function": "constructor / transferOwnership",
+      "lines": "CurveAMMAdapter.sol:20, AYieldStrategy.sol:18",
+      "sources": ["SEMGRE-037", "SEMGRE-039"],
+      "rootCause": "Both contracts use OpenZeppelin Ownable rather than Ownable2Step. A single-step ownership transfer is irreversible: if the new owner address is a typo, a contract without the expected interface, or a compromised address, the contract is permanently mis-owned with no recovery path.",
+      "impact": "Low severity operational risk; not an active exploit path. Remediable by migrating to Ownable2Step.",
+      "consolidationNote": "SEMGRE-037 and SEMGRE-039 are the same issue on two different contracts. Consolidated."
+    },
+
+    {
+      "id": "DEDUP-017",
+      "title": "ERC4626 vault used as price oracle in surplus and skimSurplus calculations — two consecutive convertToAssets calls in the same transaction may return different rates for time-weighted vaults, causing revert",
+      "estimatedSeverity": "low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_skimSurplus",
+      "lines": "449-487",
+      "sources": ["ECON-005"],
+      "rootCause": "Inside _skimSurplus, vault.convertToAssets is called at the top to snapshot totalValue, and again at the bottom to compute minOut from totalShares. For vaults with time-weighted or accrual-triggered rates (e.g., those that accrue yield on the first storage access per block), these two calls can return different rates within the same transaction. If the second call returns a higher rate, minOut becomes unsatisfiable and the swap reverts.",
+      "impact": "Temporary DoS on skimSurplus — no fund loss, retry resolves it. Low severity.",
+      "consolidationNote": "Standalone finding from ECON-005. Note: ECON-003 covers the broader vault oracle manipulation risk as a higher severity finding (DEDUP-006); ECON-005 is a narrow sub-case specifically about intra-transaction rate drift during skimSurplus, kept as a separate low-severity finding."
+    },
+
+    {
+      "id": "DEDUP-018",
+      "title": "Multi-client deposit dilution: late depositors erode early depositors' accrued surplus through proportional surplus allocation formula",
+      "estimatedSeverity": "low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_accrueSurplusShares",
+      "lines": "501-527",
+      "sources": ["ECON-006", "ECON-010"],
+      "rootCause": "Surplus per client is (totalValue * principal_i / totalDeposited) - principal_i. A new deposit after yield has accrued increases totalDeposited without adding to existing totalValue, diluting all existing clients' surplus fractions. The setSetAsideBuffer NatSpec explicitly acknowledges this as a known acceptable tradeoff for the current all-protocol-owned-client model.",
+      "impact": "Intra-protocol accounting redistribution in the current trusted-client deployment. Only becomes an external exploit if the trust model changes (unauthorized clients are added). The buffer front-run sub-case (ECON-010) is also acknowledged in the NatSpec. Low severity as documented design behavior.",
+      "consolidationNote": "ECON-006 (deposit dilution) and ECON-010 (setAsideBuffer front-run) share the same proportional allocation root cause. ECON-010 is a special case of ECON-006 where the buffer mechanic amplifies the dilution. Merged."
+    },
+
+    {
+      "id": "DEDUP-019",
+      "title": "totalBalanceOf and principalOf use different data sources — live vault price vs. static accounting value — creating inconsistent paired views that can return negative yield for downstream integrators",
+      "estimatedSeverity": "low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "totalBalanceOf / principalOf",
+      "lines": "142-156, 129-132",
+      "sources": ["ECON-012"],
+      "rootCause": "totalBalanceOf returns (vault.convertToAssets(totalShares) * principal) / totalDeposited — live vault-price-sensitive. principalOf returns the static clientBalances[token][account]. After a vault price decline, totalBalanceOf < principalOf. Any integrating contract computing totalBalanceOf - principalOf as a yield signal receives a negative value, potentially reverting on unchecked underflow or triggering incorrect downstream logic.",
+      "impact": "Low severity in isolation; elevated risk for downstream protocols that assume totalBalanceOf >= principalOf as an invariant. No fund loss in the strategy itself.",
+      "consolidationNote": "Standalone finding from ECON-012."
+    },
+
+    {
+      "id": "DEDUP-020",
+      "title": "AYieldStrategy.balanceOf/_initiateWithdrawal uses an external self-call (this.balanceOf) to read principal — unnecessary gas overhead with no security benefit",
+      "estimatedSeverity": "informational",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "_initiateWithdrawal",
+      "line": 468,
+      "sources": ["LOCAL-001-AYIELD (AYieldStrategy profile)"],
+      "rootCause": "this.balanceOf(token, client) resolves as an external call rather than an internal virtual dispatch. balanceOf in the concrete implementation delegates to principalOf, which reads clientBalances directly. The external call path is functionally correct but pays the external-call gas premium unnecessarily.",
+      "impact": "Gas inefficiency only. No security impact; the nonReentrant guard on totalWithdrawal and the view-only nature of balanceOf prevent any reentry concern.",
+      "consolidationNote": "Standalone finding from the AYieldStrategy profile. Pure QA/informational."
+    },
+
+    {
+      "id": "DEDUP-021",
+      "title": "CurveAMMAdapter.swap does not independently verify amountOut >= minAmountOut after router returns — delegates floor enforcement entirely to Curve Router NG",
+      "estimatedSeverity": "low",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "function": "swap",
+      "lines": "120-141",
+      "sources": ["ECON-011"],
+      "rootCause": "After router.exchange returns amountOut, no require(amountOut >= minAmountOut) check is performed. The strategy trusts the Curve Router NG's internal _min_dy enforcement exclusively. A misconfigured, buggy, or future-upgraded router could return a below-floor value without the adapter detecting it.",
+      "impact": "Low in practice: the router is immutable and battle-tested. Risk only materialises under a future strategy redeployment with an incorrect router address. Defense-in-depth recommendation only.",
+      "consolidationNote": "Standalone finding from ECON-011."
+    },
+
+    {
+      "id": "DEDUP-022",
+      "title": "SLITHE-005 uninitialized local totalSetAside in _distributeBuffer",
+      "estimatedSeverity": "low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_distributeBuffer",
+      "line": 546,
+      "sources": ["SLITHE-005"],
+      "rootCause": "Local variable totalSetAside at line 546 is declared but never initialized before being used as an accumulator in the _distributeBuffer loop. In Solidity 0.8+, uninitialized uint256 defaults to 0, so the accumulation is functionally correct. However, the explicit absence of initialization reduces readability and could mask a logic error if the variable's intent changes.",
+      "impact": "No security impact in Solidity 0.8+ (default initialization to 0). Code quality finding only.",
+      "consolidationNote": "Standalone finding from Slither. SLITHE-004 (CurveAMMAdapter lastToken uninitialized) is kept separate as DEDUP-009 because its impact is substantively different (address(0) vs. uint256 accumulator)."
+    }
+  ],
+
+  "filteredFindings": {
+    "reason": "Removed as tool noise, pure gas optimizations, style issues, or informational-only with no security impact",
+    "count": 22,
+    "items": [
+      {
+        "ids": ["ADERYN-015", "ADERYN-016", "ADERYN-017", "ADERYN-018", "ADERYN-019"],
+        "type": "literal-instead-of-constant",
+        "reason": "Pure gas/style optimization. No security impact. Any automated tool reports this."
+      },
+      {
+        "ids": ["ADERYN-014"],
+        "type": "large-numeric-literal",
+        "reason": "Style issue: use e-notation. No security impact."
+      },
+      {
+        "ids": ["ADERYN-022", "ADERYN-023"],
+        "type": "modifier-used-only-once",
+        "reason": "Code organization suggestion. No security impact."
+      },
+      {
+        "ids": ["ADERYN-030", "ADERYN-031", "ADERYN-032"],
+        "type": "push-zero-opcode",
+        "reason": "Deployment target note (EVM version / PUSH0). Informational. Protocol deploys on mainnet where PUSH0 is supported."
+      },
+      {
+        "ids": ["ADERYN-035"],
+        "type": "state-no-address-check",
+        "reason": "Missing zero-address check on an address state variable. QA-only per C4 norms — does not lead to fund loss."
+      },
+      {
+        "ids": ["ADERYN-036"],
+        "type": "unused-public-function",
+        "reason": "Minor API surface suggestion. No security impact."
+      },
+      {
+        "ids": ["SLITHE-006"],
+        "type": "unused-return",
+        "reason": "EnumerableSet.add() return value ignored in setClient. The EnumerableSet silently does nothing on duplicate add; the return value indicates whether the element was new. Minor: owner calling setClient(client, true) twice has no adverse effect."
+      },
+      {
+        "ids": ["SLITHE-001"],
+        "type": "incorrect-equality",
+        "reason": "Strict equality totalShares == 0 || totalDeposited[token] == 0 in _totalWithdraw. The guard is a bailout condition (return early if nothing to withdraw). The equality is intentional and correct; Slither's incorrect-equality detector flags all strict equalities. No exploit path."
+      },
+      {
+        "ids": ["SLITHE-011"],
+        "type": "reentrancy-benign",
+        "reason": "Slither classifies _depositInternal as reentrancy-benign (state written after external call, no eth). Deposit is guarded by nonReentrant. No exploit path; lower-quality duplicate of the broader CEI concern already covered in DEDUP-005."
+      },
+      {
+        "ids": ["SLITHE-012"],
+        "type": "reentrancy-events",
+        "reason": "CurveAMMAdapter.swap emits Swapped event after external router call. Event-after-external-call is purely informational — no state can be re-entered from a Swapped event. No security impact."
+      },
+      {
+        "ids": ["SEMGRE-038", "SEMGRE-041", "SEMGRE-044"],
+        "type": "unnecessary-checked-arithmetic-in-loop",
+        "reason": "Gas optimization: use unchecked for loop counter. No security impact."
+      },
+      {
+        "ids": ["SEMGRE-040", "SEMGRE-043"],
+        "type": "array-length-outside-loop",
+        "reason": "Gas optimization: cache array.length. No security impact."
+      },
+      {
+        "ids": ["SEMGRE-042"],
+        "type": "state-variable-read-in-a-loop",
+        "reason": "Gas optimization: cache state variable. No security impact."
+      },
+      {
+        "ids": ["LOCAL-003", "LOCAL-004"],
+        "type": "informational / return-value-semantic-mismatch",
+        "reason": "LOCAL-003 is a readability note on variable reuse within a loop body. LOCAL-004 is a NatSpec documentation gap on skimSurplus return value when buffers are active. Neither has security impact."
+      }
+    ]
+  },
+
+  "consolidationLog": [
+    {
+      "dedupId": "DEDUP-001",
+      "mergedFrom": ["CODE-003", "ECON-007", "Medusa INV-2 failure", "SYMBOLIC-003"],
+      "action": "merged — same root cause (_emergencyWithdraw no accounting update), Tier 3 results attached as proof"
+    },
+    {
+      "dedupId": "DEDUP-002",
+      "mergedFrom": ["CODE-001", "ECON-002", "SYMBOLIC-002", "SYMBOLIC-004", "SYMBOLIC-005", "SYMBOLIC-006"],
+      "action": "merged — same root cause (_totalWithdraw live-balance override), four Halmos proofs cover independent failure modes of same bug"
+    },
+    {
+      "dedupId": "DEDUP-003",
+      "mergedFrom": ["CODE-002", "ECON-008", "PATTERN-005 (partial)"],
+      "action": "merged — same contract:function:root-cause; PATTERN-005 setRoute/setSlippageTolerance components are lower-quality overlap with other dedups and noise"
+    },
+    {
+      "dedupId": "DEDUP-004",
+      "mergedFrom": ["PATTERN-001", "ECON-009", "LOCAL-001", "SYMBOLIC-001"],
+      "action": "merged — same state variable (slippageToleranceBps) with two distinct but related attack surfaces (zero-default deployment gap + MAX_BPS boundary); SYMBOLIC-001 dust-loss is a sub-case attached as evidence"
+    },
+    {
+      "dedupId": "DEDUP-005",
+      "mergedFrom": ["SLITHE-002", "SLITHE-003", "PATTERN-002", "CODE-005"],
+      "action": "merged — all four are CEI violation findings on _withdrawInternal/_totalWithdraw with the same nonReentrant mitigation note"
+    },
+    {
+      "dedupId": "DEDUP-006",
+      "mergedFrom": ["ECON-003", "ECON-004"],
+      "action": "merged — vault oracle trust is the shared root cause; ECON-004's share-denominated solvency invariant gap is a specific consequence of the same trust assumption"
+    },
+    {
+      "dedupId": "DEDUP-007",
+      "mergedFrom": ["PATTERN-003", "CODE-008"],
+      "action": "merged — same finding (allowance accumulation) identified by two different scanners"
+    },
+    {
+      "dedupId": "DEDUP-011",
+      "mergedFrom": ["ADERYN-024", "ADERYN-025", "ADERYN-026", "ADERYN-027", "ADERYN-028", "ADERYN-029"],
+      "action": "merged — six instances of the same pattern (nonReentrant not first) across two contracts consolidated into one finding"
+    },
+    {
+      "dedupId": "DEDUP-012",
+      "mergedFrom": ["SLITHE-007", "SLITHE-008", "SLITHE-009", "ADERYN-020", "ADERYN-021"],
+      "action": "merged — five instances of constructor _owner shadowing across three contracts"
+    },
+    {
+      "dedupId": "DEDUP-013",
+      "mergedFrom": ["LOCAL-002", "PATTERN-004", "ADERYN-033", "ADERYN-034", "SLITHE-010"],
+      "action": "merged — unbounded client loop and related require-in-loop concerns on the same iteration paths"
+    },
+    {
+      "dedupId": "DEDUP-016",
+      "mergedFrom": ["SEMGRE-037", "SEMGRE-039"],
+      "action": "merged — same Ownable vs Ownable2Step issue on two contracts"
+    },
+    {
+      "dedupId": "DEDUP-018",
+      "mergedFrom": ["ECON-006", "ECON-010"],
+      "action": "merged — same proportional dilution root cause; ECON-010 buffer front-run is a special case"
+    }
+  ]
+}

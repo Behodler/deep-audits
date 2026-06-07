@@ -1,0 +1,292 @@
+{
+  "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+  "profileTimestamp": "2026-06-06T00:00:00Z",
+  "solidityVersion": "^0.8.13",
+  "regressionNote": "story-044 (commit 2306719 vs a65dbf0): deposit() and depositAsOwner() now return uint256 creditedPrincipal. _depositInternal return type changed from void to uint256. No logic changed; existing behavior is identical. This is the primary regression scope.",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {
+      "value": "likely",
+      "confidence": "likely",
+      "notes": "_accrueSurplusShares and _distributeBuffer loop over clients[] array (passed from AYieldStrategy._authorizedClients.values()). The client count is bounded by how many calls setClient(true) has been made. There is no on-chain cap on client count, so in theory the array could grow large enough to cause OOG in skimSurplus. However, client set management is owner-only, so this requires a misconfigured or malicious owner. Flagged as local-medium (DoS risk under owner misconfiguration)."
+    },
+    "checkedArithmetic": { "value": true, "confidence": "verified", "notes": "Solidity 0.8+; no unchecked blocks or assembly." },
+    "reentrancyGuarded": {
+      "value": ["deposit", "withdraw", "depositAsOwner", "withdrawAsOwner"],
+      "confidence": "verified",
+      "notes": "All state-changing entry points have nonReentrant. skimSurplus (in AYieldStrategy) also has nonReentrant. emergencyWithdraw does NOT have nonReentrant — inherited from AYieldStrategy. _emergencyWithdraw transfers vault shares (not underlying) to owner; this calls vault.safeTransfer which interacts with the ERC4626 vault token. Reentrancy from vault token callbacks is a cross-contract concern deferred to Tier 2."
+    },
+    "accessControlled": {
+      "value": ["setSlippageTolerance", "depositAsOwner", "withdrawAsOwner"],
+      "confidence": "verified",
+      "notes": "deposit() and withdraw() are onlyAuthorizedClient. Owner functions use onlyOwner. No unguarded state-changing external functions found."
+    },
+    "initializerProtected": { "value": "n/a", "confidence": "verified", "notes": "Not upgradeable. Constructor validates all required addresses are non-zero." },
+    "pauseMechanism": { "value": true, "confidence": "verified", "notes": "Inherited from AYieldStrategy/Pausable. deposit() and withdraw() have whenNotPaused. depositAsOwner() and withdrawAsOwner() deliberately OMIT whenNotPaused to allow emergency owner operations." }
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-001",
+      "type": "missing-upper-bound-on-privileged-parameter",
+      "severity": "local-medium",
+      "function": "setSlippageTolerance",
+      "line": 194,
+      "description": "Owner can set slippageToleranceBps to MAX_BPS (10000), which causes _creditedPrincipal(amount) to return 0 for ANY deposit amount. Consequently: (1) minOut = vault.convertToShares(0) = 0, so the AMM swap executes with NO slippage floor; (2) clientBalances[token][recipient] += 0, so the user receives zero principal credit despite their underlying tokens being consumed by the swap. The sharesReceived > 0 check still passes if the swap returns any shares, so the deposit function succeeds and emits a Deposited event with a non-zero amount, masking the zero-credit outcome. The protocol captures the full position as yield. This is a centralization risk: a rogue or compromised owner can silently nullify all depositor principal. The setSlippageTolerance caller is onlyOwner but the boundary condition should be restricted to a safe maximum.",
+      "recommendation": "Add `require(_bps < MAX_BPS, \"slippage tolerance must be < MAX_BPS\")` or introduce a separate MAX_SLIPPAGE_BPS constant (e.g., 500 = 5%) as an upper bound enforced in setSlippageTolerance. The current `<=` check allows the degenerate MAX_BPS value.",
+      "affectedFunctions": ["setSlippageTolerance", "_depositInternal", "_creditedPrincipal"],
+      "isRegression": false,
+      "note": "This vulnerability existed before story-044. Story-044 did not introduce or remediate it."
+    },
+    {
+      "id": "LOCAL-002",
+      "type": "unbounded-loop-over-owner-controlled-set",
+      "severity": "local-low",
+      "function": "_skimSurplus (via _accrueSurplusShares and _distributeBuffer)",
+      "lines": [509, 547],
+      "description": "skimSurplus iterates over all authorized clients twice (once in _accrueSurplusShares, once in _distributeBuffer). The client set is owner-managed (setClient is onlyOwner), so a misconfigured or malicious owner could add enough clients to cause an OOG revert in skimSurplus. This would permanently brick surplus collection. No external attacker can grow the set without owner access.",
+      "recommendation": "Document the expected maximum client count and either (a) enforce a MAX_CLIENTS constant in setClient, or (b) add a NatSpec warning. For most production deployments with a small, static client set, this is a documentation item rather than an actionable code change.",
+      "isRegression": false
+    },
+    {
+      "id": "LOCAL-003",
+      "type": "variable-reuse-obfuscation",
+      "severity": "local-info",
+      "function": "_accrueSurplusShares",
+      "line": 522,
+      "description": "The `shares` local variable is computed as per-client surplus shares (uint256 shares = vault.convertToShares(surplus)), added to totalShares, then immediately overwritten as per-client buffer shares (shares = shares * setAsideBufferSize[client] / 100). This reuse within the same loop body is correct but reduces readability; a reader may mistake the post-reuse value for the surplus-shares value.",
+      "recommendation": "Introduce a separate `uint256 bufferSharesForClient` variable to hold the buffer-fraction result and avoid reusing the `shares` slot.",
+      "isRegression": false
+    },
+    {
+      "id": "LOCAL-004",
+      "type": "return-value-semantic-mismatch",
+      "severity": "local-info",
+      "function": "skimSurplus (inherited from AYieldStrategy)",
+      "description": "When set-aside buffers are configured, skimSurplus() returns toRecipient (amount going to `recipient`), which is LESS than underlyingReceived (total underlying extracted). The IYieldStrategy NatSpec says 'actual underlying token amount delivered to recipient', which is correct, but callers expecting 'total yield collected' will undercount when buffers are active. The CLAUDE.md discusses this for the SurplusSkimmed event sum vs. return value, but does not explicitly document the buffer reduction.",
+      "recommendation": "Extend the IYieldStrategy.skimSurplus NatSpec to state explicitly: 'When set-aside buffers are configured for any client, the return value is reduced by the buffer amounts distributed to those clients. To derive total yield collected, sum the return value and all safeTransfer amounts to clients during the call.'",
+      "isRegression": false
+    }
+  ],
+
+  "summary": "Concrete yield strategy that acquires ERC4626 vault shares via AMM swaps instead of direct vault.deposit(), allowing participation in vaults with withdrawal restrictions (e.g., sUSDe 7-day cooldown). Maintains principal ledgers (clientBalances + totalDeposited) using a slippage-haircut credit model: credited principal = amount * (MAX_BPS - slippageToleranceBps) / MAX_BPS. The haircut ensures fair_value_of_shares >= credited_principal as a provable solvency invariant. skimSurplus redeems surplus via a single AMM swap, distributing proportional set-aside buffers to clients before forwarding the remainder to the recipient.",
+
+  "keyStateVariables": [
+    {
+      "name": "underlyingToken",
+      "type": "IERC20 (immutable)",
+      "invariant": "Set once at construction. All operations validate token == address(underlyingToken)."
+    },
+    {
+      "name": "vault",
+      "type": "IERC4626 (immutable)",
+      "invariant": "Set once at construction. Non-rebasing ERC4626 vault assumed. Share price monotonically non-decreasing assumed (explicitly documented in contract comment)."
+    },
+    {
+      "name": "ammAdapter",
+      "type": "IAMMAdapter (immutable)",
+      "invariant": "Set once at construction. Must be fully configured for both underlying->vault and vault->underlying directions before any deposit/withdrawal."
+    },
+    {
+      "name": "slippageToleranceBps",
+      "type": "uint256 public",
+      "mutators": ["setSlippageTolerance (onlyOwner)"],
+      "invariant": "0 <= slippageToleranceBps <= MAX_BPS. DEFAULT IS 0 (no slippage protection until owner sets it). WARNING: MAX_BPS is a degenerate value (LOCAL-001).",
+      "defaultValue": "0"
+    },
+    {
+      "name": "clientBalances",
+      "type": "mapping(address => mapping(address => uint256)) private",
+      "mutators": ["_depositInternal (+= creditedPrincipal)", "_withdrawInternal (-= amount)", "_totalWithdraw (= 0)"],
+      "readers": ["principalOf", "balanceOf (via principalOf)", "totalBalanceOf", "_accrueSurplusShares", "_totalWithdraw"],
+      "invariant": "sum(clientBalances[token][*]) == totalDeposited[token] always. Each client's balance is incremented by the haircut principal on deposit and decremented by the REQUESTED amount on withdrawal (not received)."
+    },
+    {
+      "name": "totalDeposited",
+      "type": "mapping(address => uint256) private",
+      "mutators": ["_depositInternal (+= creditedPrincipal)", "_withdrawInternal (-= amount)", "_totalWithdraw (-= clientStoredBalance)"],
+      "invariant": "Must equal sum(clientBalances[token][*]). Used as denominator in proportional yield calculations; cannot be zero when clients have nonzero balances."
+    }
+  ],
+
+  "accountingLogic": {
+    "deposit": {
+      "creditedPrincipal": "amount * (MAX_BPS - slippageToleranceBps) / MAX_BPS",
+      "minOut": "vault.convertToShares(creditedPrincipal)",
+      "principalBooked": "creditedPrincipal (not nominal amount, not shares received)",
+      "solvencyInvariant": "minOut ensures fair_value_of_shares_received >= creditedPrincipal. Actual execution gap (good execution) surfaces as protocol yield."
+    },
+    "withdrawal": {
+      "principalDecrement": "REQUESTED amount (capped to availablePrincipal), NOT received amount",
+      "sharesToSell": "vault.convertToShares(cappedAmount), further capped to vault.balanceOf(this)",
+      "minOut": "vault.convertToAssets(sharesToSell) * (MAX_BPS - slippageToleranceBps) / MAX_BPS",
+      "shortfallHandling": "If underlying received < amount, shortfall remains as protocol yield (principal fully decremented)."
+    },
+    "skimSurplus": {
+      "surplusPerClient": "(totalValue * principal_i / totalDeposited) - principal_i (floored division, protocol-favoring)",
+      "aggregateCeiling": "require(sum(convertToShares(surplus_i)) <= convertToShares(totalValue - totalDeposited))",
+      "singleSwap": "All surplus shares sold in ONE ammAdapter.swap call. minOut computed on aggregate.",
+      "bufferDistribution": "Each client with setAsideBufferSize > 0 receives bufferPercent% of their proportional surplus back before remainder goes to recipient.",
+      "returnValue": "Amount delivered to recipient (reduced by buffer set-asides, NOT total underlying extracted)"
+    },
+    "totalWithdraw": {
+      "sharesToSell": "(totalShares * clientStoredBalance) / totalDeposited (proportional, floor division)",
+      "minOut": "vault.convertToAssets(sharesToSell) * (MAX_BPS - slippageToleranceBps) / MAX_BPS",
+      "destination": "underlyingToken transferred to owner() for manual redistribution",
+      "accountingUpdate": "clientBalances[token][client] = 0; totalDeposited[token] -= clientStoredBalance"
+    }
+  },
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "deposit(address token, uint256 amount, address recipient) returns (uint256 creditedPrincipal)",
+        "visibility": "external",
+        "stateChanges": ["clientBalances[token][recipient]", "totalDeposited[token]"],
+        "externalCalls": [
+          "underlyingToken.safeTransferFrom(msg.sender, this, amount)",
+          "underlyingToken.safeIncreaseAllowance(ammAdapter, amount)",
+          "ammAdapter.swap(underlying, vault, amount, minOut)"
+        ],
+        "accessControl": "onlyAuthorizedClient",
+        "reentrancyGuard": true,
+        "whenNotPaused": true,
+        "returnValue": "creditedPrincipal = amount * (MAX_BPS - slippageToleranceBps) / MAX_BPS"
+      },
+      {
+        "function": "withdraw(address token, uint256 amount, address recipient)",
+        "visibility": "external",
+        "stateChanges": ["clientBalances[token][recipient]", "totalDeposited[token]"],
+        "externalCalls": [
+          "vault.convertToShares(amount)",
+          "vault.balanceOf(this)",
+          "vault.convertToAssets(sharesToSell)",
+          "vault.safeIncreaseAllowance(ammAdapter, sharesToSell)",
+          "ammAdapter.swap(vault, underlying, sharesToSell, minOut)",
+          "underlyingToken.safeTransfer(recipient, underlyingReceived)"
+        ],
+        "accessControl": "onlyAuthorizedClient",
+        "reentrancyGuard": true,
+        "whenNotPaused": true
+      },
+      {
+        "function": "depositAsOwner(address token, uint256 amount, address client) returns (uint256 creditedPrincipal)",
+        "visibility": "external",
+        "stateChanges": ["clientBalances[token][client]", "totalDeposited[token]"],
+        "externalCalls": ["same as deposit()"],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": true,
+        "whenNotPaused": false,
+        "notes": "Bypass for owner to credit a client's balance directly. Tokens transferred from owner (msg.sender)."
+      },
+      {
+        "function": "withdrawAsOwner(address client, address recipient, uint256 amount)",
+        "visibility": "external",
+        "stateChanges": ["clientBalances[underlyingToken][client]", "totalDeposited[underlyingToken]"],
+        "externalCalls": ["same as withdraw()"],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": true,
+        "whenNotPaused": false,
+        "notes": "Debits client's balance but sends tokens to recipient (can differ)."
+      },
+      {
+        "function": "setSlippageTolerance(uint256 _bps)",
+        "visibility": "external",
+        "stateChanges": ["slippageToleranceBps"],
+        "externalCalls": [],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": false,
+        "notes": "Allows 0..MAX_BPS inclusive. Setting to MAX_BPS is a degenerate case (LOCAL-001)."
+      },
+      {
+        "function": "underlying() view returns (address)",
+        "visibility": "external",
+        "stateChanges": [],
+        "accessControl": "none"
+      },
+      {
+        "function": "principalOf(address token, address account) view returns (uint256)",
+        "visibility": "external",
+        "stateChanges": [],
+        "accessControl": "none"
+      },
+      {
+        "function": "totalBalanceOf(address token, address account) view returns (uint256)",
+        "visibility": "external",
+        "stateChanges": [],
+        "externalCalls": ["vault.balanceOf(this)", "vault.convertToAssets(totalShares)"],
+        "accessControl": "none"
+      },
+      {
+        "function": "balanceOf(address token, address account) view returns (uint256)",
+        "visibility": "external",
+        "stateChanges": [],
+        "accessControl": "none",
+        "notes": "DEPRECATED. Delegates to this.principalOf (external self-call). Returns principal only."
+      },
+      {
+        "function": "getTotalDeposited(address token) view returns (uint256)",
+        "visibility": "external",
+        "stateChanges": [],
+        "accessControl": "none"
+      },
+      {
+        "function": "getTotalShares() view returns (uint256)",
+        "visibility": "external",
+        "stateChanges": [],
+        "externalCalls": ["vault.balanceOf(this)"],
+        "accessControl": "none"
+      }
+    ],
+
+    "externalCalls": [
+      {
+        "target": "IERC20 underlyingToken (immutable)",
+        "methods": ["safeTransferFrom", "safeIncreaseAllowance", "safeTransfer"],
+        "trustLevel": "semi-trusted",
+        "notes": "Assumed standard ERC20. No fee-on-transfer support. safeIncreaseAllowance used; residual allowance risk is zero because each swap consumes exactly the approved amount in the same transaction."
+      },
+      {
+        "target": "IERC4626 vault (immutable)",
+        "methods": ["balanceOf", "convertToAssets", "convertToShares", "safeTransfer (via IERC20 cast)", "safeIncreaseAllowance (via IERC20 cast)"],
+        "trustLevel": "semi-trusted",
+        "notes": "Used as price oracle (convertToAssets, convertToShares) AND as the token being held/sold. Non-rebasing assumed. Manipulable share price is a cross-contract (Tier 2) concern."
+      },
+      {
+        "target": "IAMMAdapter ammAdapter (immutable)",
+        "methods": ["swap"],
+        "trustLevel": "semi-trusted",
+        "notes": "Assumed to pull exactly amountIn from this contract and return at least minOut to this contract. Token balances received after swap are not verified against minOut independently — the adapter's internal revert is the only floor enforcement."
+      }
+    ],
+
+    "events": ["Deposited", "Withdrawn", "SlippageToleranceSet"],
+
+    "modifiers": ["onlyAuthorizedClient", "onlyOwner", "nonReentrant", "whenNotPaused"]
+  },
+
+  "trustAssumptions": [
+    "Owner is trusted: slippageToleranceBps, client authorization, and emergency functions are all owner-controlled with no timelock.",
+    "ERC4626 vault share price is monotonically non-decreasing; rebasing vaults are explicitly not supported.",
+    "vault.convertToAssets and vault.convertToShares return accurate values; they are used as price oracles for minOut and surplus calculations.",
+    "ammAdapter correctly enforces minAmountOut and does not retain tokens between calls.",
+    "underlyingToken is a standard ERC20 (no hooks, no fee-on-transfer, no rebasing).",
+    "The AMM pool is liquid enough that normal deposits/withdrawals succeed within the configured slippage tolerance."
+  ],
+
+  "inheritanceChain": ["AYieldStrategy", "IYieldStrategy", "IPausable", "Ownable", "ReentrancyGuard", "Pausable"],
+
+  "complexity": {
+    "loc": 558,
+    "functions": 19,
+    "externalCalls": 12,
+    "stateVariables": 6
+  },
+
+  "regressionSummary": {
+    "changedSinceLastAudit": ["deposit()", "depositAsOwner()", "_depositInternal()"],
+    "changeNature": "Return value addition only. story-044 percolates creditedPrincipal (the slippage-haircut principal) up from _depositInternal through depositAsOwner and deposit. No logic, state update, or external call patterns were altered.",
+    "regressionRisk": "Very low. The change is ABI-backward-compatible (existing callers ignoring return value are unaffected). The new return value correctly reflects the already-implemented story-043 principal crediting logic. No new attack surface introduced.",
+    "newRiskSurface": "None. The creditedPrincipal return value is a pure read of a value already booked to storage; it introduces no new state machine paths."
+  }
+}

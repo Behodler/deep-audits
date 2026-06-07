@@ -1,0 +1,98 @@
+{
+  "severityAudit": {
+    "project": "reflax-yield-vault",
+    "run": "reflax-yield-vault-11",
+    "auditorModel": "claude-sonnet-4-6",
+    "timestamp": "2026-06-06T00:00:00Z",
+    "findings": [
+      {
+        "findingId": "H-01",
+        "claimedSeverity": "high",
+        "assessedSeverity": "high",
+        "agreement": true,
+        "confidence": "high",
+        "analysis": {
+          "assetRisk": "Confirmed. After emergencyWithdraw the strategy holds zero shares but clientBalances and totalDeposited remain at pre-withdrawal values. Every subsequent withdrawal calculates a proportional share fraction against a non-zero totalDeposited but vault.balanceOf(address(this)) == 0, so sharesToSell is capped to 0 and underlyingReceived == 0. Clients receive nothing recoverable.",
+          "attackPath": "Valid and executable. Single onlyOwner call to emergencyWithdraw(shares). No external dependencies. Effect is immediate and permanent.",
+          "conditions": "Owner must call emergencyWithdraw. Owner is protocol-controlled (not an arbitrary EOA), which reduces likelihood, but does not change severity when owner action causes irreversible client fund loss. C4 treats protocol-controlled privileged roles as in-scope for High when their action directly and permanently destroys client assets.",
+          "impact": "Three independent verified impacts: (1) all client withdrawals return 0 underlying (assets lost); (2) skimSurplus permanently returns 0 (yield collection bricked); (3) proportional calculation in _totalWithdraw uses stale denominator making future two-phase withdrawals also return 0. Medusa and Halmos proofs confirm solvency invariant violation. PoC PASS 2/2."
+        },
+        "notes": "The core question is whether an owner action that causes permanent, irreversible client asset loss qualifies as High. Under C4 criteria the answer is yes: assets ARE stolen/lost via a valid, concrete attack path. The owner is a protocol-controlled account, not a DAO multisig with timelocks — this is not a governance risk that can be mitigated by on-chain delay. The missing accounting update is a code defect (not intentional design) that makes even good-faith emergency use permanently destructive. High is correct."
+      },
+      {
+        "findingId": "H-02",
+        "claimedSeverity": "high",
+        "assessedSeverity": "medium",
+        "agreement": false,
+        "confidence": "medium",
+        "analysis": {
+          "assetRisk": "Real but conditional. The over-extraction impact requires the owner to: (a) initiate Phase 1 via totalWithdrawal, then (b) call depositAsOwner for the same client between Phase 1 and Phase 2. Both calls are onlyOwner. The underflow-DoS path (SYMBOLIC-006) does not require the depositAsOwner interleave — it can be triggered if the live balance already exceeds totalDeposited due to a pre-existing accounting state, but the precondition (live balance > stale totalDeposited for the same token) is itself only reachable through prior owner manipulation or a separately-existing accounting bug.",
+          "attackPath": "The primary impact path (silent over-extraction of inter-phase deposits) requires two coordinated owner actions — Phase 1 totalWithdrawal followed by depositAsOwner — between which the 24-hour window must elapse. This is not a simple single-call attack. The secondary impact path (underflow DoS) is realistic but requires a state precondition that itself implies prior accounting corruption.",
+          "conditions": "Over-extraction path: owner must call two specific functions in the correct order with a 24-hour gap. This is coordinated multi-step owner action, which is external-condition territory under C4 criteria. The underflow-DoS path has a precondition that depends on prior state corruption. Neither path is exploitable by an arbitrary attacker.",
+          "impact": "Halmos proofs and Forge PoC confirm all three impact sub-paths are technically valid. The most damaging sub-path (over-extraction) requires deliberate owner coordination, not a passive execution mistake."
+        },
+        "disagreementReason": "The finding's primary attack path requires the owner to deliberately interleave depositAsOwner between two phases of a two-phase withdrawal process — a multi-step, time-delayed, coordinated owner action. Under C4 criteria, this falls into the Medium category: 'value leak with stated assumptions and external requirements' where the external requirement is deliberate owner action across a 24-hour gap. The underlying _totalWithdraw live-read bug is genuine and the impact is real, but the exploit path has too many owner-controlled prerequisites to qualify as a no-precondition High. The underflow-DoS sub-path by itself would be Medium (function availability impacted). The recommended severity is Medium.",
+        "upgradeNote": "If the project intends depositAsOwner to be callable at any time for any client, and there is no protocol-level constraint that prevents its use during an active Phase-1 window, the finding could be argued back toward High on the basis that the owner has no on-chain signal preventing the dangerous interleave. However, the deliberate multi-step owner coordination requirement is sufficient to distinguish this from a zero-precondition High.",
+        "notes": "Recommend downgrade to Medium. The bug is real and the impact is real, but the primary exploit path requires deliberate coordinated owner action across two specific function calls with a time gap — not a passive or one-shot attack."
+      },
+      {
+        "findingId": "H-03",
+        "claimedSeverity": "high",
+        "assessedSeverity": "medium",
+        "agreement": false,
+        "confidence": "high",
+        "analysis": {
+          "assetRisk": "The asset risk is real: withdrawAsOwner can send all client principal to any recipient address without the 24-hour notice window. However, the risk is identical in nature to any onlyOwner privileged drain function — the owner could also simply selfDestruct, upgrade the proxy, or otherwise take funds if trusted.",
+          "attackPath": "Valid and single-call. withdrawAsOwner(client, attackerEOA, type(uint256).max) drains the client atomically. The attack path itself is clean and executable.",
+          "conditions": "Requires owner action. The owner is described as a 'protocol-controlled account, not an arbitrary EOA.' In C4 terms this is a centralization risk: the owner can rug without the documented timelock protection.",
+          "impact": "Full principal drain of all clients in one block. No recovery path once executed."
+        },
+        "disagreementReason": "This is a textbook centralization / broken-timelock finding. The documented 24-hour protection exists in NatSpec and the interface (IYieldStrategy.sol line 88: 'This provides community protection against rugpulls while allowing legitimate fund migrations') but is bypassed by a sibling function with identical owner privileges. Under C4 conventions, a finding that: (1) requires onlyOwner action, (2) describes an owner who holds unconstrained privileges by design, and (3) does not demonstrate a code defect that enables a non-owner attacker to replicate the effect — is classified as a centralization risk (C) or Medium at most, not High. The timelock bypass does constitute a broken-invariant finding (the stated protection is false), which justifies Medium rather than Low/QA. However, the root cause is that the owner can always act — the timelock was never structurally enforced. C4 judges have consistently placed 'owner can rug via undocumented path' at Medium-C (centralization) when the owner is a known privileged role. The finding is valuable and should be submitted, but as Medium / centralization, not High.",
+        "upgradeNote": "The strength of the finding is the false NatSpec documentation — the interface explicitly promises community protection that the contract does not deliver. This is a documentation/invariant failure, not asset theft by a non-owner. Recommend Medium with centralization label.",
+        "notes": "Recommend downgrade to Medium (centralization). The broken timelock documentation is a genuine finding but the attack requires owner action, and the owner holds unconstrained privileges across the contract by design. This is not a defect that enables a non-owner to steal funds."
+      },
+      {
+        "findingId": "M-01",
+        "claimedSeverity": "medium",
+        "assessedSeverity": "medium",
+        "agreement": true,
+        "confidence": "high",
+        "analysis": {
+          "assetRisk": "Two distinct sub-paths confirmed. MAX_BPS path: real tokens consumed, zero principal credited — depositor has no accounting claim on their funds. Default=0 path: strategy non-functional from deployment until owner sets tolerance — withdrawals always revert on any real-world AMM discount.",
+          "attackPath": "MAX_BPS path requires owner to call setSlippageTolerance(10000). Default=0 path requires no action — it is the deployment state. Both are confirmed by PoC 2/2 and Halmos.",
+          "conditions": "MAX_BPS path: owner action required. Default=0 path: no action required — this is the as-deployed state for any fresh contract instance.",
+          "impact": "MAX_BPS: depositor funds trapped with zero accounting claim (unrecoverable). Default=0: withdrawal DoS from deployment until configured. Neither path enables non-owner asset theft. Impact is value leak (MAX_BPS) and availability (default=0), not direct theft."
+        },
+        "notes": "Medium is correct. The two sub-paths together cover both C4 Medium buckets: (1) protocol function/availability impacted (default=0 withdrawal DoS) and (2) value leak with stated assumptions and external requirements (MAX_BPS owner-set path). The Halmos dust-loss proof (SYMBOLIC-001) adds formal verification weight. The finding was previously L-01 in the ledger; the upgrade to Medium is justified by the MAX_BPS silent-zero-credit path which is qualitatively worse than a mere spec deviation."
+      },
+      {
+        "findingId": "M-02",
+        "claimedSeverity": "medium",
+        "assessedSeverity": "medium",
+        "agreement": true,
+        "confidence": "medium",
+        "analysis": {
+          "assetRisk": "No permanent fund loss confirmed. DoS impact is real: inflated convertToAssets causes minOut > actual AMM output, reverting deposits, withdrawals, and skimSurplus. The surplus over-extraction secondary path is noted but not directly proved at the magnitude of a High.",
+          "attackPath": "Valid. Attacker donates underlying to ERC4626 vault, inflating totalAssets/totalSupply ratio. Same-block convertToAssets returns inflated value. minOut derived from this value exceeds AMM price. All affected operations revert.",
+          "conditions": "Attacker must lock capital in the donation. However, for standard ERC4626 vaults the donated tokens CAN be recovered by redeeming vault shares — the finding description notes this ('Attack cost: the donated tokens are not recoverable') but this is vault-implementation dependent. For inflation attacks on the vault itself the donation is typically only a one-block lock cost if the attacker holds shares. The capital cost is real but bounded.",
+          "impact": "Primary: DoS of all strategy operations (deposits, withdrawals, skimSurplus) — no permanent fund loss. Secondary: potential surplus over-extraction — not independently proved to magnitude of High. PoC 3/3 confirms DoS. No PoC confirms the over-extraction secondary path at High magnitude."
+        },
+        "notes": "Medium is correct under C4 criteria: protocol availability impacted, no direct asset theft, capital-cost griefing vector. The 'donated tokens are not recoverable' claim in the finding description is overstated — classic ERC4626 inflation attacks using direct transfers make the donated amount unrecoverable to the attacker, but the finding correctly identifies this as the attack cost. The secondary surplus over-extraction path needs additional evidence to support upgrading to High; as stated it is speculative. Medium stands."
+      }
+    ],
+    "summary": {
+      "totalFindings": 5,
+      "agreements": 3,
+      "disagreements": 2,
+      "upgradeRecommendations": 0,
+      "downgradeRecommendations": 2,
+      "recommendedSeverities": {
+        "H-01": "High",
+        "H-02": "Medium",
+        "H-03": "Medium",
+        "M-01": "Medium",
+        "M-02": "Medium"
+      }
+    }
+  }
+}

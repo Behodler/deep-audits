@@ -1,0 +1,109 @@
+{
+  "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+  "profileTimestamp": "2026-06-06T00:00:00Z",
+  "solidityVersion": "^0.8.13",
+  "regressionNote": "No changes since last audit (a65dbf0). File is unchanged.",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": { "value": true, "confidence": "verified", "notes": "Only loop is `for (uint256 i = 0; i < 11; i++)` in setRoute — bounded to constant 11." },
+    "checkedArithmetic": { "value": true, "confidence": "verified", "notes": "Solidity 0.8+; no unchecked blocks or assembly." },
+    "reentrancyGuarded": { "value": "not needed", "confidence": "verified", "notes": "CurveAMMAdapter is stateless during swap execution. It holds no token balances and makes no state-changing calls that could be exploited via re-entry. forceApprove resets before each router call." },
+    "accessControlled": { "value": ["setRoute"], "confidence": "verified", "notes": "setRoute is onlyOwner. swap() is open to any caller — authorization is enforced by callers (strategy)." },
+    "initializerProtected": { "value": "n/a", "confidence": "verified", "notes": "Not an upgradeable proxy. Constructor is the sole initializer." }
+  },
+
+  "localFindings": [],
+
+  "summary": "Concrete IAMMAdapter that routes token swaps through the Curve Router NG. Stores one pre-computed route struct per (tokenIn, tokenOut) direction. Enforces a bidirectional-configuration invariant: swap() in either direction reverts until BOTH directions are configured. Route management is owner-only. The contract is stateless between calls (no token balances held).",
+
+  "keyStateVariables": [
+    {
+      "name": "router",
+      "type": "ICurveRouterNG (immutable)",
+      "invariant": "Set once at construction; cannot be changed. Points to the Curve Router NG address."
+    },
+    {
+      "name": "routes",
+      "type": "mapping(address => mapping(address => Route))",
+      "visibility": "private",
+      "mutators": ["setRoute"],
+      "readers": ["getRoute", "isPairFullyConfigured", "swap"],
+      "invariant": "Route.configured must be true for swap() to succeed. Both directions must be configured before either can be used."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "setRoute(address tokenIn, address tokenOut, address[11] path, uint256[5][5] swapParams, address[5] pools)",
+        "visibility": "external",
+        "stateChanges": ["routes[tokenIn][tokenOut]"],
+        "externalCalls": [],
+        "accessControl": "onlyOwner",
+        "reentrancyGuard": false,
+        "notes": "Validates path[0] == tokenIn and last non-zero path entry == tokenOut. Does NOT validate swapParams or pools content — must be verified off-chain against actual Curve pool coin indices."
+      },
+      {
+        "function": "swap(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut) returns (uint256 amountOut)",
+        "visibility": "external",
+        "stateChanges": [],
+        "externalCalls": [
+          "IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn)",
+          "IERC20(tokenIn).forceApprove(address(router), amountIn)",
+          "router.exchange(..., _receiver=msg.sender)"
+        ],
+        "accessControl": "none",
+        "reentrancyGuard": false,
+        "notes": "Open to any caller. Authorization is the caller's responsibility. Pulls tokenIn FROM caller, sends tokenOut BACK to caller (via router receiver=msg.sender). Bidirectional invariant: requires both routes[tokenIn][tokenOut] and routes[tokenOut][tokenIn] to be configured. forceApprove (reset-then-set) prevents allowance accumulation."
+      },
+      {
+        "function": "getRoute(address tokenIn, address tokenOut) view returns (address[11], uint256[5][5], address[5], bool)",
+        "visibility": "external",
+        "stateChanges": [],
+        "accessControl": "none"
+      },
+      {
+        "function": "isPairFullyConfigured(address tokenA, address tokenB) view returns (bool)",
+        "visibility": "public",
+        "stateChanges": [],
+        "accessControl": "none",
+        "notes": "Returns true only if both A->B and B->A routes are configured."
+      }
+    ],
+
+    "externalCalls": [
+      {
+        "target": "IERC20(tokenIn)",
+        "methods": ["safeTransferFrom", "forceApprove"],
+        "trustLevel": "semi-trusted",
+        "notes": "Assumes standard ERC20. safeTransferFrom pulls from caller; forceApprove sets exact amountIn on router. No fee-on-transfer or rebasing token support."
+      },
+      {
+        "target": "ICurveRouterNG router (immutable)",
+        "methods": ["exchange"],
+        "trustLevel": "semi-trusted (canonical on-chain Curve Router NG)",
+        "notes": "Router receives exactly amountIn tokens. Output is sent directly to msg.sender (strategy). If router reverts, approval is also reverted."
+      }
+    ],
+
+    "events": ["RouteSet", "Swapped"],
+
+    "modifiers": ["onlyOwner"]
+  },
+
+  "trustAssumptions": [
+    "router is the genuine Curve Router NG at the configured address.",
+    "tokenIn is a standard ERC20 (no hooks, no fee-on-transfer).",
+    "Route data (path, swapParams, pools) is correctly pre-computed off-chain against live pool coin indices.",
+    "The Curve Router NG pulls exactly amountIn and does not re-enter the adapter."
+  ],
+
+  "inheritanceChain": ["IAMMAdapter", "Ownable"],
+
+  "complexity": {
+    "loc": 142,
+    "functions": 5,
+    "externalCalls": 3,
+    "stateVariables": 2
+  }
+}

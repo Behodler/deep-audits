@@ -1,0 +1,237 @@
+{
+  "project": "reflax-yield-vault",
+  "scanTimestamp": "2026-06-06T00:00:00Z",
+  "scanType": "pattern-matching",
+  "regressionStory": "story-044",
+  "storyDescription": "Percolate credited deposit principal up as deposit return value",
+  "patternsChecked": 22,
+  "targetContracts": [
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+    "src/AYieldStrategy.sol",
+    "src/AMMAdapters/CurveAMMAdapter.sol"
+  ],
+  "findingsCount": 8,
+  "findings": [
+    {
+      "id": "PM-001",
+      "source": "pattern-db+story-044-specific",
+      "patternId": "SAFEINCREASEALLOWANCE-VS-FORCEAPPROVE-INCONSISTENCY",
+      "type": "allowance-accumulation",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "lines": [315, 361, 423, 472],
+      "description": "ERC4626MarketYieldStrategy uses safeIncreaseAllowance to approve ammAdapter before every swap, whereas the downstream CurveAMMAdapter (CurveAMMAdapter.sol:135) uses forceApprove (reset-then-set) for the Curve router. The mismatch is architecturally inconsistent and creates a latent allowance-accumulation issue: if any AMM adapter swap call partially fails after the approval but before consuming the tokens, or if the adapter is swapped for one that does not pull-all, the strategy's running allowance grows without bound. Over repeated calls (deposit, withdraw, totalWithdraw, skimSurplus) the strategy could accumulate an unreasonably large outstanding allowance to the adapter, amplifying the blast radius of a compromised or replaced adapter. The 'safeIncreaseAllowance then swap' pattern also violates the CEI discipline expected in this codebase: the approval is an outbound state effect before the external interaction completes.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "safeIncreaseAllowance(address(ammAdapter), amount) [line 315]",
+        "safeIncreaseAllowance(address(ammAdapter), sharesToSell) [line 361]",
+        "safeIncreaseAllowance(address(ammAdapter), sharesToSell) [line 423]",
+        "safeIncreaseAllowance(address(ammAdapter), totalShares) [line 472]",
+        "forceApprove(address(router), amountIn) [CurveAMMAdapter.sol:135 — correct pattern]"
+      ],
+      "missingMitigations": [
+        "No forceApprove / approve-to-zero-then-set pattern in ERC4626MarketYieldStrategy",
+        "No post-swap allowance reset to 0",
+        "CurveAMMAdapter itself uses forceApprove but the caller never resets, so any non-CurveAMMAdapter or partial-consume adapter creates runaway allowance"
+      ],
+      "references": [
+        "OZ SafeERC20 forceApprove introduced to replace the old approve-to-zero dance",
+        "C4 allowance accumulation category findings"
+      ]
+    },
+    {
+      "id": "PM-002",
+      "source": "pattern-db+story-044-specific",
+      "patternId": "EXTERNAL-CALL-BEFORE-EFFECTS",
+      "type": "checks-effects-interactions-violation",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "lines": [364, 367, 371, 372],
+      "description": "_withdrawInternal performs two external calls (ammAdapter.swap at line 364, underlyingToken.safeTransfer at line 367) before decrementing clientBalances and totalDeposited (lines 371-372). This is a clear CEI violation. Although the public entry points (withdraw, withdrawAsOwner) are protected by nonReentrant, the internal function _withdrawInternal is also called from _totalWithdraw (line 404-435), which is invoked by _executeWithdrawal in AYieldStrategy. _executeWithdrawal first resets the WithdrawalState (lines 493-497 — commendably CEI-correct) but the actual accounting decrement in the concrete implementation still happens after two external calls. In a hypothetical upgrade or alternative concrete strategy that does not carry nonReentrant, or if the underlying token is an ERC777/callback token, state inconsistency windows exist between the swap output landing and the principal being debited.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "ammAdapter.swap(...) [line 364] — external call before state write",
+        "underlyingToken.safeTransfer(recipient, underlyingReceived) [line 367] — external call before state write",
+        "clientBalances[token][balanceHolder] -= amount [line 371] — state write after both external calls",
+        "totalDeposited[token] -= amount [line 372] — state write after both external calls"
+      ],
+      "missingMitigations": [
+        "State decrements (clientBalances, totalDeposited) not performed before external calls",
+        "nonReentrant on callers prevents re-entrancy in current deployment, but architectural CEI violation remains"
+      ],
+      "references": [
+        "Solidity CEI (Checks-Effects-Interactions) best-practice",
+        "C4 reentrancy / CEI violation category"
+      ]
+    },
+    {
+      "id": "PM-003",
+      "source": "pattern-db+story-044-specific",
+      "patternId": "EXTERNAL-SELF-CALL-IN-VIEW",
+      "type": "gas-waste-and-reentrancy-surface",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "lines": [166, 167],
+      "description": "balanceOf(address token, address account) at line 166 is implemented as `return this.principalOf(token, account)` — an external self-call (this.xxx). This surfaces inside _initiateWithdrawal (AYieldStrategy.sol:468) where `uint256 balance = this.balanceOf(token, client)` makes an external CALL opcode to itself. An external call to self carries a higher gas cost (2100 cold + CALL overhead) than an internal call, and creates a re-entrance surface (a future malicious or buggy override of balanceOf could re-enter AYieldStrategy's execution context). Because balanceOf simply delegates to principalOf which reads clientBalances[token][account] directly, there is no reason for the external dispatch.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "return this.principalOf(token, account) [ERC4626MarketYieldStrategy.sol:167]",
+        "uint256 balance = this.balanceOf(token, client) [AYieldStrategy.sol:468]"
+      ],
+      "missingMitigations": [
+        "balanceOf not implemented as a direct internal/internal-delegating call",
+        "No override of _initiateWithdrawal to avoid the this. dispatch"
+      ],
+      "references": [
+        "Solidity external call vs internal call gas model",
+        "C4 gas-optimization / self-call anti-pattern"
+      ]
+    },
+    {
+      "id": "PM-004",
+      "source": "pattern-db+story-044-specific",
+      "patternId": "STALE-BALANCE-CACHING-TWO-PHASE",
+      "type": "stale-data",
+      "severity": "potential-medium",
+      "contract": "src/AYieldStrategy.sol",
+      "lines": [468, 474, 491],
+      "description": "_initiateWithdrawal (Phase 1, line 464) captures this.balanceOf(token, client) into state.balance (line 474). _executeWithdrawal (Phase 2, line 488) then calls _totalWithdraw(token, client, state.balance) using the CACHED value (line 491). Between Phase 1 and Phase 2 execution (the 24-hour wait + up to 48-hour execution window), the client's actual balance can change in multiple ways: (a) the owner can call depositAsOwner to increase the client's principal, (b) the vault share price can rise — increasing totalBalanceOf without changing clientBalances — and, critically, (c) the current balanceOf implementation returns PRINCIPAL (clientBalances), not total yield-inclusive value. So the cached 'balance' is actually the principal at snapshot time. If deposits happen between Phase 1 and Phase 2, the cached amount will be LESS than the current principal, leaving a residual balance after Phase 2. Conversely, if the owner calls a regular withdraw between phases, reducing principal below the snapshot, _totalWithdraw is called with an amount exceeding current principal, which in _totalWithdraw is handled gracefully (proportional shares of zero → early return) but silently drains nothing — leaving the accounting inconsistent without a clear error.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "state.balance = balance [line 474 — principal snapshot at Phase 1]",
+        "uint256 withdrawAmount = state.balance [line 491 — stale value used at Phase 2]",
+        "_totalWithdraw(token, client, withdrawAmount) [line 499 — uses cached value]"
+      ],
+      "missingMitigations": [
+        "No re-read of current balance at Phase 2 execution time",
+        "No guard that cached balance still matches current principal at execution time"
+      ],
+      "references": [
+        "Time-of-check vs time-of-use (TOCTOU) patterns in DeFi two-phase withdrawals"
+      ]
+    },
+    {
+      "id": "PM-005",
+      "source": "pattern-db+story-044-specific",
+      "patternId": "EMERGENCY-WITHDRAW-NO-ACCOUNTING-RESET",
+      "type": "accounting-inconsistency",
+      "severity": "potential-high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "lines": [386, 394],
+      "description": "_emergencyWithdraw(uint256 amount) (line 386) transfers vault share tokens directly to the owner without zeroing out clientBalances or totalDeposited. After an emergency withdrawal, the accounting mappings reflect principal balances that are backed by shares that no longer exist in the contract. Any subsequent call to totalBalanceOf will compute (totalValue * principal) / totalDeposited where totalValue is now zero (or reduced) but totalDeposited and clientBalances remain at their pre-emergency values — returning wildly incorrect balances. Subsequent calls to withdraw or _totalWithdraw will attempt to sell shares that the contract no longer holds. _withdrawInternal will call vault.balanceOf(address(this)) to get availableShares, clamp sharesToSell to 0 or near-0, and proceed with a near-zero swap — but still decrement clientBalances[token][balanceHolder] by `amount`, silently wiping principal from accounting even though no real assets were returned to the client. This is an accounting consistency failure that survives emergency use.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "IERC20(address(vault)).safeTransfer(owner(), sharesToTransfer) [line 394]",
+        "clientBalances not zeroed in _emergencyWithdraw",
+        "totalDeposited not decremented in _emergencyWithdraw"
+      ],
+      "missingMitigations": [
+        "No clientBalances[token][client] = 0 after share transfer",
+        "No totalDeposited[token] decrement in _emergencyWithdraw",
+        "No per-client loop or global reset"
+      ],
+      "references": [
+        "ERC4626-adjacent emergency-exit accounting pattern",
+        "C4 accounting-inconsistency High severity pattern"
+      ]
+    },
+    {
+      "id": "PM-006",
+      "source": "pattern-db+story-044-specific",
+      "patternId": "PRINCIPAL-VS-SHARES-MISMATCH-ON-WITHDRAWAL",
+      "type": "accounting-mismatch",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "lines": [344, 350, 352, 353, 371, 372],
+      "description": "In _withdrawInternal, `amount` is first clamped to availablePrincipal (line 345-346). Then sharesToSell = vault.convertToShares(amount) is computed and independently clamped to availableShares (lines 352-353). If sharesToSell > availableShares, sharesToSell is silently reduced to availableShares — but `amount` (the principal decrement) is NOT correspondingly adjusted. The contract then swaps a SMALLER number of shares than amount implies, delivers less underlying to the recipient than expected, but still decrements clientBalances[token][balanceHolder] by the ORIGINAL `amount` (line 371). The user loses principal they did not actually recover. This is distinct from the documented 'decrement by requested not received' design (which is intentional for AMM slippage) — this path can fire when the contract's own share balance is insufficient, not due to AMM pricing. The scenario can arise if shares were swept by emergencyWithdraw (see PM-005) without accounting reset, or under race conditions in _totalWithdraw calls that reduce the pool.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "if (sharesToSell > availableShares) { sharesToSell = availableShares; } [lines 352-354 — shares silently clamped]",
+        "clientBalances[token][balanceHolder] -= amount [line 371 — full amount decremented regardless of clamp]",
+        "totalDeposited[token] -= amount [line 372]"
+      ],
+      "missingMitigations": [
+        "No back-calculation: 'amount = vault.convertToAssets(sharesToSell)' after share clamp",
+        "No adjustment of the principal decrement to match the actual shares sold"
+      ],
+      "references": [
+        "Analogous to ERC4626 redeem rounding direction findings (C4 2023 category)"
+      ]
+    },
+    {
+      "id": "PM-007",
+      "source": "pattern-db+story-044-specific",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "dos",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "lines": [509, 547],
+      "description": "_accrueSurplusShares (line 501) and _distributeBuffer (line 539) both iterate over the `clients` array, which is populated from _authorizedClients.values() — the full EnumerableSet of authorized clients. There is no cap on the number of authorized clients enforced anywhere in AYieldStrategy.setClient. If a large number of clients are authorized (the EnumerableSet grows unboundedly — setClient has no max-clients guard), both loops can exceed the block gas limit, permanently bricking skimSurplus. A secondary issue: because skimSurplus is also the mechanism by which protocol yield is realized, a DoS here has direct economic consequences beyond unavailability.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "for (uint256 i = 0; i < clients.length; i++) [line 509 — _accrueSurplusShares]",
+        "for (uint256 i = 0; i < clients.length; i++) [line 547 — _distributeBuffer]",
+        "_authorizedClients.values() [AYieldStrategy.sol:372 — unbounded set passed as clients array]"
+      ],
+      "missingMitigations": [
+        "No maximum authorized-client count enforced in setClient",
+        "No pagination for skimSurplus",
+        "No per-call gas budget check"
+      ],
+      "references": [
+        "DOS-UNBOUNDED-LOOP pattern (patterns/vulnerability-patterns.json id: DOS-UNBOUNDED-LOOP)",
+        "C4 gas-DoS category Medium severity precedents"
+      ]
+    },
+    {
+      "id": "PM-008",
+      "source": "pattern-db+story-044-specific",
+      "patternId": "MISSING-SLIPPAGE-ZERO-DEFAULT",
+      "type": "missing-slippage-protection",
+      "severity": "potential-high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "lines": [40, 194, 213, 312, 358, 420, 471],
+      "description": "slippageToleranceBps is declared as a plain storage variable defaulting to 0 (line 40). There is no constructor-time initialisation and no require that it be set before any swap is executed. When slippageToleranceBps == 0, every minOut computation collapses: _creditedPrincipal(amount) = amount * (10000 - 0) / 10000 = amount (no haircut), and all minOut values based on idealUnderlying * (MAX_BPS - 0) / MAX_BPS equal idealUnderlying — i.e., minOut == idealized vault-to-underlying conversion. Crucially, in _depositInternal minOut = vault.convertToShares(creditedPrincipal) (line 312). When slippageToleranceBps == 0, creditedPrincipal == amount and minOut = vault.convertToShares(amount). At first glance this seems tight, but vault.convertToShares uses the vault's current exchange rate — if the vault share price has risen since the nominal amount was calculated, the AMM may offer fewer shares than vault.convertToShares(amount), and the swap will fail with a revert — rather than providing any protection. Meanwhile on withdrawal, minOut = idealUnderlying * 10000 / 10000 = idealUnderlying, which IS actually 0 slippage protection because it equals the idealized conversion before AMM fees/impact. An owner who deploys and forgets to call setSlippageTolerance leaves the contract with zero margin for AMM price impact, meaning any non-zero price impact causes a deposit revert, and zero protection against sandwich attacks on withdrawals (minOut based only on vault math, not accounting for AMM deviation). MAX_BPS = 10000 is the boundary value that sets minOut = 0 (zero protection, maximum slippage tolerance) — the require in setSlippageTolerance allows _bps == MAX_BPS, which produces minOut = 0 on all operations — a valid but dangerous configuration.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "uint256 public slippageToleranceBps [line 40 — no initialiser, defaults to 0]",
+        "require(_bps <= MAX_BPS) [line 195 — allows 0 and MAX_BPS both]",
+        "uint256 minOut = idealUnderlying * (MAX_BPS - slippageToleranceBps) / MAX_BPS [lines 358, 420, 471]",
+        "MAX_BPS = 10000 [line 43 — when bps==MAX_BPS, minOut==0]"
+      ],
+      "missingMitigations": [
+        "No constructor-time slippage initialisation",
+        "No require(slippageToleranceBps > 0) guard at swap sites",
+        "No require(_bps < MAX_BPS) to prevent zero-minOut configuration",
+        "No 'must-configure-before-use' gate (e.g., initialized flag)"
+      ],
+      "references": [
+        "MISSING-SLIPPAGE pattern (patterns/vulnerability-patterns.json id: MISSING-SLIPPAGE)",
+        "C4 sandwich / slippage protection Medium-High precedents",
+        "AMM minAmountOut = 0 findings — common DeFi High"
+      ]
+    }
+  ],
+  "patternDbNonMatches": [
+    {"id": "ERC4626-INFLATION", "reason": "Contract does not implement an ERC4626 vault interface itself; no shares/totalSupply ratio calculation on the strategy side. External vault inflation is an assumption risk, not a code-level match."},
+    {"id": "ORACLE-STALE", "reason": "No Chainlink latestRoundData usage found in any target contract."},
+    {"id": "ORACLE-ROUNDID", "reason": "No latestRoundData found."},
+    {"id": "REENTRANCY-ERC777", "reason": "External calls exist but all public entrypoints carry nonReentrant; partial match (CEI violation) covered by PM-002."},
+    {"id": "SIGNATURE-REPLAY", "reason": "No ecrecover or ECDSA usage found."},
+    {"id": "FRONTRUN-APPROVE", "reason": "Skipped per pattern note: C4 typically considers QA/known issue. Also CurveAMMAdapter uses forceApprove correctly."},
+    {"id": "FLASH-LOAN-PRICE", "reason": "vault.convertToShares/convertToAssets uses vault's internal accounting, not spot pool reserves. No getReserves() or slot0() usage."},
+    {"id": "UNSAFE-DOWNCAST", "reason": "No uint128/uint96/uint64/int128 casts found in target contracts."},
+    {"id": "DIVISION-PRECISION", "reason": "All divisions are final (not followed by multiplication in the same expression). No a/b*c pattern detected."},
+    {"id": "UNPROTECTED-INIT", "reason": "No proxy/initializer pattern. Contracts use constructor-based initialization with Ownable."},
+    {"id": "STORAGE-COLLISION", "reason": "No proxy/delegatecall pattern."},
+    {"id": "CENTRALIZATION-ADMIN", "reason": "onlyOwner used extensively but this is documented as by-design. Skipped per pattern note."},
+    {"id": "RETURN-VALUE-IGNORE", "reason": "SafeERC20 wrappers used throughout. ammAdapter.swap return value is captured."},
+    {"id": "SELFDESTRUCT-FORCE-ETH", "reason": "No selfdestruct or ETH balance dependency found."},
+    {"id": "DOUBLE-VOTING", "reason": "No governance/voting mechanism in target contracts."},
+    {"id": "PERMIT-FRONTRUN", "reason": "No permit() usage found."},
+    {"id": "FIRST-DEPOSITOR-ATTACK", "reason": "Strategy does not track share price ratio; uses principal accounting not share-ratio. No totalSupply() == 0 special case."},
+    {"id": "INCORRECT-OPERATOR", "reason": "Boundary conditions reviewed; no off-by-one in critical comparators detected."},
+    {"id": "CROSS-CHAIN-REPLAY", "reason": "No cross-chain messaging."},
+    {"id": "TIMELOCK-BYPASS", "reason": "Two-phase withdrawal uses time delay correctly. emergencyWithdraw bypasses the delay by design (documented). Covered by PM-005 on accounting side."}
+  ]
+}

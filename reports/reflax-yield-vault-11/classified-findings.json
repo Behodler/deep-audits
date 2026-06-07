@@ -1,0 +1,407 @@
+{
+  "project": "reflax-yield-vault",
+  "classificationTimestamp": "2026-06-06T00:00:00Z",
+  "classifierAgent": "claude-sonnet-4-6",
+  "run": "reflax-yield-vault-11",
+  "classificationSummary": {
+    "totalClassified": 18,
+    "high": 3,
+    "medium": 4,
+    "low": 10,
+    "qa": 1,
+    "centralization": 0,
+    "downgraded": [
+      { "id": "DEDUP-008", "from": "medium", "to": "qa", "reason": "abi.encodePacked used only for revert message string formatting — no hash collision attack surface" },
+      { "id": "DEDUP-009", "from": "medium", "to": "low", "reason": "lastToken IS assigned inside the loop; finding claim is incorrect. Edge case: all-zero path reverts safely. Residual weak-input-validation concern is low." }
+    ],
+    "upgraded": [
+      { "id": "DEDUP-004", "from": "low (L-01 baseline)", "to": "medium", "reason": "MAX_BPS silently zeros ALL depositor principal credits; Halmos formally proves dust-loss at any non-trivial slippage. Exceeds low-severity threshold." }
+    ]
+  },
+
+  "classifiedFindings": [
+    {
+      "id": "CLASS-001",
+      "originalId": "DEDUP-001",
+      "severity": "high",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "All client principal is permanently unrecoverable after emergencyWithdraw: shares are gone but clientBalances/totalDeposited retain their pre-withdrawal values, making every subsequent client withdrawal receive less underlying than their ledger credit. Yield accrual is permanently bricked.",
+        "attackPath": [
+          "1. Owner (or compromised owner key) calls emergencyWithdraw(amount) on ERC4626MarketYieldStrategy",
+          "2. _emergencyWithdraw transfers sharesToTransfer vault shares to owner() via safeTransfer",
+          "3. No update to clientBalances[token][*] or totalDeposited[token]",
+          "4. Every subsequent client withdrawal calculates a proportional share fraction against the now-stale totalDeposited — but the shares no longer exist",
+          "5. Clients receive zero or less underlying than credited; _accrueSurplusShares always sees totalValue < totalDeposited and returns zero",
+          "6. Medusa counterexample: 2-step sequence yields heldValue deficit of 130e21 wei"
+        ],
+        "likelihood": "high — no special external conditions; callable by owner in one transaction",
+        "assumptions": "owner key is the only precondition; protocol-controlled account in normal operation but compromised or rogue owner is the threat model for all three High findings",
+        "externalRequirements": "none"
+      },
+      "justification": "Direct and proven insolvency of the vault with no recovery path; Medusa invariant failure and Halmos counterexample confirm the accounting corruption is not hypothetical. Forge PoC demonstrates complete principal loss in a 2-step sequence."
+    },
+
+    {
+      "id": "CLASS-002",
+      "originalId": "DEDUP-002",
+      "severity": "high",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "Inter-phase deposits are silently extracted beyond the 24-hour announced amount; double-counting can erase depositor principal entirely; arithmetic underflow permanently locks remaining client funds.",
+        "attackPath": [
+          "1. Owner calls totalWithdrawal (Phase 1) for client, announcing amount X; state caches balance = X",
+          "2. Owner calls depositAsOwner(client, delta) between Phase 1 and Phase 2, increasing clientBalances to X+delta",
+          "3. Phase 2 (_totalWithdraw) reads live clientStoredBalance = X+delta, not the cached X",
+          "4. sharesToSell calculated on X+delta — owner extracts X+delta instead of X with no additional notice window",
+          "5. If X+delta > stale totalDeposited (possible when delta is large), totalDeposited -= (X+delta) underflows and reverts, permanently bricking Phase 2 for all remaining clients",
+          "6. Four independent Halmos proofs confirm all three impact paths"
+        ],
+        "likelihood": "high — requires only owner access; the depositAsOwner amplification requires no external participants",
+        "assumptions": "owner controls depositAsOwner; threat model is compromised/rogue owner or griefing via underflow lock",
+        "externalRequirements": "none"
+      },
+      "justification": "The explicit anti-rugpull 24-hour notice mechanism is directly circumvented: the owner can silently extract more than the announced amount, and can permanently lock client funds via arithmetic underflow. All impact paths are formally proved by Halmos."
+    },
+
+    {
+      "id": "CLASS-003",
+      "originalId": "DEDUP-003",
+      "severity": "high",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "All client principal can be drained to an arbitrary recipient address in a single block with zero advance notice, completely bypassing the community-protection timelock.",
+        "attackPath": [
+          "1. Owner (compromised or rogue) calls withdrawAsOwner(client, attackerEOA, type(uint256).max) for each client",
+          "2. withdrawAsOwner routes through _withdrawInternal with no whenNotPaused check and no Phase-1/Phase-2 announcement",
+          "3. All client principal is swapped and transferred to attackerEOA atomically",
+          "4. The WithdrawalExecuted event — the signal community monitors for rugpull detection — is never emitted because the two-phase path is not taken",
+          "5. The only emitted event (Withdrawn) omits the client field (DEDUP-015), making on-chain forensics harder"
+        ],
+        "likelihood": "high — single transaction, no waiting period, no external conditions",
+        "assumptions": "owner key compromise or rogue owner; identical threat model to DEDUP-001/002",
+        "externalRequirements": "none"
+      },
+      "justification": "The totalWithdrawal timelock is architecturally documented as the anti-rugpull mechanism; withdrawAsOwner renders it cosmetic. Any owner can drain all clients atomically. The absence of whenNotPaused means even the pause-based emergency brake does not apply."
+    },
+
+    {
+      "id": "CLASS-004",
+      "originalId": "DEDUP-004",
+      "severity": "medium",
+      "plausibility": "plausible",
+      "regression": false,
+      "ledgerNote": "Upgrading L-01 from low to medium based on new evidence: MAX_BPS path silently zeroes ALL depositor principal credits (not just reduces them), and Halmos formally proves dust-loss at any non-trivial slippage setting. The zero-default structural insolvency window also warrants upgrade.",
+      "classification": {
+        "assetImpact": "At slippageToleranceBps=MAX_BPS (10000), every deposit credits zero principal while consuming real tokens — all deposited value is silently discarded from the accounting ledger. At default deployment value of 0, all withdrawals revert on any Curve AMM discount, making the strategy non-functional until owner configures the parameter.",
+        "attackPath": [
+          "Owner path: owner calls setSlippageTolerance(10000) — valid per require(_bps <= MAX_BPS)",
+          "Subsequent deposit of any amount N: _creditedPrincipal returns N*(10000-10000)/10000 = 0",
+          "clientBalances[token][depositor] += 0 — depositor's principal is never credited",
+          "Depositor's funds (vault shares) are held by the strategy but the depositor has no accounting claim",
+          "Zero-default path: at deployment, slippageToleranceBps=0, creditedPrincipal=full nominal amount",
+          "Any withdrawal swap returning less than nominal (any real-world Curve discount) hits minOut > actual and reverts",
+          "Strategy is non-functional from deployment until owner sets a non-zero tolerance",
+          "Halmos (SYMBOLIC-001): amount=4 wei, slippageBps=8192 -> creditedPrincipal=0 (proven)"
+        ],
+        "likelihood": "medium — MAX_BPS path requires owner action; zero-default is structural and affects every new deployment",
+        "assumptions": "owner sets MAX_BPS (either maliciously or by misconfiguration); zero-default impacts every deployment before configuration",
+        "externalRequirements": "setSlippageTolerance(10000) call for the MAX_BPS attack; no external requirements for zero-default impact"
+      },
+      "justification": "The MAX_BPS path silently discards all depositor principal credits while consuming real tokens — this crosses from a protocol function impairment into direct value loss with a clear owner-initiated attack path. The zero-default compounds the issue into a structural deployment-day insolvency. Upgraded from L-01 low baseline."
+    },
+
+    {
+      "id": "CLASS-005",
+      "originalId": "DEDUP-005",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None currently — nonReentrant on all public callers prevents exploitation. Latent: any future public entry point added without nonReentrant would enable double-withdrawal.",
+        "attackPath": [
+          "Currently blocked: all public callers (deposit, withdraw, withdrawAsOwner, totalWithdrawal, skimSurplus) carry nonReentrant",
+          "Latent path: new entry point added without nonReentrant + ERC777 vault/underlying token",
+          "Reentrancy during external call at line 364 (ammAdapter.swap) or line 367 (safeTransfer to recipient) before state decrements at lines 371-372 would allow double-withdrawal"
+        ],
+        "likelihood": "low — not currently exploitable; requires future code change",
+        "assumptions": "future refactoring removes or omits nonReentrant; or ERC777-style token is introduced",
+        "externalRequirements": "future code change; not exploitable in current codebase"
+      },
+      "justification": "CEI violation is a real structural defect but is not currently exploitable due to nonReentrant on all public callers. Per C4 norms, latent risk requiring future code changes caps at Low; the current state offers no attack path without hypothetical future modifications."
+    },
+
+    {
+      "id": "CLASS-006",
+      "originalId": "DEDUP-006",
+      "severity": "medium",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "ERC4626 vault donation inflates convertToAssets/convertToShares used as price oracle across deposits, withdrawals, and surplus calculations — primary realistic impact is DoS of these operations; secondary risk is over-extraction of surplus relative to real yield.",
+        "attackPath": [
+          "Attacker donates underlying tokens directly to the ERC4626 vault, inflating totalAssets",
+          "vault.convertToAssets(shares) returns inflated values in the same block",
+          "In _depositInternal: minOut (derived from inflated convertToShares) becomes unsatisfiable against the real AMM rate; swap reverts, DoS-ing deposits",
+          "In _withdrawInternal: same inflation causes minOut > actual swap output; withdrawals revert",
+          "In _skimSurplus: inflated surplus ceiling check (require totalShares <= convertToShares(aggregateSurplus)) passes when it should not, potentially allowing surplus extraction exceeding real yield",
+          "Attack cost: the donated tokens are not recoverable (classic ERC4626 inflation vector)"
+        ],
+        "likelihood": "medium — requires economic capital to donate; DoS is temporary (single block); over-extraction requires specific AMM rate alignment",
+        "assumptions": "ERC4626 vault uses totalAssets/totalSupply exchange rate (standard implementation); attacker willing to burn donation capital for DoS",
+        "externalRequirements": "economic capital for donation; vault must use standard rate derivation"
+      },
+      "justification": "Protocol availability is impacted (deposits, withdrawals, skimSurplus all DoS-able via donation) and surplus over-extraction is possible with stated assumptions. No direct principal theft path without additional conditions, but the multi-function DoS and value-leak via surplus inflation meet Medium criteria."
+    },
+
+    {
+      "id": "CLASS-007",
+      "originalId": "DEDUP-007",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "Accumulated allowances could enable a future IAMMAdapter implementation to pull more tokens than the strategy currently intends on a given call. Current CurveAMMAdapter is unaffected.",
+        "attackPath": [
+          "Swap call fails after safeIncreaseAllowance executes but before safeTransferFrom in the adapter",
+          "Residual approval persists in ERC20 allowance slot",
+          "Subsequent swap calls further accumulate the approval",
+          "Under a future adapter with partial-consumption semantics, accumulated allowance could allow the adapter to pull more than the current swap amount"
+        ],
+        "likelihood": "low — CurveAMMAdapter has atomic revert semantics making residual accumulation near-impossible in practice; only a future adapter substitution materializes the risk",
+        "assumptions": "future IAMMAdapter substitution with partial-consumption semantics; partial revert between approval and transfer",
+        "externalRequirements": "future adapter code change; not exploitable with current CurveAMMAdapter"
+      },
+      "justification": "Near-zero exploitability under the current adapter; risk only materializes under a future adapter substitution that has different revert semantics. This is structural latent risk, not a current attack path. Low severity per C4 norms for speculative future-code scenarios."
+    },
+
+    {
+      "id": "CLASS-008",
+      "originalId": "DEDUP-008",
+      "severity": "qa",
+      "plausibility": "plausible",
+      "regression": false,
+      "borderlineFlag": true,
+      "borderlineNote": "Originally flagged for manual review as potential-medium pending usage context. Code review confirms: the abi.encodePacked call at AYieldStrategy.sol line 340 is used exclusively to concatenate a human-readable revert message string (literal text + timestamp integer converted to string). No hash result is stored, compared, or used for access control or entity identity. The dynamic argument (the _uint256ToString output) is a display-only string. There is no hash collision attack surface.",
+      "classification": {
+        "assetImpact": "None. The keccak256/abi.encodePacked is used only for revert message construction.",
+        "attackPath": [
+          "No attack path exists: the encodePacked output is passed directly into revert() as an error string",
+          "Two different timestamps producing the same concatenated string would only affect the human-readable error message, not any state or access control"
+        ],
+        "likelihood": "not applicable — no security-relevant usage",
+        "assumptions": "none",
+        "externalRequirements": "none"
+      },
+      "justification": "The abi.encodePacked at line 340 constructs a revert message string embedding a formatted timestamp for human readability — not a hash used for access control, entity identification, or state gating. The standard Slither/Aderyn warning does not apply here; this is a false-positive at Medium. Downgraded to QA."
+    },
+
+    {
+      "id": "CLASS-009",
+      "originalId": "DEDUP-009",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "borderlineFlag": true,
+      "borderlineNote": "The finding's primary claim — that lastToken is uninitialized and allows malformed routes to pass — is factually incorrect. The code at lines 74-79 initializes lastToken inside the loop (lastToken = path[i] for every non-zero entry), and line 80 enforces require(lastToken == tokenOut). Because tokenOut != address(0) is checked at line 70, an all-zero path (lastToken stays address(0)) cannot pass validation. However, there is a residual weak-input-validation concern: a path array with all zero slots except path[0]==tokenIn would pass the path[0]==tokenIn check and fail only at require(lastToken==tokenOut) — not a security bypass. Reclassifying from medium to low as a weak-input-validation / defense-in-depth issue.",
+      "classification": {
+        "assetImpact": "No practical impact: the validation logic correctly rejects any path where the last non-zero entry does not equal tokenOut. An all-zero path (edge case) would revert because address(0) != tokenOut (which is non-zero by the preceding require).",
+        "attackPath": [
+          "Only theoretical path: caller supplies path where all 11 slots are address(0)",
+          "lastToken stays address(0); require(lastToken == tokenOut) reverts since tokenOut != address(0)",
+          "No route is registered; no swap can occur with a misconfigured route — validation is effective"
+        ],
+        "likelihood": "not currently exploitable; primary claim is incorrect",
+        "assumptions": "the finding assumes lastToken remains uninitialized and passes a zero-address check — this is incorrect per code",
+        "externalRequirements": "none"
+      },
+      "justification": "The core claim of the finding is factually incorrect: lastToken IS set inside the loop and the validation require correctly rejects mismatched routes. The residual concern (weak input validation for degenerate all-zero paths) is a defense-in-depth Low. Downgraded from estimated Medium."
+    },
+
+    {
+      "id": "CLASS-010",
+      "originalId": "DEDUP-010",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "No impact for sUSDe (standard ERC20 target vault). Latent: ERC777 vault with tokensReceived hook could allow owner's receiver contract to reenter emergencyWithdraw before accounting is updated.",
+        "attackPath": [
+          "emergencyWithdraw calls IERC20(vault).safeTransfer(owner(), ...) without nonReentrant",
+          "If vault token implements ERC777 tokensReceived, the owner's contract receives control mid-transfer",
+          "Reentrancy mutex is not held; second emergencyWithdraw call processes without revert",
+          "Double-transfer of vault shares possible"
+        ],
+        "likelihood": "low — requires ERC777 vault; not applicable to sUSDe deployment",
+        "assumptions": "vault implements ERC777 transfer hooks",
+        "externalRequirements": "vault token with transfer hooks"
+      },
+      "justification": "Latent reentrancy gap on emergencyWithdraw is a real structural inconsistency (all other entry points have nonReentrant) but is not exploitable with the intended sUSDe vault. Correctly estimated as Low."
+    },
+
+    {
+      "id": "CLASS-011",
+      "originalId": "DEDUP-011",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None currently. Purely structural: earlier modifiers (onlyOwner, whenNotPaused, onlyAuthorizedClient) do not make external calls so cannot reenter.",
+        "attackPath": [
+          "Theoretical: a future modifier added before nonReentrant that makes an external call could reenter the function",
+          "Current modifiers are read-only checks with no external calls"
+        ],
+        "likelihood": "low — no current exploit path; requires future modifier with external call",
+        "assumptions": "future modifier refactoring",
+        "externalRequirements": "future code change"
+      },
+      "justification": "Pure structural ordering issue with no current attack path. Correct modifier ordering is a best-practice recommendation; no impact in current code. Low per C4 norms."
+    },
+
+    {
+      "id": "CLASS-012",
+      "originalId": "DEDUP-012",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None currently. The shadowing is benign because constructors immediately pass the local _owner to the Ownable initializer and do not read the state variable.",
+        "attackPath": [
+          "No current exploit path",
+          "Future constructor logic that reads _owner expecting the state variable would silently read the parameter instead"
+        ],
+        "likelihood": "low — no current impact; future confusion risk only",
+        "assumptions": "future constructor modification reads the shadowed name",
+        "externalRequirements": "none"
+      },
+      "justification": "Classic variable shadowing with no current security impact. Code quality finding preventing future confusion. Low per C4 norms."
+    },
+
+    {
+      "id": "CLASS-013",
+      "originalId": "DEDUP-014",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "Off-chain monitoring receives incorrect withdrawal amounts; the misleading event compresses observability of the DEDUP-002 inter-phase extraction bug. No direct on-chain fund loss.",
+        "attackPath": [
+          "WithdrawalExecuted emits state.balance (Phase-1 cached snapshot)",
+          "_totalWithdraw uses live clientStoredBalance which may be larger after inter-phase deposits",
+          "Event records smaller-than-actual amount; community monitoring cannot detect inter-phase enlargement from events alone"
+        ],
+        "likelihood": "low — event accuracy issue; no exploit path",
+        "assumptions": "off-chain monitoring depends on WithdrawalExecuted amounts",
+        "externalRequirements": "none"
+      },
+      "justification": "Incorrect event data compounds the observability gap around DEDUP-002 but does not independently cause fund loss. Low per C4 norms for event accuracy issues."
+    },
+
+    {
+      "id": "CLASS-014",
+      "originalId": "DEDUP-015",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "Automated monitoring cannot determine which client's principal was debited in a multi-client deployment from the emitted event alone. No direct fund loss.",
+        "attackPath": [
+          "withdrawAsOwner(client, recipient, amount) debits clientBalances[token][client]",
+          "Emitted Withdrawn event records msg.sender and recipient but omits client",
+          "Off-chain observers cannot distinguish which client was drained without additional storage reads"
+        ],
+        "likelihood": "low — event omission; no exploit path",
+        "assumptions": "multi-client deployment with monitoring",
+        "externalRequirements": "none"
+      },
+      "justification": "Missing event field reduces monitoring fidelity and compounds the opacity of the DEDUP-003 high-severity finding, but the finding itself does not independently enable fund loss. Low severity."
+    },
+
+    {
+      "id": "CLASS-015",
+      "originalId": "DEDUP-016",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "Irreversible ownership transfer to an incorrect address would permanently lock all owner-privileged functions (setRoute, setSlippageTolerance, pause, etc.) and potentially all owner-recoverable funds.",
+        "attackPath": [
+          "Owner calls transferOwnership(typoAddress) with a mistyped address",
+          "Single-step transfer is irreversible; no pending-accept mechanism",
+          "If typoAddress is not accessible, all onlyOwner functions are permanently locked"
+        ],
+        "likelihood": "low — requires owner operational error",
+        "assumptions": "ownership transfer to incorrect address via operational error",
+        "externalRequirements": "none — pure operational risk"
+      },
+      "justification": "Single-step ownership transfer is a well-known operational risk; mitigated by Ownable2Step. No active exploit path; Low per C4 norms for centralization/operational risks that require owner error."
+    },
+
+    {
+      "id": "CLASS-016",
+      "originalId": "DEDUP-017",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "Temporary DoS on skimSurplus when vault rate accrues mid-transaction between the two convertToAssets calls, causing minOut to be unsatisfiable. No fund loss; retry resolves.",
+        "attackPath": [
+          "_skimSurplus calls vault.convertToAssets at top of function for totalValue snapshot",
+          "Vault accrual triggers mid-transaction, increasing rate",
+          "Second convertToAssets call at minOut computation returns higher value",
+          "minOut > actual swap output; swap reverts",
+          "Retry on next block succeeds"
+        ],
+        "likelihood": "low — narrow timing window; narrow sub-case of DEDUP-006",
+        "assumptions": "vault with intra-transaction accrual trigger",
+        "externalRequirements": "vault with time-weighted rate accrual mid-transaction"
+      },
+      "justification": "Temporary DoS on a single function with no fund loss and retry resolution. This is a narrow sub-case of the broader vault oracle risk (DEDUP-006) and does not independently rise to Medium. Low severity."
+    },
+
+    {
+      "id": "CLASS-017",
+      "originalId": "DEDUP-019",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "Downstream integrators computing totalBalanceOf - principalOf as a yield signal receive negative values after vault price decline, potentially triggering unchecked underflow reverts or incorrect downstream logic. No fund loss in the strategy itself.",
+        "attackPath": [
+          "Vault price declines (e.g., vault depegs or accrual reversal)",
+          "totalBalanceOf returns vault-price-sensitive value < principalOf (static clientBalances)",
+          "Integrating contract computing totalBalanceOf - principalOf gets arithmetic underflow or negative yield signal",
+          "Downstream logic branches incorrectly or reverts"
+        ],
+        "likelihood": "low — requires vault price decline; no fund loss in strategy",
+        "assumptions": "downstream protocol assumes totalBalanceOf >= principalOf as invariant",
+        "externalRequirements": "vault price decline; downstream integrator with unsafe arithmetic"
+      },
+      "justification": "Inconsistent data sources create a misleading view pair but do not cause fund loss within the strategy. The risk is elevated for downstream integrators but remains speculative without a confirmed integration pattern. Low severity."
+    },
+
+    {
+      "id": "CLASS-018",
+      "originalId": "DEDUP-021",
+      "severity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "classification": {
+        "assetImpact": "Missing independent post-swap amountOut >= minAmountOut check in CurveAMMAdapter.swap — a buggy or misconfigured router could return below-floor output without the adapter detecting it. Current Curve Router NG enforces this internally.",
+        "attackPath": [
+          "CurveAMMAdapter.swap calls router.exchange and trusts the returned amountOut",
+          "No require(amountOut >= minAmountOut) after router returns",
+          "A future redeployment with a misconfigured or buggy router address would silently accept below-floor output",
+          "Strategy would accept a swap that delivers less underlying than the slippage floor requires"
+        ],
+        "likelihood": "low — not exploitable with the current immutable Curve Router NG; risk only under future redeployment with wrong router",
+        "assumptions": "future redeployment with incorrect or buggy router address",
+        "externalRequirements": "misconfigured/buggy router address at deployment time"
+      },
+      "justification": "Defense-in-depth recommendation only; the current Curve Router NG enforces _min_dy internally. No exploit path with the current deployment. Low severity per C4 norms for missing-check findings that require external misconfiguration."
+    }
+  ]
+}

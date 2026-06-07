@@ -1,0 +1,224 @@
+{
+  "project": "reflax-yield-vault",
+  "runTimestamp": "2026-06-06T07:21:59Z",
+  "tool": "halmos",
+  "toolVersion": "0.3.3",
+  "solcVersion": "0.8.30",
+  "foundryProfile": "halmos",
+  "testFile": "workspace/reflax-yield-vault/test/symbolic/Symbolic.t.sol",
+  "runCommand": "FOUNDRY_PROFILE=halmos ~/.local/bin/halmos --contract Symbolic --forge-build-out out-halmos --solver-timeout-assertion 30000 --statistics",
+  "testsGenerated": 15,
+  "passed": 5,
+  "failed": 6,
+  "timeout": 4,
+  "findings": [
+    {
+      "id": "SYMBOLIC-001",
+      "testName": "check_creditedPrincipal_positiveAmountNeverZeroCredit",
+      "result": "FAIL",
+      "target": "_creditedPrincipal in ERC4626MarketYieldStrategy",
+      "property": "credited principal is always > 0 for non-zero deposits",
+      "counterexample": {
+        "amount": "0x04 (= 4 wei)",
+        "slippageBps": "0x2000 (= 8192 bps = 81.92%)",
+        "arithmetic": "4 * (10000 - 8192) / 10000 = 4 * 1808 / 10000 = 7232 / 10000 = 0 (floor)",
+        "note": "Any amount < 10000 / (10000 - slippageBps) will yield 0 credited principal"
+      },
+      "severity": "verified-high",
+      "description": "Halmos proved that a non-zero deposit amount can receive 0 credited principal when slippage tolerance is sufficiently high. The depositor's tokens are transferred in (safeTransferFrom succeeds), then creditedPrincipal = 0 is written to clientBalances — the depositor's principal is permanently lost with no record. Root cause: integer division truncation in `amount * (MAX_BPS - slippageBps) / MAX_BPS` when the numerator is smaller than MAX_BPS. Concretely reachable if owner sets slippageToleranceBps >= 9999 (valid: require <= MAX_BPS). Also reachable at any slippage setting for deposits smaller than MAX_BPS / (MAX_BPS - slippageBps) wei.",
+      "confidence": "verified",
+      "proof": "Halmos symbolic execution found counterexample in 0.63s over 4 paths"
+    },
+    {
+      "id": "SYMBOLIC-002",
+      "testName": "check_code001_deltaExtraction",
+      "result": "FAIL",
+      "target": "_totalWithdraw in ERC4626MarketYieldStrategy (CODE-001)",
+      "property": "shares sold in _totalWithdraw equals the Phase-1 cached amount's proportional share",
+      "counterexample": {
+        "cachedAmount": "0x800000000000 (= 140737488355328)",
+        "liveBalance": "0xc00000000000 (= 211106232532992, delta = +70368744177664)",
+        "totalDeposited": "0x8000000000000000",
+        "totalShares": "0x80000000000000000000",
+        "sharesToSellBuggy": "(totalShares * liveBalance) / totalDeposited > (totalShares * cachedAmount) / totalDeposited",
+        "note": "Inter-phase deposit delta is extracted: sold as yield but never paid out to the depositor"
+      },
+      "severity": "verified-high",
+      "description": "Halmos confirmed CODE-001: _totalWithdraw uses the LIVE clientBalances value (not the Phase-1 cached `amount` argument) to compute proportional shares to sell. Any deposit made to a client between Phase 1 initiation and Phase 2 execution causes the new deposit to be included in the shares-sold calculation — the depositor's new principal is consumed as part of the migration withdrawal and silently extracted (never returned). This is a mathematically verified trust/rug vector even if unintentional.",
+      "confidence": "verified",
+      "proof": "Halmos symbolic execution found counterexample in 1.76s over 4 paths"
+    },
+    {
+      "id": "SYMBOLIC-003",
+      "testName": "check_emergencyWithdraw_doesNotBreakSolvency",
+      "result": "FAIL",
+      "target": "_emergencyWithdraw in ERC4626MarketYieldStrategy (ECON-007 / CODE-003)",
+      "property": "totalValue >= totalDeposited invariant holds after emergencyWithdraw",
+      "counterexample": {
+        "totalDeposited": "0x8000000000000000 (= 9223372036854775808)",
+        "totalValueBeforeEmergency": "0x8000000000000000 (solvent: totalValue == totalDeposited)",
+        "rate": "0x8000000000000000",
+        "emergencySharesRemoved": "0x800000000000000 (= 576460752303423488 shares)",
+        "assetsRemoved": "shares * rate / 1e18 > 0",
+        "totalValueAfter": "totalValueBeforeEmergency - assetsRemoved < totalDeposited",
+        "note": "Solvency broken: clientBalances still sum to totalDeposited but vault holds fewer assets"
+      },
+      "severity": "verified-high",
+      "description": "Halmos confirmed that after emergencyWithdraw, the accounting invariant totalValue >= totalDeposited can be broken. The function removes vault shares without updating clientBalances or totalDeposited. Every subsequent proportional calculation (totalBalanceOf, _accrueSurplusShares, _totalWithdraw proportional shares) operates on incorrect state: clients believe they have more assets backing their principal than actually exist in the vault.",
+      "confidence": "verified",
+      "proof": "Halmos symbolic execution found counterexample in 0.44-0.55s over 4 paths"
+    },
+    {
+      "id": "SYMBOLIC-004",
+      "testName": "check_totalWithdraw_usesLiveBalance",
+      "result": "FAIL",
+      "target": "_totalWithdraw / _executeWithdrawal in AYieldStrategy + ERC4626MarketYieldStrategy",
+      "property": "the actual principal decrement at Phase 2 equals the Phase-1 cached amount",
+      "counterexample": {
+        "cachedAmount": "0x800000000000000000000000",
+        "liveBalance": "0xc00000000000000000000000 (50% larger due to inter-phase deposit)",
+        "actualDecrement": "liveBalance (live)",
+        "correctDecrement": "cachedAmount (cached)",
+        "note": "Over-decrement by liveBalance - cachedAmount"
+      },
+      "severity": "verified-high",
+      "description": "Halmos confirmed the two-phase withdrawal inconsistency: _totalWithdraw uses `clientStoredBalance = clientBalances[token][client]` (live) rather than the `amount` argument (cached at Phase 1). When liveBalance > cachedAmount, more principal is decremented from totalDeposited than was cached, corrupting the proportional accounting for all remaining clients.",
+      "confidence": "verified",
+      "proof": "Halmos symbolic execution found counterexample in 0.03s over 2 paths"
+    },
+    {
+      "id": "SYMBOLIC-005",
+      "testName": "check_totalWithdraw_extracts_interPhaseDeposit",
+      "result": "FAIL",
+      "target": "_totalWithdraw accounting corruption",
+      "property": "totalDeposited remainder after Phase-2 equals otherClientBalance + interPhaseDeposit",
+      "counterexample": {
+        "cachedAmount": "0x800000000000 (= 140737488355328)",
+        "interPhaseDeposit": "0x800000000000 (equal size deposit between phases)",
+        "otherClientBalance": "0x800000000000",
+        "totalDepositedAtPhase1": "0x1000000000000 (= cachedAmount + otherClientBalance)",
+        "buggyRemainder": "otherClientBalance - interPhaseDeposit (= 0 in this case)",
+        "correctRemainder": "otherClientBalance + interPhaseDeposit (= 2x otherClientBalance)",
+        "note": "Inter-phase deposit double-counted: removed from totalDeposited as if withdrawn, but depositor receives nothing"
+      },
+      "severity": "verified-high",
+      "description": "Halmos confirmed that in the multi-client scenario, a deposit between Phase 1 and Phase 2 is silently double-counted. The new deposit is added to totalDeposited at deposit time, but then subtracted again via the live clientStoredBalance decrement at Phase 2. The net effect is that the new deposit principal vanishes from accounting — the depositor's tokens are in the vault but they cannot recover their full principal.",
+      "confidence": "verified",
+      "proof": "Halmos symbolic execution found counterexample in 0.11s over 7 paths"
+    },
+    {
+      "id": "SYMBOLIC-006",
+      "testName": "check_totalWithdraw_underflow_bricksWithdrawal",
+      "result": "FAIL",
+      "target": "_totalWithdraw underflow / revert",
+      "property": "liveBalance <= totalDeposited (no underflow in totalDeposited subtraction)",
+      "counterexample": {
+        "cachedAmount": "0x8000000000000000",
+        "interPhaseDeposit": "0x8000000000000000",
+        "liveBalance": "cachedAmount + interPhaseDeposit = 2 * cachedAmount",
+        "totalDepositedStale": "cachedAmount (not updated between phases)",
+        "condition": "liveBalance > totalDepositedStale => underflow revert"
+      },
+      "severity": "verified-high",
+      "description": "Halmos proved the underflow reachability: if totalDeposited is not updated between phases (or any scenario where liveBalance > totalDeposited), the subtraction `totalDeposited -= clientStoredBalance` reverts with Solidity 0.8 overflow checking. This permanently bricks the two-phase withdrawal — the owner cannot complete the migration, and the client's funds are stuck in the strategy.",
+      "confidence": "verified",
+      "proof": "Halmos symbolic execution found counterexample in 0.04s over 3 paths"
+    }
+  ],
+  "proofs": [
+    {
+      "testName": "check_accrueSurplusShares_surplusNonNegative",
+      "result": "PASS",
+      "property": "_accrueSurplusShares surplus computation is always non-negative (total <= principal guard prevents negative surplus)",
+      "paths": 5,
+      "solverTime": "0.06s",
+      "note": "The `if (total <= principal) continue` guard in _accrueSurplusShares correctly prevents any negative surplus from being passed to vault.convertToShares. Proved for all symbolic inputs where totalDeposited > 0 and principal <= totalDeposited."
+    },
+    {
+      "testName": "check_accrueSurplusShares_totalSharesNoOverflow",
+      "result": "PASS",
+      "property": "sum of per-client surplus shares does not overflow uint256 for 2^80-bounded inputs",
+      "paths": 7,
+      "solverTime": "0.31s",
+      "note": "With 3 clients each having surplus shares < 2^80 and rate >= 1e18, the total shares sum is < 2^82, well within uint256. No overflow possible in the realistic range."
+    },
+    {
+      "testName": "check_creditedPrincipal_fullSlippage_alwaysZero",
+      "result": "PASS",
+      "property": "with slippageBps = MAX_BPS, credited principal is always 0 for any amount",
+      "paths": 1,
+      "solverTime": "0.00s",
+      "note": "Trivially provable: numerator = amount * 0 = 0. This proves that setSlippageTolerance(MAX_BPS) is a valid but dangerous setting that silently discards ALL principal credits."
+    },
+    {
+      "testName": "check_creditedPrincipal_zeroAmount",
+      "result": "PASS",
+      "property": "zero deposit amount yields zero credited principal regardless of slippage",
+      "paths": 2,
+      "solverTime": "0.01s",
+      "note": "Consistent with the `require(amount > 0)` guard in _depositInternal. No pathological edge case here."
+    },
+    {
+      "testName": "check_creditedPrincipal_positiveAmountNeverZeroCredit",
+      "result": "FAIL",
+      "note": "Listed under findings as SYMBOLIC-001. Expected [FAIL] — the property was written to confirm the bug, not assert correctness."
+    }
+  ],
+  "timeouts": [
+    {
+      "testName": "check_creditedPrincipal_leAmount",
+      "reason": "Proving `amount * (MAX_BPS - slippageBps) / MAX_BPS <= amount` symbolically over full uint256 range is a non-linear integer division query that exceeds 30s. The property likely holds (easily proven by hand: the factor is <= 1) but the SMT solver cannot close it within the budget.",
+      "recommendation": "Increase --solver-timeout-assertion to 120000ms or add tighter bit-width bounds (vm.assume(amount < 2^64))."
+    },
+    {
+      "testName": "check_creditedPrincipal_monotone",
+      "reason": "Non-linear integer arithmetic: proving amount2 >= amount1 => (amount2 * X / Y) >= (amount1 * X / Y) is hard for SMT over 256-bit integers.",
+      "recommendation": "Add vm.assume(amount1 < 2^64 && amount2 < 2^64) to bound the space."
+    },
+    {
+      "testName": "check_creditedPrincipal_noOverflow",
+      "reason": "The overflow proof requires the solver to verify amount * (MAX_BPS - slippageBps) < 2^256, which is a multiplication query over full 256-bit range. Computationally expensive.",
+      "recommendation": "The property is trivially true by arithmetic (max product = 2^128 * 10000 < 2^142 << 2^256). Document analytically rather than symbolically."
+    },
+    {
+      "testName": "check_creditedPrincipal_zeroSlippage_exact",
+      "reason": "Proving `amount * MAX_BPS / MAX_BPS == amount` (exact identity after integer division) requires the solver to verify no rounding occurs, which is a hard modular arithmetic query.",
+      "recommendation": "This is trivially true (X * 10000 / 10000 = X for all X). Document analytically."
+    },
+    {
+      "testName": "check_proportionalBalance_noZeroDivision",
+      "reason": "Proving (totalValue * principal) / totalDeposited <= totalValue over the full 256-bit range hits the multiplication non-linearity. The property holds by arithmetic but the solver times out.",
+      "recommendation": "Add vm.assume(totalValue < 2^128) and vm.assume(principal < 2^128) to reduce the search space."
+    }
+  ],
+  "summary": {
+    "target1_creditedPrincipal": {
+      "status": "CONFIRMED BUG",
+      "key_finding": "SYMBOLIC-001: positive deposit can yield 0 credited principal (dust loss) when slippageBps * amount < MAX_BPS^2. Halmos counterexample: amount=4, slippageBps=8192.",
+      "proved_safe": ["check_creditedPrincipal_fullSlippage_alwaysZero (PASS)", "check_creditedPrincipal_zeroAmount (PASS)"],
+      "inconclusive_timeout": ["check_creditedPrincipal_leAmount", "check_creditedPrincipal_monotone", "check_creditedPrincipal_noOverflow", "check_creditedPrincipal_zeroSlippage_exact"]
+    },
+    "target2_accrueSurplusShares": {
+      "status": "MIXED: guard proves safe, post-emergencyWithdraw state proves insolvent",
+      "key_finding": "SYMBOLIC-003: emergencyWithdraw can break the totalValue >= totalDeposited solvency invariant. The surplus guard itself (if total <= principal continue) is provably safe (SYMBOLIC P2a PASS).",
+      "proved_safe": ["check_accrueSurplusShares_surplusNonNegative (PASS)", "check_accrueSurplusShares_totalSharesNoOverflow (PASS)"],
+      "confirmed_bug": ["check_emergencyWithdraw_doesNotBreakSolvency (FAIL) -> SYMBOLIC-003"]
+    },
+    "target3_twoPhaseWithdrawal": {
+      "status": "CONFIRMED BUG — multiple failure modes",
+      "key_finding": "CODE-001 fully verified: check_code001_deltaExtraction (FAIL) proves inter-phase deposits are silently extracted. check_totalWithdraw_usesLiveBalance (FAIL) proves wrong decrement value. check_totalWithdraw_extracts_interPhaseDeposit (FAIL) proves double-counting corruption. check_totalWithdraw_underflow_bricksWithdrawal (FAIL) proves revert/brick condition.",
+      "confirmed_bugs": [
+        "SYMBOLIC-004: wrong decrement value (live vs cached)",
+        "SYMBOLIC-005: inter-phase deposit double-counted and extracted",
+        "SYMBOLIC-006: underflow revert bricks withdrawal permanently",
+        "SYMBOLIC-002: proportional shares inflated by live balance (CODE-001 direct confirmation)"
+      ]
+    }
+  },
+  "toolNotes": [
+    "Halmos 0.3.3 requires --forge-build-out out-halmos when foundry.toml uses a custom [profile.halmos] with out=out-halmos, otherwise it defaults to reading from 'out/' which has stale artifacts lacking AST data.",
+    "The halmos profile test= setting restricts compilation to test/symbolic/ only, keeping the build fast and avoiding compilation errors in non-halmos test files.",
+    "Non-linear integer division queries (multiplication then division over full 256-bit range) consistently hit the 30s timeout. Adding tighter vm.assume() bounds (e.g. < 2^64) would resolve most timeouts at the cost of reduced symbolic coverage.",
+    "All FAILs were expected counterexamples confirming known bugs — none represent newly discovered issues. They provide mathematical proof that the bugs are real and the counterexamples are concrete witnesses."
+  ]
+}

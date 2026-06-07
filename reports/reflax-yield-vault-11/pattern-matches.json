@@ -1,0 +1,141 @@
+{
+  "project": "reflax-yield-vault",
+  "scanTimestamp": "2026-06-06T00:00:00Z",
+  "scanType": "pattern-matching",
+  "patternsChecked": 22,
+  "findingsCount": 5,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "missing-slippage",
+      "severity": "potential-high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 40,
+      "description": "Matches MISSING-SLIPPAGE pattern: slippageToleranceBps is initialized to 0 (Solidity default) in the constructor and is never set in the constructor body. Until the owner explicitly calls setSlippageTolerance(), all deposits compute minOut = vault.convertToShares(amount * (10000-0) / 10000) = vault.convertToShares(amount), which is oracle-price-based and offers no AMM-slippage margin. More critically, setSlippageTolerance() accepts any value up to MAX_BPS (10000), meaning the owner can set it to 10000 to produce minOut = 0 on all subsequent swaps, completely disabling slippage protection. Additionally, the withdraw path (line 358) computes minOut using the SAME configurable tolerance.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "uint256 public slippageToleranceBps; // defaults to 0",
+        "require(_bps <= MAX_BPS, ...) // allows 10000",
+        "uint256 minOut = idealUnderlying * (MAX_BPS - slippageToleranceBps) / MAX_BPS;"
+      ],
+      "missingMitigations": [
+        "No constructor-time slippage initialization",
+        "No upper bound below MAX_BPS (e.g. require(_bps < 500)) on setSlippageTolerance",
+        "No non-zero minOut assertion before swap"
+      ],
+      "references": [],
+      "notes": "The zero-default is partially mitigated by oracle-price-based minOut on deposit (it will revert if AMM price diverges from vault share price), but the 10000-bps setting path is a genuine zero-protection path. The owner-controlled vector is a centralization concern (LOW/QA per C4 norms), but the zero-initialization at deployment is exploitable in the first-block window before setSlippageTolerance is called."
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC777",
+      "type": "reentrancy-cei-violation",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 364,
+      "description": "Matches REENTRANCY pattern (CEI violation): in _withdrawInternal(), the external call ammAdapter.swap() on line 364 is followed by underlyingToken.safeTransfer() on line 367, and only THEN are state variables clientBalances and totalDeposited decremented on lines 371-372. This is an Interactions-before-Effects ordering. While both withdraw() and withdrawAsOwner() are protected by nonReentrant, the internal _withdrawInternal function is also called from the two-phase _totalWithdraw flow, where nonReentrant is set by totalWithdrawal() in AYieldStrategy. The full call chain is protected, but the pattern is a latent risk if the function is ever refactored or called from a new path without the modifier.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "uint256 underlyingReceived = ammAdapter.swap(...); // line 364",
+        "underlyingToken.safeTransfer(recipient, underlyingReceived); // line 367",
+        "clientBalances[token][balanceHolder] -= amount; // line 371 (AFTER external calls)"
+      ],
+      "missingMitigations": [
+        "State not decremented before external call in _withdrawInternal",
+        "Relies entirely on nonReentrant being on all caller entry points"
+      ],
+      "references": [],
+      "notes": "Immediate exploitability is low because all public callers have nonReentrant. Confidence is medium because the underlying token is assumed to be a standard ERC20 (no hooks) per system assumptions, and nonReentrant covers all entry points. Flag for manual review due to CEI violation in internal helper."
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "allowance-accumulation",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 315,
+      "description": "safeIncreaseAllowance is used unconditionally before every AMM swap (lines 315, 361, 423, 472) but allowance is never reset to zero after the swap completes. CurveAMMAdapter.swap() pulls exactly amountIn via safeTransferFrom from the strategy, so under normal operation the net residual is zero. However, if a swap reverts AFTER the allowance is granted but BEFORE safeTransferFrom executes, the granted allowance persists on ammAdapter. Subsequent calls then further increase this residual with safeIncreaseAllowance. An attacker who can cause partial-revert conditions (e.g., via a malicious vault token, flash loan against the router mid-call) could accumulate allowance and later drain the strategy's token balance via a direct transferFrom call to ammAdapter. The CurveAMMAdapter is owner-set and trusted, so exploitability depends on its trustworthiness.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "underlyingToken.safeIncreaseAllowance(address(ammAdapter), amount); // line 315",
+        "IERC20(address(vault)).safeIncreaseAllowance(address(ammAdapter), sharesToSell); // line 361",
+        "IERC20(address(vault)).safeIncreaseAllowance(address(ammAdapter), sharesToSell); // line 423",
+        "IERC20(address(vault)).safeIncreaseAllowance(address(ammAdapter), totalShares); // line 472"
+      ],
+      "missingMitigations": [
+        "No safeDecreaseAllowance or forceApprove(0) after swap completes",
+        "No assertion that post-swap allowance returns to 0"
+      ],
+      "references": [],
+      "notes": "forceApprove pattern (reset-then-set) used in CurveAMMAdapter for the router (line 135) but NOT in ERC4626MarketYieldStrategy for the ammAdapter. Inconsistent pattern. Under normal operation this is benign; under adversarial revert conditions it accumulates."
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "dos-unbounded-loop",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 509,
+      "description": "Matches DOS-UNBOUNDED-LOOP pattern: _accrueSurplusShares() at line 509 and _distributeBuffer() at line 547 both iterate over clients.length, where clients is the full _authorizedClients EnumerableSet snapshot. The set is owner-controlled so in the current deployment it is expected to be small (1-2 StableStaker clients). However, there is no hard cap on the set size, and if the owner ever adds many clients, the skimSurplus() call — which is the only way surplus is extracted — will fail with out-of-gas on-chain. This would strand yield and prevent surplus collection until a client is removed.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "for (uint256 i = 0; i < clients.length; i++) { // line 509 in _accrueSurplusShares",
+        "for (uint256 i = 0; i < clients.length; i++) { // line 547 in _distributeBuffer"
+      ],
+      "missingMitigations": [
+        "No maximum client count enforced in setClient()",
+        "No pagination in skimSurplus()"
+      ],
+      "references": [],
+      "notes": "Confidence is medium because the owner-only setClient access control practically limits the set. Flag as low-severity DoS risk for operational awareness."
+    },
+    {
+      "id": "PATTERN-005",
+      "source": "pattern-db",
+      "patternId": "CENTRALIZATION-ADMIN",
+      "type": "centralization",
+      "severity": "potential-low",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "line": 68,
+      "description": "Matches CENTRALIZATION-ADMIN pattern: setRoute() in CurveAMMAdapter is onlyOwner with no timelock. The route configuration controls which Curve pools the strategy executes against, including path[0]/lastToken validation but no on-chain pool coin-index verification. A compromised owner can redirect swaps to a malicious pool that outputs a controlled token or drains the strategy's balance. Additionally, ERC4626MarketYieldStrategy.setSlippageTolerance() (onlyOwner, line 194) can be set to 10000 bps to eliminate all slippage protection, and withdrawAsOwner() (onlyOwner, line 279) allows the owner to drain any client's balance to an arbitrary recipient without the client's consent or a timelock.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "function setRoute(...) external onlyOwner { // CurveAMMAdapter.sol line 68",
+        "function setSlippageTolerance(uint256 _bps) external onlyOwner { // ERC4626MarketYieldStrategy.sol line 194",
+        "function withdrawAsOwner(address client, address recipient, uint256 amount) external onlyOwner nonReentrant { // line 279"
+      ],
+      "missingMitigations": [
+        "No timelock on setRoute",
+        "No timelock on withdrawAsOwner",
+        "No multi-sig requirement enforced at contract level"
+      ],
+      "references": [],
+      "notes": "C4 typically categorizes centralization as Low/QA unless it directly enables a rug pull. withdrawAsOwner() combined with no timelock does allow direct fund extraction from any client. The two-phase totalWithdrawal (24h timelock) exists for the symmetric path but withdrawAsOwner bypasses it. Severity estimate: potential-low per C4 norms."
+    }
+  ],
+  "patternsWithNoMatch": [
+    "ERC4626-INFLATION",
+    "ORACLE-STALE",
+    "ORACLE-ROUNDID",
+    "SIGNATURE-REPLAY",
+    "FRONTRUN-APPROVE",
+    "FLASH-LOAN-PRICE",
+    "UNSAFE-DOWNCAST",
+    "DIVISION-PRECISION",
+    "UNPROTECTED-INIT",
+    "STORAGE-COLLISION",
+    "RETURN-VALUE-IGNORE",
+    "SELFDESTRUCT-FORCE-ETH",
+    "DOUBLE-VOTING",
+    "PERMIT-FRONTRUN",
+    "FIRST-DEPOSITOR-ATTACK",
+    "INCORRECT-OPERATOR",
+    "CROSS-CHAIN-REPLAY",
+    "TIMELOCK-BYPASS"
+  ]
+}
