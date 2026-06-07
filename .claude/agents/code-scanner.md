@@ -47,7 +47,7 @@ You receive:
 
 1. **Work from profiles first**: Use interface abstractions for initial analysis
 2. **Read source only when necessary**: To verify a suspected cross-contract issue
-3. **Trust verified properties**: If profile says "no unbounded loops", don't re-check
+3. **Trust verified properties — but only the `verified` ones**: a profile property tagged `verified` is an axiom; don't re-check it. Properties tagged `likely`, `unverified`, or `violated` are **NOT** axioms (the profiler is an LLM, not a prover) — treat each as a *must-re-examine* item and confirm it against source on any interaction path that depends on it. Per Law 1, an unconfirmed "likely" is a recall risk, not a guarantee
 4. **Do NOT flag local issues**: Already captured in profiles
 5. **Focus on interactions**: Your value-add is cross-contract reasoning
 
@@ -84,7 +84,7 @@ You receive:
 - **Flash Loan Callback Risks**: Vulnerability to flash loan callbacks
 
 ### DEFERRED TO TIER 1 (Do Not Re-Check)
-The following are handled by contract-profiler. Trust the profile data:
+The following are handled by contract-profiler. Trust the profile data **where the profiler tagged it `verified`** (re-examine any `likely`/`unverified`/`violated` property — see SCOPE RESTRICTION #3):
 - Single-contract reentrancy guards
 - Local arithmetic (overflow/underflow in one function)
 - Access control on individual functions

@@ -1,4 +1,5 @@
-# Memory Index
+# Memory index
 
-- [Owner-driven attacks are invalid](owner-driven-attacks-invalid.md) — strip owner/admin-config exploit paths; only permissionless vectors are valid H/M
-- [phoenix-nft-staking BatchNFTMinter nudge](phoenix-nft-staking-batchminter-nudge.md) — H-01 history, story-014 fix, MEV front-run is what survives
+> **Migrated.** Audit memories now live in the **global** store that Claude actually
+> loads at session start: `~/.claude/projects/-home-justin-code-audits/memory/`.
+> This repo-local store is no longer read by the harness — do not add memories here.

@@ -55,6 +55,7 @@ The ledger is `reports/ledgers/<project>.json` (persistent, outside versioned ru
 - **get_ledger(name)** — parse the ledger, or return an empty `{ project, lastAuditedCommit: null, findings: [] }` if absent.
 - **current_commit(name)** — `git -C lib/<submodule> rev-parse HEAD`.
 - **changed_since(name, commit)** — `git -C lib/<submodule> diff --name-only <commit> HEAD` (read-only). If `commit` is null, all in-scope files are "changed". Returns the changed-file list intersected with scope; downstream scanners focus there in regression mode.
+- **get_story_intent(name, fromCommit)** — resolve the `[story-NNN]` intents for the audited range, feeding the **story-faithfulness** scanner (Law 2). Run read-only `git -C lib/<submodule> log --format='%H%x09%s%x09%b' <fromCommit>..HEAD` (or `git log --format=... -- <scope files>` when `fromCommit` is null / `--full`) and keep every commit whose subject matches `\[story-[0-9]+\]`. For each return `{ tag, summary, commit, body, touchedFiles }` (touchedFiles via `git show --name-only --format= <commit>`). Also surface the design-doc paths (`lib/<submodule>/docs/*.md`), the project `lib/<submodule>/CLAUDE.md`, and the `designDecisions`/`systemAssumptions` from the registry. Read-only — never modify the repo.
 - **update_ledger(name, entries)** — upsert finding entries (see finding-manager LEDGER UPSERT), set `lastAuditedCommit` and `updatedAt`. Never overwrite human-set statuses (`acknowledged`/`wont-fix`/`false-positive`).
 
 ## ERROR HANDLING

@@ -41,7 +41,7 @@ For each pattern:
 - **medium**: Most signatures match, some conditions unclear
 - **low**: Partial match, needs manual verification
 
-Only output findings with medium or high confidence.
+**Do not discard low-confidence matches.** Output medium/high-confidence matches as `findings` (primary). Emit low-confidence matches into a separate `manualReview` array — not dropped, just routed for a human or higher-tier reasoning pass to adjudicate. **Confidence ≠ severity:** a low-confidence match on a value-handling function can still be a missed High/Medium — the uncertainty is about whether the pattern *applies*, not about how bad it is if it does. Per Law 1, recall beats tidiness here.
 
 ### Step 5: Output Findings
 
@@ -87,7 +87,9 @@ Write to: `<reportDir>/pattern-matches.json`
   "scanType": "pattern-matching",
   "patternsChecked": 22,
   "findingsCount": 5,
-  "findings": [...]
+  "findings": [...],
+  "manualReviewCount": 3,
+  "manualReview": [ /* low-confidence matches, same record shape, confidence:"low" — routed, not dropped */ ]
 }
 ```
 

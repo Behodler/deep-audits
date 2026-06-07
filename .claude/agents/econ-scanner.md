@@ -53,7 +53,7 @@ You receive:
 
 1. **Work from profiles first**: Use interface abstractions for value flow mapping
 2. **Read source only when necessary**: To verify suspected protocol-wide economic issue
-3. **Trust verified properties**: If profile says "rounding: down-on-deposit", don't re-verify
+3. **Trust verified properties — but only the `verified` ones**: a property tagged `verified` (e.g. "rounding: down-on-deposit") is an axiom; don't re-verify it. Properties tagged `likely`, `unverified`, or `violated` are **NOT** axioms (the profiler is an LLM, not a prover) — re-examine each against source on any value-flow path that depends on it. Per Law 1, an unconfirmed "likely" rounding/precision property is a recall risk, not a guarantee
 4. **Do NOT flag local issues**: Single-function arithmetic already in profiles
 5. **Focus on protocol economics**: Your value-add is cross-contract value flow analysis
 
@@ -103,7 +103,7 @@ You receive:
 - **Governance Attack Vectors**: Economic attacks via governance mechanisms
 
 ### DEFERRED TO TIER 1 (Do Not Re-Check)
-The following are handled by contract-profiler. Trust the profile data:
+The following are handled by contract-profiler. Trust the profile data **where the profiler tagged it `verified`** (re-examine any `likely`/`unverified`/`violated` property — see SCOPE RESTRICTION #3):
 - Single-function precision loss
 - Rounding direction in individual functions
 - Local fee calculation correctness

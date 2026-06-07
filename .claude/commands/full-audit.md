@@ -81,6 +81,12 @@ Invoke **qa-bundler**: "Compile Low and Centralization findings"
 - Run **4naly3er** and attach its automated QA/gas markdown to the bundle.
 - Save to `<report-dir>/submissions/qa-report.md`.
 
+## 6.5 Compile Spec-Conformance Report (Law 2)
+Invoke **finding-manager**: "Compile faithfulness (F-XX) findings into the spec-conformance report"
+- Gather all `F-XX` faithfulness findings produced by the story-faithfulness scanner (story/spec deviations).
+- Write `<report-dir>/submissions/spec-conformance.md`: one section per deviation, each quoting the `[story-NNN]`/spec text it violates and the actual behaviour.
+- **Separate from the QA bundle** — faithfulness is Law 2, not gas/style noise. A deviation that also carries security/value impact appears in its H/M report too (cross-referenced by `F-XX`).
+
 ## 7. Final Review
 For each finding: invoke **validity-checker** (invalid patterns) and **severity-auditor** (severity sanity). Flag concerns.
 
@@ -101,6 +107,7 @@ Submissions ready:
   High:   1 report (1 regression)
   Medium: 2 reports
   QA:     1 report (Low + Centralization + 4naly3er output)
+  Spec-conformance: 2 faithfulness findings (F-01, F-02) — submissions/spec-conformance.md (Law 2)
   Carryover: 3 still-open from prior runs (M-01, L-02, L-04) — stubs in submissions/carryover/
 
 Reports:  reports/phoenix-nft-staking-12/submissions/*.md
@@ -115,7 +122,7 @@ Triage: record decisions with /ledger phoenix-nft-staking (ack / fixed / reopen)
 ```
 
 # Agent Delegation
-project-manager · contract-profiler · static-analyzer · pattern-matcher · code-scanner · econ-scanner · invariant-generator · symbolic-analyzer · deduplicator · sanitizer · severity-classifier · finding-manager · poc-generator · poc-validator · report-writer · report-validator · qa-bundler · validity-checker · severity-auditor
+project-manager · contract-profiler · static-analyzer · pattern-matcher · code-scanner · econ-scanner · story-faithfulness · invariant-generator · symbolic-analyzer · deduplicator · sanitizer · severity-classifier · finding-manager · poc-generator · poc-validator · report-writer · report-validator · qa-bundler · validity-checker · severity-auditor
 
 # Error Handling
 - **Analysis failures**: continue with partial results.

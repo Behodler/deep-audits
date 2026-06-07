@@ -153,6 +153,7 @@ acronym there).
 - R- (refactor) labels
 - I- (informational) labels
 - S- (suggestion) labels
+- F- (faithfulness) labels — story/spec deviations belong in the dedicated **spec-conformance** report (Law 2), NOT the QA bundle. Do not absorb them here.
 
 ### Priority Ordering
 1. Findings affecting user funds (even indirectly)

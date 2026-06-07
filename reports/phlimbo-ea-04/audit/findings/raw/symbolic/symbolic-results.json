@@ -1,0 +1,316 @@
+{
+  "project": "phlimbo-ea",
+  "runTimestamp": "2026-06-07T02:22:08Z",
+  "tool": "halmos",
+  "toolVersion": "0.3.3",
+  "fallbackTool": "forge fuzz (foundry) @ 50000 runs",
+  "contract": "src/Phlimbo.sol (PhlimboEA V1)",
+  "commit": "1b1a32c4d1d7ec81a043f40ffe9a6d408c89d301",
+  "scope": "Pure-arithmetic reward math: _updatePool stable accrual (cap/strand/re-anchor), _claimRewards & view reward-debt subtraction (underflow), phUSDPerSecond emission floor/overflow, dust-regime accStablePerShare bounds, two-step APY gate.",
+  "harnessFiles": [
+    "workspace/phlimbo-ea/test/halmos/UpdatePoolDistribution.t.sol",
+    "workspace/phlimbo-ea/test/halmos/UpdatePoolDistributionTight.t.sol",
+    "workspace/phlimbo-ea/test/halmos/UpdatePoolFuzz.t.sol",
+    "workspace/phlimbo-ea/test/halmos/EmissionDustBounds.t.sol",
+    "workspace/phlimbo-ea/test/halmos/ClaimUnderflow.t.sol",
+    "workspace/phlimbo-ea/test/halmos/PendingViewsUnderflow.t.sol",
+    "workspace/phlimbo-ea/test/halmos/EmissionRateOverflow.t.sol",
+    "workspace/phlimbo-ea/test/halmos/TwoStepAPYGate.t.sol"
+  ],
+  "halmosInvocation": "halmos --contract <C> --solver-timeout-assertion 60000 --statistics (timeouts retried at 120000 with --solver-threads 4)",
+  "newHarnessesThisRun": [
+    "UpdatePoolDistribution.t.sol",
+    "UpdatePoolDistributionTight.t.sol",
+    "UpdatePoolFuzz.t.sol",
+    "EmissionDustBounds.t.sol"
+  ],
+  "reusedHarnesses": [
+    "ClaimUnderflow.t.sol",
+    "PendingViewsUnderflow.t.sol",
+    "EmissionRateOverflow.t.sol",
+    "TwoStepAPYGate.t.sol"
+  ],
+  "testsGenerated": 30,
+  "passed": 19,
+  "failed": 8,
+  "timeout": 3,
+  "notes": "FAIL = Halmos found a reachable counterexample. Several FAILs are EXPECTED-and-confirmatory (they prove a known LOCAL/ECON defect exists, e.g. strand>0, re-anchor under-distribution, dust emission zeroing) rather than being new bugs. Only the _claimRewards / pending* reward-debt underflow (M-01 / CODE-002) is a genuine reachable-panic finding; it is already ledgered. Three PROVE-properties of _updatePool TIMED OUT in Halmos at both 1e30 and 2^64 scale (nested symbolic integer divisions are intractable for the bitvector solver regardless of value bounds); they were discharged by forge fuzz (50k runs, all PASS) plus a closed-form Euclidean argument and are recorded as proved-by-fallback.",
+  "findings": [
+    {
+      "id": "SYMBOLIC-001",
+      "testName": "ClaimRewardsUnderflowSymbolic.check_claim_safe_when_acc_advances / check_claim_safe_witness_family / check_claim_safe_when_acc_static",
+      "result": "FAIL",
+      "type": "arithmetic-underflow (Panic 0x11) / DoS",
+      "contract": "src/Phlimbo.sol",
+      "function": "_claimRewards (L440, L446); pendingPhUSD (L489); pendingStable (L513)",
+      "property": "user.amount * accPerShare / PRECISION >= reward-debt (subtraction must not underflow) after a pauseWithdraw->unpause->claim trajectory",
+      "verdict": "DISPROVED — reachable underflow",
+      "severity": "verified-high (confirms ledger M-01 / CODE-002, severity Medium per C4)",
+      "counterexample": {
+        "witness_family_decoded": {
+          "amount0": "100e18 (100 tokens, pre-pauseWithdraw stake)",
+          "withdrawnBps": "8192 (81.92% pulled via pauseWithdraw, debt left anchored to amount0)",
+          "acc0_hex": "0x800000000000000000000",
+          "acc0_approx": "~1.547e26",
+          "accDelta_hex": "0x800000000000000000000",
+          "accDelta_approx": "~1.547e26 (monotone accumulator growth before claim)",
+          "outcome": "lhs = (amount0-withdrawn)*(acc0+accDelta)/PRECISION ~= 5.59e27 < phUSDDebt = amount0*acc0/PRECISION ~= 1.547e28 -> subtraction underflows (Panic 0x11)"
+        },
+        "acc_advances_hex": {
+          "amount0": "0x70ad0668db5677481cab2e69a",
+          "acc0": "0x27f6849478586fd83b699dffc",
+          "withdrawn": "0x65a40009a7fdd57be927be7fd",
+          "accDelta": "0xa32bc530691878a70b4418c42"
+        },
+        "acc_static_hex": {
+          "amount0": "0x1f1a654813f0303f29c2400",
+          "acc0": "0x8187f6c27983182440e4ff80",
+          "withdrawn": "0x1202ac8020e0ceb7fb7a54d",
+          "note": "acc1 == acc0 (NO accumulator growth) STILL underflows: pauseWithdraw shrinking user.amount while leaving reward-debt anchored to the larger pre-withdraw amount is sufficient on its own. This STRENGTHENS M-01: the underflow does not require any further accrual between pauseWithdraw and claim."
+        }
+      },
+      "remediationProof": "check_claim_clamped_remediation_is_safe PASSED: clamping the subtraction (pending = lhs > debt ? lhs - debt : 0), or rebasing the debt inside pauseWithdraw, removes the panic for all inputs.",
+      "confidence": "verified",
+      "proof": "Halmos symbolic execution found a reachable assertion violation; mirrors ledger M-01 PoC (poc-M-01-claim-underflow.t.sol).",
+      "reconciliation": "Maps to ledger M-01 (stale phUSDDebt after pauseWithdraw -> _claimRewards underflow). Not net-new; symbolic proof reinforces it and broadens it to the static-accumulator case and to the pending* views (CODE-007)."
+    },
+    {
+      "id": "SYMBOLIC-002",
+      "testName": "PendingViewsUnderflowSymbolic.check_pendingPhUSD_no_underflow / check_pendingStable_no_underflow / check_pendingPhUSD_post_pauseWithdraw",
+      "result": "FAIL",
+      "type": "arithmetic-underflow (Panic 0x11) in view helpers",
+      "contract": "src/Phlimbo.sol",
+      "function": "pendingPhUSD (L489), pendingStable (L513)",
+      "property": "(amount * projectedAccPerShare)/PRECISION >= reward-debt in the view return",
+      "verdict": "DISPROVED — reachable underflow (views revert instead of returning 0)",
+      "severity": "verified-low/qa (view DoS; same root cause as M-01)",
+      "counterexample": {
+        "pendingPhUSD_hex": {
+          "amount": "0x8000000000000000000000000",
+          "phUSDDebt": "0xc000000000000000000000000",
+          "accPhUSDPerShareInit": "0x00",
+          "phUSDPerSecond": "0x800000000000000000000",
+          "timeElapsed": "0x10000",
+          "totalStaked": "0x8000000000000000000000000",
+          "note": "phUSDDebt (1.5x) > amount*acc/PRECISION -> view reverts"
+        },
+        "pendingStable_hex": {
+          "amount": "0x8000000000000000000000000",
+          "stableDebt": "0x8000000000000000000000000",
+          "rewardBalance": "0x00",
+          "totalStaked": "0x8000000000000000000000000",
+          "note": "rewardBalance=0 so no accrual; stableDebt anchored above current credit -> revert"
+        }
+      },
+      "confidence": "verified",
+      "proof": "Halmos found reachable assertion violations on the exact view arithmetic.",
+      "reconciliation": "Same stale-debt root cause as M-01 (CODE-007). pendingPhUSD/pendingStable should clamp at 0; current code reverts, breaking off-chain integrations that read these views for a post-pauseWithdraw user."
+    }
+  ],
+  "confirmatoryCounterexamples": [
+    {
+      "id": "SYMBOLIC-CONFIRM-STRAND",
+      "testName": "UpdatePoolDistributionSymbolic.check_singleStep_no_strand",
+      "result": "FAIL (expected)",
+      "verdict": "Disproved 'no strand' -> a non-zero rounding strand DOES occur in a single _updatePool step",
+      "maps": "LOCAL-004 / ECON-001 (divide-before-multiply stable-reward stranding)",
+      "counterexample": {
+        "toDistribute_hex": "0x388b1f0ce2215877fa147ae67",
+        "totalStaked_hex": "0x21840000000550000000",
+        "meaning": "rewardBalance -= toDistribute (full) while accStablePerShare += floor(toDistribute*PRECISION/totalStaked); the floored remainder leaves rewardBalance uncredited to any share."
+      },
+      "boundedComplement": "check_singleStep_strand_bounded proves the strand per update is < totalStaked/PRECISION + 1 wei (TIMEOUT in Halmos, PROVED by fuzz + Euclidean closed form). So each poke strands at most ~totalStaked/1e18 reward-wei; accumulates under LOCAL-001's frequent re-pokes."
+    },
+    {
+      "id": "SYMBOLIC-CONFIRM-REANCHOR",
+      "testName": "UpdatePoolDistributionSymbolic.check_reanchor_two_pokes_eq_one + UpdatePoolFuzz.testFuzz_reanchor_strict_underdistribution",
+      "result": "FAIL (expected) / fuzz PASS on strict shortfall",
+      "verdict": "Disproved 'two pokes == one poke' -> splitting a depletion window distributes STRICTLY LESS; ~25% shortfall at N=2 pokes",
+      "maps": "LOCAL-001 / ECON-001 (exponential decay vs intended linear depletion; re-anchor at L416)",
+      "counterexample": {
+        "B0_hex": "0x8000000000000000000000000",
+        "B0_approx": "~6.3e29",
+        "fuzzWitness": "B0=1,000,000e18, D=1 week: one poke distributes ~B0; two equal pokes distribute ~0.75*B0 (assertApproxEqRel to 75% within 1% PASSED), matching ECON-001's N=2 -> 75% figure."
+      }
+    },
+    {
+      "id": "SYMBOLIC-CONFIRM-EMISSION-ZERO",
+      "testName": "EmissionDustBoundsSymbolic.check_emissionRate_zeroes_in_dust",
+      "result": "FAIL (expected)",
+      "verdict": "Disproved 'funded stake with positive APY always emits' -> phUSDPerSecond floors to 0",
+      "maps": "Profile section 3 emission-rounding note; amplified by LOCAL-005 dust (pauseWithdraw below MINIMUM_STAKE)",
+      "counterexample": {
+        "desiredAPYBps": "1",
+        "totalStaked_hex": "0x4000000000",
+        "totalStaked_approx": "~2.749e11 wei (~2.7e-7 token, dust)",
+        "meaning": "totalStaked*desiredAPYBps < 10000*SECONDS_PER_YEAR (~3.1536e11) -> phUSDPerSecond = 0; no phUSD ever emitted while in this state."
+      },
+      "guardProof": "check_emissionRate_nonzero_above_minimum PROVED: with totalStaked >= MINIMUM_STAKE (1e15) and bps >= 1, the rate is always > 0. The zeroing only manifests once the INV-6 dust invariant is broken (i.e. via pauseWithdraw, LOCAL-005)."
+    },
+    {
+      "id": "SYMBOLIC-NONFINDING-OVERFLOW-BOUNDARY",
+      "testName": "EmissionDustBoundsSymbolic.check_dust_claim_product_overflow_boundary",
+      "result": "FAIL (expected, NON-FINDING)",
+      "verdict": "A theoretical overflow of user.amount * accStablePerShare exists only at jointly-implausible magnitudes; OUT OF REALISTIC RANGE",
+      "maps": "ECON-CLEAR-FIRSTDEP (cleared)",
+      "counterexample": {
+        "amount_hex": "0x1000000000000000000000000000000000",
+        "amount_approx": "~5.4e39 (~5e21 tokens at 18dp)",
+        "accStablePerShare_hex": "0x8000000000000000000000000000000000000000",
+        "accStablePerShare_approx": "~7.3e47",
+        "meaning": "product ~4e87 > 2^256 (~1.16e77). Requires absurd token supply AND an absurd dust-inflated accumulator simultaneously; would brick stake/claim (checked-math revert), not steal funds. check_dust_claim_product_safe_realistic PROVED safe at realistic bounds (amount<1e27, acc<1e30)."
+      }
+    }
+  ],
+  "proofs": [
+    {
+      "testName": "UpdatePoolDistributionSymbolic.check_singleStep_distribute_le_balance",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "INV-3/INV-4 cap: a single _updatePool removes at most rewardBalance (toDistribute = min(potential, rewardBalance) <= rewardBalance). No stable over-distribution per call."
+    },
+    {
+      "testName": "UpdatePoolFuzz.testFuzz_singleStep_no_overcredit",
+      "result": "PASS",
+      "tool": "forge-fuzz (50000 runs) + closed-form Euclidean proof",
+      "halmosStatus": "TIMEOUT at 1e30 and 2^64 (nested symbolic division intractable)",
+      "property": "INV-4: per-share rounding never credits MORE than toDistribute (creditedBack = accInc*totalStaked/PRECISION <= toDistribute). Rounding can only strand, never inflate."
+    },
+    {
+      "testName": "UpdatePoolFuzz.testFuzz_singleStep_strand_bounded",
+      "result": "PASS",
+      "tool": "forge-fuzz (50000 runs) + closed-form Euclidean proof",
+      "halmosStatus": "TIMEOUT at 1e30 and 2^64",
+      "property": "LOCAL-004 magnitude: strand per update < totalStaked/PRECISION + 1 wei (strand*PRECISION < totalStaked + PRECISION)."
+    },
+    {
+      "testName": "UpdatePoolFuzz.testFuzz_reanchor_two_pokes_le_one",
+      "result": "PASS",
+      "tool": "forge-fuzz (50000 runs, symbolic B0 and D)",
+      "halmosStatus": "TIMEOUT at 1e30 and 2^64",
+      "property": "Re-anchor monotonicity: splitting the depletion window never distributes MORE than a single poke (delivery is monotonically non-increasing in poke count)."
+    },
+    {
+      "testName": "EmissionDustBoundsSymbolic.check_emissionRate_nonzero_above_minimum",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "With totalStaked >= MINIMUM_STAKE (1e15) and desiredAPYBps >= 1, phUSDPerSecond > 0 (emission cannot floor to zero while INV-6 holds)."
+    },
+    {
+      "testName": "EmissionDustBoundsSymbolic.check_dust_accStable_increment_no_overflow",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "Even at totalStaked == 1 wei (max dust), accStablePerShare += (toDistribute*PRECISION)/totalStaked does not overflow for realistic per-update reward (< 1e30); increment <= toDistribute*PRECISION."
+    },
+    {
+      "testName": "EmissionDustBoundsSymbolic.check_dust_claim_product_safe_realistic",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "user.amount * accStablePerShare does not overflow for realistic magnitudes (amount < 1e27, accStablePerShare < 1e30)."
+    },
+    {
+      "testName": "EmissionRateOverflowSymbolic.check_phUSDReward_projection_no_overflow",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "phUSDPerSecond = totalStaked*desiredAPYBps/10000/SECONDS_PER_YEAR and its forward projection timeElapsed*phUSDPerSecond*PRECISION do not overflow for totalStaked<1e30, bps<1e30, elapsed<1000y. (Supersedes the weaker check_emission_rate_no_overflow which TIMED OUT on a tautological assert; the emission-rate product is a strict sub-term of this proved bound, so emission-rate overflow is covered.)"
+    },
+    {
+      "testName": "EmissionRateOverflowSymbolic.check_accStable_update_no_overflow",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "(toDistribute*PRECISION)/totalStaked does not overflow for totalStaked in [1, 1e30), toDistribute < 1e30."
+    },
+    {
+      "testName": "ClaimRewardsUnderflowSymbolic.check_claim_clamped_remediation_is_safe",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "Clamped subtraction (pending = lhs > debt ? lhs - debt : 0) is panic-free for all inputs -> validates the M-01 remediation."
+    },
+    {
+      "testName": "TwoStepAPYGateSymbolic.check_fresh_state_always_preview",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "From a fresh state (apySetInProgress == false) any setDesiredAPY call goes to PREVIEW (cannot commit in one tx)."
+    },
+    {
+      "testName": "TwoStepAPYGateSymbolic.check_window_expiry_always_preview",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "block.number > pendingAPYBlockNumber + 100 always forces PREVIEW (stale pending cannot silently commit)."
+    },
+    {
+      "testName": "TwoStepAPYGateSymbolic.check_bps_mismatch_always_preview",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "bps != pendingAPYBps always forces PREVIEW."
+    },
+    {
+      "testName": "TwoStepAPYGateSymbolic.check_commit_requires_exact_tuple",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "INV-9: commit reachable IFF apySetInProgress AND block.number <= pending+100 AND bps == pendingAPYBps."
+    },
+    {
+      "testName": "TwoStepAPYGateSymbolic.check_boundary_block_inclusive",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "+100 boundary is inclusive: block == pending+100 allows commit."
+    },
+    {
+      "testName": "TwoStepAPYGateSymbolic.check_boundary_plus_one_excludes_commit",
+      "result": "PASS",
+      "tool": "halmos",
+      "property": "block == pending+101 falls back to PREVIEW."
+    }
+  ],
+  "timeouts": [
+    {
+      "testName": "UpdatePoolDistributionSymbolic.check_singleStep_no_overcredit (and *_tight)",
+      "result": "TIMEOUT",
+      "reason": "Nested symbolic integer divisions ((D*P/T)*T/P) over a symbolic divisor T are intractable for the bitvector solver at both 1e30 and 2^64 operand bounds.",
+      "resolution": "Discharged by UpdatePoolFuzz.testFuzz_singleStep_no_overcredit (50k runs PASS) + closed-form Euclidean proof. Recorded as PROVED-by-fallback."
+    },
+    {
+      "testName": "UpdatePoolDistributionSymbolic.check_singleStep_strand_bounded (and *_tight)",
+      "result": "TIMEOUT",
+      "reason": "Same nested-division intractability.",
+      "resolution": "Discharged by UpdatePoolFuzz.testFuzz_singleStep_strand_bounded (50k runs PASS) + Euclidean proof (strand*PRECISION = r1 + r2 < totalStaked + PRECISION)."
+    },
+    {
+      "testName": "UpdatePoolDistributionSymbolic.check_reanchor_two_pokes_le_one (and *_tight)",
+      "result": "TIMEOUT",
+      "reason": "Symbolic division branching across the two-poke re-anchor sequence.",
+      "resolution": "Discharged by UpdatePoolFuzz.testFuzz_reanchor_two_pokes_le_one (50k runs, symbolic B0 and D, PASS)."
+    },
+    {
+      "testName": "EmissionRateOverflowSymbolic.check_emission_rate_no_overflow",
+      "result": "TIMEOUT",
+      "reason": "Tautological assert (phUSDPerSecond <= product) over huge symbolic ranges with division; solver cannot close it quickly.",
+      "resolution": "Superseded by check_phUSDReward_projection_no_overflow (PASS), which proves no overflow for the larger projected product that strictly dominates the emission-rate product. Overflow concern considered RESOLVED."
+    }
+  ],
+  "propertySummary": {
+    "prop1_updatePool_cap_strand_reanchor": {
+      "cap_distributed_le_rewardBalance": "PROVED (halmos)",
+      "no_overcredit_INV4": "PROVED (fuzz + closed form; halmos TIMEOUT)",
+      "strand_exists": "CONFIRMED via counterexample (LOCAL-004/ECON-001)",
+      "strand_bounded_lt_totalStaked_over_PRECISION_plus1": "PROVED (fuzz + closed form; halmos TIMEOUT)",
+      "single_poke_distributes_approx_rewardBalance": "single-step cap holds; full-window ~rewardBalance only with ONE poke",
+      "reanchor_multi_poke_underdistributes": "CONFIRMED (FAIL on two==one; ~75% at N=2) -> ECON-001 / LOCAL-001"
+    },
+    "prop2_claimRewards_debt_underflow": {
+      "no_underflow_under_monotonic_updates": "DISPROVED -> reachable underflow (M-01/CODE-002). Holds ONLY when debt is rebased on every amount change; pauseWithdraw breaks that (even with static accumulator).",
+      "remediation_clamped": "PROVED safe"
+    },
+    "prop3_phUSDPerSecond_floor_overflow": {
+      "zeroing_at_small_totalStaked": "CONFIRMED (rate floors to 0 once totalStaked*bps < ~3.15e11; reachable only in dust regime / LOCAL-005)",
+      "nonzero_above_MINIMUM_STAKE": "PROVED",
+      "overflow_large_totalStaked_times_APY": "PROVED no overflow for realistic bounds (via projection test)"
+    },
+    "prop4_pauseWithdraw_dust_accStablePerShare_overflow": {
+      "increment_no_overflow_at_dust": "PROVED (safe even at totalStaked=1 wei for realistic rewards)",
+      "downstream_product_realistic": "PROVED safe",
+      "downstream_product_theoretical_boundary": "overflow only at jointly-implausible ~1e78 magnitudes (NON-FINDING; matches ECON-CLEAR-FIRSTDEP)"
+    }
+  }
+}

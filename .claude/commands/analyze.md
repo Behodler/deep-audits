@@ -37,6 +37,7 @@ Invoke **project-manager**: "Load the persistent ledger and compute changed file
   - No ledger, or `--full` → **full scan** (entire scope).
   - Ledger present, no `--full` → **regression scan**: scanners still receive the full scope for context, but focus effort on changed files/functions and on previously-`open` findings.
 - Pass the ledger (open/fixed/acknowledged fingerprints) and the changed-file set to downstream agents.
+- Also invoke **project-manager** `get_story_intent` to resolve the `[story-NNN]` intents for the audited range (+ design docs / `CLAUDE.md` / `designDecisions`) for the **story-faithfulness** scanner (Law 2). Regression mode → the changed-commit range; `--full` → stories touching in-scope files.
 
 ```
 Run Mode
@@ -88,6 +89,11 @@ Invoke **econ-scanner**: "Scan for cross-contract economic vulnerabilities"
 - Works from profiles + documentation.
 - Focus: intent vs implementation, cross-contract value leakage, oracle/flash-loan surfaces, incentive misalignment, MEV paths.
 
+### 5c. Story-Faithfulness Scan (Law 2)
+Invoke **story-faithfulness**: "Verify in-scope features implement the stories they derive from"
+- Works from profiles + the resolved `[story-NNN]` intents + design docs.
+- Checks (1) does the implementation conform to each story's acceptance criteria, and (2) **Law-1 override** — is the story's *own* intent unsafe? An unsafe story escalates to a security finding; a behavioural deviation becomes a faithfulness (`F-XX`) finding for the spec-conformance report.
+
 ## 6. Tier 3 — Property & Symbolic Verification (default)
 Run these IN PARALLEL. Skippable for a fast pass via `--no-deep`, but they are part of the standard flow.
 
@@ -112,7 +118,8 @@ Symbolic:   5 tests — 4 proved, 1 counterexample
 
 ## 7. Deduplicate Findings
 Invoke **deduplicator**: "Filter obvious and common issues from all sources"
-- Combine: local findings (4a), static analysis (4b), pattern matches (4c), code findings (5a), economic findings (5b), invariant/symbolic counterexamples (6).
+- Combine: local findings (4a), static analysis (4b), pattern matches (4c), code findings (5a), economic findings (5b), story-faithfulness findings (5c), invariant/symbolic counterexamples (6).
+- The pattern-matcher **`manualReview`** (low-confidence) list is **not** noise-filtered — preserve it to `<report-dir>/manual-review.json` as a visible parked channel for human / higher-tier adjudication (Law 1: recall beats tidiness).
 - Remove exact duplicates, consolidate shared root causes, filter tool noise. Track source for the audit trail.
 
 ## 8. Sanitize Against Known Issues and Ledger
@@ -132,7 +139,7 @@ Invoke **severity-classifier**: "Classify findings by C4 severity"
 
 ## 10. Create Finding Records and Update Ledger
 Invoke **finding-manager**: "Create finding records and upsert the ledger"
-- Write findings to `<report-dir>/findings/<severity>/` with labels `H-01`, `M-01`, `L-01`, `C-01`.
+- Write findings to `<report-dir>/findings/<severity>/` with labels `H-01`, `M-01`, `L-01`, `C-01`, and **`F-01` faithfulness** (Law-2 deviations → `findings/faithfulness/`, compiled into `submissions/spec-conformance.md`, kept out of the QA bundle).
 - Status `draft` or `needs-poc`. Tag new vs regressed vs still-open.
 - For each **still-open** entry (all severities), write a thin carryover stub to `<report-dir>/submissions/carryover/<label>-CARRYOVER.md` linking back to its original report — so untriaged-but-unfixed findings never disappear from the run you review.
 - Upsert `reports/ledgers/<project>.json`: add new entries, bump `lastSeenRun` for still-open, mark entries whose code changed and are no longer flagged as `fixed` at the current commit, set `lastAuditedCommit = HEAD`.
@@ -176,6 +183,7 @@ Next:
 - **static-analyzer**: Slither + Aderyn + Semgrep (Tier 1)
 - **pattern-matcher**: pattern database (Tier 1)
 - **code-scanner** / **econ-scanner**: interaction analysis (Tier 2)
+- **story-faithfulness**: story/spec conformance + unsafe-story escalation (Tier 2, Law 2)
 - **invariant-generator** / **symbolic-analyzer**: property + symbolic verification (Tier 3)
 - **deduplicator**: filter duplicates and common issues
 - **sanitizer**: known issues + ledger reconciliation
@@ -186,7 +194,7 @@ Next:
 ```
 TIER 1 (parallel)   contract-profiler · static-analyzer (Slither/Aderyn/Semgrep) · pattern-matcher
         │
-TIER 2 (parallel)   code-scanner · econ-scanner   (consume profiles)
+TIER 2 (parallel)   code-scanner · econ-scanner · story-faithfulness   (consume profiles + story intents)
         │
 TIER 3 (parallel)   invariant-generator (forge + medusa/echidna) · symbolic-analyzer (halmos)
         │

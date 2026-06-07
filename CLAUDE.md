@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repository contains the audit tooling used to review the Phoenix/Behodler smart-contract suite. Findings are written in a format compatible with Code4rena (C4) conventions so the same artefacts can be repurposed if a Phoenix component is ever submitted to a public audit; treat the C4 framing as an output spec, not a contest goal.
 
+## Audit Philosophy — The Three-Law Hierarchy
+
+Every audit decision — what to scan, what to report, how to rank, what to suppress — obeys a strict, ordered hierarchy. Lower laws yield to higher ones (Asimov-style). When laws conflict, the lowest-numbered one wins. This hierarchy is the authority behind the agent rules; where a C4 convention contradicts it, the laws win (C4 is an output spec, not the goal).
+
+1. **No exploits (security is paramount).** This is DeFi; a live exploit is the worst possible outcome. **Recall beats report-tidiness** — never silently drop a plausibly-security-relevant finding to keep a report clean. If a finding must be set aside, park it in a *visible* channel (manual-review / spec-conformance / carryover) with the reason, never in a log nobody reads.
+2. **Faithfulness to stories.** Features must do what the `[story-NNN]` they derive from says. Stories live in `[story-NNN]`-tagged git commit messages, `lib/<project>/docs/`, and the project `CLAUDE.md`. **Law 1 overrides:** if a story's own intended behaviour would introduce an exploit, flag the unsafe story — do not bless a faithful-but-exploitable implementation.
+3. **The owner is trusted — for KNOWING actions only.** Assume the owner is **non-malicious**: never report "a malicious owner could…" vectors (a self-audit cannot stop a malicious owner, and the owner is not their own adversary — such findings are pure noise). But an owner action with a *non-obvious* consequence that **unknowingly** enables a Law-1 exploit or breaks a Law-2 story is a **footgun**, and footguns are **in scope** — surfaced as operational hazards with safe-config guidance, at honest severity. The test: *"would a competent, non-malicious owner be surprised by this consequence?"* Surprise ⇒ footgun ⇒ report. Obvious ⇒ trusted ⇒ suppress.
+
 ## Terminology
 
 - **Source repo** - A repository containing the Solidity project to be audited. Source repos are added as git submodules in `lib/`.
@@ -127,7 +135,7 @@ git submodule add <repo-url> lib/<project-name>
 - CryptoPunks support
 - Approve race condition / safeApprove front-running
 - User input mistakes / phishing
-- Reckless admin mistakes
+- Reckless admin mistakes — owner acting maliciously, or a misconfig whose harm is *obvious* (Law 3). **Exception:** a *non-obvious* owner footgun that unknowingly enables an exploit or breaks a story is **in scope** as an operational hazard, not invalid.
 - Unused view functions (QA at best)
 - Speculation on future code without demonstrated root cause
 

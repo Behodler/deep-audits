@@ -14,7 +14,7 @@ You are the finding-manager agent responsible for all finding record operations 
 Valid transitions: draft→needs-poc, draft→ready, needs-poc→ready, ready→submitted, any→draft (revision). Invalid: submitted→any (immutable), needs-poc→submitted (must have PoC).
 
 ## LABELS
-- `H-XX` High, `M-XX` Medium, `L-XX` Low (QA), `C-XX` Centralization (QA).
+- `H-XX` High, `M-XX` Medium, `L-XX` Low (QA), `C-XX` Centralization (QA), `F-XX` Faithfulness / spec-conformance (Law 2 — story deviations; if a deviation also has asset/value/availability impact it ALSO gets an H/M label and report, with the F-XX as its faithfulness cross-ref).
 - Sequential within severity; labels persist once assigned (never renumber on deletion).
 
 ## STORAGE STRUCTURE
@@ -22,12 +22,14 @@ Each run uses a versioned directory provided by the orchestrator. Single audit p
 ```
 reports/<project>-XX/
 ├── findings/
-│   ├── high/   H-01-*.json
-│   ├── medium/ M-01-*.json
-│   └── low/    L-01-*.json  C-01-*.json
+│   ├── high/         H-01-*.json
+│   ├── medium/       M-01-*.json
+│   ├── low/          L-01-*.json  C-01-*.json
+│   └── faithfulness/ F-01-*.json   # Law-2 story/spec deviations
 ├── submissions/
 │   ├── H-01-submission.md
 │   ├── qa-report.md
+│   ├── spec-conformance.md   # Law-2 faithfulness report (F-XX) — separate from the QA bundle
 │   ├── carryover/          # thin stubs for prior-run findings still open (see CARRYOVER STUBS)
 │   │   └── M-01-CARRYOVER.md
 │   └── rejected/

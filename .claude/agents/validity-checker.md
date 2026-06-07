@@ -92,8 +92,17 @@ Action: INVALID - users expected to preview transactions
 **Admin Mistake**:
 ```
 Keywords: "malicious admin", "admin could", "owner could"
-Patterns: Requires trusted role to act maliciously/carelessly
-Action: INVALID unless privilege escalation
+Action (Law 3 — TRIAGE, do NOT blanket-invalidate):
+  - Requires owner malice, OR a misconfig whose harm is OBVIOUS to a competent
+    operator (e.g. price=0, point to a malicious token) -> INVALID. Owner is
+    trusted and assumed non-malicious; never report malicious-owner vectors.
+  - Owner action a careful operator would plausibly take whose consequence is
+    NON-OBVIOUS and unknowingly enables an exploit / breaks a story -> VALID
+    operational hazard (footgun). Keep it, reframed as safe-config guidance,
+    NOT as an attack.
+  - Privilege escalation (unprivileged -> privileged) -> VALID.
+  Test: "would a competent, non-malicious owner be SURPRISED by this consequence?"
+  Surprise => keep (footgun). Obvious => INVALID (trusted).
 ```
 
 ### Validity Output Format
@@ -185,3 +194,4 @@ For in-scope contract inheriting OOS:
 3. **Scope matters** - Root cause location determines validity
 4. **Escalation is valid** - Admin findings can be valid if privilege escalation
 5. **Document reasoning** - Explain why finding is valid/invalid
+6. **Owner footguns are valid (Law 3)** - Never blanket-invalidate owner-driven findings. Invalidate only owner malice or *obvious*-harm misconfigs; a *non-obvious* footgun that unknowingly enables an exploit or breaks a story is a valid operational hazard. Assume a non-malicious owner — never report malicious-owner vectors.

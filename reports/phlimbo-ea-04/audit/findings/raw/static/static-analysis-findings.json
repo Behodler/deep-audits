@@ -1,0 +1,223 @@
+{
+  "project": "phlimbo-ea",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "static",
+  "scope": "src/Phlimbo.sol",
+  "compilation": {
+    "solc": "0.8.19",
+    "source": "workspace/phlimbo-ea (forge build OK; lib/ is read-only)",
+    "note": "Slither/Aderyn compiled the writable workspace clone. Nested submodules reflax-yield-vault and flax-token-v2 are empty but not imported by in-scope code, so the build succeeds."
+  },
+  "tools": {
+    "slither": "0.11.3",
+    "aderyn": "0.6.8",
+    "semgrep": "1.163.0"
+  },
+  "missingTools": [],
+  "findingsCount": 13,
+  "filteredCount": 31,
+  "filterSummary": {
+    "slither": { "raw": 17, "kept": 12, "droppedOrMerged": 5 },
+    "aderyn": { "rawPhlimboIssueTypes": 7, "kept": 1, "dropped": 6, "outOfScopeNote": "Aderyn HIGH 'Reentrancy: state change after external call' is in src/MigratorV1V2.sol (lines 159,160,181,207,227), which is OUT OF SCOPE (scope = src/Phlimbo.sol only); not counted here." },
+    "semgrep": { "raw": 20, "kept": 0, "dropped": 20, "note": "All 20 Semgrep hits on Phlimbo.sol were INFO/gas-style (use-ownable2step, non-payable-constructor, use-custom-error-not-require x9, inefficient-state-variable-increment x4, use-nested-if x3); discarded per Informational->discard mapping. use-ownable2step is owner-trusted single-step ownership (documented known issue) -> not surfaced." }
+  },
+  "findings": [
+    {
+      "id": "SLITHER-001",
+      "source": "slither",
+      "type": "reentrancy-no-eth",
+      "severity": "potential-medium",
+      "contract": "src/Phlimbo.sol",
+      "function": "stake",
+      "line": 309,
+      "description": "External call _claimRewards(recipient) -> phUSD.mint(user, pendingPhUSDAmount) (line 442) occurs before state writes: totalStaked += amount (321), user.amount/phUSDDebt/stableDebt (316-318) and _updatePhUSDEmissionRate() -> phUSDPerSecond (324/463/469). phUSDPerSecond, totalStaked and userInfo are read by cross-function views/accrual (_updatePool, pendingPhUSD, pendingStable, getPoolInfo, withdraw, claim, pauseWithdraw), so a reentrant callback during mint sees inconsistent accounting.",
+      "confidence": "medium",
+      "rawCheck": "reentrancy-no-eth",
+      "corroboratingChecks": ["reentrancy-events@stake"],
+      "rationale": "Real CEI violation: the reward sink is an external mint() and accounting state is updated after it. phUSD is a protocol-controlled mintable token (mitigates classic attacker control), and the function carries no nonReentrant modifier (only collectReward does) -> dedup/severity must judge whether phUSD.mint can re-enter. Kept (Law 1: recall over tidiness)."
+    },
+    {
+      "id": "SLITHER-002",
+      "source": "slither",
+      "type": "reentrancy-no-eth",
+      "severity": "potential-medium",
+      "contract": "src/Phlimbo.sol",
+      "function": "withdraw",
+      "line": 341,
+      "description": "External call _claimRewards(msg.sender) -> phUSD.mint (line 442) occurs before state writes: totalStaked -= actualWithdrawAmount (359), user.amount/phUSDDebt/stableDebt (354-356) and _updatePhUSDEmissionRate() -> phUSDPerSecond (365/463/469). Same cross-function reentrancy surface as stake (totalStaked, phUSDPerSecond, userInfo).",
+      "confidence": "medium",
+      "rawCheck": "reentrancy-no-eth",
+      "corroboratingChecks": ["reentrancy-events@withdraw"],
+      "rationale": "CEI violation on the core unstake path; no nonReentrant modifier. The mint() callback could observe pre-decrement totalStaked/user.amount. Kept for recall; severity hinges on whether protocol-owned phUSD.mint can hand control to the caller."
+    },
+    {
+      "id": "SLITHER-003",
+      "source": "slither",
+      "type": "reentrancy-no-eth",
+      "severity": "potential-medium",
+      "contract": "src/Phlimbo.sol",
+      "function": "claim",
+      "line": 376,
+      "description": "External call _claimRewards(msg.sender) -> phUSD.mint (line 442) occurs before state writes user.phUSDDebt (379) and user.stableDebt (380). userInfo is read across _claimRewards, stake, withdraw, pendingPhUSD, pendingStable, pauseWithdraw, allowing a reentrant claim to double-count pending rewards before debt is rebased.",
+      "confidence": "medium",
+      "rawCheck": "reentrancy-no-eth",
+      "rationale": "Debt (reward checkpoint) is written only after the mint external call; a re-entrant claim before line 379/380 would see stale phUSDDebt/stableDebt. No nonReentrant on claim. Kept for recall."
+    },
+    {
+      "id": "SLITHER-004",
+      "source": "slither",
+      "type": "reentrancy-events",
+      "severity": "potential-low",
+      "contract": "src/Phlimbo.sol",
+      "function": "_claimRewards",
+      "line": 442,
+      "description": "phUSD.mint(user, pendingPhUSDAmount) external call (442) followed by RewardsClaimed event emission (453). This internal function is the shared external-call sink reached by stake/withdraw/claim.",
+      "confidence": "medium",
+      "rawCheck": "reentrancy-events",
+      "rationale": "Lower-severity sibling of SLITHER-001/002/003 marking the exact external-call site (the phUSD.mint). Kept as the canonical sink location so dedup can anchor the reentrancy cluster; event-ordering itself is minor but the call site is load-bearing."
+    },
+    {
+      "id": "SLITHER-005",
+      "source": "slither",
+      "type": "divide-before-multiply",
+      "severity": "potential-medium",
+      "contract": "src/Phlimbo.sol",
+      "function": "_updatePool",
+      "line": 403,
+      "description": "Precision loss: potentialReward = (rewardPerSecond * timeElapsed) / PRECISION (403); toDistribute = potentialReward (406); then accStablePerShare += (toDistribute * PRECISION) / totalStaked (410). A division (by PRECISION) feeds a later multiplication (by PRECISION), and rewardPerSecond is itself a scaled (rewardBalance*PRECISION)/depletionDuration quotient.",
+      "confidence": "medium",
+      "rawCheck": "divide-before-multiply",
+      "rationale": "Core stable-reward accrual math. Linear-depletion rate is divided then re-scaled; rounding can systematically under/over-distribute over many small updates (rate recomputes every interaction in V1 per CLAUDE.md). Security/economic-relevant precision finding -> kept."
+    },
+    {
+      "id": "SLITHER-006",
+      "source": "slither",
+      "type": "divide-before-multiply",
+      "severity": "potential-medium",
+      "contract": "src/Phlimbo.sol",
+      "function": "pendingStable",
+      "line": 503,
+      "description": "View mirror of SLITHER-005: potentialReward = (rewardPerSecond * timeElapsed) / PRECISION (503); toDistribute = potentialReward (506); _accStablePerShare += (toDistribute * PRECISION) / totalStaked (509). Same divide-before-multiply ordering as the on-chain accrual.",
+      "confidence": "medium",
+      "rawCheck": "divide-before-multiply",
+      "rationale": "Read-side pending-reward preview must match _updatePool exactly; identical rounding so any drift is consistent, but confirms the same precision pattern is reachable via a view. Kept to corroborate SLITHER-005."
+    },
+    {
+      "id": "SLITHER-007",
+      "source": "slither",
+      "type": "timestamp",
+      "severity": "potential-low",
+      "contract": "src/Phlimbo.sol",
+      "function": "_updatePool",
+      "line": 390,
+      "description": "Reward accrual gated on block.timestamp: 'block.timestamp <= lastRewardTime' (390) and timeElapsed = block.timestamp - lastRewardTime (400) drives the entire stable + phUSD distribution.",
+      "confidence": "medium",
+      "rawCheck": "timestamp",
+      "rationale": "LOAD-BEARING per suite policy: linear depletion accrues over (block.timestamp - lastRewardTime). Not informational here; kept so severity-classifier can assess timestamp/accrual sensitivity."
+    },
+    {
+      "id": "SLITHER-008",
+      "source": "slither",
+      "type": "timestamp",
+      "severity": "potential-low",
+      "contract": "src/Phlimbo.sol",
+      "function": "pendingStable",
+      "line": 501,
+      "description": "block.timestamp > lastRewardTime && totalStaked != 0 (501); timeElapsed = block.timestamp - lastRewardTime (502) drives previewed stable accrual and the rewardBalance cap.",
+      "confidence": "medium",
+      "rawCheck": "timestamp",
+      "rationale": "LOAD-BEARING: time-driven stable-reward preview. Kept per suite policy (time is the depletion driver)."
+    },
+    {
+      "id": "SLITHER-009",
+      "source": "slither",
+      "type": "timestamp",
+      "severity": "potential-low",
+      "contract": "src/Phlimbo.sol",
+      "function": "pendingPhUSD",
+      "line": 483,
+      "description": "block.timestamp > lastRewardTime && totalStaked != 0 (483); timeElapsed = block.timestamp - lastRewardTime (484) drives previewed phUSD emission accrual.",
+      "confidence": "medium",
+      "rawCheck": "timestamp",
+      "rationale": "LOAD-BEARING: time-driven phUSD APY emission preview. Kept per suite policy."
+    },
+    {
+      "id": "SLITHER-010",
+      "source": "slither",
+      "type": "timestamp",
+      "severity": "potential-low",
+      "contract": "src/Phlimbo.sol",
+      "function": "withdraw",
+      "line": 336,
+      "description": "Slither flags withdraw under block-timestamp because it reaches _updatePool; the 'dangerous comparison' it lists is require(user.amount >= amount) (336), which is NOT a timestamp comparison.",
+      "confidence": "low",
+      "rawCheck": "timestamp",
+      "rationale": "Kept per explicit suite policy (do NOT drop timestamp detectors), but the flagged comparison is a balance check, not block.timestamp -> likely a tainted/spurious attribution from the _updatePool call edge. dedup/severity should down-rank unless tied to SLITHER-007."
+    },
+    {
+      "id": "SLITHER-011",
+      "source": "slither",
+      "type": "timestamp",
+      "severity": "potential-low",
+      "contract": "src/Phlimbo.sol",
+      "function": "pauseWithdraw",
+      "line": 247,
+      "description": "Slither flags pauseWithdraw under block-timestamp; the listed 'dangerous comparison' is require(user.amount >= amount) (247), not an actual block.timestamp comparison. pauseWithdraw deliberately skips _updatePool (emergency exit).",
+      "confidence": "low",
+      "rawCheck": "timestamp",
+      "rationale": "Kept per suite policy, but appears spurious (no timestamp comparison in this function; it is the emergency path that intentionally does not accrue). Flagged as likely FP for downstream triage."
+    },
+    {
+      "id": "SLITHER-012",
+      "source": "slither",
+      "type": "timestamp",
+      "severity": "potential-low",
+      "contract": "src/Phlimbo.sol",
+      "function": "_claimRewards",
+      "line": 441,
+      "description": "Slither flags _claimRewards under block-timestamp; the listed comparisons are pendingPhUSDAmount > 0 (441), pendingRewardAmount > 0 (447) and their OR (452) - none are block.timestamp comparisons.",
+      "confidence": "low",
+      "rawCheck": "timestamp",
+      "rationale": "Kept per suite policy; comparisons are reward-amount guards, not timestamp -> likely spurious attribution. Retained for recall, marked low confidence."
+    },
+    {
+      "id": "ADERYN-001",
+      "source": "aderyn",
+      "type": "state-change-without-event",
+      "severity": "potential-low",
+      "contract": "src/Phlimbo.sol",
+      "function": "setPauser",
+      "line": 206,
+      "description": "setPauser(address _pauser) updates the security-critical 'pauser' state variable (207) without emitting an event, so off-chain monitors cannot observe pauser-role rotation.",
+      "confidence": "medium",
+      "rawCheck": "State Change Without Event",
+      "rationale": "QA/observability gap on a privileged role that controls pause/unpause (and thus pauseWithdraw availability). Owner-only and owner is trusted, but silent rotation of the pauser is a monitoring blind spot worth noting. Kept as low; the companion zero-check finding was dropped because setPauser(0) is documented-intentional ('can be zero address to disable pausing')."
+    }
+  ],
+  "droppedNoise": {
+    "slither": [
+      "missing-zero-check @ setPauser line 206 (in drop-list; setPauser(0) is documented-intentional to disable pausing)",
+      "immutable-states @ phUSD line 24, rewardToken line 27 (gas optimization, Informational->discard)",
+      "reentrancy-events @ stake / @ withdraw (merged as corroboration into SLITHER-001 / SLITHER-002)"
+    ],
+    "aderyn": [
+      "Centralization Risk @ lines 18,151,178,206,214 (owner-trusted onlyOwner functions incl. emergencyTransfer; documented known issue 'Owner trust assumptions')",
+      "Large Numeric Literal @ line 469 (10000 bps divisor; readability/too-many-digits noise)",
+      "PUSH0 Opcode @ line 2 (EVM-version/solc noise)",
+      "Address State Variable Set Without Checks @ line 207 (== missing-zero-check; zero is intentional)",
+      "State Variable Could Be Immutable @ lines 24,27 (gas optimization)",
+      "Unspecific Solidity Pragma @ line 2 (pragma noise)"
+    ],
+    "aderynOutOfScope": [
+      "HIGH 'Reentrancy: State change after external call' @ src/MigratorV1V2.sol lines 159,160,181,207,227 (MigratorV1V2 is OUT OF SCOPE; scope = src/Phlimbo.sol)",
+      "Costly operations inside loop / nonReentrant Not First Modifier / Loop Contains require|revert (all in MigratorV1V2.sol / PhlimboV2.sol, out of scope)"
+    ],
+    "semgrep": [
+      "use-ownable2step @ line 18 (INFO; single-step Ownable, owner-trusted, documented known issue)",
+      "non-payable-constructor @ line 125 (gas/INFO)",
+      "use-custom-error-not-require @ lines 130,131,132,179,198,236,247,248,271,296,336 (gas/INFO)",
+      "inefficient-state-variable-increment @ lines 280,321,410,422 (gas/INFO)",
+      "use-nested-if @ lines 348,483,501 (gas/INFO)"
+    ]
+  }
+}

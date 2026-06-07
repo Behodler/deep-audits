@@ -73,6 +73,8 @@ Includes incorrect state handling, spec deviations, centralization risks, admin-
 
 **Centralization Risks**: direct admin misuse or admin-unblocked mistakes → QA report; privilege escalation → judge by likelihood and impact; reasonable privileged-function misuse → up to Medium.
 
+**Owner footguns (Law 3 — operational hazards)**: a *non-obvious* owner action that **unknowingly** enables an exploit or breaks a story is NOT mere centralization. Classify by the impact it unlocks — often Medium "operational hazard", up to High if it enables direct asset loss — and label it a footgun with safe-config guidance, never as a malicious-admin vector. Pure obvious-misuse / malicious-owner vectors stay out (assume a non-malicious owner). Test: "would a competent, non-malicious owner be surprised by this consequence?"
+
 **View Functions**: unused view-function issues → Low/QA at best.
 
 **Regressions**: a finding that reappears after being marked `fixed` in the ledger inherits at least its prior severity and is flagged prominently.
@@ -81,11 +83,13 @@ Includes incorrect state handling, spec deviations, centralization risks, admin-
 
 **Upgrade to High**: clear asset theft/loss path; no hypotheticals; executable by an external attacker; direct protocol compromise.
 
-**Downgrade from High**: requires admin mistake; depends on user error; hypothetical only; speculative future code.
+**Downgrade from High**: requires admin malice or an *obvious*-consequence admin mistake; depends on user error; hypothetical only; speculative future code. (A *non-obvious* owner footgun is NOT auto-downgraded — see "Owner footguns" under Special Cases.)
 
 **Upgrade to Medium**: protocol function impacted; availability affected; value leak with stated assumptions.
 
-**Downgrade to QA**: pure centralization risk; spec deviation without impact; informational; style/documentation.
+**Downgrade to QA**: pure centralization risk; informational; style/documentation.
+
+**Faithfulness / story deviations (Law 2 — do NOT bury in the QA/gas bundle)**: a deviation from a `[story-NNN]`'s stated behaviour is tagged `faithfulness: true` and routed to the dedicated **spec-conformance** report (label `F-XX`), at honest severity. If it also causes asset/value/availability impact it keeps its real High/Medium (Law 1). Even a pure behavioural deviation with no security impact is reported as `F-XX` (visible to the owner), never dropped into gas-report noise.
 
 ## ERROR HANDLING
 - **Ambiguous Impact**: default to lower severity, flag for review
@@ -98,3 +102,5 @@ Includes incorrect state handling, spec deviations, centralization risks, admin-
 3. **Attack path required** — High/Medium need clear attack paths.
 4. **Be conservative** — when uncertain, classify lower.
 5. **Impact over intent** — focus on what CAN happen.
+6. **Surface faithfulness (Law 2)** — tag story/spec deviations `faithfulness: true` and route them to the spec-conformance report (`F-XX`); never bury them in the QA/gas bundle.
+7. **Triage owner footguns (Law 3)** — a *non-obvious* footgun is an operational hazard classified by the impact it unlocks, not dropped; obvious-misuse / malicious-owner vectors stay out (assume a non-malicious owner).

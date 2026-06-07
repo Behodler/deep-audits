@@ -1,0 +1,105 @@
+{
+  "project": "phlimbo-ea",
+  "runTimestamp": "2026-06-07T05:45:00Z",
+  "contract": "src/Phlimbo.sol (PhlimboEA)",
+  "runners": { "forge": true, "medusa": true, "echidna": false },
+  "toolVersions": { "forge": "1.5.1", "medusa": "1.5.1", "crytic-compile": "0.3.11", "solc": "0.8.19" },
+  "environmentNotes": [
+    "Echidna not installed in this environment; Medusa (Trail of Bits) used as the stateful fuzzer.",
+    "A concurrently-generated, syntactically-broken symbolic test (test/halmos/EmissionDustBounds.t.sol, natspec '@18dp)') blocked whole-project compilation; excluded from these runs via forge --skip and a temporary, restored foundry.toml skip. No existing PoC/test files were modified.",
+    "crytic-compile skips test/ by default; Medusa harness compiled via crytic-compile arg '--foundry-compile-all'."
+  ],
+  "totals": {
+    "forge_deterministic": { "passed": 4, "failed": 3 },
+    "forge_stateful_invariants": { "passed": 5, "failed": 2 },
+    "medusa_property": { "passed": 16, "failed": 2 }
+  },
+  "summary": "All five targeted hypotheses confirmed. ECON-001 (under-distribution / path-dependence), ECON-003 (phUSD over-mint), and CODE-002/M-01 (stale-debt underflow brick) reproduce under forge invariant, forge deterministic property tests, AND Medusa. INV-1 (totalStaked==sum), INV-3 (stable solvency), accumulator monotonicity and lastRewardTime monotonicity hold across 128k calls/invariant in forge and 2.0M calls in Medusa.",
+  "confirmedFindings": [
+    {
+      "finding": "ECON-001",
+      "title": "Linear Depletion pays out as exponential decay; under-distribution is path-dependent on poke count",
+      "status": "CONFIRMED",
+      "severity": "potential-medium",
+      "runners": ["forge-deterministic", "forge-fuzz"],
+      "measured": {
+        "distributedPctOverOneDepletionDuration": { "1_poke": 99.99, "2_pokes": 74.99, "12_pokes": 64.80, "168_pokes_hourly": 63.32 },
+        "intendedPct": 100.0,
+        "undistributedAt1D_hourlyPct": 36.68
+      },
+      "counterexample": {
+        "property": "distribution over one depletionDuration must be ~100% and independent of interaction cadence",
+        "minimalSequence": [
+          "alice stake(1000e18)",
+          "collectReward(100000e18)  (fund once, no further funding)",
+          "loop N times over depletionDuration: warp(D/N); claim()  (poke without funding)"
+        ],
+        "minimalN": 2,
+        "result": "N=2 distributes 74.99% (B0*(1-(1-1/N)^N)); N->inf distributes 63.2% (B(t)=B0*e^(-t/D)). 1 poke distributes ~100%, proving the realized rate is controlled by whoever pokes the pool."
+      }
+    },
+    {
+      "finding": "ECON-003",
+      "title": "pause -> pauseWithdraw -> unpause over-mints phUSD (stale phUSDPerSecond + frozen lastRewardTime)",
+      "status": "CONFIRMED",
+      "severity": "potential-medium",
+      "runners": ["forge-deterministic", "forge-invariant", "medusa-property"],
+      "measured": {
+        "deterministic": { "S0_phUSD": "2000e18", "S1_phUSD": "1000e18", "pauseDays": 7, "apyBps": 1000, "mintedToAliceWei": "3835616438355609000", "fairCapWei": "1917808219178082191", "overMintFactor": "2.0 (== S0/S1)" }
+      },
+      "counterexample": {
+        "property": "reward phUSD minted to a staker (and globally) must not exceed the APY-implied cap stake*APY*time",
+        "forgeInvariant": {
+          "shrunkSequence": ["stake", "pause", "pauseWithdraw", "unpause", "warp", "withdraw"],
+          "observed": "rewardMinted 726814135496959606125 > fairAPYIntegral 587709412078615188157"
+        },
+        "medusa": {
+          "shrunkSequence": ["h_stake (actor 0x30000)", "h_pause", "h_pauseWithdraw (actor 0x20000)", "h_pause", "h_unpause", "h_withdraw (actor 0x30000) -> mints reward phUSD"],
+          "observed": "property_no_over_mint() returned false (rewardMinted exceeds fair APY integral)"
+        }
+      }
+    },
+    {
+      "finding": "CODE-002 / M-01",
+      "title": "Partial pauseWithdraw leaves reward debt anchored to the larger pre-withdraw amount -> claim/withdraw/stake underflow-revert (account brick)",
+      "status": "CONFIRMED",
+      "severity": "medium",
+      "runners": ["forge-deterministic", "forge-invariant", "medusa-property"],
+      "counterexample": {
+        "property": "a staker who did a PARTIAL pauseWithdraw must still be able to claim/withdraw after unpause without revert",
+        "deterministicPoC": {
+          "sequence": [
+            "alice stake(1000e18)",
+            "collectReward(100000e18); warp(7d); alice claim()  (anchors stableDebt at 1000e18 * accStable / PRECISION)",
+            "pause()",
+            "alice pauseWithdraw(500e18)  (amount -> 500e18, stableDebt still sized for 1000e18)",
+            "unpause()",
+            "alice claim()  => panic 0x11 arithmetic underflow",
+            "alice withdraw(100e18) => panic 0x11 (withdraw also bricked)"
+          ],
+          "result": "claim() and withdraw() revert with arithmetic underflow; remaining 500e18 principal recoverable ONLY via re-pause + pauseWithdraw"
+        },
+        "forgeInvariant": { "shrunkSequence": ["stake", "warp", "stake", "pause", "pauseWithdraw"], "observed": "pendingPhUSD/pendingStable underflow (claim would revert)" },
+        "medusa": { "shrunkSequence": ["h_stake (0x20000)", "h_withdraw (0x10000)", "h_pause (0x20000)", "h_pauseWithdraw (0x30000)"], "observed": "property_no_pending_underflow() returned false" }
+      }
+    }
+  ],
+  "heldInvariants": [
+    { "name": "INV-1 totalStaked == sum(user.amount)", "status": "HELD", "runners": ["forge-invariant (128k calls)", "medusa (2.0M calls)"] },
+    { "name": "INV-2 totalStaked <= phUSD.balanceOf(contract)", "status": "HELD", "runners": ["forge-invariant"], "note": "outside emergencyTransfer, which the handler does not exercise" },
+    { "name": "INV-3 rewardBalance <= rewardToken.balanceOf(contract) (stable solvency / no over-distribution)", "status": "HELD", "runners": ["forge-invariant", "medusa"] },
+    { "name": "accStablePerShare / accPhUSDPerShare monotonic non-decreasing", "status": "HELD", "runners": ["forge-invariant"] },
+    { "name": "lastRewardTime monotonic non-decreasing", "status": "HELD", "runners": ["forge-invariant"] }
+  ],
+  "passed": 25,
+  "failed": 7,
+  "failures": [
+    { "invariant": "test_ECON001_property_fullWindowDistribution_hourlyPokes", "runner": "forge", "finding": "ECON-001", "severity": "potential-medium" },
+    { "invariant": "testFuzz_ECON001_pathIndependence", "runner": "forge", "finding": "ECON-001", "severity": "potential-medium" },
+    { "invariant": "test_ECON003_property_noOverMint", "runner": "forge", "finding": "ECON-003", "severity": "potential-medium" },
+    { "invariant": "invariant_ECON003_no_over_mint", "runner": "forge", "finding": "ECON-003", "severity": "potential-medium" },
+    { "invariant": "invariant_CODE002_no_pending_underflow", "runner": "forge", "finding": "CODE-002", "severity": "medium" },
+    { "invariant": "property_no_over_mint", "runner": "medusa", "finding": "ECON-003", "severity": "potential-medium" },
+    { "invariant": "property_no_pending_underflow", "runner": "medusa", "finding": "CODE-002", "severity": "medium" }
+  ]
+}

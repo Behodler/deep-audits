@@ -94,7 +94,7 @@ Per C4 rules, these are typically OOS:
 - CryptoPunks support
 - Approve race condition / safeApprove front-running
 - User input mistakes / phishing
-- Reckless admin mistakes
+- Reckless admin mistakes — owner malice or *obvious*-harm misconfig only. **Law 3 exception:** a *non-obvious* owner footgun that unknowingly enables an exploit (Law 1) or breaks a story (Law 2) is **NOT OOS** — keep it as an operational hazard with safe-config guidance. Assume a non-malicious owner; never surface malicious-owner vectors. Test: "would a competent, non-malicious owner be surprised by this consequence?"
 - Issues in parent/forked contracts where root cause is OOS
 
 ## LEDGER RECONCILIATION (run after known-issue filtering)
