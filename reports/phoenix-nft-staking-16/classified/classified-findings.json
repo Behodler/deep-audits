@@ -1,0 +1,147 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-06-07T08:10:00Z",
+    "project": "phoenix-nft-staking",
+    "submoduleHead": "5f863d27ebbab5df20131a4592996537cd8bf503",
+    "reportDir": "reports/phoenix-nft-staking-16",
+    "classifier": "severity-classifier",
+    "criteria": "Code4rena High/Medium/QA (project CLAUDE.md) + three-law hierarchy",
+    "inputs": "reports/phoenix-nft-staking-16/dedup/sanitized-findings.json",
+    "pocVerifiedThisRun": "workspace/phoenix-nft-staking/test/Invariant.t.sol (NFTStakerEcon001Scenario: 100x over-emission, solvency PASSES; NFTStakerF02TransientSolvency: ledger over-states balance by exactly mintDebt, _safePay still gates, pull() restores strict equality)",
+
+    "classifiedFindings": [
+      {
+        "id": "CLASS-001",
+        "originalId": "DEDUP-001",
+        "label": "M-02",
+        "severity": "medium",
+        "plausibility": "plausible (value-leak); the dramatic-drain attack variant is Implausible-High only — see justification",
+        "faithfulness": true,
+        "faithfulnessRef": "F-01",
+        "regression": false,
+        "contract": "src/NFTStaker.sol",
+        "function": "emergencyWithdraw",
+        "lineStart": 538,
+        "lineEnd": 561,
+        "classification": {
+          "assetImpact": "Protocol reward budget (real phUSD allocated for emissions) is over-emitted vs the targetAPY policy and redistributed to whoever remains staked. NOT user principal (returned in full by emergencyWithdraw) and NOT insolvency (solvency invariant balance == rewardBudget + committedDebt holds throughout, PoC-confirmed). The over-draw is hard-clamped to rewardBudget at NFTStaker.sol:329, so the contract never goes underwater. Impact = mis-emission / runway drain (loss of in-motion emissions), not theft of principal or matured/owed debt.",
+          "attackPath": [
+            "1. emergencyWithdraw decrements totalStaked (L545) but calls neither _updatePool nor _recomputeSchedule, and does not advance lastRewardTime.",
+            "2. rewardRate stays sized for the pre-exit (larger) pool while totalStaked has shrunk.",
+            "3. The next _updatePool (fired by any later stake/unstake/claim via _syncBudget, or topUp/setTargetAPY) settles elapsed * R_old over the SMALLER totalStaked, inflating accRewardPerShare for survivors by oldTotal/newTotal (PoC: 1000->10 = 100x) across the whole [lastRewardTime, now] window.",
+            "4a. Non-malicious: ANY legitimate large emergency exit silently gifts a runway-draining windfall to remaining stakers.",
+            "4b. Self-profit variant: attacker holds a large RECOVERABLE position + a small side position, emergency-exits the large one (principal returned), waits an inactivity window, then claims ~the budget over the tiny remaining pool."
+          ],
+          "likelihood": "medium. The mechanism triggers on every emergencyWithdraw (even one block over-emits), but the LARGE, value-meaningful drain requires a post-exit inactivity window in which no other staker stake/unstake/claim (or owner recompute) occurs — any such interaction recomputes and halts the stale rate. emergencyWithdraw is a documented, expected-to-be-used escape hatch (ID migration / broken hook), so the non-malicious mis-emission is a realistic operating condition.",
+          "assumptions": "(a) someone makes a large emergency exit (built into normal operation, or attacker-supplied with recoverable capital); (b) a meaningful window elapses with NO other staker interaction or owner recompute before a survivor's _updatePool.",
+          "externalRequirements": "The attacker cannot force other independent participants to stay idle; post-exit inactivity is an external condition the attacker does not control. This is the qualifier that caps the deliberate-extraction variant at Medium rather than High."
+        },
+        "severityDispute": {
+          "highArgument": "The over-emission begins on the very next _updatePool, even a single block is over-emitted, and the leaked funds are real protocol phUSD redistributed to a self-controllable survivor position with recoverable capital -> looks like a direct-loss path.",
+          "mediumArgument": "(1) No principal theft and no insolvency: solvency invariant holds at all times (128k fuzz calls + this run), the over-draw is clamped to rewardBudget, principal is always returned. (2) The value at risk is protocol reward budget = in-motion emissions; per special-case rule unmatured/in-motion yield loss is capped at Medium. (3) The value-meaningful drain depends on a stated external requirement (post-exit inactivity) the attacker cannot guarantee -> 'value leak WITH stated assumptions, but external requirements' is the textbook Medium definition. (4) The single-block leak that needs NO assumptions is dust-scale; the headline 100x needs the window.",
+          "resolution": "MEDIUM. The no-hypothetical, no-external-requirement slice of this bug is only a dust-scale one-block over-emission; the dramatic, PoC-demonstrated drain requires the inactivity external requirement, so it fails the 'no hand-wavy hypotheticals / direct loss' bar for High and lands on the Medium 'value leak with stated assumptions + external requirements' definition. The asset is protocol reward budget / in-motion emissions (Medium ceiling per loss-of-yield rule), not principal or matured yield. If argued as High it would be Implausible-High (predicated on an inactivity window). Medium is the honest ceiling and the honest floor (it is clearly above QA: it breaks a stated Critical Invariant AND leaks real value via a core, expected-to-be-used function)."
+        },
+        "justification": "Medium (M-02). A core, documented function (emergencyWithdraw, the masterchef escape hatch) silently leaves rewardRate sized for the pre-exit pool while shrinking totalStaked, so the next _updatePool over-emits the protocol reward budget by oldTotal/newTotal to surviving stakers (PoC: 100x). No principal is stolen and the contract stays solvent (over-draw clamped to rewardBudget) — the loss is protocol runway / in-motion emissions, which the loss-of-yield rule caps at Medium. The deliberate-extraction variant is a value leak gated on an external requirement (post-exit inactivity) the attacker cannot control, matching the Medium 'value leak with stated assumptions + external requirements' definition; the non-malicious variant is an automatic mis-emission on any large exit (protocol-function impact). It is firmly above QA because it both breaks a stated Critical Invariant and leaks real value. Also tagged faithfulness:true and routed to spec-conformance as F-01 because it violates the documented M-03 'no participation multiplier' Critical Invariant; it keeps its Medium security severity (Law 1) in addition to the F-01 listing (Law 2).",
+        "recommendation": "Call _updatePool() (settle accrual at the OLD rate against the OLD totalStaked) and then _recomputeSchedule() inside emergencyWithdraw AFTER decrementing totalStaked, mirroring the unstake() head+tail pattern. To preserve the escape-hatch guarantee (must not depend on a working dispatcher hook / minter / recompute), gate the recompute in a try/catch or a balance-only path so a broken external call can never trap principal — i.e. keep principal return unconditional, but refresh rate/lastRewardTime on the success path so survivors cannot inherit the stale high rate."
+      },
+      {
+        "id": "CLASS-002",
+        "originalId": "DEDUP-005",
+        "label": "L-06",
+        "severity": "low",
+        "plausibility": "n/a (no value-extraction path)",
+        "faithfulness": true,
+        "faithfulnessRef": "F-03",
+        "regression": false,
+        "contract": "src/NFTStaker.sol",
+        "function": "_recomputeSchedule (via topUp / setTargetAPY)",
+        "lineStart": 264,
+        "lineEnd": 284,
+        "classification": {
+          "assetImpact": "None directly extractable. When mintDebt > 0 sits un-pulled at the hook and topUp/setTargetAPY recompute without a preceding pull(), _recomputeSchedule sizes rewardBudget on V = balance + mintDebt (NFTStaker.sol:403-405), so rewardBudget + committedDebt transiently over-states the on-chain balance by exactly the un-pulled mintDebt. PoC-confirmed (F02).",
+          "attackPath": [
+            "1. mintDebt accrues un-pulled at the dispatcher hook.",
+            "2. Owner calls setTargetAPY or topUp (neither pulls first) -> recompute over-sizes rewardBudget by mintDebt.",
+            "3. The over-statement is phantom: _safePay (L510) gates every payout on actual balanceOf and reverts on a real shortfall, so the phantom budget is NOT drainable.",
+            "4. Self-heals: the next stake/unstake/claim/pullAndRefresh runs _syncBudget -> pull() and restores strict equality."
+          ],
+          "likelihood": "low - benign by construction; no value can be removed before the window closes.",
+          "assumptions": "Owner uses topUp/setTargetAPY (intended) while mintDebt is outstanding (intended dispatcher-hook-independence design, Feature Spec item 7).",
+          "externalRequirements": "A claim-DoS tail exists ONLY if the dispatcher hook is rotated or breaks within the window so the assumed mintDebt never materialises; even then it is recoverable by owner topUp / pullAndRefresh. Contingent and recoverable, not a standalone availability failure."
+        },
+        "justification": "Low / QA + doc-precision. The defect is the gap between the Critical Invariant's wording ('Solvency: balance == rewardBudget + committedDebt holds at ALL times') and the actual eventually-consistent behaviour (transiently over-stated by exactly the un-pulled mintDebt, self-healing on the next _syncBudget). No value is extractable because _safePay gates on real balance and reverts on shortfall; the only adverse tail (claim revert) is contingent on a separate hook failure within the window and is owner-recoverable. This is state-handling / spec-precision, the canonical QA/Low. Tagged faithfulness:true (F-03) so the imprecise 'holds at all times' invariant claim is surfaced visibly rather than buried.",
+        "recommendation": "Re-word the Solvency Critical Invariant to 'eventually-consistent: strict on-balance equality holds after every _syncBudget; between a config recompute and the next pull() the ledger may over-state balance by the un-pulled mintDebt, which is never payable because _safePay gates on actual balance.' Optionally call pull()/_syncBudget before the recompute in topUp/setTargetAPY (weigh against the intentional dispatcher-hook-independence property)."
+      },
+      {
+        "id": "CLASS-003",
+        "originalId": "DEDUP-006",
+        "label": "L-07",
+        "severity": "qa",
+        "plausibility": "n/a",
+        "faithfulness": true,
+        "faithfulnessRef": "F-02",
+        "regression": false,
+        "files": ["docs/runway-dynamics-and-apy-as-policy.md", "docs/design.md"],
+        "classification": {
+          "assetImpact": "No direct asset impact. The shipped code is correct (total-staked M-03). The risk is operational: docs/runway-dynamics-and-apy-as-policy.md labels a stale TOTAL-SUPPLY T-model as the 'current spec', and docs/design.md still describes the abandoned 540-day fixed-window model, while the code emits against the staked subset S = totalStaked * latestPrice.",
+          "attackPath": [
+            "1. Owner consults the stale runway tables / model to choose a targetAPY.",
+            "2. The doc's T (aggregate notional) differs from the code's S (staked subset), so the doc-derived runway does not match real on-chain runway.",
+            "3. Owner mis-sizes targetAPY -> runway over- or under-provisioned relative to intent. Recoverable via re-tuning (setTargetAPY / topUp)."
+          ],
+          "likelihood": "low - requires the owner to trust stale docs over on-chain runwaySeconds(); fully recoverable.",
+          "assumptions": "Owner tunes APY against the documented runway model rather than live on-chain views.",
+          "externalRequirements": "None code-side; this is a non-obvious Law-3 owner footgun (stale tuning guidance), in scope as an operational hazard, not auto-invalid reckless-admin."
+        },
+        "justification": "QA/Low. Documentation-vs-code drift with no code defect and no direct asset risk; the worst case is the owner mis-sizing runway from stale tables, which is recoverable. In scope as a non-obvious Law-3 footgun (the owner is expected to tune targetAPY against these tables, so labelling a superseded model 'current spec' can surprise a competent non-malicious owner). Tagged faithfulness:true (F-02): a doc that calls a superseded model the 'current spec' is a spec-vs-code deviation and is surfaced in the spec-conformance report even though its security impact is nil, per Law 2 (never dropped into gas-noise).",
+        "recommendation": "Update docs/runway-dynamics-and-apy-as-policy.md to the shipped total-staked S-model and mark docs/design.md's 540-day fixed-window model as superseded/historical. Point owner APY-tuning guidance at the live runwaySeconds() / currentRewardRate() views rather than static tables."
+      }
+    ],
+
+    "reTriageOpinions": [
+      {
+        "id": "RETRIAGE-001",
+        "originalId": "DEDUP-002",
+        "ledgerLabel": "M-01",
+        "ledgerStatus": "acknowledged",
+        "currentSeverity": "medium",
+        "severityCeilingConfirmed": "medium",
+        "isSecretlyHigh": false,
+        "regression": false,
+        "opinion": "Medium remains the correct ceiling; this is NOT secretly a High. The new evidence (the 'NFTs have no secondary market, so a pure MEV bot cannot recoup' premise of the 2026-05-30 acceptance no longer holds if the minted NFTs are resellable/redeemable) strengthens the VALIDITY and severity-floor of the existing Medium but does not push it to High. Reasoning against High: (1) No user-principal theft — honest minters still receive their NFTs, and story-015's minReward reverts a sniped honest caller atomically, so no honest user mints-for-nothing. (2) The asset captured is the owner-funded nudge incentive pot, whose loss is BOUNDED by what the owner funds (the over-funding facet, PATTERN-002, is a non-obvious Law-3 footgun: 'fund the incentive' silently equals 'set a sweepable bounty' — in scope, but it caps loss at owner-chosen funding, it does not make the loss unbounded). (3) The capture is a mempool ordering / gas-auction race, not an unconditional direct drain — it requires the pot to be funded and the searcher to win the race; classic Medium MEV redistribution. The new evidence's real consequence is that the incentive is reliably raced to zero for ANY pot size (protocol-function impairment: the nudge does not reach honest participants as intended) + bounded value leak of the pot — both squarely Medium.",
+        "recommendation": "Confirm Medium ceiling. The classifier does NOT change severity. Recommend the human consider reopening M-01 from acknowledged -> open (the acceptance invariant it rested on no longer holds), per the sanitizer's proposed /ledger note, and consider a value-bounded payout (cap nudge to caller-contributed value) rather than full-balance winner-take-all. This is a human triage decision; not auto-applied."
+      }
+    ],
+
+    "specConformanceRouting": {
+      "note": "Faithfulness items routed to the dedicated spec-conformance report (Law 2). They keep their security severity above; the F-XX listing is additive, not a downgrade. Final F-numbering is owned by the spec-conformance/story-faithfulness agent.",
+      "items": [
+        {
+          "ref": "F-01",
+          "source": "CLASS-001 / DEDUP-001",
+          "severityCarried": "medium",
+          "deviation": "emergencyWithdraw violates the documented M-03 'no participation multiplier' Critical Invariant by leaving rewardRate sized for the pre-exit pool; survivors out-earn the targetAPY policy by oldTotal/newTotal."
+        },
+        {
+          "ref": "F-02",
+          "source": "CLASS-003 / DEDUP-006",
+          "severityCarried": "qa",
+          "deviation": "docs/runway-dynamics-and-apy-as-policy.md labels a superseded total-supply model 'current spec' and docs/design.md retains the abandoned 540-day fixed-window model; shipped code uses total-staked M-03."
+        },
+        {
+          "ref": "F-03",
+          "source": "CLASS-002 / DEDUP-005",
+          "severityCarried": "low",
+          "deviation": "the 'Solvency: balance == rewardBudget + committedDebt holds at ALL times' Critical Invariant is eventually-consistent, not strict — transiently over-stated by the un-pulled mintDebt between a config recompute and the next pull()."
+        }
+      ]
+    },
+
+    "labelSuggestions": {
+      "newMedium": ["M-02 (DEDUP-001)"],
+      "newLowQA": ["L-06 (DEDUP-005)", "L-07 (DEDUP-006)"],
+      "reTriageNoNewLabel": ["M-01 (DEDUP-002) — existing acknowledged Medium, ceiling confirmed"],
+      "labelBasis": "Ledger occupies H-01(fixed), M-01(ack), L-01..L-05; next free Medium=M-02, next free Low=L-06."
+    }
+  }
+}

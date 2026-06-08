@@ -1,0 +1,59 @@
+{
+  "contract": "src/dispatchers/BalancerPooler.sol",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "context": "V1 — profiled for diffing against BalancerPoolerV2 only.",
+  "purpose": "V1 dispatcher that, on dispatch, immediately single-side-adds the received prime token (sUSDS in V1) as liquidity to a Balancer V3 pool via the vault unlock pattern, receiving BPT. Pooling is COUPLED to dispatch (this is what the V2 H-02 fix decoupled).",
+  "inheritanceChain": ["ATokenDispatcher", "ITokenDispatcher", "Pausable", "Ownable", "IUnlockCallback"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": [],
+    "accessControlled": ["dispatch(onlyMinter)", "withdrawBPT(onlyOwner)", "setMetadata/setMinter(onlyOwner)", "pause/unpause(onlyMinter)"],
+    "initializerProtected": "n/a",
+    "pauseMechanism": "inherited; dispatch whenNotPaused"
+  },
+
+  "diffVsV2": [
+    "H-02: V1 pools synchronously inside dispatch (every mint adds liquidity); V2 decouples — dispatch only wraps USDS->sUSDS and a separate pool(minBPT) does the LP add.",
+    "V1 prime token is the pool token directly (sUSDS); V2 prime token is USDS and is wrapped to sUSDS on dispatch.",
+    "V1 has no donation/PSM logic, no auth-version pooler model, no rescueERC20; minBptAmountOut comes from per-mint extraData.",
+    "V1 dispatch/unlockCallback are NOT nonReentrant (V2 adds the guard)."
+  ],
+
+  "localFindings": [
+    {
+      "id": "LOCAL-BPV1-001",
+      "type": "context-only",
+      "severity": "local-info",
+      "function": "dispatch/unlockCallback",
+      "line": 50,
+      "description": "Per-mint synchronous pooling with no reentrancy guard and slippage (minBptAmountOut) sourced from caller-supplied extraData — a minter could pass minBpt=0. Superseded by V2 design. Relevant only if V1 remains live.",
+      "recommendation": "Prefer V2. If V1 stays deployed, treat per-mint pooling as MEV/slippage-exposed and unguarded."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "dispatch(address,uint256 amount,bytes extraData)", "visibility": "external override", "stateChanges": ["primeToken->vault, BPT received"], "externalCalls": ["vault.unlock()->unlockCallback"], "accessControl": "onlyMinter", "reentrancyGuard": false, "guards": ["whenNotPaused"]},
+      {"function": "unlockCallback(bytes)", "visibility": "external", "externalCalls": ["primeToken.safeTransfer(vault)", "vault.addLiquidity()", "vault.settle()"], "accessControl": "require(msg.sender == _vault)"},
+      {"function": "withdrawBPT(address,uint256)", "accessControl": "onlyOwner"},
+      {"function": "primeToken/vault", "visibility": "view"}
+    ],
+    "externalCalls": [
+      {"target": "IBalancerVault _vault", "methods": ["unlock", "addLiquidity", "settle"], "trustLevel": "semi-trusted"},
+      {"target": "IERC20 _primeToken / BPT", "methods": ["balanceOf", "safeTransfer"], "trustLevel": "semi-trusted"}
+    ],
+    "stateVariables": [
+      {"name": "_primeToken/_pool/_vault/_primeTokenIsFirst", "type": "immutable", "mutators": ["constructor"], "readers": ["dispatch/unlockCallback/views"]}
+    ],
+    "events": [],
+    "modifiers": ["onlyMinter", "whenNotPaused", "onlyOwner"]
+  },
+
+  "valueFlows": ["DISPATCH: prime token -> Balancer pool (single-sided), BPT -> this contract, per mint. withdrawBPT by owner."],
+  "invariants": ["Liquidity added single-sided each dispatch; BPT custodied until owner withdraws."],
+  "trustAssumptions": ["Balancer V3 vault honors unlock/settle; _minter trusted; pool/token ordering set correctly by deployer."],
+  "complexity": {"loc": 99, "functions": 5, "externalCalls": 2, "stateVariables": 4}
+}

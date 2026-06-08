@@ -1,0 +1,116 @@
+{
+  "contract": "src/V2/dispatchers/BalancerPoolerV2.sol",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "purpose": "V2 dispatcher for the USDS prime token. On dispatch it (a) wraps the pooling portion of USDS into sUSDS (ERC4626 deposit) and (b) attempts a failure-isolated USDS->USDC donation via the Sky PSM to batchMinter (story-034). Accumulated sUSDS is later added as single-sided liquidity to a Balancer V3 sUSDS/phUSD pool via pool(minBPT) by an authorized pooler (pure LP add). Receives and custodies BPT.",
+  "inheritanceChain": ["ATokenDispatcherV2", "ITokenDispatcherV2", "Pausable", "Ownable", "ReentrancyGuard", "IUnlockCallback"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["dispatch (via base, non-virtual)", "pool"],
+    "accessControlled": ["setPool", "setAuthorizedPooler", "incrementAuthVersion", "setBatchDonationSize", "setBatchMinter", "setPSM", "setMaxTout", "withdrawBPT", "rescueERC20", "setMetadata", "setMinter", "setHook"],
+    "initializerProtected": "n/a (constructor)",
+    "pauseMechanism": "OZ Pausable inherited; pool() is whenNotPaused; _dispatch path is whenNotPaused via base; rescueERC20 intentionally NOT pause-gated"
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-BPV2-001",
+      "type": "stranded-funds-edge",
+      "severity": "local-low",
+      "function": "_dispatch",
+      "line": 202,
+      "description": "The donation sweep (`balanceOf(USDS)`) only runs when donationEnabled (batchMinter && psm && batchDonationSize>0). If a prior donation parked USDS on the contract and the owner THEN disables the donation (set batchMinter=0 / size=0), the stranded USDS is neither swept nor wrapped: subsequent _dispatch wraps only `amount` (poolingUSDS == amount) and the previously-parked USDS sits idle until donation is re-enabled or rescueERC20 is called. Funds are recoverable (owner escape hatch), so this is a low-severity accounting wrinkle, not a loss.",
+      "recommendation": "Optionally always sweep/wrap residual USDS, or document that owner must rescueERC20 stranded USDS before disabling the donation."
+    },
+    {
+      "id": "LOCAL-BPV2-002",
+      "type": "rounding-direction",
+      "severity": "local-info",
+      "function": "_psmDonate",
+      "line": 240,
+      "description": "gemAmt = floor(usdsAmount*WAD / (conv*(WAD+tout))); usdsSpent recomputed from gemAmt (<= usdsAmount). Rounding is FLOOR on USDC out, so the contract never over-spends USDS and dust (usdsAmount - usdsSpent) parks for the next sweep. require(gemAmt > 0) reverts on sub-unit donations -> caught by try/catch -> parks. Math mirrors DssLitePsm._buyGem. Rounding favors the protocol (no over-credit). Verified internally consistent.",
+      "recommendation": "None. Confirm conv/tout semantics against the live PSM in interaction analysis."
+    },
+    {
+      "id": "LOCAL-BPV2-003",
+      "type": "self-external-call",
+      "severity": "local-info",
+      "function": "_dispatch / _psmDonate",
+      "line": 226,
+      "description": "Donation is isolated via `try this._psmDonate(remaining) {} catch { emit DonationSkipped }`. _psmDonate is external, gated `require(msg.sender == address(this))`. It is invoked while the base dispatch holds the nonReentrant lock; _psmDonate itself is not nonReentrant (it cannot be, being a self-call under the lock). The PSM.buyGem external call could in principle re-enter, but dispatch/pool are nonReentrant so re-entry into the value paths is blocked. The only non-guarded external entry reachable mid-call is _psmDonate (self-gated) — confirm in interaction analysis that PSM cannot trigger an unguarded state-changing path.",
+      "recommendation": "Interaction analysis: model PSM as semi-trusted external; confirm reentrancy containment."
+    },
+    {
+      "id": "LOCAL-BPV2-004",
+      "type": "value-flow-asymmetry",
+      "severity": "local-info",
+      "function": "_dispatch",
+      "line": 223,
+      "description": "The donation sweeps the FULL USDS balance (this dispatch's share + any stranded), but the base class then calls hook.onDispatch with the GROSS `amount` of THIS dispatch only. So phUSD mint-debt (BalancerPoolerMintDebtHook) accrues on the gross per-dispatch USDS, independent of how much USDS was actually donated/parked. This is intended (debt tracks dispatched volume, not donation success) but couples two independent percentages (batchDonationSize for USDC donation vs hook.ratio for phUSD debt). Economic soundness is an econ-scanner concern.",
+      "recommendation": "Flag for econ-scanner: relationship between batchDonationSize, hook.ratio, sUSDS pooled, and phUSD minted."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "dispatch(address,uint256 amount,bytes) [inherited, non-virtual]", "visibility": "external", "stateChanges": ["sUSDS balance (deposit)", "USDS balance (donation/park)", "PSM allowance"], "externalCalls": ["USDS.forceApprove(sUSDS)", "sUSDS.deposit()", "USDS.balanceOf()", "this._psmDonate()->PSM.tout/to18ConversionFactor/buyGem", "hook.onDispatch()"], "accessControl": "onlyMinter (base)", "reentrancyGuard": true, "guards": ["whenNotPaused"]},
+      {"function": "_psmDonate(uint256)", "visibility": "external", "stateChanges": ["USDS allowance to PSM", "USDS balance"], "externalCalls": ["PSM.tout()", "PSM.to18ConversionFactor()", "USDS.forceApprove(psm)", "PSM.buyGem(batchMinter,gemAmt)"], "accessControl": "require(msg.sender == address(this))", "reentrancyGuard": false, "guards": ["tout <= maxTout", "gemAmt > 0"]},
+      {"function": "pool(uint256 minBPT)", "visibility": "external", "stateChanges": ["sUSDS->vault, BPT received"], "externalCalls": ["sUSDS.balanceOf()", "vault.unlock()->unlockCallback"], "accessControl": "onlyAuthorizedPooler", "reentrancyGuard": true, "guards": ["whenNotPaused", "sUSDSAmount > 0"]},
+      {"function": "unlockCallback(bytes)", "visibility": "external", "stateChanges": ["sUSDS transferred to vault, BPT minted to this"], "externalCalls": ["sUSDS.safeTransfer(vault)", "vault.addLiquidity()", "vault.settle()"], "accessControl": "require(msg.sender == _vault)", "reentrancyGuard": "inherits dispatch/pool guard (only reachable via pool's unlock)"},
+      {"function": "getIdealBPT()", "visibility": "external (state-mutating query)", "externalCalls": ["router.queryAddLiquidityUnbalanced()"], "accessControl": "none (view-like, non-view due to router)"},
+      {"function": "withdrawBPT(address,uint256)", "visibility": "external", "stateChanges": ["BPT balance"], "externalCalls": ["BPT.safeTransfer()"], "accessControl": "onlyOwner"},
+      {"function": "rescueERC20(address,address,uint256)", "visibility": "external", "stateChanges": ["arbitrary token balance"], "externalCalls": ["token.safeTransfer()"], "accessControl": "onlyOwner", "guards": ["to != 0"], "notes": "NOT pause-gated (escape hatch must work during pause)."},
+      {"function": "setPool/setAuthorizedPooler/incrementAuthVersion/setBatchDonationSize/setBatchMinter/setPSM/setMaxTout", "visibility": "external", "accessControl": "onlyOwner"},
+      {"function": "primeToken/sUSDS/vault/pool/poolerAuthVersion/authVersion/batchDonationSize/batchMinter/psm/maxTout", "visibility": "view/public"}
+    ],
+    "externalCalls": [
+      {"target": "IERC4626 sUSDS (USDS wrapper)", "methods": ["asset", "deposit"], "trustLevel": "trusted (Sky savings USDS)", "notes": "_primeToken == sUSDS.asset() == USDS, read once in ctor."},
+      {"target": "ISkyPSM psm (UsdsPsmWrapper)", "methods": ["tout", "to18ConversionFactor", "buyGem"], "trustLevel": "semi-trusted (Sky governance-controlled fees)", "notes": "Donation route. tout ceiling = maxTout. Failure isolated in try/catch."},
+      {"target": "IBalancerVault _vault (Balancer V3)", "methods": ["unlock", "addLiquidity", "settle"], "trustLevel": "semi-trusted (external protocol)", "notes": "unlock/settle transient-accounting pattern; unlockCallback gated to vault."},
+      {"target": "IBalancerRouter _router", "methods": ["queryAddLiquidityUnbalanced"], "trustLevel": "semi-trusted", "notes": "Off-chain quote helper (getIdealBPT)."},
+      {"target": "IERC20 USDS (_primeToken)", "methods": ["forceApprove", "balanceOf", "safeTransfer (rescue)"], "trustLevel": "semi-trusted standard ERC20"},
+      {"target": "BPT (_pool token)", "methods": ["balanceOf(via vault)", "safeTransfer (withdrawBPT)"], "trustLevel": "semi-trusted"},
+      {"target": "address batchMinter", "methods": ["receives USDC via PSM"], "trustLevel": "owner-configured recipient"}
+    ],
+    "stateVariables": [
+      {"name": "_sUSDS/_primeToken/_vault/_router/_sUSDSIsFirst", "type": "immutable", "mutators": ["constructor"], "readers": ["_dispatch", "pool", "unlockCallback", "getIdealBPT", "views"]},
+      {"name": "_pool", "type": "address (private)", "mutators": ["constructor", "setPool"], "readers": ["pool", "unlockCallback", "getIdealBPT", "withdrawBPT", "rescueERC20(indirect)"]},
+      {"name": "authVersion", "type": "uint256", "mutators": ["constructor=1", "incrementAuthVersion"], "readers": ["onlyAuthorizedPooler", "setAuthorizedPooler"]},
+      {"name": "poolerAuthVersion", "type": "mapping(address=>uint256)", "mutators": ["setAuthorizedPooler"], "readers": ["onlyAuthorizedPooler"]},
+      {"name": "batchDonationSize", "type": "uint256 (0..100)", "mutators": ["setBatchDonationSize"], "readers": ["_dispatch"]},
+      {"name": "batchMinter", "type": "address", "mutators": ["setBatchMinter"], "readers": ["_dispatch", "_psmDonate"]},
+      {"name": "psm", "type": "address", "mutators": ["setPSM"], "readers": ["_dispatch", "_psmDonate"]},
+      {"name": "maxTout", "type": "uint256 (=0.01e18)", "mutators": ["setMaxTout"], "readers": ["_psmDonate"]}
+    ],
+    "events": ["PoolerAuthorized", "PoolerDeauthorized", "AuthVersionIncremented", "Pooled", "BatchDonationSizeSet", "BatchMinterSet", "PSMSet", "MaxToutSet", "BatchDonatedViaPSM", "DonationSkipped"],
+    "modifiers": ["onlyAuthorizedPooler", "onlyOwner", "onlyMinter (base)", "whenNotPaused", "nonReentrant"]
+  },
+
+  "valueFlows": [
+    "DISPATCH: USDS arrives on contract (minter transferFrom). poolingUSDS = amount - donationUSDS wrapped to sUSDS (held). donationUSDS portion (plus any stranded USDS) -> PSM.buyGem -> USDC delivered directly to batchMinter. On PSM failure the USDS parks and retries next dispatch. hook.onDispatch(gross amount) accrues phUSD mint-debt.",
+    "POOL: authorized pooler triggers pool(minBPT) -> all accumulated sUSDS single-sided-added to Balancer V3 pool -> BPT minted to this contract. minBPT is slippage floor.",
+    "WITHDRAW: owner withdrawBPT to recipient; owner rescueERC20 any token (incl. parked USDS / sUSDS / BPT)."
+  ],
+
+  "invariants": [
+    "_primeToken == IERC4626(_sUSDS).asset() (USDS).",
+    "poolingUSDS + donationUSDS == amount; donationUSDS == 0 when donation disabled (full amount wrapped).",
+    "_psmDonate spends <= swept USDS; USDC out is floor-rounded (never over-credits batchMinter).",
+    "buyGem only executes when tout <= maxTout (else reverts -> caught -> USDS parks).",
+    "pool() and dispatch() are mutually non-reentrant (shared OZ ReentrancyGuard).",
+    "Donation never reverts the mint (try/catch isolation) — story-034 core property.",
+    "pool() performs only an LP add, no swap/donation (story-034: pool() is a pure LP add)."
+  ],
+
+  "trustAssumptions": [
+    "sUSDS is the canonical Sky ERC4626 over USDS; deposit() yields proportional sUSDS with no donation-attack vector that harms this single-depositor contract beyond standard 4626 risk.",
+    "psm is the canonical Sky UsdsPsmWrapper (USDS<->USDC); tout governance-settable but bounded by owner maxTout.",
+    "Balancer V3 vault honors the unlock/addLiquidity/settle accounting; unlockCallback only invoked by vault.",
+    "Owner sets _pool to a real sUSDS/phUSD pool with the correct token ordering (_sUSDSIsFirst).",
+    "batchMinter, poolers, and owner are trusted; phUSD mint-debt accounting handled by the separate hook."
+  ],
+
+  "complexity": {"loc": 354, "functions": 23, "externalCalls": 7, "stateVariables": 13}
+}

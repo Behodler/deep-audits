@@ -1,0 +1,231 @@
+{
+  "project": "phoenix-nft-staking",
+  "reportDir": "reports/phoenix-nft-staking-16",
+  "submoduleHead": "5f863d27ebbab5df20131a4592996537cd8bf503",
+  "stage": "deduplication",
+  "producedAt": "2026-06-07T07:20:00Z",
+  "scanType": "cold-scan (full)",
+  "inputs": {
+    "tier1": [
+      "reports/phoenix-nft-staking-16/static/static-analysis-findings.json (23 findings + droppedSummary)",
+      "reports/phoenix-nft-staking-16/patterns/pattern-matches.json (3 findings, 2 manual-review, 23 ruled-out)",
+      "reports/phoenix-nft-staking-16/profiles/ (BatchNFTMinter, NFTStaker, INDEX)"
+    ],
+    "tier2_tier3": [
+      "ECON-001", "ECON-002/F-03", "CODE-002/F-02", "F-01",
+      "CODE-001/ECON-003", "LOCAL-BNM-001", "H-01 (recheck)"
+    ],
+    "ledger": "reports/ledgers/phoenix-nft-staking.json"
+  },
+  "summary": {
+    "canonicalFindings": 6,
+    "new": 3,
+    "mapsToLedger": 3,
+    "fixedConfirmed": 1,
+    "droppedNoiseOrByDesign": 1,
+    "ledgerEntriesNotResurfacedThisRun": 2
+  },
+  "canonicalFindings": [
+    {
+      "id": "DEDUP-001",
+      "title": "emergencyWithdraw decrements totalStaked without recomputing the reward schedule, over-emitting to remaining stakers (reward-budget value leak)",
+      "status": "NEW",
+      "ledgerLabel": null,
+      "severityHint": "medium",
+      "severityDispute": "Medium<->High (econ-scanner). Tier-3 SOLVENCY invariant PASSED => value-leak, not insolvency; pure value-leak/grief leg is permissionless but self-profit leg needs stated assumptions (recoverable capital + side position + inactivity window). FLAG for severity-classifier to resolve; preserve High note per conflicting-severity rule.",
+      "humanReviewFlag": "severity (Medium vs High) — confirmed-live with PoC, label is the only open question",
+      "rootCause": "NFTStaker.emergencyWithdraw reduces totalStaked but calls neither _updatePool nor _recomputeSchedule, so rewardRate stays sized for the pre-withdrawal (larger) pool. The next _updatePool then over-emits to the remaining stakers by oldTotal/newTotal, draining rewardBudget faster than targetAPY permits and reintroducing the per-participant multiplier that M-03 was meant to eliminate (APY-AS-FLOOR invariant breach).",
+      "locations": [
+        {"contract": "src/NFTStaker.sol", "function": "emergencyWithdraw", "lineStart": 538, "lineEnd": 561, "focus": 545},
+        {"contract": "src/NFTStaker.sol", "function": "_updatePool", "line": 320, "role": "over-emission site (uses stale rewardRate)"},
+        {"contract": "src/NFTStaker.sol", "function": "_recomputeSchedule", "lineStart": 385, "lineEnd": 421, "role": "the recompute that emergencyWithdraw fails to call"}
+      ],
+      "bestDescription": "emergencyWithdraw (src/NFTStaker.sol:538-561, esp. line 545) decrements totalStaked on principal return but does not re-settle or re-size the emission schedule: it skips both _updatePool and _recomputeSchedule. rewardRate is therefore left sized for the old, larger pool. On the next _updatePool, the unchanged rate is divided across a smaller totalStaked, so each remaining staker accrues at an inflated per-share rate (PoC measured ~100x), draining rewardBudget faster than the targetAPY policy allows. This re-introduces the participation multiplier that M-03 (APY-AS-FLOOR) was designed to remove. A self-profit variant exists where an attacker stakes, runs a side position to benefit from the inflated rate during an inactivity window, then recovers principal via emergencyWithdraw. Impact is value leak / mis-emission of the reward budget, not insolvency.",
+      "evidence": {
+        "strongest": "Tier-3 invariant PoC: workspace/phoenix-nft-staking/test/Invariant.t.sol — deterministic test FAILED and fuzz invariant FAILED, shrunk to the sequence stake -> emergencyWithdraw; SOLVENCY invariant (balance == rewardBudget + committedDebt) PASSED (=> value-leak classification, not insolvency).",
+        "discoveredBy": "econ-scanner (ECON-001), confirmed by invariant-generator (Tier-3)"
+      },
+      "sourceCrossRefs": ["ECON-001 (econ-scanner)", "Tier-3 Invariant.t.sol"],
+      "relatedInvariant": "profiles INDEX NFTStaker #4 APY-AS-FLOOR (M-03) and #3 RATE-FORMULA/RUNWAY — both violated by the missing recompute",
+      "consolidationNote": "Single-source root cause; no duplicates to merge. Distinct from H-01/M-01 (BatchNFTMinter nudge) and from the NFTStaker reentrancy tool-cluster (a real accounting bug, not a tool pattern). Not present in the ledger — genuinely NEW."
+    },
+    {
+      "id": "DEDUP-002",
+      "title": "Winner-take-all nudge pot: full balance-based payout on a count-only gate is permissionlessly front-runnable and silently over-fundable",
+      "status": "MAPS-TO-LEDGER",
+      "ledgerLabel": "M-01 (acknowledged)",
+      "ledgerFingerprint": "521c20ad48b388ea37eea906fb5e5495885952fcd944a3377fee24f274434d60",
+      "severityHint": "medium",
+      "rootCause": "batchMint pays the FULL nudgePaymentToken balance to a caller-chosen recipient on a purely count-based gate (count >= nudgeSize), decoupled from the value the caller contributed. A searcher can copy a qualifying batch with recipient=self and a higher gas bid and scoop the whole externally-funded pot; the minReward floor (story-015) only protects the loser, not the pot. The same value-blind design is also a non-obvious owner over-funding footgun (Law 3).",
+      "locations": [
+        {"contract": "src/BatchNFTMinter.sol", "function": "batchMint", "lineStart": 271, "lineEnd": 297, "focus": 273, "role": "full-pot snapshot + count-only gate + caller-chosen-recipient payout"}
+      ],
+      "bestDescription": "The nudge reads nudgeAmount = balanceOf(nudgePaymentToken) (full pot) and transfers it to a caller-chosen recipient whenever count >= nudgeSize, with no relation between the payout and the value the caller paid. This is a permissionless winner-take-all pot: a searcher who sees a qualifying batchMint in the mempool copies it with recipient=self and a higher gas bid, pays for the same nudgeSize real mints, and takes the entire pot. story-015's minReward floor only lets the LOSER bail on a sniped (now-zero) reward; the winner still takes the whole balance-based payout. story-016's snapshot-before-loop closes the donation-self-refund sub-vector but not the race. RE-EXAMINATION (this run): the acknowledged operational mitigation 'keep pot < nudgeSize x mintPrice' does NOT bound the loss, because each loop iteration mints a REAL, potentially resellable/redeemable NFT to recipient — a searcher who can realize NFT value nets ~pot > 0 for ANY pot size, so the giveaway is raced to zero on every refill. The owner over-funding facet (PATTERN-002, Law-3 footgun) folds in here: 'fund the incentive' silently equals 'set a sweepable bounty'.",
+      "evidence": {
+        "strongest": "Existing validated PoC workspace/phoenix-nft-staking/test/poc-MevFrontrunNudge.t.sol (ledger M-01); re-confirmed present at HEAD 5f863d2 by PATTERN-001 + econ/story re-examination.",
+        "discoveredBy": "pattern-matcher (PATTERN-001), econ-scanner (ECON-002), story-faithfulness (F-03)"
+      },
+      "sourceCrossRefs": [
+        "ECON-002 / F-03 (econ-scanner + story-faithfulness — sharpening: realizable NFT value defeats the pot-size mitigation)",
+        "PATTERN-001 (pattern-db BATCH-PAYOUT-FIXED-POT, MEV facet)",
+        "PATTERN-002 (pattern-db BATCH-PAYOUT-FIXED-POT, owner over-funding footgun — FOLDED IN as the Law-3 facet of the same root cause)",
+        "ledger M-01 (acknowledged)"
+      ],
+      "consolidationNote": "PATTERN-001 (MEV) and PATTERN-002 (over-funding footgun) share one root cause (value-blind full-pot payout on a count-only gate) and one location — consolidated into a single canonical finding with two facets. ECON-002/F-03 is a re-examination/sharpening of acknowledged M-01, NOT a brand-new issue; it strengthens the argument that the human's operational mitigation does not actually bound loss. Surface to the user as new analysis on an acknowledged finding (may warrant re-triage), do not file as a new ledger entry.",
+      "humanReviewFlag": "Re-triage candidate: M-01 was accepted partly on the 'keep pot < nudgeSize x mintPrice' invariant; this run argues that invariant does not bound loss once NFTs carry realizable value. Worth surfacing to the human triager."
+    },
+    {
+      "id": "DEDUP-003",
+      "title": "batchMint lacks nonReentrant while custodying the nudge pot and using balance-based accounting across an ERC1155-callback mint loop",
+      "status": "MAPS-TO-LEDGER",
+      "ledgerLabel": "L-01 (submitted)",
+      "ledgerFingerprint": "9135cf7947c212b0930bbce58ad9254327eb2d7fb355c4ac913f452ce15608fe",
+      "severityHint": "low",
+      "rootCause": "BatchNFTMinter.batchMint is whenNotPaused but NOT nonReentrant (ReentrancyGuard is imported only by NFTStaker), yet it does balance-based pot accounting across a count-length loop of nftMinter.mint() calls, each of which fires the caller-chosen recipient's onERC1155Received. Defense-in-depth gap.",
+      "locations": [
+        {"contract": "src/BatchNFTMinter.sol", "function": "batchMint", "lineStart": 232, "lineEnd": 297, "focus": 280, "role": "unguarded fund-moving entrypoint with mid-loop ERC1155 callback"}
+      ],
+      "bestDescription": "batchMint has no reentrancy guard while it is the only fund-moving entrypoint: it pulls payment, forceApproves the minter, runs a count-length loop of nftMinter.mint() (each dispatching an ERC1155 mint whose onERC1155Received runs the caller-chosen recipient's code), then transfers the balance-snapshotted nudge pot and refunds dust. Because accounting is contract-balance-based rather than per-call escrow, a guard is warranted for defense-in-depth. Tier-2 traced every reentry path and CONFIRMED NOT exploitable for theft: re-entry only fires into the attacker's own chosen recipient (cannot inject into a victim batch); a self-batch only moves the attacker's own funds; the nudge double-pay self-reverts (full-balance snapshot transfer underflows the drained balance) and the inner frame's forceApprove(minter,0) makes the outer loop's remaining mints revert; the minReward floor cannot be escaped. Recommendation: add OZ ReentrancyGuard regardless and make the refund credit a recorded amount instead of balanceOf(this).",
+      "evidence": {
+        "strongest": "Validated Tier-3 PoC workspace/phoenix-nft-staking/test/poc-L01-reentrancy.t.sol (4 cases, all pass against real source) per ledger L-01; corroborated this run by SLITHER-006, PATTERN-MR-001, and Tier-2 reentry-path tracing.",
+        "discoveredBy": "code-scanner (CODE-001), econ-scanner (ECON-003), pattern-matcher (PATTERN-MR-001), slither (SLITHER-006)"
+      },
+      "sourceCrossRefs": [
+        "CODE-001 / ECON-003 (code-scanner + econ-scanner — full reentry-path trace, NOT exploitable)",
+        "PATTERN-MR-001 (pattern-db REENTRANCY-ERC777, manual-review)",
+        "SLITHER-006 (reentrancy-events on batchMint:232 — same missing-guard root cause)",
+        "ledger L-01 (submitted)"
+      ],
+      "consolidationNote": "Four tool/agent surfaces (CODE-001, ECON-003, PATTERN-MR-001, SLITHER-006) collapse to one canonical finding — same missing-guard root cause, same location, all converge on NOT-exploitable / defense-in-depth Low. SLITHER-006 is the static event-ordering shadow of the same gap. Maps to existing submitted L-01; no severity change."
+    },
+    {
+      "id": "DEDUP-004",
+      "title": "Uncapped caller-supplied count loop in batchMint",
+      "status": "MAPS-TO-LEDGER",
+      "ledgerLabel": "L-02 (submitted)",
+      "ledgerFingerprint": "e35388bfa2b5bbdb5c66fcac5682a63e45c9086b4e1a37dc3bff981445b37666",
+      "severityHint": "low",
+      "rootCause": "for (uint256 i; i < count; ++i) nftMinter.mint(...) iterates a caller-supplied count with no upper bound and one external mint per iteration. Self-bounded: the caller pays each mint at the dispatcher's geometrically ramping price and bears their own gas; no shared/growing state, so no third-party DoS.",
+      "locations": [
+        {"contract": "src/BatchNFTMinter.sol", "function": "batchMint", "line": 280, "role": "caller-supplied unbounded loop bound"}
+      ],
+      "bestDescription": "batchMint loops over a caller-supplied count with an external nftMinter.mint() per iteration and no max-count cap or pagination. The pattern matches the DB unbounded-loop template, but realistic impact is LOW: the loop touches no shared/growing array, the caller funds their own gas, and the dispatcher's ramping per-mint price makes a large count economically self-limiting. Only caller self-DoS, no cross-user griefing.",
+      "evidence": {
+        "strongest": "Static + pattern corroboration at HEAD 5f863d2; behavior unchanged from prior runs (ledger L-02).",
+        "discoveredBy": "pattern-matcher (PATTERN-003), slither (SLITHER-012)"
+      },
+      "sourceCrossRefs": [
+        "PATTERN-003 / LOCAL-BNM-001 (pattern-db DOS-UNBOUNDED-LOOP, severity deliberately set below DB MEDIUM template)",
+        "SLITHER-012 (calls-loop, batchMint:281 — same loop)",
+        "ledger L-02 (submitted)"
+      ],
+      "consolidationNote": "PATTERN-003, LOCAL-BNM-001, and SLITHER-012 are the same loop at the same site — one canonical finding. Maps to submitted L-02; no change."
+    },
+    {
+      "id": "DEDUP-005",
+      "title": "Transient solvency-invariant window: topUp/setTargetAPY recompute the budget without a preceding pull(), over-stating budget while mintDebt > 0",
+      "status": "NEW",
+      "ledgerLabel": null,
+      "severityHint": "low",
+      "rootCause": "_recomputeSchedule sizes the budget on balance + dispatcherHook.mintDebt(), but topUp and setTargetAPY recompute WITHOUT first calling pull(). In the transient window where mintDebt > 0, the documented invariant 'Solvency (always): balance == rewardBudget + committedDebt' does not literally hold; it self-heals on the next _syncBudget/pullAndRefresh.",
+      "locations": [
+        {"contract": "src/NFTStaker.sol", "function": "topUp/setTargetAPY", "lineStart": 264, "lineEnd": 284, "role": "recompute without preceding pull()"},
+        {"contract": "src/NFTStaker.sol", "function": "_recomputeSchedule", "lineStart": 385, "lineEnd": 421, "role": "budget sized on balance + mintDebt()"}
+      ],
+      "bestDescription": "topUp and setTargetAPY call the schedule recompute without first pulling outstanding mintDebt, so during a window where dispatcherHook.mintDebt() > 0 the budget is over-stated by exactly the un-pulled mintDebt and the 'balance == rewardBudget + committedDebt' solvency invariant is transiently violated. Tier-3 confirmed the over-statement is precisely mintDebt and is restored by the next pullAndRefresh/_syncBudget. The only residual impact is a minor, recoverable claim-DoS tail IF the hook is rotated or breaks during that exact window. Best treated as a doc-precision fix (qualify the invariant as eventually-consistent) plus an optional pull() before recompute.",
+      "evidence": {
+        "strongest": "Tier-3 confirmation that the transient over-statement equals mintDebt and is restored by pullAndRefresh.",
+        "discoveredBy": "code-scanner (CODE-002), story-faithfulness (F-02)"
+      },
+      "sourceCrossRefs": ["CODE-002 / F-02 (code-scanner + story-faithfulness)"],
+      "consolidationNote": "Single root cause across two source agents (same transient-window observation). NEW — not in ledger. Low/informational. Distinct from DEDUP-006 (this is a code transient-state window; that is stale prose in docs)."
+    },
+    {
+      "id": "DEDUP-006",
+      "title": "Documentation drift: runway/design docs describe stale reward models (TOTAL-SUPPLY T-model and 540-day fixed window) vs shipped TOTAL-STAKED (M-03)",
+      "status": "NEW",
+      "ledgerLabel": null,
+      "severityHint": "qa-low",
+      "rootCause": "docs/runway-dynamics-and-apy-as-policy.md still calls the TOTAL-SUPPLY T model the 'current spec' while shipped code + CLAUDE.md use TOTAL-STAKED (M-03); docs/design.md is fully stale (540-day fixed-window model). An owner tuning APY off the doc's runway tables can mis-size runway.",
+      "locations": [
+        {"file": "docs/runway-dynamics-and-apy-as-policy.md", "role": "labels stale TOTAL-SUPPLY T-model as current spec"},
+        {"file": "docs/design.md", "role": "fully stale 540-day fixed-window model"}
+      ],
+      "bestDescription": "The runway documentation is out of sync with shipped behavior: runway-dynamics-and-apy-as-policy.md presents the TOTAL-SUPPLY T model as the current spec, but the code and submodule CLAUDE.md size emission on TOTAL-STAKED post-M-03; design.md describes an entirely superseded 540-day fixed-window model. Because the owner is expected to tune targetAPY against the doc's runway tables, the drift is a non-obvious footgun: APY chosen from stale tables can mis-size the real runway. Fix is documentation (mark design.md superseded; update the runway doc to the TOTAL-STAKED/variable-runway model).",
+      "evidence": {
+        "strongest": "Profiles INDEX corroborates: 'docs/design.md is partially stale (fixed-window 540d model); authoritative specs are CLAUDE.md Critical Invariants + runway-dynamics doc.'",
+        "discoveredBy": "story-faithfulness (F-01)"
+      },
+      "sourceCrossRefs": ["F-01 (story-faithfulness)", "profiles/INDEX.md notes (corroboration)"],
+      "consolidationNote": "Single root cause (doc-vs-code drift) spanning two doc files — kept as one finding. NEW; QA/Low. Kept separate from DEDUP-005 per 'keep both when different root causes' (stale prose vs transient code state)."
+    }
+  ],
+  "fixedConfirmed": [
+    {
+      "ledgerLabel": "H-01 (fixed)",
+      "ledgerFingerprint": "858e9e807abee888b378db210bae982f23fe7b5d91052321e204d7ba568579b7",
+      "title": "Value-blind nudge drain (caller-chosen no-op minter)",
+      "action": "DO NOT RE-REPORT",
+      "reason": "Fixed by story-014 (owner-pinned minter + dispatcherIndex); re-confirmed STILL-FIXED at HEAD 5f863d2 (story-016 snapshot-before-loop does not reintroduce it; balance-based safeTransfer reverts on over-pay). No regression."
+    }
+  ],
+  "ledgerEntriesNotResurfacedThisRun": [
+    {
+      "ledgerLabel": "L-03 (submitted)",
+      "title": "Nudge-token equality guard reverts even when nudge is size-disabled",
+      "action": "leave as-is",
+      "reason": "QA/usability nit; not raised by any tier this run. No change."
+    },
+    {
+      "ledgerLabel": "L-05 (wont-fix)",
+      "title": "minReward==0 default silently opts out of the slippage guard",
+      "action": "leave as-is",
+      "reason": "Contract-level wont-fix (legitimate non-nudge batches must pass minReward=0); enforcement lives at the integration/UI layer. Thematically referenced by DEDUP-002's mitigation discussion but remains a distinct, already-triaged entry. No change."
+    }
+  ],
+  "dropped": {
+    "note": "Law 1 visible channel: dropped here are tool noise, mitigated tool-patterns, by-design, or accepted known-design items — recorded so nothing is silently lost.",
+    "items": [
+      {
+        "group": "NFTStaker reentrancy tool-cluster",
+        "sourceIds": ["SLITHER-001", "SLITHER-002", "SLITHER-003", "SLITHER-004", "SLITHER-005", "SLITHER-007", "ADERYN-001"],
+        "reason": "reentrancy-no-eth / -benign / -events / -state-change on stake/unstake/claim/_syncBudget. All user entrypoints are nonReentrant (OZ ReentrancyGuard) and the dispatcherHook + stakedToken are owner-pinned trusted state; the ERC1155 callback fires after the guard is set. Tool-pattern only, no exploit. (ADERYN-001 HIGH is the same root cause as SLITHER-001, guard-mitigated.)"
+      },
+      {
+        "group": "unused-return on nftMinter.mint()",
+        "sourceIds": ["SLITHER-009", "ADERYN-002"],
+        "reason": "Informational: mint() reverts on failure so success is implied; the discarded id only means batchMint cannot relay minted ids to the caller. No security impact. (ADERYN-002 is an exact duplicate of SLITHER-009.)"
+      },
+      {
+        "group": "unused-return tuple destructuring (configs)",
+        "sourceIds": ["SLITHER-008", "SLITHER-010"],
+        "reason": "Intentional partial tuple destructuring of INFTMinterV2.configs(); benign by design."
+      },
+      {
+        "group": "uninitialized-local",
+        "sourceIds": ["SLITHER-011", "ADERYN-003"],
+        "reason": "nudgeAmount relies on the 0 default (0 = no nudge) and loop counter i defaults to 0 — idiomatic Solidity, benign."
+      },
+      {
+        "group": "timestamp-dependency cluster",
+        "sourceIds": ["SLITHER-013", "SLITHER-014", "SLITHER-015", "SLITHER-016", "SLITHER-017", "SLITHER-018", "SLITHER-019", "SLITHER-020"],
+        "reason": "block.timestamp usage in the accrual/runway math is inherent to a time-driven reward schedule; kept by-design per time-driven-protocol policy. Several (015/016/017) are call-graph artifacts with no direct timestamp dependence."
+      },
+      {
+        "group": "division-before-multiplication rate math",
+        "sourceIds": ["PATTERN-MR-002"],
+        "reason": "latestPrice = price.mulDiv(...) then S = totalStaked * latestPrice floors conservatively-for-protocol; error bound ~totalStaked wei vs S~1e27 is negligible; explicitly in the project knownIssues as intentional (warns against flipping to ceiling). Accepted known design, not a live defect."
+      },
+      {
+        "group": "pattern-matcher ruled-out (non-match / not-vulnerable)",
+        "sourceIds": ["REWARD-ACCRUAL-ORDER", "REWARD-RUNWAY-DEPLETION", "EMISSION-WINDOW-BOUNDARY", "MINT-ON-DEMAND-OVERMINT", "FIRST-DEPOSITOR-ATTACK", "ERC4626-INFLATION", "YIELD-PRINCIPAL-ACCOUNTING-SKEW", "TWO-STEP-COMMIT-WINDOW", "FLASH-LOAN-PRICE", "MISSING-SLIPPAGE", "RETURN-VALUE-IGNORE", "UNSAFE-DOWNCAST", "UNPROTECTED-INIT", "STORAGE-COLLISION", "SIGNATURE-REPLAY", "PERMIT-FRONTRUN", "FRONTRUN-APPROVE", "ORACLE-STALE", "ORACLE-ROUNDID", "SELFDESTRUCT-FORCE-ETH", "DOUBLE-VOTING", "CROSS-CHAIN-REPLAY", "TIMELOCK-BYPASS", "INCORRECT-OPERATOR", "CENTRALIZATION-ADMIN"],
+        "reason": "23 patterns ruled out by pattern-matcher with documented verdicts (non-match or prior-fix-holds). CENTRALIZATION-ADMIN suppressed under Law 3 (trusted non-malicious owner); the only owner-action surfaced is the non-obvious over-funding footgun already folded into DEDUP-002."
+      },
+      {
+        "group": "static-analyzer pre-filtered tool noise",
+        "sourceIds": ["slither: missing-zero-check x3, cyclomatic-complexity x1, out-of-scope x11", "aderyn: centralization-risk x16, state-no-address-check x5, push-zero-opcode x2, unspecific-pragma x2", "semgrep: 30 INFO (custom-error/state-increment/nested-if/short-revert/ownable2step/non-payable-ctor/checked-arith)"],
+        "reason": "Already filtered by static-analyzer into droppedSummary (59 filtered). Style/QA-only or out-of-scope file roots; no HM exploit path. Echoed here for the visible channel."
+      }
+    ]
+  }
+}

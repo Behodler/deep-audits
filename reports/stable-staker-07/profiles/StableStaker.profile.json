@@ -1,0 +1,195 @@
+{
+  "contract": "src/StableStaker.sol",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "submoduleCommit": "7e9ef80a916081148e28df60ef6daf83c9157a3b",
+  "solidityVersion": "0.8.28 (pragma ^0.8.20, foundry.toml pins 0.8.28)",
+  "scanMode": "cold",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {
+      "value": "likely",
+      "note": "No untrusted-caller-reachable unbounded loop in a state-changing path. batchMigrate loops over a migrator-supplied (trusted, onlyMigrator) array, expected to be paged off-chain via getStakersRange. Views getStakers/getStakedTokens/getStakersRange return EnumerableSet arrays; getStakersRange offers explicit paging. EnumerableSet add/remove/contains are O(1)."
+    },
+    "checkedArithmetic": {
+      "value": "verified",
+      "note": "solc 0.8.28; zero `unchecked` blocks and zero inline assembly (grep-confirmed). All arithmetic is overflow/underflow-checked."
+    },
+    "reentrancyGuarded": ["stake", "withdraw", "claim", "emergencyWithdraw", "initiateMigration", "batchMigrate", "userMigrate", "depositFor"],
+    "reentrancyUnguardedByDesign": [
+      {"function": "setYieldStrategy", "reason": "onlyOwner; makes external strategy.deposit call but owner is trusted (Law 3) and no user can reach it"},
+      {"function": "rescueERC20", "reason": "onlyOwner; strict CEI with trailing safeTransfer, no post-transfer state"}
+    ],
+    "accessControlled": {
+      "onlyOwner": ["addToken", "phUSDPerDay", "setMigrator", "setPauser", "setYieldStrategy", "rescueERC20"],
+      "onlyPauser": ["pause"],
+      "ownerOrPauser": ["unpause"],
+      "onlyMigrator": ["initiateMigration", "batchMigrate", "depositFor"],
+      "permissionless": ["stake", "withdraw", "claim", "emergencyWithdraw", "userMigrate"]
+    },
+    "initializerProtected": {
+      "value": "n/a",
+      "note": "Not upgradeable; single constructor sets immutable phUSD and Ownable owner. No initializer surface."
+    },
+    "pausable": {
+      "value": true,
+      "note": "OZ Pausable + IPausable (Behodler3 pattern). whenNotPaused gates stake/withdraw/claim. emergencyWithdraw, userMigrate, batchMigrate, depositFor, initiateMigration, rescueERC20 are intentionally callable while paused."
+    },
+    "totalStakedEqualsSumOfUserAmounts": {
+      "value": "verified",
+      "note": "All five totalStaked writes (stake +credited L252, withdraw -amount L271, emergencyWithdraw -user.amount L313, _exitPosition -amt L476, depositFor +credited L533) are matched by an equal user.amount delta. Hence totalStaked == Σ user.amount, which guarantees the subtractions never underflow."
+    }
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-SS-001",
+      "type": "precision-loss / owner-config-footgun",
+      "severity": "local-low",
+      "function": "phUSDPerDay",
+      "line": 169,
+      "description": "phusdPerSecond = amountPerDay / SECONDS_PER_DAY (floor). Any daily budget below 86400 wei of phUSD silently rounds to a 0 wei/sec emission rate, so the pool emits nothing while still appearing configured. Realistic budgets (>= ~1e5 wei, and any human-scale phUSD/day) are unaffected, so this requires an implausibly tiny budget to trigger.",
+      "recommendation": "Optionally require amountPerDay >= SECONDS_PER_DAY (or revert when the computed perSecond == 0 for a non-zero budget) to make a misconfigured rate fail loudly. Surfaced for recall; classifier may treat as informational/QA given the implausible config.",
+      "confidence": "verified"
+    }
+  ],
+
+  "notFlaggedDeferredToInteraction": [
+    "phUSD.mint reverting (e.g. authorized-minter revocation via mintVersion bump) would brick reward-minting paths (claim, and the _settle leg of stake/withdraw/depositFor). emergencyWithdraw and userMigrate forfeit/freeze reward minting differently and the escape hatch never mints, so principal is never trapped by a broken mint. Cross-contract dependency -> interaction analysis.",
+    "Yield-strategy underwater / slippage / AMM price-impact behaviour, and whether _routeExit's measured-received vs requested-decrement accounting leaks value, depend on the concrete IYieldStrategy implementation -> interaction/econ analysis.",
+    "setYieldStrategy replacing an in-use strategy without first draining it strands principal in the old (now de-allowanced) strategy. Documented in the source/CLAUDE.md as an owner operational hazard; cross-contract -> surfaced as trust assumption, not a local finding.",
+    "rescueERC20 treats reserved==0 when a strategy is set, so the on-contract idle buffer (used to satisfy underwater withdraws) is owner-rescuable. Whether this can strip the buffer is an economic/owner-trust concern across the strategy boundary -> interaction/econ analysis."
+  ],
+
+  "interfaceAbstraction": {
+    "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPausable"],
+    "constants": [
+      {"name": "ACC_PRECISION", "value": "1e18", "purpose": "fixed-point scale for accPhusdPerShare; dust rounds down"},
+      {"name": "SECONDS_PER_DAY", "value": "86400", "purpose": "per-day budget -> per-second rate conversion"}
+    ],
+    "externalEntryPoints": [
+      {"function": "addToken(address token)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyOwner", "reentrancyGuard": false, "stateChanges": ["_registeredTokens", "poolInfo[token].lastRewardTime"], "externalCalls": [], "events": ["TokenAdded"]},
+      {"function": "phUSDPerDay(address token, uint256 amountPerDay)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyOwner + poolExists", "reentrancyGuard": false, "stateChanges": ["poolInfo[token].phusdPerSecond", "poolInfo[token].accPhusdPerShare (via _updatePool)", "poolInfo[token].lastRewardTime"], "externalCalls": [], "events": ["RewardRateSet"], "note": "settles pool at old rate before changing (non-retroactive)"},
+      {"function": "setMigrator(address _migrator)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyOwner", "reentrancyGuard": false, "stateChanges": ["migrator"], "externalCalls": [], "events": ["MigratorSet"]},
+      {"function": "setPauser(address _pauser)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyOwner", "reentrancyGuard": false, "stateChanges": ["pauser"], "externalCalls": [], "events": ["PauserUpdated"]},
+      {"function": "setYieldStrategy(address token, IYieldStrategy strategy)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyOwner + poolExists", "reentrancyGuard": false, "stateChanges": ["yieldStrategy[token]"], "externalCalls": ["IERC20(token).forceApprove(old,0)", "IERC20(token).forceApprove(new,max)", "IERC20(token).balanceOf(this)", "strategy.deposit(token, idleBalance, this)"], "events": ["YieldStrategySet"], "note": "sweeps idle balance into new strategy; does NOT migrate funds out of an old in-use strategy"},
+      {"function": "pause()", "visibility": "external override", "mutability": "nonpayable", "accessControl": "onlyPauser", "reentrancyGuard": false, "stateChanges": ["_paused"], "externalCalls": [], "events": ["Paused"]},
+      {"function": "unpause()", "visibility": "external override", "mutability": "nonpayable", "accessControl": "owner() || pauser", "reentrancyGuard": false, "stateChanges": ["_paused"], "externalCalls": [], "events": ["Unpaused"]},
+      {"function": "stake(address token, uint256 amount)", "visibility": "external", "mutability": "nonpayable", "accessControl": "none (whenNotPaused + poolExists + !migrating)", "reentrancyGuard": true, "stateChanges": ["userInfo[token][msg.sender].amount", "userInfo[token][msg.sender].rewardDebt", "poolInfo[token].totalStaked", "poolInfo[token].accPhusdPerShare/lastRewardTime", "_stakers[token]"], "externalCalls": ["phUSD.mint (via _settle)", "token.safeTransferFrom + token.balanceOf (via _pullToken)", "strategy.deposit (via _routeDeposit, if set)"], "events": ["Staked"]},
+      {"function": "withdraw(address token, uint256 amount)", "visibility": "external", "mutability": "nonpayable", "accessControl": "none (whenNotPaused + poolExists + !migrating)", "reentrancyGuard": true, "stateChanges": ["userInfo[token][msg.sender]", "poolInfo[token].totalStaked", "poolInfo[token] acc/lastRewardTime", "_stakers[token]"], "externalCalls": ["phUSD.mint", "strategy.withdraw + token.balanceOf (via _routeExit, if set)", "token.safeTransfer"], "events": ["Withdrawn", "BufferWithdrawn (underwater buffer path)"], "note": "reverts 'strategy underwater' when strategy below par and buffer insufficient"},
+      {"function": "claim(address token)", "visibility": "external", "mutability": "nonpayable", "accessControl": "none (whenNotPaused + poolExists)", "reentrancyGuard": true, "stateChanges": ["userInfo[token][msg.sender].rewardDebt", "poolInfo[token] acc/lastRewardTime"], "externalCalls": ["phUSD.mint"], "events": ["Claimed"]},
+      {"function": "emergencyWithdraw(address token)", "visibility": "external", "mutability": "nonpayable", "accessControl": "none (callable while paused; blocked while migrating)", "reentrancyGuard": true, "stateChanges": ["userInfo[token][msg.sender] (zeroed)", "poolInfo[token].totalStaked", "_stakers[token]"], "externalCalls": ["strategy.withdraw + token.balanceOf (via _routeExit, guardUnderwater=false)", "token.safeTransfer"], "events": ["EmergencyWithdrawn"], "note": "forfeits pending reward; never mints phUSD so a broken mint path cannot trap principal; accepts haircut if strategy below par. No poolExists modifier but user.amount>0 guard makes unregistered tokens unreachable."},
+      {"function": "initiateMigration(address token)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyMigrator + poolExists", "reentrancyGuard": true, "stateChanges": ["poolInfo[token] settle/freeze", "yieldStrategy[token] (cleared)", "migrationInfo[token] (active=true, R, P)"], "externalCalls": ["strategy.withdraw + token.balanceOf (via _routeExit, guardUnderwater=false)", "strategy.principalOf", "IERC20(token).forceApprove(strategy,0)"], "events": ["MigrationInitiated"], "note": "terminal, runs once; reverts 'incomplete exit' if strategy.principalOf != 0 after exit"},
+      {"function": "batchMigrate(address token, address[] users) returns (uint256[] amounts)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyMigrator + poolExists (requires active)", "reentrancyGuard": true, "stateChanges": ["per-user userInfo zeroed", "poolInfo[token].totalStaked", "_stakers[token]"], "externalCalls": ["phUSD.mint (per user, via _exitPosition)", "token.safeTransfer(migrator, total)"], "events": ["MigratedOut (per user)"], "loop": "iterates users[] (migrator-supplied)", "note": "credit_i = p_i*min(R,P)/P from immutable snapshot; Sigma amounts <= R"},
+      {"function": "userMigrate(address token)", "visibility": "external", "mutability": "nonpayable", "accessControl": "none (requires active + own non-zero position)", "reentrancyGuard": true, "stateChanges": ["userInfo[token][msg.sender] zeroed", "poolInfo[token].totalStaked", "_stakers[token]"], "externalCalls": ["phUSD.mint (via _exitPosition)", "token.safeTransfer(msg.sender, credit)"], "events": ["UserMigrated", "MigratedOut"], "note": "permissionless terminal escape hatch; same credit as batch; CEI (zero before transfer)"},
+      {"function": "depositFor(address token, address user, uint256 amount)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyMigrator + poolExists (blocked while migrating)", "reentrancyGuard": true, "stateChanges": ["userInfo[token][user]", "poolInfo[token].totalStaked", "poolInfo[token] acc/lastRewardTime", "_stakers[token]"], "externalCalls": ["phUSD.mint (via _settle)", "token.safeTransferFrom(migrator) + balanceOf (via _pullToken)", "strategy.deposit (via _routeDeposit, if set)"], "events": ["DepositedFor"], "note": "callable while paused; pulls from migrator. Blocked on the OLD migrating staker; redeposit target is the NEW staker."},
+      {"function": "rescueERC20(address token, address to, uint256 amount)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyOwner (callable while paused)", "reentrancyGuard": false, "stateChanges": [], "externalCalls": ["IERC20(token).balanceOf(this)", "token.safeTransfer(to, amount)"], "events": ["ERC20Rescued"], "note": "reserved = totalStaked when no strategy set (protects idle principal), else 0; require bal >= reserved + amount"},
+      {"function": "pendingReward(address token, address account)", "visibility": "external view", "returns": "uint256", "note": "forward-projects acc when not migrating & totalStaked>0; returns frozen pending while migrating"},
+      {"function": "getStakers(address token)", "visibility": "external view", "returns": "address[]"},
+      {"function": "getStakersRange(address token, uint256 start, uint256 end)", "visibility": "external view", "returns": "address[]", "note": "half-open [start,end), end clamped to length; paging helper for batchMigrate"},
+      {"function": "stakerCount(address token)", "visibility": "external view", "returns": "uint256"},
+      {"function": "getStakedTokens()", "visibility": "external view", "returns": "address[]"},
+      {"function": "withdrawDisabled(address token)", "visibility": "external view", "returns": "bool", "externalCalls": ["strategy.totalBalanceOf", "strategy.principalOf"], "note": "true while strategy below par; false when no strategy"},
+      {"function": "poolInfo(address)", "visibility": "public mapping getter", "returns": "(phusdPerSecond, accPhusdPerShare, lastRewardTime, totalStaked)"},
+      {"function": "userInfo(address,address)", "visibility": "public mapping getter", "returns": "(amount, rewardDebt)"},
+      {"function": "yieldStrategy(address)", "visibility": "public mapping getter", "returns": "IYieldStrategy"},
+      {"function": "migrationInfo(address)", "visibility": "public mapping getter", "returns": "(active, realized, principalSnapshot)"},
+      {"function": "phUSD()", "visibility": "public immutable getter", "returns": "IFlax"},
+      {"function": "pauser()", "visibility": "public override getter", "returns": "address"},
+      {"function": "migrator()", "visibility": "public getter", "returns": "address"}
+    ],
+
+    "externalCalls": [
+      {"target": "IFlax phUSD (immutable)", "methods": ["mint"], "trustLevel": "semi-trusted", "notes": "Phoenix FlaxToken; this contract must be an authorized minter. mint reverts if minter privilege revoked (mintVersion mismatch) -> would brick reward-minting legs but not emergencyWithdraw/userMigrate principal return. Cross-contract behaviour deferred to interaction analysis."},
+      {"target": "IYieldStrategy yieldStrategy[token] (owner-set, may be address(0))", "methods": ["deposit", "withdraw", "principalOf", "totalBalanceOf"], "trustLevel": "semi-trusted", "notes": "Phoenix reflax-yield-vault adapter, owner-wired; strategy owner must setClient(this,true). deposit may haircut credited principal (market strategy slippage); withdraw forwards measured-received. Reentrancy from strategy callbacks is contained by nonReentrant on all principal paths. Strategy correctness (principalOf/totalBalanceOf honesty, underwater behaviour) deferred to interaction analysis."},
+      {"target": "IERC20 token (staked stable, per pool)", "methods": ["safeTransferFrom", "safeTransfer", "balanceOf", "forceApprove"], "trustLevel": "semi-trusted", "notes": "Assumed standard ERC20: no fee-on-transfer (known-issue exclusion; would make credited<requested and drift accounting), no rebasing, no transfer hooks. _pullToken/_routeExit use balance-delta measurement."},
+      {"target": "pauser (Global Pauser / Behodler3 pauser address)", "methods": ["calls pause() on this contract"], "trustLevel": "semi-trusted", "notes": "External actor that can pause; owner OR pauser can unpause. Pauser identity set by owner via setPauser."}
+    ],
+
+    "stateVariables": [
+      {"name": "phUSD", "type": "IFlax (immutable)", "mutators": ["constructor"], "readers": ["stake/withdraw/claim/depositFor (mint via _settle)", "_settle", "_exitPosition", "claim"]},
+      {"name": "pauser", "type": "address (public override)", "mutators": ["setPauser"], "readers": ["onlyPauser", "unpause"]},
+      {"name": "migrator", "type": "address (public)", "mutators": ["setMigrator"], "readers": ["onlyMigrator"]},
+      {"name": "poolInfo", "type": "mapping(address => PoolInfo)", "mutators": ["addToken (lastRewardTime)", "phUSDPerDay (phusdPerSecond)", "_updatePool (accPhusdPerShare, lastRewardTime)", "stake/depositFor (totalStaked +)", "withdraw/emergencyWithdraw/_exitPosition (totalStaked -)"], "readers": ["all reward math", "pendingReward", "rescueERC20", "initiateMigration"]},
+      {"name": "userInfo", "type": "mapping(address => mapping(address => UserInfo))", "mutators": ["stake", "withdraw", "claim", "emergencyWithdraw", "depositFor", "_exitPosition"], "readers": ["_settle", "pendingReward", "userMigrate guard"]},
+      {"name": "_stakers", "type": "mapping(address => EnumerableSet.AddressSet) (private)", "mutators": ["stake/depositFor (add)", "withdraw/emergencyWithdraw/_exitPosition (remove)"], "readers": ["getStakers", "getStakersRange", "stakerCount"]},
+      {"name": "_registeredTokens", "type": "EnumerableSet.AddressSet (private)", "mutators": ["addToken (add only; no removal)"], "readers": ["poolExists modifier", "getStakedTokens"]},
+      {"name": "yieldStrategy", "type": "mapping(address => IYieldStrategy)", "mutators": ["setYieldStrategy", "initiateMigration (cleared to address(0))"], "readers": ["_routeDeposit", "_routeExit", "withdrawDisabled", "rescueERC20", "initiateMigration"]},
+      {"name": "migrationInfo", "type": "mapping(address => MigrationInfo)", "mutators": ["initiateMigration (terminal active=true, R, P)"], "readers": ["stake/withdraw/emergencyWithdraw/depositFor guards", "batchMigrate/userMigrate guard", "_updatePool freeze", "_exitPosition", "pendingReward"]}
+    ],
+
+    "events": ["TokenAdded", "RewardRateSet", "MigratorSet", "PauserUpdated", "YieldStrategySet", "Staked", "Withdrawn", "Claimed", "EmergencyWithdrawn", "MigratedOut", "MigrationInitiated", "UserMigrated", "DepositedFor", "BufferWithdrawn", "ERC20Rescued"],
+
+    "modifiers": ["onlyOwner (OZ)", "whenNotPaused (OZ)", "nonReentrant (OZ)", "onlyPauser", "onlyMigrator", "poolExists"]
+  },
+
+  "localInvariants": [
+    {
+      "id": "INV-SS-1-emission-cap",
+      "statement": "_updatePool is the SOLE writer of poolInfo[token].accPhusdPerShare; it folds in exactly elapsed*phusdPerSecond per update. No sequence of user actions can mint more than phUSDPerDay over any window.",
+      "confidence": "verified",
+      "evidence": "grep: the only storage assignment to accPhusdPerShare is L623 inside _updatePool; every other occurrence is a read. Rate changes (phUSDPerDay) call _updatePool first, so changes are never retroactive."
+    },
+    {
+      "id": "INV-SS-2-dust-down",
+      "statement": "All reward and migration division is integer floor in the protocol's favor: acc += reward*ACC_PRECISION/totalStaked, pending = amount*acc/ACC_PRECISION - rewardDebt, credit = amt*min(R,P)/P. Realized emission <= phusdPerSecond*elapsed; Sigma migration credits <= min(R,P) <= R.",
+      "confidence": "verified",
+      "evidence": "No unchecked/assembly (grep). Floor division at L550/L623 (rewards) and L468 (migration). Conservation Sigma floor(p_i*S/P) <= (S/P)*Sigma p_i = S documented and arithmetically sound."
+    },
+    {
+      "id": "INV-SS-3-totalStaked-conservation",
+      "statement": "poolInfo[token].totalStaked == sum over users of userInfo[token][user].amount at all times, so the totalStaked-=amount subtractions can never underflow.",
+      "confidence": "verified",
+      "evidence": "Every totalStaked write (L252,271,313,476,533) is paired with an equal user.amount delta; withdraw/_exitPosition guard amount<=user.amount; emergencyWithdraw/_exitPosition subtract exactly the zeroed amount."
+    },
+    {
+      "id": "INV-SS-4-migration-freeze",
+      "statement": "Once migrationInfo[token].active is true it is terminal (no clearing path) and _updatePool no-ops, freezing each user's pending phUSD at the initiateMigration snapshot; stake/withdraw/emergencyWithdraw/depositFor on that token are blocked so P is immutable.",
+      "confidence": "verified",
+      "evidence": "_updatePool early-returns on active (L609); the four mutating paths require !migrationInfo[token].active; migrationInfo is only ever written in initiateMigration."
+    },
+    {
+      "id": "INV-SS-5-migration-credit-order-independence",
+      "statement": "Terminal-migration credit_i = amt_i*min(R,P)/P uses the immutable snapshot (R,P) and the fixed denominator P (not a re-summed batch total), so payouts are independent of batch composition, ordering, and batch-vs-self; equal principal => equal payout.",
+      "confidence": "verified",
+      "evidence": "_exitPosition reads mig.principalSnapshot/mig.realized only; batchMigrate and userMigrate both route through _exitPosition. Closes legacy ss2m1/M-01."
+    },
+    {
+      "id": "INV-SS-6-migration-solvency",
+      "statement": "The idle pile realized at initiateMigration (R) covers every credit in any interleaving of batch/self exits; the last claimer is never starved. Floor dust stays protocol-owned.",
+      "confidence": "verified",
+      "evidence": "Sigma floor(p_i*S/P) <= S <= R with S=min(R,P); credits paid only from idle balance, no strategy round-trip post-initiate."
+    },
+    {
+      "id": "INV-SS-7-rescue-cannot-take-idle-principal",
+      "statement": "rescueERC20 cannot withdraw idle-held user principal: when yieldStrategy[token]==address(0), reserved=totalStaked and require(bal>=reserved+amount).",
+      "confidence": "verified",
+      "evidence": "L708-710. NOTE (deferred): when a strategy IS set, reserved=0 and the on-contract buffer becomes fully rescuable; the buffer's role in underwater withdraws makes this an econ/owner-trust question, not a local violation."
+    },
+    {
+      "id": "INV-SS-8-cei-on-exits",
+      "statement": "All token-transferring exits zero/decrement state before the external token transfer and carry nonReentrant: withdraw, emergencyWithdraw, batchMigrate, userMigrate, _exitPosition.",
+      "confidence": "verified",
+      "evidence": "Effects precede safeTransfer in each; nonReentrant present (grep L238/259/304/431/495/518)."
+    }
+  ],
+
+  "trustAssumptions": [
+    "phUSD authorized-minter relationship is and stays valid (phUSD.setMinter(staker,true)); a revocation (mintVersion bump) bricks reward-minting legs but never traps principal (emergencyWithdraw/userMigrate return principal without minting).",
+    "Staked tokens are standard ERC20s: no fee-on-transfer (known-issue exclusion), no rebasing, no transfer/approve hooks. Fee-on-transfer would make credited<requested and drift the totalStaked accounting.",
+    "Each configured IYieldStrategy is honest and correctly wired (strategy owner has called setClient(staker,true)); principalOf/totalBalanceOf/deposit/withdraw behave per spec. Strategy correctness is out of local scope.",
+    "Owner is trusted and non-malicious (Law 3). Owner-only setters (addToken, phUSDPerDay, setMigrator, setPauser, setYieldStrategy, rescueERC20) are config surface. Operational footguns to flag to ops: (a) setYieldStrategy replacing an in-use strategy without first draining the old one strands principal in the de-allowanced old strategy; (b) phUSDPerDay below 86400 wei/day silently emits 0; (c) rescueERC20 can sweep the idle buffer used for underwater withdraws when a strategy is set.",
+    "migrator is a trusted permissioned role (the StableStakerMigrator). initiateMigration/batchMigrate/depositFor are fully under migrator control; batchMigrate batch size and composition are the migrator's responsibility (paged off-chain).",
+    "pauser is a trusted Behodler3/Global-Pauser address set by owner; it can halt stake/withdraw/claim but cannot block the escape hatches."
+  ],
+
+  "complexity": {
+    "loc": 714,
+    "externalStateChangingFunctions": 15,
+    "viewFunctions": 6,
+    "publicMappingGetters": 4,
+    "internalFunctions": 7,
+    "externalCallTargets": 4,
+    "stateVariables": 11,
+    "events": 15
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "commit": "2306719",
+  "solidityVersion": "^0.8.13 declared; effective >=0.8.20 (OZ v5 Ownable(initialOwner) + pauser IPausable ^0.8.20)",
+  "purpose": "Yield strategy that acquires/disposes ERC4626 vault SHARES via an AMM swap (IAMMAdapter) instead of vault.deposit()/vault.redeem(). Designed for restricted vaults (e.g. sUSDe with a 7-day cooldown) where direct redeem is impractical. Tracks per-client principal and distributes yield proportionally to share-price appreciation. Rebasing vaults are explicitly NOT supported; assumes share price only rises or stays flat.",
+
+  "inheritanceChain": ["AYieldStrategy", "IYieldStrategy", "IPausable", "Ownable", "ReentrancyGuard", "Pausable"],
+  "relatedContractsNotedNotAnalyzed": ["src/AYieldStrategy.sol (base, profiled separately)", "src/AMMAdapters/IAMMAdapter.sol", "@openzeppelin IERC4626/IERC20/SafeERC20", "external ERC4626 vault (sUSDe etc.)", "external AMM adapter instance (CurveAMMAdapter)"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": "violated-bounded-by-clientset: _accrueSurplusShares/_distributeBuffer loop over the strategy-owned EnumerableSet of authorized clients (skim path only); set is owner-curated, not user/attacker-extendable, so DoS-by-growth is owner-gated not attacker-gated",
+    "checkedArithmetic": "verified (0.8.x, no unchecked blocks, no assembly)",
+    "reentrancyGuarded": ["deposit", "withdraw", "depositAsOwner", "withdrawAsOwner", "skimSurplus(base)", "totalWithdrawal(base)"],
+    "reentrancyNotGuarded": ["emergencyWithdraw(base, onlyOwner, only transfers shares to owner)"],
+    "accessControlled": {
+      "onlyAuthorizedClient": ["deposit", "withdraw"],
+      "onlyOwner": ["setSlippageTolerance", "depositAsOwner", "withdrawAsOwner"],
+      "onlyAuthorizedWithdrawer(base)": ["skimSurplus"],
+      "onlyOwner(base, inherited)": ["setClient", "setWithdrawer", "setSetAsideBuffer", "setPauser", "emergencyWithdraw", "totalWithdrawal"],
+      "onlyPauser(base)": ["pause"]
+    },
+    "initializerProtected": "n/a (immutable constructor, non-upgradeable)",
+    "pauseCoverage": "deposit/withdraw/skimSurplus/totalWithdrawal gated by whenNotPaused; depositAsOwner/withdrawAsOwner/emergencyWithdraw deliberately NOT paused (owner emergency path)",
+    "principalAccountingInvariant": "verified: sum_over_clients(clientBalances[token][c]) == totalDeposited[token] is preserved by deposit (+credited), withdraw (-requested capped), _totalWithdraw (-clientStoredBalance). skim and emergencyWithdraw do not touch it.",
+    "underflowSafety": "verified: withdraw caps amount to clientBalances[balanceHolder] before decrementing both balances; _totalWithdraw decrements totalDeposited by clientStoredBalance (<= totalDeposited by the sum-invariant)"
+  },
+
+  "stateVariables": [
+    {"name": "underlyingToken", "type": "IERC20 immutable", "invariant": "set once, non-zero (constructor require); the ONLY supported token (every entrypoint requires token==underlyingToken)"},
+    {"name": "vault", "type": "IERC4626 immutable", "invariant": "set once, non-zero; share token traded via AMM; convertToShares/convertToAssets are the fair-value oracle for solvency + minOut"},
+    {"name": "ammAdapter", "type": "IAMMAdapter immutable", "invariant": "set once, non-zero; sole swap venue; trusted to honor minOut"},
+    {"name": "slippageToleranceBps", "type": "uint256", "mutators": ["setSlippageTolerance"], "invariant": "<= MAX_BPS (10000); DEFAULT 0 -> full-credit + tightest possible minOut (see fragile findings)"},
+    {"name": "MAX_BPS", "type": "uint256 constant = 10000"},
+    {"name": "clientBalances", "type": "mapping(token=>mapping(account=>uint256)) private", "mutators": ["_depositInternal(+credited)", "_withdrawInternal(-requested)", "_totalWithdraw(=0)"], "readers": ["principalOf", "balanceOf", "totalBalanceOf", "_accrueSurplusShares"], "invariant": "= booked principal (slippage-haircut on deposit), NOT nominal input, NOT mark-to-market"},
+    {"name": "totalDeposited", "type": "mapping(token=>uint256) private", "mutators": ["_depositInternal", "_withdrawInternal", "_totalWithdraw"], "readers": ["getTotalDeposited", "totalBalanceOf", "_skimSurplus", "_accrueSurplusShares"], "invariant": "== sum of clientBalances for that token"}
+  ],
+
+  "externalEntryPoints": [
+    {"function": "deposit(address token,uint256 amount,address recipient) returns(uint256 creditedPrincipal)", "visibility": "external", "accessControl": "onlyAuthorizedClient + nonReentrant + whenNotPaused", "stateChanges": ["clientBalances[recipient]+=credited", "totalDeposited+=credited"], "externalCalls": ["underlyingToken.safeTransferFrom(depositor)", "underlyingToken.safeIncreaseAllowance(ammAdapter)", "vault.convertToShares", "ammAdapter.swap(underlying->vault)"], "valueFlow": "pulls `amount` underlying from msg.sender; swaps ALL of it to vault shares; credits haircut principal = amount*(MAX_BPS-slip)/MAX_BPS; minOut=convertToShares(creditedPrincipal). Returns creditedPrincipal."},
+    {"function": "withdraw(address token,uint256 amount,address recipient)", "visibility": "external", "accessControl": "onlyAuthorizedClient + nonReentrant + whenNotPaused", "stateChanges": ["clientBalances[recipient]-=amount", "totalDeposited-=amount"], "externalCalls": ["vault.convertToShares", "vault.balanceOf(this)", "vault.convertToAssets", "IERC20(vault).safeIncreaseAllowance(ammAdapter)", "ammAdapter.swap(vault->underlying)", "underlyingToken.safeTransfer(recipient)"], "valueFlow": "balanceHolder==recipient. amount capped to principal; sharesToSell=convertToShares(amount) capped to held shares; minOut=convertToAssets(sharesToSell)*(1-slip); recipient receives ACTUAL underlyingReceived; principal debited by REQUESTED amount (design decision)."},
+    {"function": "depositAsOwner(address token,uint256 amount,address client) returns(uint256)", "visibility": "external", "accessControl": "onlyOwner + nonReentrant (NO whenNotPaused)", "notes": "owner deposits on behalf of client, tokens pulled from owner; same _depositInternal credit math"},
+    {"function": "withdrawAsOwner(address client,address recipient,uint256 amount)", "visibility": "external", "accessControl": "onlyOwner + nonReentrant (NO whenNotPaused)", "notes": "debits client's principal, sends tokens to a DIFFERENT recipient; balanceHolder=client, recipient!=client allowed"},
+    {"function": "principalOf / balanceOf / totalBalanceOf / underlying / getTotalDeposited / getTotalShares", "visibility": "external view", "accessControl": "none", "notes": "totalBalanceOf = convertToAssets(vault.balanceOf(this)) * principal / totalDeposited -> uses VAULT rate, not AMM-realizable rate"},
+    {"function": "setSlippageTolerance(uint256 bps)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["slippageToleranceBps"], "notes": "require bps<=MAX_BPS"}
+  ],
+
+  "internalVirtualOverrides": [
+    {"function": "_emergencyWithdraw(uint256 amount)", "calledBy": "AYieldStrategy.emergencyWithdraw (onlyOwner)", "behavior": "transfers min(amount, heldShares) of RAW vault SHARES to owner() via safeTransfer; does NOT swap and does NOT touch clientBalances/totalDeposited", "fragile": "desyncs share holdings from principal accounting -> after use, totalBalanceOf overstates and remaining clients' withdraws cap on a reduced share pool (see findings)"},
+    {"function": "_totalWithdraw(token,client,amount)", "calledBy": "AYieldStrategy._executeWithdrawal (phase 2 of totalWithdrawal, onlyOwner)", "behavior": "sharesToSell = heldShares * clientStoredBalance / totalDeposited; swap vault->underlying; zero clientBalances[client]; totalDeposited-=clientStoredBalance; send underlying to owner()", "note": "uses clientBalances[client] read live (clientStoredBalance), NOT the cached state.balance amount passed in; the `amount` param is effectively only used for the amount>0 guard"},
+    {"function": "_skimSurplus(token,clients,recipient) returns(uint256)", "calledBy": "AYieldStrategy.skimSurplus (onlyAuthorizedWithdrawer)", "behavior": "snapshot totalValue=convertToAssets(heldShares); per-client floored surplus shares summed (_accrueSurplusShares); require totalShares<=convertToShares(aggregateSurplus) [M-01 loud ceiling]; SINGLE swap of totalShares vault->underlying; fast-path forwards all to recipient, buffered-path splits via _distributeBuffer; principal untouched"}
+  ],
+
+  "valueFlows": {
+    "in": ["client/owner -> deposit: underlying in, swapped to shares held by strategy"],
+    "out": ["withdraw/withdrawAsOwner: shares swapped to underlying -> recipient", "skimSurplus: surplus shares swapped to underlying -> recipient (+ per-client buffer set-asides)", "emergencyWithdraw: raw shares -> owner", "totalWithdrawal phase2: client's proportional shares swapped to underlying -> owner"],
+    "heldAssets": "vault SHARES (never underlying except transiently mid-tx); strategy holds no idle underlying between txs in normal flow"
+  },
+
+  "externalCalls": [
+    {"target": "IERC20 underlyingToken (e.g. USDe)", "methods": ["safeTransferFrom", "safeTransfer", "safeIncreaseAllowance"], "trustLevel": "semi-trusted", "notes": "standard non-fee-on-transfer ERC20 assumed (registry assumption); FoT would break credited-principal vs received accounting"},
+    {"target": "IERC4626 vault (e.g. sUSDe)", "methods": ["convertToShares", "convertToAssets", "balanceOf", "transfer (as IERC20)"], "trustLevel": "semi-trusted (external protocol)", "notes": "convertTo* used as the fair-value oracle for minOut, solvency invariant, surplus, and totalBalanceOf. Assumes monotone non-decreasing share price (NO rebasing, NO loss events). A share-price DROP breaks the solvency invariant. Vault-rate may diverge from AMM-realizable price."},
+    {"target": "IAMMAdapter ammAdapter (CurveAMMAdapter)", "methods": ["swap"], "trustLevel": "trusted (protocol-deployed, immutable)", "notes": "relied on to honor minOut and to return the TRUE amountOut. swap return value (not balance delta) is taken as shares/underlying received."}
+  ],
+
+  "trustAssumptions": [
+    "underlyingToken is a standard ERC20 (no fee-on-transfer, no rebasing, no transfer hooks).",
+    "vault is a well-behaved ERC4626 whose share price only increases or stays flat (NO rebasing, NO loss/slashing events). convertToShares/convertToAssets are accurate and not manipulable within a block in a way that breaks minOut.",
+    "ammAdapter (and the Curve Router NG behind it) is trusted to enforce minOut and report the real output amount.",
+    "Owner is non-malicious and sets a sane slippageToleranceBps before enabling deposits (default 0 is unusable, see findings).",
+    "Authorized clients are protocol-owned contracts (setAsideBuffer front-run quirk is accepted because no external attacker profits).",
+    "Authorized withdrawers (skim callers) tolerate the post-slippage return value via their own minOut floor."
+  ],
+
+  "localFindings": [
+    {"id": "LOCAL-MKT-001", "type": "config-DoS-footgun", "severity": "local-medium", "function": "_depositInternal/_withdrawInternal (slippageToleranceBps default)", "line": "212-213, 312, 358", "description": "slippageToleranceBps defaults to 0. At 0, deposit credits the FULL nominal amount and sets minOut=convertToShares(amount) (the full fair value); withdraw sets minOut=idealUnderlying (full). An AMM swap essentially never returns the full vault-rate fair value (spread + AMM curve), so every deposit/withdraw reverts on minOut until the owner explicitly calls setSlippageTolerance(bps>0). Non-obvious owner footgun: a freshly deployed strategy is deposit-DoS'd by default.", "recommendation": "Require a non-zero slippage at construction or document the mandatory post-deploy setSlippageTolerance step; consider a sane default."},
+    {"id": "LOCAL-MKT-002", "type": "value-leak-upside-uncapped", "severity": "local-high", "function": "_withdrawInternal", "line": "364-372", "description": "Withdraw transfers the ENTIRE underlyingReceived (actual AMM output) to recipient but debits principal by the REQUESTED amount only. minOut floors the downside; there is NO upper bound. If the AMM returns more underlying than `amount` (vault shares trading at/above vault-rate, or any favorable swing), the withdrawer pockets the excess while burning only `amount` of principal -- capturing yield/other-clients' value that should accrue to the protocol via skimSurplus. Direction depends on AMM-vs-vault rate (defer exploitability to econ/interaction scanner), but the local code path has no ceiling.", "recommendation": "Cap underlyingReceived transferred to `amount` (idealUnderlying) and route any excess to protocol surplus, OR document/justify why over-delivery is acceptable."},
+    {"id": "LOCAL-MKT-003", "type": "accounting-desync", "severity": "local-medium", "function": "_emergencyWithdraw", "line": "386-395", "description": "emergencyWithdraw transfers raw vault shares out to owner WITHOUT decrementing clientBalances/totalDeposited. Afterward the principal ledger overstates backing: totalBalanceOf over-reports realizable value, the fairValue>=principal solvency invariant is broken, and subsequent withdraws cap sharesToSell to the (now reduced) held shares while still debiting full requested principal -- earlier withdrawers are made whole at the expense of later ones (first-come drain). Owner emergency action with a non-obvious accounting consequence (Law-3 footgun).", "recommendation": "Document that emergencyWithdraw is a terminal/migration action requiring off-chain re-accounting, or have it proportionally reduce principal; flag as operational hazard."},
+    {"id": "LOCAL-MKT-004", "type": "solvency-invariant-rounding", "severity": "local-low", "function": "_depositInternal", "line": "312-318", "description": "The claimed solvency invariant fairValueOfShares >= creditedPrincipal relies on convertToAssets(convertToShares(creditedPrincipal)) ~= creditedPrincipal, but ERC4626 rounds DOWN in both directions, so the round-trip can be slightly below creditedPrincipal. Per-deposit dust shortfall can accumulate. Minor while share price rises; matters at the margin / on flat markets.", "recommendation": "Acknowledge the rounding dust in the invariant claim; ensure minOut derivation rounds in protocol's favor."},
+    {"id": "LOCAL-MKT-005", "type": "CEI-ordering", "severity": "local-low", "function": "_withdrawInternal / _depositInternal", "line": "364-372, 302-326", "description": "State (clientBalances/totalDeposited) is updated AFTER the external swap and (for withdraw) AFTER safeTransfer to recipient. nonReentrant + standard non-hooked ERC20 assumption neutralize this, but it is a checks-effects-interactions violation that would bite if a token with transfer hooks (ERC777/FoT) were ever used.", "recommendation": "Move principal updates before the external transfer/swap, or keep the explicit non-hooked-ERC20 assumption documented."},
+    {"id": "LOCAL-MKT-006", "type": "external-self-call-gas", "severity": "local-low", "function": "balanceOf", "line": "166-167", "description": "balanceOf does `return this.principalOf(...)` -- an external self-call (also via base _initiateWithdrawal calling this.balanceOf). Functionally fine (msg.sender becomes the contract, not checked) but wastes gas and adds a needless external-call surface.", "recommendation": "Call the internal storage read directly."}
+  ],
+
+  "scannerAttention": [
+    "Vault-rate (convertToAssets) vs AMM-realizable rate divergence: minOut, surplus, totalBalanceOf and the solvency invariant are all denominated at the VAULT rate, but funds are only ever realized at the AMM rate. For sUSDe the Curve price can sit below cooldown-redeem fair value -> snapshot surplus and totalBalanceOf can overstate what a skim/withdraw actually realizes. Hand to econ-scanner.",
+    "Withdraw upside leak (LOCAL-MKT-002) -> econ/interaction: is over-delivery realizable given the configured Curve route?",
+    "emergencyWithdraw share/principal desync (LOCAL-MKT-003) -> interaction: how do downstream clients (stableYieldAccumulator) react to post-emergency totalBalanceOf overstatement?",
+    "skimSurplus return value != sum of SurplusSkimmed.amount (documented) -> ensure downstream bookkeeping does not assume equality."
+  ],
+
+  "complexity": {"loc": 558, "externalFunctions": 11, "internalOverrides": 5, "immutables": 3, "externalCallTargets": 3, "loops": "2 (skim path, bounded by authorized-client set size)"}
+}

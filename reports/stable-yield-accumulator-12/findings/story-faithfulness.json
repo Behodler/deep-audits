@@ -1,0 +1,78 @@
+{
+  "project": "stable-yield-accumulator",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "story-faithfulness",
+  "contract": "src/StableYieldAccumulator.sol",
+  "submoduleHead": "71abe3e088559cb5d9c10e8475dc67e7cc57fac9",
+  "storiesChecked": ["story-022", "story-023", "story-024", "story-025"],
+  "storyVerdicts": [
+    {
+      "storyTag": "story-022",
+      "summary": "Simplify NFT validation — use index directly as tokenId, remove dispatcher/override resolution; exactly 1 NFT burned per claim",
+      "verdict": "FAITHFUL",
+      "evidence": "_validateAndBurnNFT (L531-540) uses `index` directly as the ERC1155 tokenId (balanceOf(caller,index)>0 then burn(caller,index,1)), with no dispatcher-config / override-mapping resolution. canClaim (L700-712) loops i=1..nextIndex() with the same simplified balanceOf check. Exactly 1 unit is burned per claim, matching contract NatSpec L55 (\"exactly 1 NFT is burned per claim\"). index==0 is rejected (L533) and skipped by canClaim — consistent reserved-index handling.",
+      "unsafeStory": false
+    },
+    {
+      "storyTag": "story-023",
+      "summary": "Add nudge split: divert actualPayment*nudgeSplit/100 to nudge via safeTransfer; phlimboAmount via subtraction; revert NudgeNotConfigured when split>0 && nudge==0; skip collectReward when phlimboAmount==0; reject split>100; allow zero nudge; default split==0 byte-identical",
+      "verdict": "FAITHFUL",
+      "evidence": "claim() L506 reverts NudgeNotConfigured when nudgeSplit>0 && nudge==address(0); L512 nudgeAmount=(actualPayment*nudgeSplit)/100; L513 phlimboAmount=actualPayment-nudgeAmount (subtraction, no precision drift); L515-517 safeTransfer to nudge only if >0; L518-519 collectReward skipped when phlimboAmount==0 (e.g. split==100). setNudgeSplit (L396-402) rejects >100 (InvalidNudgeSplit). setNudgeAddress (L385-389) allows address(0). With split==0: nudgeAmount==0, phlimboAmount==actualPayment, nudge transfer skipped, collectReward(actualPayment) — byte-identical to pre-nudge behavior. All acceptance criteria met.",
+      "note": "The setNudgeSplit(>0)-while-nudge-unset → claim bricks (NudgeNotConfigured) behavior is INTENDED and explicitly documented in the interface NatSpec (IStableYieldAccumulator L276-279: \"While the address is unset, nudgeSplit must remain 0 or claim() will revert with NudgeNotConfigured\"). The code is therefore FAITHFUL — this is not a Law-2 deviation. The residual recoverable-availability owner footgun (PARK-03) is already surfaced for the severity-classifier; it is an operational hazard, not a faithfulness finding, and not a Law-1 exploit (recoverable by owner setting nudge or zeroing split).",
+      "unsafeStory": false
+    },
+    {
+      "storyTag": "story-024",
+      "summary": "Add exemptStrategies[] to claim() and calculateClaimAmount(); validate every entry registered BEFORE the NFT burn (ExemptStrategyNotRegistered); inline scan skips listed strategies; mitigates audit M-04 (one bad strategy can no longer brick all claims)",
+      "verdict": "FAITHFUL",
+      "evidence": "claim() validates exempt entries are registered (L453-455) BEFORE _validateAndBurnNFT (L458), reverting ExemptStrategyNotRegistered so a bad list never consumes the NFT. Inner exempt scan (L472-479) skips any listed strategy via `continue`. calculateClaimAmount mirrors this exactly (validate L653-655, skip L666-673), so the preview matches the eventual claim. ExemptStrategyNotRegistered error declared in interface (L144). M-04 routing intent satisfied: a claimer can exempt a reverting strategy and still claim the healthy ones.",
+      "note": "exemptStrategies is neither length-bounded nor deduped, but entries must be registered and the cost falls on the caller's own tx (self-grief, PARK-07) — no DoS on other claimers, no value leak (an exempted strategy's yield simply stays for the next claimer). Story is safe.",
+      "unsafeStory": false
+    },
+    {
+      "storyTag": "story-025",
+      "summary": "Adopt batch skimSurplus/getAuthorizedClients; claim() unconditionally calls skimSurplus(token,msg.sender) and accumulates the returned underlyingReceived; previews aggregate surplus across getAuthorizedClients(); remove minterAddress/setMinter/MinterUpdated/withdrawFrom",
+      "verdict": "FAITHFUL",
+      "evidence": "claim() L484 unconditionally calls IYieldStrategy(strategy).skimSurplus(token, msg.sender) and accumulates the returned underlyingReceived (L489), emitting/counting only when >0. Preview helpers _getYieldForStrategy (L552-564) aggregate totalBalanceOf-principalOf across getAuthorizedClients(). grep confirms minterAddress/setMinter/MinterUpdated/withdrawFrom are fully removed from src/ (only the unrelated NFT-gate NFTMinterUpdated remains). Vault interface bump (skimSurplus returning underlyingReceived) is integrated as the authoritative payment basis.",
+      "note": "The deliberate two-source design — claim() prices off the ACTUAL skimSurplus return (post-redeem/post-swap), while calculateClaimAmount/getYield/getTotalYield use the getAuthorizedClients snapshot ESTIMATE — is FAITHFUL, not a deviation. It is explicitly documented in _getYieldForStrategy NatSpec (L542-547: \"This is an ESTIMATE only... The actual amount delivered by a claim is the value returned by skimSurplus(), which can diverge from this snapshot... minRewardTokenSupplied covers that divergence\"). The divergence is the intended MEV/slippage surface (PARK-06), guarded by the minRewardTokenSupplied floor (claim() L501). Payment is always derived from the same underlyingReceived the claimer actually got, so the pay/receive ratio cannot be skewed; an over-estimate just makes the transferFrom revert (atomic, NFT not consumed since the whole tx rolls back).",
+      "unsafeStory": false
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-01",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-023 / story-025 (claim() flow NatSpec)",
+      "title": "claim() NatSpec documents pay-then-skim with a direct claimer->phlimbo transfer; implementation skims-then-pays and routes claimer->this then nudge-split + phlimbo pull",
+      "severity": "low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 509,
+      "lineStart": 463,
+      "lineEnd": 520,
+      "specText": "Contract NatSpec (src/StableYieldAccumulator.sol L426-434): \"Full claim flow: ... 5. Transfer rewardToken FROM claimer TO phlimbo  6. skimSurplus each non-exempt strategy, sending the batched surplus of ALL its authorized clients TO the claimer\". Interface NatSpec (src/interfaces/IStableYieldAccumulator.sol L315-323): \"Full flow: ... 6. TransferFrom claimer to phlimbo  7. skimSurplus each non-exempt strategy, sending the batched surplus of all its authorized clients to the claimer\".",
+      "specSource": "NatSpec @dev on claim() in both the contract (L424-442) and the interface (L314-336)",
+      "actualBehavior": "claim() executes the skimSurplus loop FIRST (L463-492, delivering all strategy yield to the claimer), THEN computes/collects payment (L497-520). Payment is NOT a direct claimer->phlimbo transfer: rewardToken is safeTransferFrom(claimer -> this contract) at L509, then split — nudgeAmount safeTransfer to `nudge` (L515-517) and phlimboAmount PULLED by phlimbo via IPhlimbo.collectReward (L518-519). So both the ordering (documented pay-then-skim vs implemented skim-then-pay) and the payment destination/mechanism (documented direct transfer-to-phlimbo vs implemented transfer-to-self then nudge-split + phlimbo-pull) contradict the NatSpec.",
+      "deviation": "Two doc/impl mismatches in the same NatSpec flow block: (1) ORDERING — NatSpec step 5/6 (pay) precedes step 6/7 (skim), but the code skims before it pays; (2) DESTINATION — NatSpec says 'transfer rewardToken FROM claimer TO phlimbo', but story-023's nudge split changed this to claimer->this contract followed by a nudge transfer and a phlimbo collectReward pull. The NatSpec was not updated when story-023 (nudge) and story-025 (skimSurplus return-value pricing) reshaped the flow.",
+      "consequence": "Documentation/spec-conformance only. No security or value impact: the skims-then-pays ordering is atomic (claim() is nonReentrant + whenNotPaused; any later revert rolls back the skims), and payment is derived from the actual underlyingReceived the claimer received in the same tx, so value conservation holds (PARK-02 confirms atomicity). Risk is reader/integrator confusion — a developer trusting the NatSpec would expect CEI pay-before-deliver and a direct phlimbo transfer, neither of which is what the contract does.",
+      "lawImpacted": 2,
+      "alsoSecurityImpact": false,
+      "ledgerCrossRef": "Existing ledger entry L-03 (sya11l3, open, low) — 'claim() NatSpec says pay-then-skim; code skims-then-pays'. This finding CONFIRMS L-03 still live at HEAD 71abe3e and EXTENDS it: story-023 added a second drift (payment destination/mechanism) to the same NatSpec block. Reconciled by sanitizer/ledger; surfaced here for recall, not as a new High/Medium.",
+      "confidence": "high"
+    }
+  ],
+  "unsafeStories": [],
+  "summary": {
+    "faithful": ["story-022", "story-023", "story-024", "story-025"],
+    "deviations": ["F-01 (story-023/025 claim() flow NatSpec doc-drift — confirms+extends ledger L-03, Low/QA)"],
+    "unsafeStoryFlags": [],
+    "notes": [
+      "All four in-scope stories are FAITHFUL in code behavior. The only deviation found is documentation-level: the claim() NatSpec flow (contract L426-434 + interface L315-323) was not updated when story-023 (nudge split) and story-025 (skimSurplus return-value pricing) reshaped the payment path. This is the existing ledger L-03, confirmed live and extended.",
+      "No Law-1 override triggered: none of story-022/023/024/025 mandates exploitable behavior. The nudge-brick (PARK-03) and exempt self-grief (PARK-07) are recoverable/self-contained, not exploits; the preview/actual skim divergence (PARK-06) is intended and slippage-guarded.",
+      "Cross-task references: PARK-03 (nudge misconfig availability footgun) and PARK-06 (preview vs actual divergence) are intended/documented behaviors, owned by the severity-classifier and econ/interaction scanners respectively — they are NOT faithfulness deviations and are not re-raised here.",
+      "Project CLAUDE.md (lib/stable-yield-accumulator/CLAUDE.md) Claim Example (L30-45) predates the nudge feature and implicitly assumes nudgeSplit==0 (phlimbo receives the full discounted payment). It is not wrong for the default config but no longer documents the nudge-split path — same doc-drift family as F-01, sub-QA, not separately ledgered."
+    ]
+  }
+}

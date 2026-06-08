@@ -1,0 +1,54 @@
+{
+  "contract": "src/AYieldStrategy.sol",
+  "role": "ABSTRACT BASE (supporting context, not a primary in-scope target)",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "commit": "2306719",
+  "solidityVersion": "^0.8.13 declared; effective >=0.8.20",
+  "purpose": "Abstract base for yield-strategy adapters. Provides Ownable + ReentrancyGuard + Pausable, an EnumerableSet of authorized clients, authorized withdrawers, per-client setAsideBuffer, a two-phase (24h wait / 48h window) totalWithdrawal migration flow, emergencyWithdraw, and the skimSurplus orchestration. Concrete strategies (ERC4626MarketYieldStrategy) override _emergencyWithdraw / _totalWithdraw / _skimSurplus / deposit / withdraw.",
+
+  "inheritanceChain": ["IYieldStrategy", "IPausable", "Ownable", "ReentrancyGuard", "Pausable"],
+
+  "stateVariables": [
+    {"name": "_pauser", "type": "address private", "mutators": ["setPauser(onlyOwner)"], "readers": ["pauser", "onlyPauser", "unpause"]},
+    {"name": "_authorizedClients", "type": "EnumerableSet.AddressSet private", "mutators": ["setClient(onlyOwner add/remove)"], "readers": ["onlyAuthorizedClient", "authorizedClients", "getAuthorizedClients", "authorizedClientCount", "skimSurplus"], "invariant": "distinct membership (set) -> skimSurplus cannot over-skim via duplicate clients (M-01 structural fix)"},
+    {"name": "authorizedWithdrawers", "type": "mapping(address=>bool) public", "mutators": ["setWithdrawer(onlyOwner)"], "readers": ["onlyAuthorizedWithdrawer"]},
+    {"name": "setAsideBufferSize", "type": "mapping(address=>uint256) public", "mutators": ["setSetAsideBuffer(onlyOwner, <=100)"], "readers": ["_accrueSurplusShares (PERCENT 0-100, note: units differ from slippage BPS)"]},
+    {"name": "withdrawalStates", "type": "mapping(token=>mapping(client=>WithdrawalState)) public", "mutators": ["totalWithdrawal flow"], "notes": "two-phase state machine None->Initiated->Executable->Expired"}
+  ],
+
+  "externalEntryPoints": [
+    {"function": "setClient(client,bool)", "accessControl": "onlyOwner"},
+    {"function": "setWithdrawer(withdrawer,bool)", "accessControl": "onlyOwner"},
+    {"function": "setSetAsideBuffer(client,bufferPercent<=100)", "accessControl": "onlyOwner", "notes": "documented accepted economic quirk: a client front-running a skim with a fresh deposit raises its surplus share and thus its self-set-aside; accepted because clients are protocol-owned and principal is untouched"},
+    {"function": "setPauser(newPauser)", "accessControl": "onlyOwner"},
+    {"function": "pause()", "accessControl": "onlyPauser"},
+    {"function": "unpause()", "accessControl": "owner OR pauser"},
+    {"function": "emergencyWithdraw(amount>0)", "accessControl": "onlyOwner (NO nonReentrant, NO whenNotPaused)", "delegates": "_emergencyWithdraw (concrete)"},
+    {"function": "totalWithdrawal(token,client)", "accessControl": "onlyOwner + nonReentrant + whenNotPaused", "notes": "phase1 caches balanceOf at initiation; phase2 (after 24h, within 48h window) calls _executeWithdrawal -> _totalWithdraw; resets state before the external call (reentrancy-safe ordering); CANNOT run while paused"},
+    {"function": "skimSurplus(token,recipient)", "accessControl": "onlyAuthorizedWithdrawer + nonReentrant + whenNotPaused", "notes": "passes the on-strategy _authorizedClients.values() into _skimSurplus (caller cannot supply a client list -> closes duplicate over-skim); empty set is a no-op returning 0"}
+  ],
+
+  "verifiedProperties": {
+    "checkedArithmetic": "verified",
+    "reentrancyGuarded": ["totalWithdrawal", "skimSurplus", "(concrete) deposit/withdraw/depositAsOwner/withdrawAsOwner"],
+    "reentrancyNotGuarded": ["emergencyWithdraw (onlyOwner; concrete impl only moves shares to owner)"],
+    "twoPhaseWithdrawalOrdering": "verified: _executeWithdrawal zeroes state BEFORE calling _totalWithdraw (effects before interaction)",
+    "skimClientListNotCallerSupplied": "verified (M-01 mitigation): client set is read from on-chain EnumerableSet"
+  },
+
+  "trustAssumptions": [
+    "Owner is trusted/non-malicious (Law 3). Owner controls client/withdrawer/buffer/pauser config and the emergency + migration paths.",
+    "Pauser is a trusted Global Pauser contract.",
+    "Two-phase totalWithdrawal (24h+48h) is the anti-rug delay; note totalWithdrawal is whenNotPaused, so a paused contract blocks even legitimate migration until unpaused."
+  ],
+
+  "supportingFindings": [
+    {"id": "LOCAL-BASE-001", "type": "unit-mismatch-footgun", "severity": "local-low", "description": "setAsideBufferSize is a PERCENT (0-100) while slippageToleranceBps is BPS (0-10000). Mixing the two mental models is an owner footgun (e.g. passing 50 expecting 0.5%). Both are owner-gated and documented but the inconsistency is worth noting."},
+    {"id": "LOCAL-BASE-002", "type": "availability", "severity": "local-low", "function": "totalWithdrawal", "description": "totalWithdrawal carries whenNotPaused. If the Global Pauser pauses the strategy, the emergency migration path is blocked until unpause. emergencyWithdraw (no pause gate) remains available to owner, so this is a degraded-availability note, not a lockup."}
+  ],
+
+  "scannerNotes": [
+    "Surplus/skim math lives partly here (orchestration) and partly in the concrete (_skimSurplus). Treat the concrete ERC4626MarketYieldStrategy profile as authoritative for realized value.",
+    "_initiateWithdrawal caches this.balanceOf (principal for the market strategy) at phase 1; the cached value is passed to phase 2 but the concrete _totalWithdraw re-reads clientBalances live and uses THAT (clientStoredBalance), so a balance change between phases is honored by the concrete, not the cache."
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "commit": "2306719",
+  "solidityVersion": "^0.8.13 declared; effective >=0.8.20 (OZ v5 Ownable(initialOwner))",
+  "purpose": "IAMMAdapter implementation routing swaps through the Curve Router NG (0x16C6521Dff6baB339122a0FE25a9116693265353). Stores one pre-computed route per ordered (tokenIn,tokenOut) pair (path / swapParams / pools). Routes are owner-set because Curve route encoding must be verified off-chain against pool coin indices. Enforces a bidirectional-configuration invariant so a swap in either direction reverts until BOTH directions of the pair are configured -- a strategy needing round-trip swaps cannot be wired to a half-configured adapter.",
+
+  "inheritanceChain": ["IAMMAdapter", "Ownable"],
+  "relatedContractsNotedNotAnalyzed": ["ICurveRouterNG (external Curve Router NG, trusted)", "@openzeppelin Ownable/IERC20/SafeERC20", "AMMRoutes.json (off-chain route catalog consumed by deploy scripts)"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": "verified-bounded: setRoute loops a FIXED 11 iterations over path[]; no dynamic/user-sized loops",
+    "checkedArithmetic": "verified (no arithmetic beyond loop index; 0.8.x)",
+    "reentrancyGuarded": "none (no nonReentrant) -- but stateless per-call: pulls exactly amountIn, forceApprove exactly amountIn, router sends output directly to msg.sender; holds no persistent funds, no state mutated by swap",
+    "accessControlled": {"onlyOwner": ["setRoute"], "none(permissionless)": ["swap", "getRoute(view)", "isPairFullyConfigured(view)"]},
+    "initializerProtected": "n/a (immutable router via constructor)",
+    "bidirectionalInvariant": "verified: swap requires routes[tokenIn][tokenOut].configured AND routes[tokenOut][tokenIn].configured",
+    "routeValidationOnSet": "partial: validates path[0]==tokenIn and last-non-zero(path)==tokenOut; does NOT validate swapParams correctness, pool addresses, coin indices, or reverse-route consistency (off-chain trust)"
+  },
+
+  "stateVariables": [
+    {"name": "router", "type": "ICurveRouterNG immutable", "invariant": "set once, non-zero (constructor require); the sole swap venue; TRUSTED per registry"},
+    {"name": "routes", "type": "mapping(tokenIn=>mapping(tokenOut=>Route)) private", "mutators": ["setRoute"], "readers": ["swap", "getRoute", "isPairFullyConfigured"], "invariant": "Route.configured distinguishes unset from all-zero; path[0]==tokenIn and last-non-zero==tokenOut enforced at set time"}
+  ],
+
+  "structs": [
+    {"name": "Route", "fields": ["address[11] path (interleaved token/pool for Router NG)", "uint256[5][5] swapParams ([i,j,swap_type,pool_type,n_coins] per hop)", "address[5] pools (base pools for meta-swaps)", "bool configured"]}
+  ],
+
+  "externalEntryPoints": [
+    {"function": "swap(address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut) returns(uint256 amountOut)", "visibility": "external (override)", "accessControl": "NONE (permissionless)", "stateChanges": ["none persistent (transient allowance only)"], "externalCalls": ["IERC20(tokenIn).safeTransferFrom(msg.sender)", "IERC20(tokenIn).forceApprove(router, amountIn)", "router.exchange(path,swapParams,amountIn,minAmountOut,pools, receiver=msg.sender)"], "valueFlow": "pulls amountIn tokenIn from caller -> approves router -> router swaps and sends output DIRECTLY to msg.sender (receiver). Returns router's reported amountOut. Reverts if route or reverse-route not configured, or amountIn==0.", "notes": "permissionless is safe: caller funds its own swap and receives its own output; adapter is a stateless conduit"},
+    {"function": "setRoute(tokenIn,tokenOut,path[11],swapParams[5][5],pools[5])", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["routes[tokenIn][tokenOut]"], "notes": "validates non-zero tokens, path[0]==tokenIn, last-non-zero==tokenOut; emits RouteSet"},
+    {"function": "getRoute(tokenIn,tokenOut)", "visibility": "external view", "accessControl": "none"},
+    {"function": "isPairFullyConfigured(tokenA,tokenB)", "visibility": "public view", "accessControl": "none"}
+  ],
+
+  "valueFlows": {
+    "perSwap": "tokenIn: caller -> adapter (amountIn) -> router (approval). tokenOut: router -> caller (receiver=msg.sender). Adapter retains nothing in the happy path.",
+    "residualRisk": "if Curve exchange ever consumed < amountIn, leftover tokenIn dust and a stale router allowance could linger in the adapter (no rescue function); negligible for full-consume Curve exchange"
+  },
+
+  "externalCalls": [
+    {"target": "ICurveRouterNG router (0x16C6521Dff6baB339122a0FE25a9116693265353)", "methods": ["exchange (payable, called without value)"], "trustLevel": "trusted (registry: Curve Router NG is trusted)", "notes": "amountOut is taken from router's RETURN value, not a balance delta; minAmountOut is forwarded as the router's _expected slippage floor; receiver set to msg.sender so output never sits in the adapter"},
+    {"target": "IERC20 tokenIn (caller-supplied)", "methods": ["safeTransferFrom", "forceApprove"], "trustLevel": "depends on caller; in protocol use it is underlyingToken or the vault share token", "notes": "forceApprove reset-then-set; SafeERC20 used throughout"}
+  ],
+
+  "trustAssumptions": [
+    "Curve Router NG at the hard-referenced address is trusted to honor minAmountOut and report true output (registry: Curve Router NG is trusted).",
+    "Owner correctly pre-computes and verifies route payloads off-chain (path/swapParams/pools, coin indices) -- setRoute only checks endpoints, not internal hop correctness.",
+    "Bidirectional routes are configured CONSISTENTLY: setRoute does not check that routes[B][A] is the true inverse of routes[A][B], only that the .configured flag is set (registry: bidirectional Curve route invariant assumed honored by deploy scripts / AMMRoutes.json).",
+    "Tokens are standard ERC20 (non-fee-on-transfer); FoT would make router output diverge from caller expectation."
+  ],
+
+  "localFindings": [
+    {"id": "LOCAL-CRV-001", "type": "config-correctness-trust", "severity": "local-low", "function": "setRoute", "line": "62-89", "description": "setRoute only validates path endpoints (path[0]==tokenIn, last-non-zero==tokenOut). swapParams [i,j,swap_type,pool_type,n_coins], the pools array, and reverse-route inverse-consistency are NOT validated on-chain. A misconfigured route (wrong coin index i/j, wrong pool) could swap into an unintended token or silently underperform; the bidirectional check verifies only the .configured FLAG of the reverse, not that it is the true inverse. Owner-trusted off-chain verification, but a non-obvious footgun for a one-direction-only mistake.", "recommendation": "Treat AMMRoutes.json correctness and reverse-inverse consistency as a deploy-time review item; document that on-chain validation is endpoint-only."},
+    {"id": "LOCAL-CRV-002", "type": "stuck-funds-no-rescue", "severity": "local-low", "function": "swap / contract-wide", "line": "120-141", "description": "No sweep/rescue function. Any token accidentally sent to the adapter, or dust left if a router ever under-consumes amountIn, is permanently stranded (router output goes to msg.sender, not the adapter, so this is only an edge/operator concern).", "recommendation": "Consider an onlyOwner rescue for stranded tokens, or accept as negligible given the stateless design."}
+  ],
+
+  "scannerAttention": [
+    "Permissionless swap() is benign in isolation (caller funds + receives its own swap), but confirm no integrator ever relies on the adapter holding balances.",
+    "Reverse-route inverse-consistency is an assumption, not an on-chain guarantee -- a half-correct bidirectional config passes isPairFullyConfigured but could misroute one direction. Cross-check against AMMRoutes.json USDe<->sUSDe entries (swapParams [0,1,1,10,2] forward vs [1,0,1,10,2] reverse).",
+    "router.exchange amountOut trusted as the realized amount (no balance-delta verification); fine under the trusted-router assumption, flag if that assumption is ever relaxed."
+  ],
+
+  "complexity": {"loc": 142, "externalFunctions": 4, "immutables": 1, "externalCallTargets": 2, "loops": "1 fixed (11 iterations in setRoute)"}
+}

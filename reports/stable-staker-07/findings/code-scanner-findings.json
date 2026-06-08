@@ -1,0 +1,122 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "auditedCommit": "7e9ef80a916081148e28df60ef6daf83c9157a3b",
+  "contractsScanned": 2,
+  "scope": ["src/StableStaker.sol", "src/StableStakerMigrator.sol"],
+  "method": "Profile-first interaction analysis. Trusted the profiler's `verified` invariants (INV-SS-1..8, INV-MIG-1..3) as axioms; re-examined the two `likely` properties (noUnboundedLoops) and every `deferred-to-interaction` note against source. Findings below are code-level implementation/state-machine bugs, not economic-design issues.",
+  "findings": [
+    {
+      "id": "CODE-001",
+      "title": "setYieldStrategy lacks a `!migrationInfo[token].active` guard: adopting/replacing a strategy on a token under terminal migration sweeps the realized payout pile (R) into the strategy and bricks all migration exits",
+      "type": "migration-state-machine / missing-guard / owner-footgun",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "line": 215,
+      "lineStart": 198,
+      "lineEnd": 220,
+      "newOrKnown": "NEW",
+      "description": "initiateMigration deliberately decouples the strategy (yieldStrategy[token] = address(0) at L401) and leaves the full realized position R sitting idle in the contract; batchMigrate (L448) and userMigrate (L502) pay every migrant's credit by `IERC20(token).safeTransfer` out of that idle pile. setYieldStrategy is gated only by `onlyOwner` and `poolExists` (L198) — it has NO `!migrationInfo[token].active` check. Because migration cleared the strategy to zero, an owner who (re)sets a strategy on a token that is in terminal migration takes the `address(old)==0` branch (no revoke), then unconditionally sweeps `idleBalance = balanceOf(this)` — which now equals the realized pile R (+ any buffer) — into the new strategy via `strategy.deposit(token, idleBalance, this)` (L213-216).",
+      "mechanism": "After the sweep the contract's token balance is ~0. Every subsequent migration exit reverts on its transfer: batchMigrate's `safeTransfer(migrator, total)` (L448) and userMigrate's `safeTransfer(msg.sender, credit)` (L502) both fail for lack of balance. Migration is terminal (no resume path) and active blocks stake/withdraw/emergencyWithdraw/depositFor, so there is no in-contract route to pull the swept funds back to idle: setYieldStrategy(token, 0) only revokes allowance (it never withdraws), _routeExit is reachable only through the now-blocked paths, and rescueERC20 moves contract balance, not strategy-held balance. Migrants' principal is stranded inside the re-adopted strategy; the permissionless userMigrate escape hatch is bricked.",
+      "trigger": "1) Migrator calls initiateMigration(token) -> active=true, strategy cleared, R held idle. 2) Owner calls setYieldStrategy(token, X) on that token (e.g. re-wiring during the upgrade, unaware this specific token is mid-migration, or reusing a strategy whose setClient still authorizes this farm). 3) The idle pile R is swept into X. 4) Any userMigrate / batchMigrate now reverts on transfer; principal recoverable only via X's owner-side flow, not via the staker.",
+      "lawAnalysis": "Owner footgun under Law 3, not a malicious-owner vector. setYieldStrategy is an ordinary config call with no on-function indication it is destructive; the migration that cleared the strategy may be operated by a different role (the migrator) on a different timeline, so a competent non-malicious owner can be surprised that calling it strands migrants' principal and bricks the permissionless escape hatch. Non-obvious consequence => in-scope hazard.",
+      "attackVector": "No external attacker required; it is an owner operational hazard that disables the permissionless userMigrate escape hatch and strands principal. Fix: add `require(!migrationInfo[token].active, \"migrating\")` to setYieldStrategy (mirrors the guard already on stake/withdraw/emergencyWithdraw/depositFor).",
+      "confidence": "high",
+      "relatedKnownIssues": "Adjacent to documented known-issue #7 (replace-in-use-strategy strands funds) and to ledger dab5a656 (idle-pool adoption discards creditedPrincipal), but distinct: those concern healthy-pool re-wiring; this concerns re-wiring a pool that is already in terminal migration, sweeping the realized payout pile. Not present in the ledger."
+    },
+    {
+      "id": "CODE-002",
+      "title": "Terminal-migration escape hatch is not mint-free: userMigrate/_exitPosition mints frozen pending phUSD, so a broken phUSD mint mid-migration traps principal (re-confirms ledger e4567dc3, but impact is principal-loss not reward-loss)",
+      "type": "trapped-principal / external-call-revert-in-escape-path",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "userMigrate / _exitPosition",
+      "line": 480,
+      "lineStart": 459,
+      "lineEnd": 504,
+      "newOrKnown": "KNOWN (ledger e4567dc343655af9, status=open, severity=low)",
+      "description": "emergencyWithdraw (the non-migration escape hatch) was deliberately built to never call phUSD.mint, so a revoked-minter / paused phUSD can never trap principal. But while a token is in terminal migration, emergencyWithdraw, withdraw and stake are all blocked by `require(!migrationInfo[token].active)` (L307/L263/L242) and the ONLY permissionless exit is userMigrate. userMigrate routes through _exitPosition, which mints the user's frozen pending phUSD at L480 (`if (pending > 0) phUSD.mint(account, pending)`) BEFORE the credit transfer. If the farm's phUSD minter right is revoked (mintVersion bump) or phUSD is otherwise reverting during the migration window, _exitPosition reverts on the mint, so userMigrate AND batchMigrate revert for every user whose frozen pending > 0. claim (which also mints) cannot be used to pre-zero pending once mint is already broken.",
+      "mechanism": "During active migration there is no mint-free exit. A user with pending > 0 cannot self-exit (userMigrate reverts on mint), cannot be batch-migrated (batchMigrate reverts in the loop), cannot emergencyWithdraw (blocked while active), cannot withdraw (blocked while active). Principal is trapped for the life of the (terminal, non-resumable) migration. This directly contradicts the profile's trust assumption that 'emergencyWithdraw/userMigrate return principal without minting' — userMigrate DOES mint.",
+      "trigger": "Migration is the natural decommissioning flow for the old staker, and revoking the old staker's phUSD minter privilege is a plausible decommission step. Sequence: initiateMigration(token) -> active=true with frozen non-zero pending for stakers; phUSD revokes the old staker as minter (or phUSD is paused/upgraded); a staker calls userMigrate -> reverts at L480; principal trapped.",
+      "severityNote": "Ledger has this at LOW framed as 'no mint-free escape hatch'. Re-confirmed LIVE at HEAD. I assess the true impact as principal-trapping (not merely reward forfeiture), which argues for Medium: assets' availability is impaired under an external requirement (mint failure during the migration window). Flagged for the classifier to re-weigh; status remains per ledger.",
+      "attackVector": "Conditional on phUSD mint failing during an active migration. Fix: make _exitPosition's pending mint best-effort (try/catch and forfeit, like emergencyWithdraw) or split principal return from reward mint so the principal leg always succeeds.",
+      "confidence": "high",
+      "ledgerCorrelation": "e4567dc343655af9 — 'Terminal migration has no mint-free escape hatch if phUSD minter rights are revoked mid-migration' (open, low). Re-confirmation, not a new finding."
+    },
+    {
+      "id": "CODE-003",
+      "title": "Underwater-buffer withdrawals desync totalStaked below strategy.principalOf, so initiateMigration (requesting only P=totalStaked) leaves residual strategy principal and trips the `incomplete exit` require, permanently bricking terminal migration for the token",
+      "type": "principal-accounting-desync / migration-liveness",
+      "severity": "potential-low",
+      "contract": "src/StableStaker.sol",
+      "function": "withdraw (buffer path via _routeExit) -> initiateMigration",
+      "line": 392,
+      "lineStart": 369,
+      "lineEnd": 410,
+      "newOrKnown": "RELATED to ledger 3d61c9552fcdf778 (acknowledged, medium)",
+      "description": "When a strategy is below par, withdraw's _routeExit underwater branch (L679-686) pays the user their full `amount` from the on-contract buffer and returns WITHOUT calling strategy.withdraw, while withdraw still does `pool.totalStaked -= amount` (L271). The strategy's principalOf(this) is unchanged, so after one or more buffer-path withdrawals principalOf(this) > totalStaked. Later, initiateMigration snapshots `P = poolInfo[token].totalStaked` (L378) and realizes via `_routeExit(token, P, false)` (L387), i.e. it requests only P from the strategy. If the strategy decrements its booked principal by the requested P, principalOf(this) is left at (prior gap) > 0, so the post-check `require(strategy.principalOf(token, this) == 0, 'incomplete exit')` (L392-395) reverts.",
+      "mechanism": "initiateMigration is terminal and one-shot with no retry; once the require can never be satisfied (the gap principal is stranded in the strategy and there is no path to re-credit totalStaked up to principalOf), terminal migration for that token is permanently un-initiable. Principal is NOT lost (users can still withdraw normally when above par, or emergencyWithdraw), so this is a feature-availability/liveness defect on the dormant migration mechanism rather than a direct theft/loss.",
+      "trigger": "1) Strategy set and protocol-funded buffer present (the buffer mechanism is intended per the source comment). 2) Strategy goes below par; one or more users withdraw and are paid from the buffer (totalStaked drops, strategy principal does not). 3) Operator later calls initiateMigration -> reverts 'incomplete exit'.",
+      "attackVector": "No attacker; arises from the buffer mechanism used as designed. Fix: realize the strategy by its own principalOf (drain-to-zero) in initiateMigration rather than by P=totalStaked, or reconcile totalStaked when paying from the buffer.",
+      "confidence": "medium",
+      "ledgerCorrelation": "Overlaps the class captured by 3d61c9552fcdf778 'Underwater-pool migration is bricked by requested-vs-received accounting mismatch' (acknowledged, medium). Same end-state (initiateMigration bricked by a principalOf-vs-requested gap) but a distinct upstream cause (buffer-path withdrawals rather than the underwater realization haircut). Re-confirmation/related; defer to deduplicator on whether to merge."
+    },
+    {
+      "id": "CODE-004",
+      "title": "setYieldStrategy idle-sweep discards strategy.deposit's returned creditedPrincipal, leaving totalStaked overstating strategy-backed principal under a haircutting strategy (re-confirms submitted M-01)",
+      "type": "principal-accounting-skew / unchecked-return",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "line": 215,
+      "lineStart": 213,
+      "lineEnd": 216,
+      "newOrKnown": "KNOWN (ledger dab5a656, status=submitted, severity=medium)",
+      "description": "On first adoption over a non-empty idle pool, setYieldStrategy sweeps idleBalance into the strategy via `strategy.deposit(token, idleBalance, this)` (L215) and DISCARDS the returned creditedPrincipal. Everywhere else (_routeDeposit at L661, used by stake/depositFor) totalStaked is credited with the strategy's returned value, which a haircutting market strategy books below nominal. After adoption poolInfo.totalStaked retains the full nominal idle total while strategy.principalOf(this) is the haircut amount, so totalStaked > principalOf. _isUnderwater compares strategy-internal totalBalanceOf vs principalOf and is blind to the gap, so healthy withdraws drain the strategy at full nominal `amount` each and the last withdrawer(s) cannot be paid.",
+      "mechanism": "Confirms the existing submitted Medium independently via the code path; not a new bug. See PATTERN-001 and ledger dab5a656.",
+      "trigger": "Idle principal accumulated (staked while yieldStrategy==0) -> owner adopts a haircutting strategy over the non-empty pool.",
+      "attackVector": "Capture strategy.deposit's return at L215 and reconcile poolInfo.totalStaked to it after the adoption sweep.",
+      "confidence": "high",
+      "ledgerCorrelation": "dab5a65613c7af50 — 'Idle-pool strategy adoption discards creditedPrincipal, shorting last withdrawers' (submitted, medium). Re-confirmation only."
+    }
+  ],
+  "examinedBenign": [
+    {
+      "area": "emergencyWithdraw does not call _updatePool before `totalStaked -= amount` (L313)",
+      "verdict": "benign / intended",
+      "reason": "Standard MasterChef emergencyWithdraw forfeits the exiting user's pending and lets the un-folded window's reward concentrate on the reduced totalStaked at the next _updatePool. lastRewardTime is preserved so the [lastRewardTime, now] window is folded exactly once; the exiting user zeroes amount+rewardDebt so claims nothing. Total minted over any window stays <= elapsed*phusdPerSecond (INV-SS-1 emission cap holds); only the forfeited share is redistributed to remaining stakers, which is the expected forfeit semantics. No over-mint, no theft."
+    },
+    {
+      "area": "claim() callable while migrating (no !active guard; whenNotPaused only)",
+      "verdict": "benign",
+      "reason": "_updatePool no-ops while active so acc is frozen; claim mints the same frozen pending the migration exit would, then sets rewardDebt = amt*acc/PREC so _exitPosition later computes pending=0 (no double-mint). A second claim reverts 'nothing to claim'. Consistent with INV-SS-4/5."
+    },
+    {
+      "area": "Duplicate / overlapping users in batchMigrate users[] or repeated migrate() batches",
+      "verdict": "benign",
+      "reason": "_exitPosition zeroes the position on first touch and returns 0 (amt==0) on any subsequent touch; migrator skips zero amounts in the redeposit loop and forceApprove(total) matches the redeposit sum, so no double-credit and no dangling allowance (INV-MIG-1/3)."
+    },
+    {
+      "area": "StableStakerMigrator has no rescue/sweep function",
+      "verdict": "benign",
+      "reason": "migrate() is atomic (INV-MIG-3): batchMigrate's pull-in and the depositFor push-out are in one tx, so a revert in any leg rolls back the token transfer too. Net custody per call is zero (INV-MIG-2). Out-of-band donations to the migrator would be stuck, but no protocol flow leaves value there."
+    },
+    {
+      "area": "depositFor missing require(credited > 0) (vs stake L250)",
+      "verdict": "known/QA",
+      "reason": "Ledger eae10d6031d96318 (submitted-qa, low). A fully-haircut tiny deposit would add a 0-amount staker; migrator only calls with amounts[i] > 0. Not re-reported."
+    }
+  ],
+  "verifiedPropertiesTrusted": [
+    "INV-SS-1 emission-cap (verified): re-checked emergencyWithdraw redistribution and migration paths do not breach it.",
+    "INV-SS-3 totalStaked conservation (verified): buffer-path desync in CODE-003 is principalOf-vs-totalStaked, not a totalStaked-vs-sum(user.amount) break, and does not underflow.",
+    "INV-SS-5/6 migration credit order-independence & solvency (verified): trusted; CODE-001/002/003 are orthogonal (payout-pile custody, mint dependency, and initiate-time post-check respectively).",
+    "INV-MIG-1/2/3 (verified): trusted; no migrator-side double-credit or dangling-allowance bug found."
+  ],
+  "reExaminedLikelyProperties": [
+    "noUnboundedLoops (likely) on both contracts: confirmed batchMigrate/migrate loops are reachable only by the onlyMigrator/onlyOwner trusted roles and are paged off-chain via getStakersRange; matches ledger 59eebbf8 (low, open). No new finding."
+  ]
+}

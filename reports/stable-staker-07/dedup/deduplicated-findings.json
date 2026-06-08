@@ -1,0 +1,301 @@
+{
+  "project": "stable-staker",
+  "run": "stable-staker-07",
+  "scanType": "deduplication",
+  "dedupTimestamp": "2026-06-07T00:00:00Z",
+  "auditedCommit": "7e9ef80a916081148e28df60ef6daf83c9157a3b",
+  "scope": ["src/StableStaker.sol", "src/StableStakerMigrator.sol"],
+  "inputSources": {
+    "static/static-analysis-findings.json": 27,
+    "patterns/pattern-findings.json": 3,
+    "findings/code-scanner-findings.json": 4,
+    "findings/econ-scanner-findings.json": 3,
+    "findings/faithfulness-findings.json": 2
+  },
+  "counts": {
+    "rawCandidates": 39,
+    "mappedToCanonical": 17,
+    "droppedNoise": 22,
+    "canonicalFindings": 10,
+    "new": 5,
+    "reconfirmation": 3,
+    "knownIssueLike_manualReview": 1,
+    "preservedSastForClassifier": 1
+  },
+  "canonicalFindings": [
+    {
+      "id": "DEDUP-001",
+      "title": "Idle-pool strategy adoption discards strategy.deposit's returned creditedPrincipal: poolInfo.totalStaked overstates strategy.principalOf, underwater guard is blind to the gap, normal withdraw() drains the strategy FCFS and shorts the last withdrawers",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "line": 215,
+      "lineStart": 213,
+      "lineEnd": 216,
+      "severityGuess": "medium",
+      "newOrReconfirmation": "RE-CONFIRMATION",
+      "ledgerFingerprint": "dab5a65613c7af50bb124ac4bcde1ed259355c7e1ba654a732031c9511fed510",
+      "ledgerStatus": "submitted",
+      "mergedFrom": ["PATTERN-001", "CODE-004", "ECON-002", "F-01", "STATIC-009", "STATIC-004"],
+      "corroboratingSast": [
+        {"id": "STATIC-009", "type": "unchecked-return", "line": 215, "note": "Slither+Aderyn: strategy.deposit(token,idleBalance,this) return (creditedPrincipal) ignored at L215 — the mechanical root cause of this finding."},
+        {"id": "STATIC-004", "type": "reentrancy-events", "line": 198, "note": "Slither: YieldStrategySet event after strategy.deposit during the idle-balance sweep; same sweep code path (benign reentrancy, but pins the location)."}
+      ],
+      "rootCause": "On first adoption over a non-empty IDLE pool, setYieldStrategy sweeps idleBalance into the new strategy via strategy.deposit(token, idleBalance, address(this)) (L215) and discards the returned creditedPrincipal, never reconciling poolInfo[token].totalStaked. Every other principal-entry path (_routeDeposit at L661, used by stake/depositFor) credits totalStaked with the strategy's returned value, which a haircutting market strategy books below nominal. After adoption poolInfo.totalStaked = full nominal idle total while strategy.principalOf(this) = idleBalance*(1-slip); _isUnderwater compares strategy-internal totalBalanceOf vs principalOf (both post-haircut) and is blind to the farm-vs-strategy gap, so healthy withdraw() drains the strategy at full requested amount and the last withdrawer(s) cannot be paid.",
+      "impactSummary": "Bounded to the destination strategy's slippageToleranceBps of the swept idle total; silent FCFS shortfall on the NORMAL withdraw path (not just escape hatches); gated on an owner adopting a haircutting strategy over a non-empty idle pool. Owner footgun under Law 3.",
+      "faithfulnessCrossReference": {
+        "storyTag": "story-005",
+        "fromFinding": "F-01",
+        "framing": "story-005 established 'credit the ACTUAL booked principal' for stake/depositFor but the sibling setYieldStrategy adoption-sweep path was left on the old full-credit assumption — a faithful-but-incomplete application of the story-005 rule. Preserve as the spec-conformance lens on the same root cause; keep visible in the spec-conformance report as F-01."
+      },
+      "consolidationReasoning": "PATTERN-001, CODE-004, ECON-002 and F-01 all describe the SAME L213-216 discarded-creditedPrincipal defect from four lenses (pattern signature / code path / economic FCFS-shortfall / story-005 spec gap). Collapsed to one canonical finding; the faithfulness (story-005) framing is preserved as a cross-reference rather than a separate finding. STATIC-009 (the literal unchecked-return at L215) is the mechanical corroboration. Re-confirms submitted ledger Medium dab5a656; PoC PoC_M01_AdoptionHaircut.t.sol passing at HEAD. NOT a new bug.",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-002",
+      "title": "setYieldStrategy lacks a !migrationInfo[token].active guard: (re)setting a strategy on a token in terminal migration sweeps the realized payout pile R into the strategy and bricks all migration exits, disabling the permissionless userMigrate escape hatch",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "line": 215,
+      "lineStart": 198,
+      "lineEnd": 220,
+      "severityGuess": "medium",
+      "newOrReconfirmation": "NEW",
+      "ledgerFingerprint": null,
+      "ledgerStatus": null,
+      "mergedFrom": ["CODE-001"],
+      "corroboratingSast": [],
+      "rootCause": "initiateMigration clears yieldStrategy[token]=0 (L401) and leaves the realized position R idle in the contract; batchMigrate (L448) and userMigrate (L502) pay migrants by safeTransfer out of that idle pile. setYieldStrategy is gated only by onlyOwner+poolExists (L198) with NO !migrationInfo[token].active check, so an owner who (re)sets a strategy on a token already in terminal migration takes the address(old)==0 branch and unconditionally sweeps idleBalance (= the payout pile R) into the new strategy via strategy.deposit (L213-216).",
+      "impactSummary": "After the sweep the contract token balance is ~0; every subsequent batchMigrate/userMigrate reverts on its transfer. Migration is terminal/non-resumable and active blocks stake/withdraw/emergencyWithdraw/depositFor, so there is no in-contract route to pull the swept funds back. Migrants' principal stranded inside the re-adopted strategy; permissionless escape hatch bricked. Owner footgun under Law 3.",
+      "distinctnessReasoning": "DISTINCT from DEDUP-001 (dab5a656): that concerns the discarded-credit haircut when adopting onto a HEALTHY non-empty pool; this concerns re-wiring a pool already in TERMINAL MIGRATION, sweeping the realized payout pile R. Also distinct from known-issue #7 (replace-in-use-strategy strands funds), which is healthy-pool re-wiring. Not present in the ledger. Same function/line as DEDUP-001 but a different state (migration active) and a different harm (bricked escape hatch vs FCFS shortfall) => kept separate; deduplicator does NOT collapse co-located findings with distinct root-cause states.",
+      "suggestedFix": "Add require(!migrationInfo[token].active, \"migrating\") to setYieldStrategy (mirrors the guard already on stake/withdraw/emergencyWithdraw/depositFor).",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-003",
+      "title": "Terminal-migration escape hatch is not mint-free: userMigrate/_exitPosition mints frozen pending phUSD (L480) before the credit transfer, so a broken/revoked phUSD mint mid-migration traps principal (impact is principal-availability, not reward-loss)",
+      "contract": "src/StableStaker.sol",
+      "function": "userMigrate / _exitPosition",
+      "line": 480,
+      "lineStart": 459,
+      "lineEnd": 504,
+      "severityGuess": "low",
+      "severityReTriageFlag": "CODE-002 argues MEDIUM (principal-availability impairment under an external requirement) vs the ledger's LOW framing ('no mint-free escape hatch'). FLAG FOR CLASSIFIER RE-WEIGH. Status remains per ledger (open) until human triage.",
+      "newOrReconfirmation": "RE-CONFIRMATION",
+      "ledgerFingerprint": "e4567dc343655af93ee23650220f46606aaa27ed173364f87f5d9038937d059d",
+      "ledgerStatus": "open",
+      "mergedFrom": ["CODE-002", "STATIC-007"],
+      "corroboratingSast": [
+        {"id": "STATIC-007", "type": "calls-loop", "line": 480, "note": "Slither: phUSD.mint(account,pending) at L480 sits inside the _exitPosition path invoked per-user by batchMigrate's loop — a single failing mint reverts/griefs the whole batch, corroborating the trapped-principal mechanism for the batch path."}
+      ],
+      "rootCause": "While a token is in terminal migration, emergencyWithdraw/withdraw/stake are blocked by require(!migrationInfo[token].active) and the only permissionless exit is userMigrate, which routes through _exitPosition and mints the user's frozen pending phUSD at L480 BEFORE the credit transfer. If the farm's phUSD minter right is revoked (mintVersion bump) or phUSD is paused/reverting during the migration window, _exitPosition reverts on the mint, so userMigrate AND batchMigrate revert for every user with frozen pending > 0. Unlike emergencyWithdraw (deliberately mint-free), terminal mode has no mint-free exit.",
+      "impactSummary": "Conditional on phUSD mint failing during an active migration (a plausible decommission step — revoking the old staker's minter privilege). Principal not permanently lost but temporarily unrecoverable from terminal-migration exits until minter rights are restored. CODE-002 re-frames the ledger's reward-loss impact as principal-availability impairment.",
+      "consolidationReasoning": "Re-confirms ledger e4567dc3 (open, low) at HEAD via the code path. STATIC-007 (mint inside the batchMigrate per-user loop) is the SAST corroboration of the batch-revert leg. Not a new finding; the only delta is the proposed severity re-weigh, surfaced for the classifier (Law 1 — do not silently inherit the Low).",
+      "suggestedFix": "Make _exitPosition's pending mint best-effort (try/catch and forfeit, like emergencyWithdraw) or split principal return from reward mint so the principal leg always succeeds.",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-004",
+      "title": "Underwater-buffer withdrawals desync totalStaked below strategy.principalOf, so initiateMigration (requesting only P=totalStaked) leaves residual strategy principal and trips the `incomplete exit` require (L392), permanently bricking terminal migration for the token",
+      "contract": "src/StableStaker.sol",
+      "function": "withdraw (buffer path via _routeExit) -> initiateMigration",
+      "line": 392,
+      "lineStart": 369,
+      "lineEnd": 410,
+      "severityGuess": "low",
+      "newOrReconfirmation": "NEW",
+      "ledgerFingerprint": null,
+      "ledgerStatus": null,
+      "relatedLedgerFingerprint": "3d61c9552fcdf7787458ff4863032ea07ae92d672b7af5df80a4bfd352044f4c",
+      "relatedLedgerStatus": "acknowledged (recheck: LIKELY-FIXED; root cause migrateOut removed; proposedStatus=fixed)",
+      "mergedFrom": ["CODE-003"],
+      "corroboratingSast": [],
+      "rootCause": "withdraw's _routeExit underwater branch (L679-686) pays the user their full amount from the on-contract buffer and returns WITHOUT calling strategy.withdraw, while withdraw still does pool.totalStaked -= amount (L271). The strategy's principalOf(this) is unchanged, so after one or more buffer-path withdrawals principalOf(this) > totalStaked. Later initiateMigration snapshots P = totalStaked (L378) and realizes via _routeExit(token, P, false) (L387) — requesting only P — leaving the prior gap stranded in the strategy, so the post-check require(strategy.principalOf(token,this) == 0, 'incomplete exit') (L392-395) reverts. initiateMigration is terminal/one-shot with no retry, so terminal migration for that token becomes permanently un-initiable.",
+      "impactSummary": "Feature-availability/liveness defect on the dormant terminal-migration mechanism. Principal is NOT lost (users withdraw normally above par, or emergencyWithdraw). Requires the story-002 buffer mechanism present + strategy below par + buffer-path withdrawals + operator later attempting initiateMigration.",
+      "mergeVsKeepDecision": "KEEP DISTINCT (do NOT merge into ledger 3d61c955).",
+      "mergeVsKeepReasoning": "Same END-STATE as 3d61c955 ('terminal/underwater migration bricked by a principalOf-vs-requested gap') but a DISTINCT upstream cause and a distinct code location. (1) 3d61c955's root cause was the requested-vs-received realization haircut INSIDE the old migrateOut (L301-337), which was REMOVED in story-004 — recheck classifies it LIKELY-FIXED (root cause deleted, proposedStatus=fixed). (2) DEDUP-004's root cause is the orthogonal story-002 BUFFER-path desync (principalOf > totalStaked created by buffer withdrawals) tripping the NEW initiateMigration post-check (L392) that did not exist when 3d61c955 was filed. (3) Different trigger (buffer withdrawals vs realization haircut), different function. They share only the symptom. Merging would bury a live defect under a likely-fixed/removed-code entry. FLAGGED FOR MANUAL REVIEW because of the symptom-class overlap.",
+      "manualReview": true,
+      "suggestedFix": "Realize the strategy by its own principalOf (drain-to-zero) in initiateMigration rather than by P=totalStaked, or reconcile totalStaked when paying from the buffer.",
+      "confidence": "medium"
+    },
+    {
+      "id": "DEDUP-005",
+      "title": "emergencyWithdraw realizes an underwater strategy loss first-come-first-served via direct share over-redemption (bufferless par bank-run): early exiters keep full principal, late exiters absorb the entire shortfall, unbounded by buffer size",
+      "contract": "src/StableStaker.sol",
+      "function": "emergencyWithdraw / _routeExit",
+      "line": 314,
+      "lineStart": 304,
+      "lineEnd": 319,
+      "relatedLines": [673, 687, 689, 691],
+      "severityGuess": "medium",
+      "newOrReconfirmation": "NEW (extension of a wont-fix; keep DISTINCT)",
+      "ledgerFingerprint": null,
+      "ledgerStatus": null,
+      "relatedLedgerFingerprints": [
+        {"fingerprint": "69c7666eee33698e7f4f2cce7ab94406e40929494e19a2517a2a324e5c9ea73d", "status": "wont-fix", "relation": "SAME FCFS-socialization economics but buffer-SCOPED (withdraw L679-687, bounded by on-contract buffer). DEDUP-005 is the strictly LARGER, BUFFERLESS exposure via emergencyWithdraw's direct strategy-share over-redemption."},
+        {"fingerprint": "b5218ab27253cff9acc872951b860013e113d573e23a0d59ececd09f6c02bf12", "status": "submitted", "relation": "Same order-dependence root-cause CLASS (legacy migrateOut), which terminal migration fixed ONLY for the migration path; the class survives on the still-live emergencyWithdraw escape hatch."}
+      ],
+      "mergedFrom": ["ECON-001"],
+      "corroboratingSast": [],
+      "rootCause": "When a token's IYieldStrategy is below par, normal withdraw() reverts ('strategy underwater') so the only live permissionless exit is emergencyWithdraw, which calls _routeExit(token, user.amount, false) -> strategy.withdraw(token, requestedPrincipal, this). The strategy redeems convertToShares(requestedPrincipal) shares (the user's REQUESTED principal valued at the CURRENT depressed price) and decrements principal accounting by the requested amount. While shares remain, the first caller redeems MORE shares than their proportional entitlement and is paid ~par, draining value backing other stakers; the last caller(s) absorb the entire realized shortfall. Realized haircut is a pure function of EXIT ORDER, not pro-rata fairness — the exact order-dependence terminal migration's min(R,P)/P snapshot was built to eliminate, but emergencyWithdraw never inherits it (and is itself blocked once migration is active).",
+      "impactSummary": "Redistribution of a fixed underwater shortfall from late to early exiters; first-mover always profits when below par and gas << avoided haircut. Bounded by the FULL pool shortfall (not the buffer). Worked example: 10% NAV drop, two equal 100-principal stakers -> first exiter receives full ~100, second receives ~80 absorbing the entire 20 loss.",
+      "reTriageFlag": "DO NOT silently inherit 69c7666's buffer-scoped wont-fix disposition. The bufferless/unbounded nature (loss bounded by full shortfall, not buffer size) materially changes the exposure and warrants explicit re-evaluation. FLAG FOR HUMAN RE-TRIAGE. Also note known-issue #6 blesses that an emergency exiter MAY take a haircut, but does not obviously bless the order-dependent FIRST-exiter-made-whole externalization.",
+      "consolidationReasoning": "Single source (ECON-001). Kept DISTINCT from the buffer-scoped wont-fix 69c7666 per task instruction and Law 1: same FCFS economics, strictly larger and structurally different attack surface (direct share over-redemption, no buffer required).",
+      "suggestedFix": "When below par, realize loss uniformly: require terminal migration (uniform min(R,P)/P) as the only underwater exit, OR have emergencyWithdraw pay min(amount, amount*strategyTotalBalance/strategyPrincipal) so every exiter takes the same proportional haircut regardless of order.",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-006",
+      "title": "Operator batch-migration silently books migrated users BELOW their migrated principal when the destination staker routes through a haircutting strategy, whereas self-migrating (userMigrate) users keep full value",
+      "contract": "src/StableStaker.sol",
+      "function": "depositFor / _routeDeposit (vs userMigrate)",
+      "line": 532,
+      "lineStart": 516,
+      "lineEnd": 537,
+      "relatedLines": [495, 504, 656, 661],
+      "severityGuess": "low",
+      "newOrReconfirmation": "NEW",
+      "ledgerFingerprint": null,
+      "ledgerStatus": null,
+      "mergedFrom": ["ECON-003"],
+      "corroboratingSast": [],
+      "rootCause": "Two intended-equivalent terminal-migration exits diverge: userMigrate sends the snapshot credit straight to the user's own wallet (no further haircut), while the operator's batchMigrate -> Migrator.migrate -> newStaker.depositFor re-deposits the same credit through _routeDeposit on the NEW staker. If the destination staker has a haircutting (market) IYieldStrategy wired, depositFor credits credited = amounts[i]*(1-slip) < amounts[i]; the full amounts[i] is pulled into the new strategy and the slippage difference is booked as protocol-owned principal, not credited to the user.",
+      "impactSummary": "Value-routing fairness asymmetry, not an attack. Magnitude = destination strategy's slippageToleranceBps of each migrated principal; zero when the destination has no strategy / a full-credit strategy at migration time (the normal freshly-seeded-target ordering, hence Low). Owner footgun under Law 3.",
+      "consolidationReasoning": "Single source (ECON-003). No ledger match. Distinct from DEDUP-001 (different function/path: destination-side depositFor haircut on migration, not the setYieldStrategy adoption sweep).",
+      "suggestedFix": "Migrate into a destination pool with no strategy (or a full-credit strategy) and adopt the yield strategy only AFTER migration completes; or document the asymmetry.",
+      "confidence": "medium"
+    },
+    {
+      "id": "DEDUP-007",
+      "title": "withdrawDisabled view over-reports: after story-002 added the buffer path, it still returns _isUnderwater, so it reads true in states where a buffer-covered withdraw(amount) would actually succeed",
+      "contract": "src/StableStaker.sol",
+      "function": "withdrawDisabled",
+      "line": 599,
+      "lineStart": 594,
+      "lineEnd": 600,
+      "severityGuess": "low",
+      "newOrReconfirmation": "NEW",
+      "ledgerFingerprint": null,
+      "ledgerStatus": null,
+      "mergedFrom": ["F-02"],
+      "corroboratingSast": [],
+      "rootCause": "withdrawDisabled returns _isUnderwater(token, strategy) (L599) — true whenever the strategy is below par. story-002 made 'withdraw blocked' a strict subset (blocked only when underwater AND buffer < amount), but withdrawDisabled was not updated, so its documented contract ('true while withdraw is blocked') no longer holds: it over-reports disabled.",
+      "impactSummary": "Conservative direction only (never reports enabled when actually blocked). UX/off-chain false-negative: a user may be discouraged from a withdraw that would succeed via the buffer. No value at risk; no on-chain logic depends on this view. Spec/doc deviation (QA/Low), no security competition.",
+      "consolidationReasoning": "Single source (F-02). Faithfulness/spec finding with explicit securityEscalation=false. Pure QA/Low; route to spec-conformance/QA report.",
+      "suggestedFix": "Update the CLAUDE.md/natspec contract to 'true while the strategy is below par', or make withdrawDisabled buffer-aware.",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-008",
+      "title": "phUSDPerDay converts the daily budget to a per-second rate by integer division before the per-elapsed multiplication (division-before-multiplication), truncating sub-second emission permanently into the stored rate",
+      "contract": "src/StableStaker.sol",
+      "function": "phUSDPerDay",
+      "line": 169,
+      "relatedLines": [621, 549],
+      "severityGuess": "low",
+      "newOrReconfirmation": "MANUAL-REVIEW (likely SUBSUMED by an accepted known issue)",
+      "ledgerFingerprint": null,
+      "ledgerStatus": null,
+      "relatedLedgerFingerprint": "35e9be8d5955827e472d49705bf969bb7ac5b6c90b0b1d37546c9ca4fc0cccb8",
+      "relatedLedgerStatus": "wont-fix (subsumed by accepted known issue 'Integer-division dust rounds DOWN (protocol favor)')",
+      "mergedFrom": ["PATTERN-002"],
+      "corroboratingSast": [],
+      "rootCause": "perSecond = amountPerDay / SECONDS_PER_DAY (L169) floors first, then reward = elapsed * pool.phusdPerSecond (L621; mirrored in pendingReward L549). Realized daily emission = floor(amountPerDay/86400)*86400 <= amountPerDay; lost remainder up to 86399 wei/day. For 18-decimal phUSD this is dust; becomes meaningful only for a per-day budget < 86400 base units (perSecond == 0 -> zero emission).",
+      "impactSummary": "Sub-rate dust, rounds DOWN (protocol-favoring). Almost certainly the project's documented 'dust always rounds DOWN' known issue rather than a distinct bug. Edge: an owner setting amountPerDay < 86400 base units silently emits nothing (owner-config footgun candidate).",
+      "manualReview": true,
+      "consolidationReasoning": "Single source (PATTERN-002), routed to manual review by the pattern-matcher. Not dropped (Law 1): kept visible as a known-issue-like Low for human confirmation against the 'dust rounds DOWN' acceptance and the small-budget zero-emission edge.",
+      "suggestedFix": "Store amountPerDay and divide once at accrual with ACC_PRECISION scaling (higher-precision per-second representation), or document/guard the sub-86400 budget edge.",
+      "confidence": "low"
+    },
+    {
+      "id": "DEDUP-009",
+      "title": "Unbounded per-user external-call loop in batchMigrate + StableStakerMigrator.migrate: a batch sized beyond the block gas limit reverts wholesale",
+      "contract": "src/StableStaker.sol",
+      "function": "batchMigrate",
+      "line": 440,
+      "relatedLines": [445],
+      "crossContract": {"contract": "src/StableStakerMigrator.sol", "function": "migrate", "lines": [65, 76]},
+      "severityGuess": "low",
+      "newOrReconfirmation": "RE-CONFIRMATION (location moved)",
+      "ledgerFingerprint": "59eebbf87b3d0a7117e67b88914e9b73c26d45411fdae799d70c16f2a14a6f9e",
+      "ledgerStatus": "open",
+      "ledgerNote": "Ledger entry titled for the removed migrateOut/migrate loop; the equivalent unbounded loop now lives in batchMigrate (L440-445) + Migrator.migrate (L76-81). Same root-cause class, relocated code.",
+      "mergedFrom": ["PATTERN-003", "STATIC-008"],
+      "corroboratingSast": [
+        {"id": "STATIC-008", "type": "calls-loop", "line": 78, "note": "Slither: newStaker.depositFor inside the per-user migrate loop (L78) — corroborates the cross-contract leg of the unbounded loop."}
+      ],
+      "rootCause": "batchMigrate iterates a caller-supplied users[] calling _exitPosition per user (L440-445); StableStakerMigrator.migrate then iterates the same set calling newStaker.depositFor per user (L76-81). A batch larger than the block gas limit reverts wholesale.",
+      "impactSummary": "Gas-bound DoS only. The array is built off-chain by the onlyMigrator operator and paged via getStakers/getStakersRange (end clamped); no per-user transfer-to-user in the credit path, so a single unreceivable/blacklisted user does not brick the batch. Risk is the operator over-sizing a batch. Law 3 trusts the operator to batch sensibly. QA/Low.",
+      "consolidationReasoning": "PATTERN-003 + STATIC-008 (calls-loop) describe the same unbounded migration loop. Maps to open Low 59eebbf8 (location migrated from the removed migrateOut to batchMigrate+migrate). Re-confirmation.",
+      "suggestedFix": "Optional explicit in-contract max-batch bound; otherwise relies on operator paging (already provided).",
+      "confidence": "low"
+    },
+    {
+      "id": "DEDUP-010",
+      "title": "initiateMigration writes state (migrationInfo, yieldStrategy=0) after the external strategy.withdraw call — reentrancy ordering (Aderyn HIGH, Slither Medium); guard- and trust-mitigated, preserved for classifier review",
+      "contract": "src/StableStaker.sol",
+      "function": "initiateMigration",
+      "line": 369,
+      "relatedLines": [387, 401, 408],
+      "severityGuess": "low",
+      "newOrReconfirmation": "NEW (not in ledger; likely-not-exploitable, classifier disposition required)",
+      "ledgerFingerprint": null,
+      "ledgerStatus": null,
+      "mergedFrom": ["STATIC-003"],
+      "corroboratingSast": [
+        {"id": "STATIC-003", "type": "reentrancy-no-eth", "line": 369, "source": "slither+aderyn", "note": "Slither Medium / Aderyn HIGH: state writes migrationInfo[token] (408) and yieldStrategy[token]=0 (401) after external call _routeExit->strategy.withdraw (387/690)."}
+      ],
+      "rootCause": "State writes migrationInfo[token] (L408) and yieldStrategy[token]=0 (L401) occur after the external call _routeExit->strategy.withdraw (L387/690). Aderyn rates this HIGH; Slither Medium.",
+      "impactSummary": "All principal-moving externals are nonReentrant-guarded and the only external callees are protocol-trusted (phUSD minter / owner-configured IYieldStrategy), not attacker-controlled. Likely NOT exploitable. PRESERVED per task instruction (initiateMigration reentrancy ordering) and Law 1 — surfaced for the classifier rather than silently dropped.",
+      "consolidationReasoning": "Single SAST source (STATIC-003), the one reentrancy finding the task explicitly directs to preserve (Aderyn HIGH on the terminal migration entry point). Kept as a standalone low-priority item flagged for classifier; the other reentrancy-no-eth / reentrancy-events findings on guarded+trusted paths are recorded in droppedNoise with reasons.",
+      "confidence": "medium"
+    }
+  ],
+  "droppedNoise": [
+    {
+      "category": "reentrancy on nonReentrant-guarded, protocol-trusted-callee paths (not attacker-controlled, not corroborating a reasoning finding)",
+      "ids": ["STATIC-001", "STATIC-002", "STATIC-005", "STATIC-006"],
+      "detail": [
+        "STATIC-001 reentrancy-no-eth stake L238 — nonReentrant; callees phUSD.mint + owner-set strategy.deposit (trusted).",
+        "STATIC-002 reentrancy-no-eth depositFor L516 — same as above.",
+        "STATIC-005 reentrancy-events migrate L62 (Migrator) — event after oldStaker.batchMigrate; benign ordering.",
+        "STATIC-006 reentrancy-events migrate L78 (Migrator) — event after batchMigrate + depositFor loop; benign ordering."
+      ],
+      "reason": "All on nonReentrant-guarded functions whose only externals are protocol-trusted (phUSD minter / owner-configured IYieldStrategy / sibling staker), not attacker-controlled; conclusively guard+trust mitigated. Recorded here (visible channel) rather than silently dropped per Law 1. STATIC-003 (initiateMigration, Aderyn HIGH) was PRESERVED as DEDUP-010; STATIC-004 (setYieldStrategy sweep) was folded into DEDUP-001 as corroboration.",
+      "lawNote": "Law 1: kept visible with explicit guard+trust reasoning; not elevated to canonical because they corroborate no reasoning finding and are not attacker-reachable."
+    },
+    {
+      "category": "EnumerableSet.add/remove ignored bool return (benign; existing info-level ledger item)",
+      "ids": ["STATIC-010", "STATIC-011", "STATIC-012", "STATIC-013", "STATIC-014"],
+      "reason": "EnumerableSet add/remove bool return ignored at stake L254 / withdraw L274 / emergencyWithdraw L314 / _exitPosition L477 / depositFor L535. QA-only false positive for security; already tracked as info-level ledger fingerprint 7b0717792d14063f70d35c272d1a8d787f7c67b02d9b3961574fe89c79b9169e (open). Not security-relevant; not re-reported."
+    },
+    {
+      "category": "uninitialized-local false positives (Solidity zero-default accumulators/counters)",
+      "ids": ["STATIC-015", "STATIC-016", "STATIC-017"],
+      "reason": "Migrator.migrate 'total' (L64) and 'migratedCount' (L75), StableStaker.batchMigrate 'total' (L439) all default to 0 and are used as accumulators/counters. Benign QA-level false positive."
+    },
+    {
+      "category": "timestamp false positives (Slither grouped under function; flagged comparison is a bool migration-flag check, not a timestamp comparison)",
+      "ids": ["STATIC-018", "STATIC-019", "STATIC-020", "STATIC-021", "STATIC-022", "STATIC-023", "STATIC-024", "STATIC-027"],
+      "reason": "stake L242 / withdraw L263 / emergencyWithdraw L307 / initiateMigration L370 / batchMigrate L436 / userMigrate L496 / depositFor L524 / _routeExit L683 — flagged comparison is the !migrationInfo.active bool check, not block.timestamp. Mis-grouping noise."
+    },
+    {
+      "category": "timestamp dependence inherent to continuous reward accrual (load-bearing but benign; not a vulnerability)",
+      "ids": ["STATIC-025", "STATIC-026"],
+      "reason": "pendingReward L547 / _updatePool L613 — genuine block.timestamp-driven accrual. Continuous pro-rata emission with no windowEnd; miner timestamp jitter yields negligible, protocol-favoring dust. Not a security finding; inherent to MasterChef-style accrual. Documented, not elevated."
+    }
+  ],
+  "flagsForHumanReview": [
+    {"id": "DEDUP-003", "flag": "SEVERITY RE-TRIAGE", "detail": "CODE-002 argues Medium (principal-availability) vs ledger e4567dc3 Low. Classifier to re-weigh; ledger status unchanged until human triage."},
+    {"id": "DEDUP-004", "flag": "MERGE-VS-KEEP MANUAL REVIEW", "detail": "Symptom-class overlap with ledger 3d61c955 (acknowledged, likely-fixed/removed code). Recommended KEEP DISTINCT (distinct upstream cause on new code); confirm not folded into the likely-fixed entry."},
+    {"id": "DEDUP-005", "flag": "DISPOSITION RE-TRIAGE", "detail": "Related to wont-fix 69c7666 (buffer-scoped) but strictly larger/bufferless. Do NOT silently inherit the wont-fix; re-evaluate the unbounded emergencyWithdraw exposure explicitly."},
+    {"id": "DEDUP-008", "flag": "KNOWN-ISSUE CONFIRMATION", "detail": "Likely subsumed by accepted 'dust rounds DOWN' known issue (class of wont-fix 35e9be8d). Confirm, and check the sub-86400-budget zero-emission edge."}
+  ],
+  "notes": [
+    "39 raw candidate findings -> 10 canonical (17 raw mapped, 22 dropped as documented noise).",
+    "Key collapse: the dab5a656 cluster (PATTERN-001 + CODE-004 + ECON-002 + F-01, plus corroborating STATIC-009/STATIC-004) merged into one canonical RE-CONFIRMATION (DEDUP-001), with the story-005 faithfulness framing preserved as a cross-reference.",
+    "Co-located but distinct: DEDUP-001 and DEDUP-002 share setYieldStrategy/L215 but are kept separate (healthy-pool discarded-credit haircut vs migration-active payout-pile sweep) — different state, different harm.",
+    "CODE-003 (DEDUP-004) kept DISTINCT from ledger 3d61c955: same symptom (terminal migration bricked) but distinct upstream cause (story-002 buffer-path desync tripping the new initiateMigration L392 post-check) on code that did not exist when 3d61c955 was filed; 3d61c955's root cause (migrateOut) is removed/likely-fixed.",
+    "ECON-001 (DEDUP-005) kept DISTINCT from wont-fix 69c7666 per task: bufferless, unbounded-by-buffer emergencyWithdraw share over-redemption.",
+    "All SAST noise dropped is recorded in droppedNoise with per-id reasons (Law 1 visible-channel requirement); the SAST findings that corroborate reasoning findings (STATIC-009->DEDUP-001, STATIC-004->DEDUP-001, STATIC-007->DEDUP-003, STATIC-008->DEDUP-009, STATIC-003->DEDUP-010) were preserved."
+  ]
+}

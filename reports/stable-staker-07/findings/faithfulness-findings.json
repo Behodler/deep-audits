@@ -1,0 +1,112 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "story-faithfulness",
+  "submoduleCommit": "7e9ef80a916081148e28df60ef6daf83c9157a3b",
+  "mode": "full",
+  "inScope": ["src/StableStaker.sol", "src/StableStakerMigrator.sol"],
+  "storiesChecked": ["story-001", "story-002", "story-003", "story-004", "story-005"],
+  "storyVerdicts": [
+    {
+      "storyTag": "story-001",
+      "summary": "Route staked principal through per-token yield strategies",
+      "verdict": "faithful",
+      "note": "All five principal-moving paths route via _routeDeposit/_routeExit when a strategy is set, unchanged when unset (migrateOut later replaced by initiateMigration in story-004). withdraw guarded (guardUnderwater=true); emergencyWithdraw + initiateMigration pass false (accept haircut). _isUnderwater + withdrawDisabled present. Reward accounting untouched. Exits forward measured-received; principal decremented by requested amount, sub-amount stays protocol-owned. Matches commit body."
+    },
+    {
+      "storyTag": "story-002",
+      "summary": "Buffer path in _routeExit + rescueERC20",
+      "verdict": "faithful",
+      "note": "Underwater withdraw served all-or-nothing from idle buffer (L679-688): buffer>=amount returns amount + emits BufferWithdrawn, else reverts 'strategy underwater' leaving partial buffer intact. rescueERC20 reserved=totalStaked iff no strategy set else 0 (L706-712). Works while paused, no nonReentrant. Events present. NOTE: the buffer path makes the withdrawDisabled view inaccurate -> F-02."
+    },
+    {
+      "storyTag": "story-003",
+      "summary": "Pro-rata re-credit on underwater migration (legacy migrateOut)",
+      "verdict": "superseded",
+      "note": "migrateOut removed in story-004; the no-brick / no-over-credit guarantee is now delivered structurally by terminal migration (sum floor(p_i*min(R,P)/P) <= R). The earlier guarantee is preserved, not regressed."
+    },
+    {
+      "storyTag": "story-004",
+      "summary": "Terminal migration state machine (initiateMigration / batchMigrate / userMigrate)",
+      "verdict": "faithful",
+      "note": "initiateMigration realizes via client-callable strategy.withdraw (guardUnderwater=false), NOT totalWithdrawal; snapshots immutable (R,P); freezes emissions (_updatePool no-ops + pendingReward frozen while active); decouples strategy; incomplete-exit post-check. batchMigrate/userMigrate pay p_i*min(R,P)/P from idle pile, order/method independent. !active guards on stake/withdraw/emergencyWithdraw/depositFor. IStableStaker + Migrator wired (migrate->batchMigrate, owner-only initiateMigration forwarder). Matches commit body."
+    },
+    {
+      "storyTag": "story-005",
+      "summary": "Credit ACTUAL deposited principal on stake (deposit slippage)",
+      "verdict": "faithful-on-stated-scope-but-incomplete",
+      "note": "stake (L248-255) and depositFor (L530-537) credit and emit _routeDeposit's returned booked principal; stake guards require(credited>0). _routeDeposit (L656-662) returns strategy.deposit's creditedPrincipal (amount when idle). All as the commit states. GAP: the sibling principal-entry path setYieldStrategy adoption sweep (L213-216) discards the same return value -> F-01."
+    }
+  ],
+  "law1OverrideAssessments": [
+    {
+      "question": "story-001: 'exits forward actual received amount' (measured-received, principal decremented by requested) -- unsafe as specified?",
+      "verdict": "safe",
+      "reasoning": "withdraw is underwater-guarded so a user is never silently forced below par; emergencyWithdraw/migration accept the haircut by design. The sub-amount difference staying protocol-owned cannot be steered by a user to extract more than their principal: strategy.withdraw redeems principal only and caps at available principal, yield stays inside the strategy. No value extraction path. No escalation."
+    },
+    {
+      "question": "story-001/CLAUDE.md: 'emergencyWithdraw and initiateMigration are NOT blocked by the underwater guard' -- unsafe as specified?",
+      "verdict": "safe",
+      "reasoning": "emergencyWithdraw zeroes the caller's own position and forwards the measured-received haircut; the caller can only harm themselves and cannot extract more than their own principal (request = user.amount, strategy caps at available). Blocking the escape hatch while underwater would be the actual hazard (trapped principal). initiateMigration is onlyMigrator (trusted) and feeds min(R,P)/P conservation. No escalation."
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-01",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-005",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "line": 215,
+      "lineStart": 211,
+      "lineEnd": 216,
+      "specText": "story-005: \"_routeDeposit now returns the booked principal (strategy.deposit return value; amount when idle). stake/depositFor credit that value and emit it ... MockYieldStrategy gains settable depositSlippageBps and books/returns only the haircut.\"",
+      "specSource": "git commit 7e9ef80 body (+ IYieldStrategy.deposit natspec: 'creditedPrincipal ... the market strategy returns the story-043 slippage haircut, which is < amount')",
+      "actualBehavior": "On first strategy adoption setYieldStrategy sweeps the idle balance into the new strategy via strategy.deposit(token, idleBalance, address(this)) but DISCARDS the returned creditedPrincipal (L215). Internal accounting (poolInfo[token].totalStaked and every user.amount) is left untouched. For a market/AMM strategy that haircuts the deposit, the strategy books principalOf = idleBalance*(1-slippage) < totalStaked, so the staker's books permanently overstate the strategy-recoverable principal by the entry slippage.",
+      "deviation": "story-005 established the rule 'credit the ACTUAL booked principal so the staker's accounting mirrors the strategy ledger' and applied it to stake + depositFor. The sibling principal-entry path (the setYieldStrategy adoption sweep) was left on the OLD behaviour: it assumes the full idleBalance was booked. The rule was fixed for stake but the adoption path was left inconsistent.",
+      "impact": "When a market (slippage) strategy is adopted onto an already-populated idle pool (an explicitly documented flow -- CLAUDE.md L60-62: 'sweeps any idle balance ... at first adoption this equals staked principal'), the entry slippage becomes a hidden shortfall that totalStaked does not reflect. Consequences: (1) the strategy's own underwater check (_isUnderwater compares strategy.totalBalanceOf vs strategy.principalOf, both post-haircut) reads at-par immediately after adoption, so withdraw is NOT blocked even though the pool cannot honour every principal; (2) strategy.withdraw caps at available principal (confirmed in MockYieldStrategy.withdraw L92-94, 'mirrors ERC4626YieldStrategy'), so the shortfall is socialized first-come-first-served -- early withdrawers get full principal, the last exiters silently eat the entire collective slippage with no revert and no underwater flag; (3) at initiateMigration R = strategy-drained amount < P, so the haircut also flows through migration as a socialized credit.",
+      "conditions": "Requires (a) the token routed through an ERC4626MarketYieldStrategy / AMM-backed strategy with non-zero deposit slippage (direct ERC4626YieldStrategy returns amount, no gap), AND (b) adoption onto a pool with totalStaked > 0. Both are supported, documented flows.",
+      "footgun": true,
+      "footgunRationale": "Law-3 in scope: a competent, non-malicious owner adopting a yield strategy on a live pool (the documented first-adoption flow) would be surprised that the AMM entry slippage is silently dropped from totalStaked, leaving the pool unable to honour all principals and the underwater guard blind to it. Non-obvious consequence -> operational hazard, not suppressed.",
+      "testGap": "test_setYieldStrategy_sweepsIdleBalance (YieldStrategyIntegration.t.sol L108-117) asserts principalOf == full idleBalance but runs at depositSlippageBps == 0, so the slippage-on-adoption case story-005 was created to handle is never exercised on this path.",
+      "crossReference": {
+        "carriesSecurityValueImpact": true,
+        "class": "value-leak / unfair-loss-socialization / defeated-underwater-guard",
+        "routeTo": "econ-scanner / code-scanner (competes for Medium on value impact); keep visible in spec-conformance report as F-01",
+        "suggestedFix": "Mirror the stake path: credit = strategy.deposit(...) return value and reconcile totalStaked/user accounting (or block adoption while totalStaked > 0 for slippage strategies, or require idleBalance booked == idleBalance)."
+      },
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "F-02",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-002",
+      "severity": "potential-low",
+      "contract": "src/StableStaker.sol",
+      "function": "withdrawDisabled",
+      "line": 599,
+      "lineStart": 594,
+      "lineEnd": 600,
+      "specText": "CLAUDE.md: \"withdrawDisabled(token) is a cheap public view returning true while withdraw is blocked (and false when no strategy is set).\" story-002: \"When a token's yield strategy is underwater and the contract holds sufficient idle ERC20 balance, withdraw is now served from that buffer instead of touching the strategy.\"",
+      "specSource": "lib/stable-staker/CLAUDE.md L81-82 (withdrawDisabled contract) vs git commit 48be4e2 body (story-002 buffer path)",
+      "actualBehavior": "withdrawDisabled returns _isUnderwater(token, strategy) (L599) -- true whenever the strategy is below par. After story-002 added the buffer path, a withdraw of `amount` actually SUCCEEDS while underwater whenever the contract's idle balance >= amount. So withdrawDisabled returns true in states where withdraw(amount) would not be blocked.",
+      "deviation": "story-002 changed 'withdraw blocked' from being equivalent to 'underwater' into a strict subset (blocked only when underwater AND buffer < amount), but withdrawDisabled was not updated and still equates the two. Its documented contract ('true while withdraw is blocked') no longer holds: it over-reports disabled.",
+      "impact": "Conservative direction only -- the view never reports enabled when withdraw is actually blocked; it only reports disabled when a buffer-covered withdraw would succeed. Effect is a UX/off-chain false-negative: a user may be discouraged from a withdraw that would in fact go through via the buffer. No value at risk, no on-chain logic depends on this view.",
+      "footgun": false,
+      "crossReference": {
+        "carriesSecurityValueImpact": false,
+        "class": "spec/doc deviation (view predicate inaccurate after later story)",
+        "routeTo": "spec-conformance report (QA/Low); no security competition",
+        "suggestedFix": "Either update the CLAUDE.md/natspec contract to 'true while the strategy is below par' (rename intent), or make withdrawDisabled buffer-aware (return underwater && buffer < <relevant amount>) to match the actual block condition."
+      },
+      "lawImpacted": 2,
+      "confidence": "high"
+    }
+  ]
+}

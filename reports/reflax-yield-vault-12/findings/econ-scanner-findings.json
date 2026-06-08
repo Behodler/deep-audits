@@ -1,0 +1,122 @@
+{
+  "project": "reflax-yield-vault",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "economic",
+  "commit": "2306719",
+  "tier": 2,
+  "contractsScanned": 3,
+  "scope": [
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+    "src/AMMAdapters/CurveAMMAdapter.sol",
+    "src/AYieldStrategy.sol"
+  ],
+  "systemModel": {
+    "shape": "ERC4626MarketYieldStrategy holds restricted ERC4626 SHARES (sUSDe). Deposits BUY shares on Curve; withdraws/skims/migrations SELL shares on Curve. The vault's convertToAssets/convertToShares is used everywhere as the value oracle (principal credit, minOut, totalBalanceOf, surplus, solvency ceiling), but value is ONLY ever realized at the Curve AMM rate.",
+    "vaultRate": "convertToAssets/convertToShares == cooldown-redeem fair value of sUSDe (monotonic non-decreasing by assumption).",
+    "ammRate": "Curve USDe<->sUSDe execution price; a 2-hop route each direction (~2 hops fee+slippage per swap, ~4 hops round-trip). For a restricted token the AMM rate can sit BELOW the vault rate (instant-exit/liquidity discount, stress depeg) and occasionally ABOVE it.",
+    "coreTension": "The entire reason this strategy exists (the share token is restricted and cannot be redeemed directly) is exactly the reason the vault rate is NOT a realizable price, yet all accounting and solvency are denominated at the vault rate."
+  },
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "design-mismatch / cross-rate value-leak (surplus + solvency priced at vault rate, realized at AMM rate)",
+      "severity": "medium",
+      "plausibility": "plausible (steady-state always-on leak of the deposit haircut buffer; escalates toward High during an sUSDe AMM discount event)",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_skimSurplus / _accrueSurplusShares (+ totalBalanceOf, _depositInternal solvency claim)",
+      "line": 457,
+      "lineStart": 449,
+      "lineEnd": 527,
+      "supportingLines": "457 (totalValue snapshot at vault rate), 463-467 (aggregate-surplus ceiling at vault rate), 470-471 (minOut at vault rate), 516-521 (per-client surplus & convertToShares at vault rate); 142-156 (totalBalanceOf at vault rate); 304-312 (deposit 'provable solvency invariant' claim)",
+      "description": "skimSurplus measures the protocol's distributable surplus, and gates it with the M-01 'aggregate-surplus ceiling', entirely at the VAULT rate: totalValue = convertToAssets(heldShares), aggregateSurplus = totalValue - totalDeposited, ceiling = totalShares <= convertToShares(aggregateSurplus). But the surplus shares are SOLD at the Curve AMM rate, and crucially the shares LEFT to back principal are also only realizable at the AMM rate. Because the AMM rate is below the vault rate by the round-trip Curve cost (and far below it during a discount), the vault-rate surplus systematically OVERSTATES realizable surplus, and skimming the full vault-rate surplus leaves the remaining principal-backing shares worth less than principal at the only rate the protocol can ever realize.",
+      "economicMechanism": "On deposit, principal is credited as the slippage-haircut amount*(1-slip) while the strategy actually holds shares worth ~amount*(1-f_buy) at the vault rate (f = one-way Curve cost). The gap (slip - f_buy)*amount is immediately counted as 'surplus' by totalBalanceOf/_accrueSurplusShares even with zero real yield - i.e. the deposit-time haircut buffer is booked as distributable surplus. skimSurplus then sells it to the yield recipient. Once the buffer is skimmed, remaining shares = exactly principal at the vault rate, so a subsequent withdraw must sell those shares at the AMM rate and realizes principal*(1-f_sell) < principal; the principal ledger is debited by the full requested amount (line 371-372), so the shortfall is borne by the client's stakers. The haircut buffer that was the ONLY reserve against round-trip AMM cost has been converted into yield, shifting the sell-side cost onto principal holders. During an sUSDe AMM discount (AMM rate r=P_amm/P_vault well below 1), the same mechanism distributes 'yield' that does not exist at the realizable rate, turning a paper surplus into a real principal shortfall.",
+      "exploitScenario": "Steady-state (calm market), single client, slip=50bps, one-way Curve cost f~5bps:\n1. Client deposits 1,000,000 USDe -> principal booked 995,000; shares held worth ~999,500 (vault). Paper surplus = 4,500.\n2. Authorized withdrawer calls skimSurplus -> sells 4,500 of shares, yield recipient gets ~4,498. Remaining shares worth 995,000 (vault) = principal.\n3. Client withdraws 995,000 -> sells all remaining shares on Curve, receives 995,000*(1-f_sell) ~ 994,503; ledger debits full 995,000. Client/stakers are short ~497 that the (now-skimmed) buffer would have covered.\nStress (sUSDe trades 3% below fair value on Curve), 1,000,000 principal, true yield 2% (vault value 1,020,000):\n1. skimSurplus ceiling = convertToShares(20,000); sells 20,000 of shares at the discounted AMM -> recipient ~19,400.\n2. Remaining shares worth 1,000,000 vault but only ~970,000 at the AMM. Clients are collectively owed 1,000,000 but only ~970,000 is realizable -> ~30,000 socialized shortfall, eaten by the last stakers to exit. The protocol distributed ~19,400 of 'yield' while creating a ~30,000 realizable hole in principal.",
+      "magnitude": "Per skim, steady-state: ~(slip - f)*deposited of buffer is mis-distributed and ~f_sell*principal of sell-side cost is shifted to principal holders. Under an X% sUSDe AMM discount, up to X% of total principal becomes unrealizable while the corresponding paper surplus is handed to the yield recipient; sUSDe has historically discounted several percent in stress.",
+      "preconditions": "AMM rate != vault rate. The round-trip-cost leak is always present (every Curve route here is 2 hops/direction). The large principal-shortfall escalation requires an sUSDe market discount (sUSDe-flavoured but generic to ANY restricted/illiquid ERC4626 share traded on an AMM). No external attacker needed; the loss is a structural mispricing realized by ordinary skim+withdraw.",
+      "affectedParties": "Principal-holding clients and their stakers (receive < principal on exit / last-out socialized shortfall); benefits the skim recipient (yield destination) and Curve LPs (double fees).",
+      "law": "Law 1 (loss of funds / principal under-backing) and Law 2 (the deposit NatSpec markets 'fairValueOfShares >= creditedPrincipal' as a 'provable solvency invariant', and the contract WARNING only guards against share-price DROP - neither acknowledges that for a deliberately-restricted token the vault rate is not realizable; CLAUDE.md acknowledges the skim RETURN value diverges from the snapshot but still computes the solvency CEILING at the vault rate, so the safety story is unfaithful to realizable value).",
+      "recommendation": "Denominate the surplus/solvency ceiling at a realizable (AMM-quote or conservatively-discounted) rate, or retain the deposit haircut as a non-skimmable principal reserve (exclude the buffer from surplus). At minimum, cap skim to realizable surplus net of the round-trip Curve cost so principal stays backed at the AMM rate.",
+      "confidence": "high (mechanism), medium (severity - magnitude scales with the live AMM/vault gap)",
+      "duplicateOfLocal": "elevates LOCAL-MKT-004 (rounding) and the profile scannerAttention #1 to an interaction-level economic finding"
+    },
+    {
+      "id": "ECON-002",
+      "type": "uncapped withdraw over-delivery (mirror of ECON-001): realized AMM output above booked principal drains surplus/other clients",
+      "severity": "medium",
+      "plausibility": "plausible-conditional (requires sUSDe to trade at/above vault fair value, transiently realistic; bounded by available surplus)",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_withdrawInternal",
+      "line": 367,
+      "lineStart": 350,
+      "lineEnd": 375,
+      "description": "withdraw computes sharesToSell = convertToShares(amount) (vault rate), sells them on Curve, and forwards the ENTIRE actual underlyingReceived to recipient (line 367) while debiting principal only by the REQUESTED amount (lines 371-372). minOut floors the downside but nothing caps the upside. When the AMM sells sUSDe at or above the vault fair value (premium, oracle lag, or simply favorable execution), underlyingReceived > amount and the withdrawer pockets the excess, which is exactly the surplus/yield that skimSurplus is supposed to route to the protocol, and/or other clients' share backing.",
+      "economicMechanism": "underlyingReceived = sharesToSell * P_amm = (amount/P_vault)*P_amm = amount*r where r = P_amm/P_vault. If r > 1, recipient receives amount*r but only amount of principal is burned. The excess amount*(r-1) is drawn from the common share pool that backs every other client's principal and the unskimmed surplus. This is the same 'unallocated pot' as ECON-001 but captured by a first-mover withdrawer instead of the skim recipient - whichever path runs first wins the pot; ordering, not entitlement, decides.",
+      "exploitScenario": "1. sUSDe transiently trades 1% above vault fair value on Curve (demand spike / pool-oracle lag).\n2. A client withdraws its full principal P. sharesToSell = convertToShares(P); AMM returns P*1.01.\n3. Recipient receives P*1.01; ledger debits P. The client captured 1% of P of pooled surplus/other-client backing in one tx, repeatable while the premium persists, until the shared pool is depleted and later clients are left short.",
+      "magnitude": "Per withdraw, up to (r-1)*amount of pooled value; cumulative cap is the total surplus + other clients' over-collateralization. An authorized client withdrawing in slices can sweep the entire premium-driven surplus before a skim can claim it.",
+      "preconditions": "AMM realizable rate >= vault rate (r>=1). sUSDe-plausible transiently; generic to any AMM-traded ERC4626 share that can trade at premium. Caller must be an authorized client (protocol-owned), so this is intra-protocol value redistribution / fairness rather than external theft - but it defeats the skim's role as the sole surplus-routing path and can leave honest clients short.",
+      "affectedParties": "Other clients (reduced share backing), the protocol surplus / skim recipient (loses the pot to a first-moving withdrawer).",
+      "law": "Law 1 (value leak from the shared pool) and Law 2 (NatSpec states 'shortfall accumulates as protocol-owned yield' and rounding 'favors the protocol' - over-delivery is the exact opposite: surplus leaks to the withdrawer, not the protocol).",
+      "recommendation": "Cap the underlying transferred to the recipient at idealUnderlying (the requested amount's fair value) and retain any positive excess as protocol surplus to be routed via skimSurplus; only the downside (minOut) should float.",
+      "confidence": "high (code path; LOCAL-MKT-002 confirmed realizable when r>1)",
+      "duplicateOfLocal": "promotes LOCAL-MKT-002 (local-high, deferred) to a confirmed interaction-level econ finding"
+    },
+    {
+      "id": "ECON-003",
+      "type": "MEV / sandwich + missing deadline: slippage floor anchored to spot vault rate, single owner param, no per-call minOut, no deadline",
+      "severity": "medium",
+      "plausibility": "plausible (standard AMM-integration MEV; magnitude gated by Curve pool depth)",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "function": "swap (+ strategy minOut derivation and slippageToleranceBps)",
+      "line": 138,
+      "lineStart": 120,
+      "lineEnd": 141,
+      "supportingLines": "CurveAMMAdapter.swap 138 (router.exchange has NO deadline arg - confirmed in ICurveRouterNG.sol, no deadline parameter exists); strategy minOut derived from same-tx spot rate at 312, 358, 420, 471; single owner slippageToleranceBps at 40/194-199; client cannot pass its own minOut (deposit/withdraw signatures expose no minOut/deadline)",
+      "description": "Every value-moving swap derives its slippage floor from a single owner-set slippageToleranceBps applied to the vault spot rate computed IN THE SAME TX, and there is no transaction deadline anywhere on the Curve path (the ICurveRouterNG.exchange signature used has no deadline parameter, and neither the adapter nor the strategy enforces one). Individual stakers/clients cannot supply their own minOut or deadline. Result: (a) a pending/held/censored deposit or withdraw can be executed at a stale moment within the slippage band; (b) every swap is sandwichable on Curve for up to slippageToleranceBps of trade value, because minOut only protects against the vault rate (which moves slowly and monotonically), not against intra-block AMM price manipulation.",
+      "economicMechanism": "minOut = (vault-rate value) * (1 - slip). The vault rate is not the execution venue; an MEV searcher front-runs the strategy's Curve swap to move the pool price up to the slip boundary, the strategy's swap fills at that boundary (>= minOut, so no revert), and the searcher back-runs - extracting up to slip*tradeSize minus their cost. No deadline means a builder can also hold the tx and choose the worst in-band block.",
+      "exploitScenario": "1. Strategy submits a 1,000,000 USDe deposit (or withdraw) with slip=50bps.\n2. Searcher sandwiches the Curve swap, pushing price ~0.5% against the strategy; swap fills at minOut.\n3. Strategy receives ~0.5% fewer shares (deposit) / ~0.5% less underlying (withdraw); the gap is the searcher's profit (net of Curve fees + the route's 2 hops).\n4. Without a deadline, a held tx can be executed by a builder at the most adverse in-band moment.",
+      "magnitude": "Bounded per trade by slippageToleranceBps (e.g. 0.5%); realized profit depends on sUSDe/USDe Curve pool depth (the live pool is deep, compressing single-block profit, which is why this is Medium not High) and on the 2-hop route cost.",
+      "preconditions": "Generic (not sUSDe-specific). Applies to every deposit/withdraw/skim/migrate swap. Worsened by the inability of the actual value-owner (staker/client) to set a tighter minOut or a deadline; the only knob is one global owner param. NOTE: minOut collapses to 0 for dust deposits (creditedPrincipal rounds to 0) and at slip=MAX_BPS - the MAX_BPS case is an obvious owner misconfig (Law 3, suppressed); the dust case is non-profitable, noted only.",
+      "affectedParties": "Clients/stakers (worse fills), protocol (value bled to searchers/Curve LPs).",
+      "law": "Law 1 (value extraction via MEV). The single-owner-slippage / no-per-call-minOut design is a Law-3 footgun only at its absurd extremes (MAX_BPS); the missing deadline and spot-anchored floor are genuine integration weaknesses.",
+      "recommendation": "Add a deadline to the swap path (requires a Curve router method/wrapper that accepts one, or an on-chain block.timestamp guard at the strategy); allow callers to pass an explicit minOut (taking max(callerMinOut, ownerFloor)); consider anchoring the floor to a manipulation-resistant quote rather than the same-tx spot rate.",
+      "confidence": "medium (clean root cause; exploit magnitude depends on live pool depth)",
+      "duplicateOfLocal": "PATTERN-002; complements LOCAL-MKT-001 (default-slippage DoS)"
+    },
+    {
+      "id": "ECON-004",
+      "type": "convert* used as in-tx slippage oracle: donation/flash manipulable for a GENERIC ERC4626 vault (safe for the wired sUSDe deployment)",
+      "severity": "low",
+      "plausibility": "implausible for sUSDe (live); plausible only if the immutable strategy is ever deployed against a small/new/manipulable ERC4626 vault",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_depositInternal / _withdrawInternal / _skimSurplus",
+      "line": 312,
+      "lineStart": 312,
+      "lineEnd": 471,
+      "supportingLines": "312 (deposit minOut = convertToShares spot), 357-358 (withdraw idealUnderlying/minOut from convertToAssets spot), 457/470 (skim totalValue & minOut from convertToAssets spot)",
+      "description": "Every slippage floor is derived from the vault's convertToShares/convertToAssets read in the SAME tx as the swap. The strategy is generic over ANY ERC4626 vault (vault is a constructor immutable). For a small or freshly-seeded ERC4626 vault, convertToAssets is donation/flash-manipulable (classic ERC4626 inflation), which would let an attacker move minOut and strip the strategy's slippage protection ahead of the Curve swap. For the only currently-wired vault, sUSDe, this is NOT exploitable: sUSDe's rate is backed by multi-billion TVL and reward vesting (transferInRewards vests over ~8h), so moving convertToAssets meaningfully would require donating capital comparable to sUSDe TVL - economically infeasible.",
+      "economicMechanism": "Inflate totalAssets via donation -> convertToAssets up / convertToShares down -> deposit minOut (in shares) drops -> the strategy accepts fewer shares for its USDe, opening a profitable sandwich on the Curve buy. The attack cost is the donation (largely unrecoverable, shared across all vault holders), so it only pays when the vault is tiny relative to the strategy's trade.",
+      "exploitScenario": "Only if a future deployment wires this strategy to a small ERC4626 vault: attacker donates underlying to the vault to deflate convertToShares right before a large strategy deposit, collapsing minOut, then sandwiches the Curve swap.",
+      "magnitude": "Zero for the live sUSDe deployment; up to full slippage-protection bypass for a manipulable vault.",
+      "preconditions": "Manipulable (small/new) ERC4626 vault. The current sUSDe wiring is safe. Per CLAUDE rules this is reported as a scoped DESIGN CONSTRAINT (demonstrated root cause in current code: spot convert* as the in-tx floor), not as a speculative future-code exploit.",
+      "affectedParties": "Future deployments against thin ERC4626 vaults; none for sUSDe.",
+      "law": "Law 1 (potential, deployment-conditional). Flagged as an operational constraint, not a live finding.",
+      "recommendation": "Document and enforce that this strategy may only be wired to ERC4626 vaults whose convertToAssets is not single-block manipulable (deep TVL + reward vesting, like sUSDe); for generic safety, use a manipulation-resistant rate source for minOut.",
+      "confidence": "high (root cause present); low exploitability for the live deployment",
+      "duplicateOfLocal": "PATTERN-001 (FLASH-LOAN-PRICE) - scoped down after sUSDe-specific analysis"
+    }
+  ],
+  "suppressed": [
+    {
+      "item": "slippageToleranceBps == MAX_BPS makes minOut collapse to 0",
+      "reason": "Obvious owner misconfig (setting 100% slippage). Law 3: a competent non-malicious owner would not be surprised; suppressed as reckless-admin. Folded as a note into ECON-003."
+    },
+    {
+      "item": "setAsideBuffer front-run quirk (fresh deposit raises self-set-aside)",
+      "reason": "Documented & accepted in AYieldStrategy NatSpec; clients are protocol-owned, principal untouched, no external profit. Genuinely a non-issue per Law 3."
+    },
+    {
+      "item": "emergencyWithdraw share/principal desync (LOCAL-MKT-003)",
+      "reason": "Owner-only emergency action; left to the faithfulness/operational-hazard channel as a Law-3 footgun (already captured by Tier-1 LOCAL-MKT-003). Not re-rated here to avoid duplication."
+    }
+  ]
+}

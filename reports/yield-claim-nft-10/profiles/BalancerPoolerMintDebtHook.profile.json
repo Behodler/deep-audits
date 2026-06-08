@@ -1,0 +1,89 @@
+{
+  "contract": "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "purpose": "IDispatchHook that accrues a phUSD 'mint debt' equal to ratio% of every USDS amount dispatched through its registered BalancerPoolerV2. onDispatch (gated to the dispatcher) increments mintDebt; pull() (owner or recipient) realises the debt by minting phUSD to recipient and zeroing the ledger.",
+  "inheritanceChain": ["IDispatchHook", "IBalancerPoolerMintDebtHook", "Ownable", "ReentrancyGuard"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["pull"],
+    "accessControlled": ["setRatio", "setRecipient", "setDispatcher", "onDispatch (gated to dispatcher)", "pull (onlyOwnerOrRecipient)"],
+    "initializerProtected": "n/a (constructor)",
+    "pauseMechanism": "none"
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-HOOK-001",
+      "type": "spec-comment-mismatch",
+      "severity": "local-low",
+      "function": "setRatio",
+      "line": 77,
+      "description": "Doc/comment state ratio must be 'strictly < MAX_RATIO (50)' and 'max settable ratio is MAX_RATIO - 1' (49). The implementation reverts only when `newRatio > MAX_RATIO`, so newRatio == 50 is accepted and DEFAULT_RATIO is 50. The 'strictly less than 50' invariant is therefore NOT enforced (50% is reachable). Off-by-one between documentation and the bound check. Low impact (50% is owner-controlled and within plausible design), but the stated invariant does not hold.",
+      "recommendation": "Either change the check to `newRatio >= MAX_RATIO` (enforce <50) or update the docs/DEFAULT_RATIO to reflect that 50 is a valid maximum. Confirm intended cap with the story."
+    },
+    {
+      "id": "LOCAL-HOOK-002",
+      "type": "value-flow-note",
+      "severity": "local-info",
+      "function": "onDispatch / pull",
+      "line": 109,
+      "description": "onDispatch trusts the `amount` argument forwarded by the dispatcher (gross dispatched USDS) and accrues ratio% as phUSD debt with no cap or backing check. pull() mints that debt as fresh phUSD to recipient. The hook holds unilateral phUSD minting authority; total minted phUSD over time = sum(ratio_i * amount_i)/100 across dispatches. Whether the minted phUSD is economically backed by the pooled sUSDS / donated USDC is an econ-scanner concern, not a local defect.",
+      "recommendation": "Flag for econ-scanner: phUSD mint-debt vs collateral (sUSDS pooled, USDC donated) backing ratio."
+    },
+    {
+      "id": "LOCAL-HOOK-003",
+      "type": "operational-footgun",
+      "severity": "local-info",
+      "function": "setDispatcher",
+      "line": 98,
+      "description": "setDispatcher repoints the dispatcher permitted to call onDispatch. The NatSpec advises pulling outstanding mintDebt before repointing so the ledger is clean across a swap. Not enforced in code; a careless repoint mid-debt mixes debt accrued from two dispatchers into one ledger. Owner action with a non-obvious consequence (ledger attribution) — operational hazard, owner-recoverable.",
+      "recommendation": "Document the pull-before-repoint ordering in operator runbook; optional require(mintDebt == 0) in setDispatcher."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "onDispatch(address minter, uint256 amount, bytes)", "visibility": "external", "stateChanges": ["mintDebt"], "externalCalls": [], "accessControl": "msg.sender == dispatcher (else OnlyDispatcher)", "reentrancyGuard": false, "notes": "Silent no-op when added == 0."},
+      {"function": "pull()", "visibility": "external", "stateChanges": ["mintDebt -> 0", "phUSD supply (mint to recipient)"], "externalCalls": ["phUSD.mint(recipient, debt)"], "accessControl": "onlyOwnerOrRecipient", "reentrancyGuard": true, "guards": ["recipient != 0", "mintDebt != 0"]},
+      {"function": "setRatio(uint8)", "visibility": "external", "stateChanges": ["ratio"], "accessControl": "onlyOwner", "guards": ["newRatio <= MAX_RATIO (see LOCAL-HOOK-001)"]},
+      {"function": "setRecipient(address)", "visibility": "external", "stateChanges": ["recipient"], "accessControl": "onlyOwner", "notes": "Zero allowed (re-arms; pull reverts while zero)."},
+      {"function": "setDispatcher(address)", "visibility": "external", "stateChanges": ["dispatcher"], "accessControl": "onlyOwner", "guards": ["newDispatcher != 0"]},
+      {"function": "mintDebt / dispatcher / recipient / ratio / phUSD / MAX_RATIO / DEFAULT_RATIO", "visibility": "public view"}
+    ],
+    "externalCalls": [
+      {"target": "IMintable phUSD (immutable)", "methods": ["mint"], "trustLevel": "trusted (this hook is authorized minter of phUSD)", "notes": "Unilateral mint to recipient on pull()."}
+    ],
+    "stateVariables": [
+      {"name": "dispatcher", "type": "address", "mutators": ["constructor", "setDispatcher"], "readers": ["onDispatch"]},
+      {"name": "phUSD", "type": "IMintable (immutable)", "mutators": ["constructor"], "readers": ["pull"]},
+      {"name": "recipient", "type": "address", "mutators": ["constructor=0", "setRecipient"], "readers": ["pull", "onlyOwnerOrRecipient"]},
+      {"name": "mintDebt", "type": "uint256", "mutators": ["onDispatch (+=)", "pull (=0)"], "readers": ["pull", "view"]},
+      {"name": "ratio", "type": "uint8 (default 50)", "mutators": ["constructor", "setRatio"], "readers": ["onDispatch"]}
+    ],
+    "events": ["RatioUpdated", "RecipientUpdated", "DebtAccrued", "DebtPulled", "DispatcherUpdated"],
+    "modifiers": ["onlyOwner", "onlyOwnerOrRecipient", "nonReentrant"]
+  },
+
+  "valueFlows": [
+    "ACCRUE: on each dispatch, mintDebt += amount*ratio/100 (no token movement).",
+    "REALISE: pull() mints `mintDebt` phUSD to recipient and resets mintDebt to 0. This is the contract that creates new phUSD supply backed (economically) by the pooled/donated USDS."
+  ],
+
+  "invariants": [
+    "Only the registered dispatcher can grow mintDebt.",
+    "pull() mints exactly the outstanding mintDebt and zeros it atomically (CEI: mintDebt=0 before mint).",
+    "pull() reverts while recipient == 0; no-ops while mintDebt == 0.",
+    "ratio bound: code enforces ratio <= 50 (note doc says <50; LOCAL-HOOK-001)."
+  ],
+
+  "trustAssumptions": [
+    "This hook is granted phUSD mint authority — it is a privileged minter; owner is trusted to set a sane ratio and recipient.",
+    "The registered dispatcher faithfully forwards the gross dispatched USDS amount to onDispatch.",
+    "phUSD backing/solvency vs minted debt is governed off-this-contract (econ concern)."
+  ],
+
+  "complexity": {"loc": 128, "functions": 6, "externalCalls": 1, "stateVariables": 5}
+}

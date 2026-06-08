@@ -1,0 +1,102 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "submoduleCommit": "7e9ef80a916081148e28df60ef6daf83c9157a3b",
+  "contractsScanned": 2,
+  "scope": ["src/StableStaker.sol", "src/StableStakerMigrator.sol"],
+  "summary": "Protocol-wide economic review of the StableStaker farm + Migrator. The farm's reward (emission) machinery is sound: accPhusdPerShare is the sole accumulator, rate changes settle at the old rate, empty windows accrue nothing, and dust rounds protocol-favor (no reward-MEV / no first-depositor share game because there are no redeemable shares). The economic risk surface is concentrated entirely in the strategy boundary: whenever a per-token IYieldStrategy is below par, the farm's exit paths realize that loss in a FIRST-COME-FIRST-SERVED manner rather than a uniform pro-rata haircut. Terminal migration (the min(R,P)/P snapshot) fixes this for the migration path only; the permissionless escape hatches that users are forced onto while underwater do NOT inherit that fix. The single most material new observation: emergencyWithdraw reproduces the wont-fixed buffer-FCFS bank-run via direct over-redemption of strategy shares, requiring NO idle buffer, so an underwater pool is always a bank run bounded by the full shortfall, not the buffer size.",
+  "findings": [
+    {
+      "id": "ECON-001",
+      "title": "emergencyWithdraw realizes an underwater strategy loss first-come-first-served via direct share over-redemption (bufferless par bank-run); early exiters keep full principal, the last exiters absorb the entire shortfall",
+      "type": "underwater-loss-socialization / FCFS-exit-race",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "emergencyWithdraw / _routeExit",
+      "lines": "304-319, 673-692",
+      "lineStart": 304,
+      "lineEnd": 319,
+      "relatedLines": [282, 679, 687, 689, 691],
+      "codeSnippet": "uint256 payout = _routeExit(token, amount, false); // emergencyWithdraw, guardUnderwater=false\n... strategy.withdraw(token, amount, address(this)); return t.balanceOf(this) - balanceBefore;",
+      "economicMechanism": "When a token's IYieldStrategy is below par (totalBalanceOf < principalOf), normal withdraw() reverts ('strategy underwater'), so the only live exit is the permissionless emergencyWithdraw escape hatch (and userMigrate, only if the operator has engaged terminal migration). emergencyWithdraw calls _routeExit(token, user.amount, false) which forwards strategy.withdraw(token, requestedPrincipal, this). In the ERC4626/market strategies, withdraw redeems convertToShares(requestedPrincipal) shares -- i.e. the share count for the user's REQUESTED principal valued at the CURRENT (depressed) price -- and decrements principal accounting by the requested amount. While shares remain, the first caller therefore redeems MORE shares than their proportional entitlement and is paid ~par (full principal), draining value that backs other stakers' principal. The pool becomes progressively more underwater for everyone left; the last caller(s) redeem only the depleted remainder and absorb the entire realized shortfall. The realized haircut is thus a pure function of EXIT ORDER, not of pro-rata fairness -- exactly the order-dependence terminal migration's fixed min(R,P)/P snapshot was built to eliminate, but emergencyWithdraw (the path users are funneled to while underwater, and which is blocked once migration is active) never inherits that snapshot.",
+      "attacker": "A fast / MEV-aware or simply earlier-acting staker (or the protocol operator front-running an incident).",
+      "victim": "Slower stakers in the same underwater pool, who are left to redeem the depleted share remainder and eat a disproportionate (up to total) share of the loss.",
+      "profitability": "No net-new protocol loss; this is a redistribution of a fixed underwater shortfall from late to early exiters. The early exiter avoids their entire pro-rata share of the loss (bounded by the pool's shortfall) at the direct expense of late exiters. Always profitable for the first mover whenever the strategy is below par and gas << avoided-haircut. Worked example (direct ERC4626, 10% NAV drop, two equal 100-principal stakers, 200 shares @0.9): User A emergencyWithdraws first -> redeems convertToShares(100)=111.1 of the 200 shares -> receives ~100 (FULL principal, zero haircut); User B is left 88.9 shares worth ~80 -> receives ~80, absorbing the full 20 loss. Equal principal, wildly unequal payout.",
+      "preconditions": [
+        "A per-token IYieldStrategy is set and below par (negative yield / vault loss / market-strategy AMM discount / or the dab5a656 adoption desync that makes the pool effectively underwater).",
+        "Terminal migration is NOT active for the token (emergencyWithdraw reverts once active), i.e. the operator has not (yet) engaged the uniform-haircut migration path.",
+        "More than one staker, exiting at different times."
+      ],
+      "affectedParties": ["slow / late-exiting stakers"],
+      "newOrReconfirmation": "RELATED RE-CONFIRMATION + EXTENSION. The ledger entry 69c7666eee33 ('Underwater withdraw buffer is FCFS at par, socializing strategy loss onto slow stakers', status=wont-fix, medium) captures the SAME FCFS-socialization economics but is scoped to the idle-buffer branch of withdraw() (L679-687), which is bounded by the on-contract buffer size. This entry surfaces the strictly LARGER exposure: emergencyWithdraw achieves the identical par-FCFS bank-run by over-redeeming strategy SHARES directly, requiring NO buffer at all, so the socialized loss is bounded by the full pool shortfall rather than the buffer. Also the same root-cause CLASS as b5218ab2 (sequential migrateOut order-dependence, submitted) which terminal migration fixed ONLY for the migration path. Surfaced for recall (Law 1); triage may fold it into 69c7666's wont-fix disposition, but the bufferless / unbounded nature warrants explicit re-evaluation rather than silent inheritance of the buffer-scoped wont-fix.",
+      "knownIssueInteraction": "Known issue #6 states emergencyWithdraw 'intentionally NOT blocked (accept the haircut)'. That blesses that an emergency exiter MAY receive less than principal; it does not obviously bless that the haircut is non-uniform / order-dependent such that the FIRST exiter receives FULL principal by externalising loss onto later exiters. The protocol's own terminal-migration design treats order-dependent haircuts as a bug worth a major redesign (closes ss2m1/M-01), so the FCFS nature on the still-live escape hatch is a non-obvious gap.",
+      "recommendation": "When a pool's strategy is below par, realize the loss uniformly: either (a) require terminal migration (uniform min(R,P)/P snapshot) as the only underwater exit, or (b) have emergencyWithdraw pay min(user.amount, user.amount * strategyTotalBalance / strategyPrincipal) so every exiter takes the same proportional haircut regardless of order, leaving no first-mover advantage. At minimum, document that underwater emergency exits are a FCFS bank run (extends, beyond the buffer, the wont-fixed 69c7666).",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-002",
+      "title": "Idle-pool strategy adoption discards creditedPrincipal: poolInfo.totalStaked overstates strategy.principalOf, the underwater guard is blind to the gap, and normal withdraw() drains the strategy FCFS, shorting the last withdrawers",
+      "type": "principal-accounting-desync / FCFS-shortfall",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "lines": "198-220 (sweep 213-216)",
+      "lineStart": 213,
+      "lineEnd": 216,
+      "relatedLines": [656, 662, 282, 648, 649],
+      "codeSnippet": "uint256 idleBalance = IERC20(token).balanceOf(address(this));\nif (idleBalance > 0) { strategy.deposit(token, idleBalance, address(this)); } // return value discarded",
+      "economicMechanism": "Adopting a strategy over a non-empty IDLE pool sweeps the contract's idle balance via strategy.deposit(token, idleBalance, this) but discards the returned creditedPrincipal and never reconciles poolInfo[token].totalStaked. A haircutting (market) strategy books principal = idleBalance*(MAX_BPS-slippageToleranceBps)/MAX_BPS < idleBalance, so afterwards poolInfo.totalStaked (full nominal) > strategy.principalOf(this) (haircut). The underwater guard _isUnderwater compares strategy-internal totalBalanceOf vs principalOf (both consistent within the strategy) and is BLIND to the farm-vs-strategy gap, so withdraw() proceeds at full requested amount and drains the strategy; once strategy principal is exhausted the LAST withdrawers cannot be paid (strategy.withdraw under-delivers / reverts). The shortfall is an unintended loss imposed on slow stakers, distinct from the documented requested-vs-received rounding rule.",
+      "attacker": "n/a (owner-config footgun + early-vs-late withdrawer race).",
+      "victim": "Late withdrawers in the adopted pool.",
+      "profitability": "Bounded to slippageToleranceBps of the swept idle total, gated on an owner adopting a haircutting strategy over a non-empty idle pool. Early withdrawers made whole; last ones shorted.",
+      "preconditions": [
+        "Token accrued idle principal while yieldStrategy == address(0).",
+        "Owner adopts a HAIRCUTTING strategy (e.g. ERC4626MarketYieldStrategy) over the non-empty pool."
+      ],
+      "affectedParties": ["late withdrawers", "protocol (accounting integrity)"],
+      "newOrReconfirmation": "RE-CONFIRMATION of submitted ledger Medium dab5a65613c7 (firstSeenRun stable-staker-06; PoC PoC_M01_AdoptionHaircut.t.sol passing; pattern-matcher PATTERN-001 re-confirmed at L213-216, still LIVE at HEAD). NOT a new bug. Noted here because it is the cleanest concrete TRIGGER of the general underwater-FCFS mechanism in ECON-001: the discarded-credit desync makes the pool effectively underwater while _isUnderwater reports healthy, so the FCFS shortfall reaches even the NORMAL withdraw() path (not just the escape hatch).",
+      "recommendation": "Capture and reconcile: totalStaked += strategy.deposit(...) returned creditedPrincipal at L215, or forbid adoption while totalStaked != 0 (as CLAUDE.md already advises operationally). Tie poolInfo.totalStaked to strategy.principalOf(this) by invariant.",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-003",
+      "title": "Operator batch-migration silently books migrated users BELOW their migrated principal when the destination staker routes through a haircutting strategy, whereas self-migrating (userMigrate) users keep full value",
+      "type": "migration-fairness-asymmetry / owner-footgun",
+      "severity": "potential-low",
+      "contract": "src/StableStaker.sol",
+      "function": "depositFor / _routeDeposit (vs userMigrate)",
+      "lines": "516-537, 656-662 (compare userMigrate 495-504)",
+      "lineStart": 516,
+      "lineEnd": 537,
+      "relatedLines": [495, 504, 656, 661, 73, 78],
+      "codeSnippet": "depositFor: uint256 credited = _routeDeposit(token, received); info.amount += credited; // new strategy haircut applies\nuserMigrate: IERC20(token).safeTransfer(msg.sender, credit); // tokens to own wallet, no further haircut",
+      "economicMechanism": "Two exit routes exist for a migrating user. (a) userMigrate sends the snapshot credit straight to the user's own wallet -- no further haircut. (b) The operator's batchMigrate -> Migrator.migrate -> newStaker.depositFor re-deposits the same credit, and depositFor routes through _routeDeposit on the NEW staker; if the new staker has a haircutting (market) IYieldStrategy wired, the user is credited credited = amounts[i]*(1-slip) < amounts[i]. The full amounts[i] is pulled into the new strategy (approval fully consumed, INV-MIG-1 intact); the slippage difference is booked as protocol-owned principal inside the new strategy, NOT credited to the user. Result: a user moved by the operator's zero-action batch migration ends up with strictly less recorded principal on the new staker than an otherwise-identical user who exited via the permissionless userMigrate to their own wallet -- a fairness asymmetry between the two intended-equivalent terminal-migration exits.",
+      "attacker": "n/a (non-malicious owner footgun under Law 3).",
+      "victim": "Batch-migrated users (relative to self-migrating users).",
+      "profitability": "Not an attack; a value-routing asymmetry. Magnitude = destination strategy's slippageToleranceBps of each migrated principal. Zero when the destination staker has no strategy (or a full-credit ERC4626 strategy) at migration time.",
+      "preconditions": [
+        "Operator wires a haircutting (market) IYieldStrategy on the DESTINATION staker before/at migration (an unusual ordering -- a freshly-seeded target normally has no strategy yet, which is why this is Low)."
+      ],
+      "affectedParties": ["batch-migrated users"],
+      "newOrReconfirmation": "NEW (no matching ledger entry). Low-severity, owner-config-dependent. Surfaced for recall (Law 1) as a non-obvious consequence: a competent operator running a 'zero-user-action, principal-preserving' migration (per the Migrator NatSpec) would be surprised that routing the destination through a market strategy quietly books migrated users below their migrated principal, breaking the userMigrate-vs-batchMigrate equivalence the terminal-migration design otherwise guarantees.",
+      "recommendation": "Migrate into a destination pool with no strategy (or a full-credit strategy) and adopt the yield strategy only AFTER migration completes; or document that batchMigrate into a haircutting destination imposes a deposit haircut that userMigrate does not.",
+      "confidence": "medium"
+    }
+  ],
+  "reconfirmedLedgerEntries": [
+    {"fingerprint": "dab5a65613c7", "mappedTo": "ECON-002", "status": "submitted", "note": "adoption discards creditedPrincipal; still LIVE at HEAD."},
+    {"fingerprint": "69c7666eee33", "relatedTo": "ECON-001", "status": "wont-fix", "note": "buffer-FCFS-at-par; ECON-001 extends it to the bufferless emergencyWithdraw share-over-redemption path (strictly larger exposure)."},
+    {"fingerprint": "b5218ab27253", "relatedTo": "ECON-001", "status": "submitted", "note": "legacy migrateOut order-dependence; fixed for the migration path by terminal migration, but the same order-dependence class survives on emergencyWithdraw (ECON-001)."}
+  ],
+  "clearedVectors": [
+    {"vector": "phUSDPerDay rate-change sandwich / emission MEV", "verdict": "no-finding", "reason": "phUSDPerDay settles at the old rate before changing (calls _updatePool first), accrual is continuous and strictly pro-rata to totalStaked, and there are no redeemable shares. Staking just-before vs just-after a rate change is economically identical; no retroactive credit, no extractable sandwich. Matches known-issue #3 and INV-SS-1."},
+    {"vector": "First-depositor / empty-pool dust inflation", "verdict": "no-finding", "reason": "No shares are minted; user.amount tracks principal 1:1 and accPhusdPerShare is reward accounting, not a redeemable price. Empty windows accrue nothing (lastRewardTime fast-forwarded); flash-staking yields 0. Any ERC4626 first-depositor inflation lives inside the OOS strategy. Matches known-issue #2."},
+    {"vector": "Migration credit order/composition dependence (batch vs self)", "verdict": "no-finding", "reason": "credit_i = p_i*min(R,P)/P over the immutable (R,P) snapshot and fixed denominator P; verified order/composition-independent (INV-SS-5/6). Solvency Sigma floor(p_i*S/P) <= S <= R holds; last claimer never starved. This is the FIX for b5218ab2/ss2m1 and holds."},
+    {"vector": "User siphoning protocol-owned YIELD (above-par)", "verdict": "no-finding", "reason": "On withdraw/emergencyWithdraw above par, strategy.withdraw redeems convertToShares(requestedPrincipal) -- FEWER shares than the user's proportional holding when price>1 -- delivering exactly the requested principal and leaving surplus shares (yield) in the strategy as protocol-owned. Value extraction only occurs BELOW par, and that is principal-vs-principal redistribution (ECON-001), not a yield siphon."},
+    {"vector": "rescueERC20 sweeping the underwater buffer (strategy set => reserved=0)", "verdict": "deferred-to-existing-ledger", "reason": "Already tracked as ledger 0790a76a00ed (low, open). Owner-trusted action; non-malicious owner footgun already surfaced. Not re-raised as new."},
+    {"vector": "Migrator residual allowance / custody / atomicity", "verdict": "no-finding", "reason": "forceApprove(total)==Sigma redeposits (INV-MIG-1), net-zero transient custody (INV-MIG-2), all-or-nothing batch (INV-MIG-3). No value leak under standard ERC20."}
+  ],
+  "notes": "Per Tier-2 scope: verified Tier-1 properties tagged 'verified' (INV-SS-1..8, INV-MIG-1..3) were trusted as axioms. The 'likely' noUnboundedLoops property was re-examined and confirmed migrator/owner-gated (matches ledger 59eebbf8, low/open). All economic risk is at the strategy boundary; the farm's own emission/reward accounting is sound. The mature ledger already covers most strategy-boundary vectors -- the genuinely net-new contribution of this scan is ECON-001's observation that the wont-fixed buffer-FCFS bank-run (69c7666) is reproducible WITHOUT any buffer through emergencyWithdraw's direct share over-redemption, making it unbounded by buffer size, plus ECON-003's migration-fairness asymmetry."
+}

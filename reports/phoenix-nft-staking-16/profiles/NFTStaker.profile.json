@@ -1,0 +1,207 @@
+{
+  "contract": "src/NFTStaker.sol",
+  "scope": "CONTEXT (in-scope, secondary)",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "submoduleHead": "5f863d27ebbab5df20131a4592996537cd8bf503",
+  "solidityVersion": "^0.8.20",
+  "summary": "Masterchef-style staking pool for a single ERC1155 token ID. Stakers deposit `stakedId` units, earn per-second phUSD emissions. Emission rate R is derived from owner-set targetAPY sized against the STAKED-SUBSET notional S = totalStaked * latestPrice (post-audit M-03), funded by pull()-ing realised mint-debt from the dispatcher hook plus owner top-ups. Runway (windowEnd) is derived = budget/R.",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "noUnboundedLoopsNote": "No loops anywhere; all accounting is O(1) masterchef per-share math.",
+    "checkedArithmetic": "verified",
+    "checkedArithmeticNote": "0.8.20, no unchecked/assembly. Bare multiplies (totalStaked*latestPrice, elapsed*rewardRate, user.amount*acc) are documented-bounded and revert on overflow. mulDiv used for latestPrice and F.",
+    "reentrancyGuarded": ["stake", "unstake", "claim", "emergencyWithdraw"],
+    "reentrancyGuardedNote": "All user state-changing entrypoints are nonReentrant (OZ ReentrancyGuard). ERC1155 inbound transfers land on this contract (ERC1155Holder); outbound unstake transfer invokes onERC1155Received on msg.sender but is guarded.",
+    "accessControlled": ["setPauser", "setDispatcherHook", "setStakedId", "setDispatcherIndex", "setNFTMinter", "setTargetAPY", "topUp", "pullAndRefresh", "pause", "unpause"],
+    "accessControlNote": "All setters/funding are onlyOwner; pause/unpause are onlyPauser. stake/unstake/claim are whenNotPaused; emergencyWithdraw is callable while paused.",
+    "initializerProtected": "n/a",
+    "initializerProtectedNote": "Not upgradeable; immutables + constructor (Ownable(initialOwner)).",
+    "pausable": true
+  },
+
+  "localFindings": [],
+  "localFindingsNote": "No standalone single-contract local findings surfaced. The contract is heavily hardened by audit fixes M-01 (committedDebt solvency ledger) and M-03 (staked-subset rate sizing). Cross-contract / economic concerns (hook trust, mint-debt accuracy, runway dynamics) are deferred to interaction/econ analysis per scope rules.",
+
+  "interfaceAbstraction": {
+    "inheritance": ["Ownable", "Pausable", "ReentrancyGuard", "ERC1155Holder", "IPausable"],
+    "externalEntryPoints": [
+      {
+        "function": "stake(uint256 amount)",
+        "visibility": "external", "accessControl": "none", "modifiers": ["nonReentrant", "whenNotPaused"],
+        "stateChanges": ["users[msg.sender]", "totalStaked", "accRewardPerShare", "rewardBudget", "committedDebt", "windowEnd", "rewardRate", "lastRewardTime"],
+        "externalCalls": ["_syncBudget -> dispatcherHook.pull() + rewardToken.balanceOf + nftMinter.configs + dispatcherHook.mintDebt", "_safePay -> rewardToken.safeTransfer (pending)", "stakedToken.safeTransferFrom(msg.sender->this, stakedId, amount)"],
+        "valueFlows": ["IN: ERC1155 stakedId units", "OUT: pending phUSD reward (if any)"],
+        "notes": "Head _syncBudget settles accrual at OLD rate/OLD totalStaked; tail _recomputeSchedule re-sizes R against post-mutation totalStaked (M-03)."
+      },
+      {
+        "function": "unstake(uint256 amount)",
+        "visibility": "external", "accessControl": "none", "modifiers": ["nonReentrant", "whenNotPaused"],
+        "stateChanges": ["users[msg.sender]", "totalStaked", "accRewardPerShare", "rewardBudget", "committedDebt", "windowEnd", "rewardRate", "lastRewardTime"],
+        "externalCalls": ["_syncBudget -> dispatcherHook.pull()/reads", "_safePay -> rewardToken.safeTransfer", "stakedToken.safeTransferFrom(this->msg.sender)"],
+        "valueFlows": ["OUT: ERC1155 stakedId units + pending phUSD"],
+        "reverts": ["insufficient stake (user.amount < amount)", "zero unstake"],
+        "notes": "Tail _recomputeSchedule re-sizes R down for the smaller pool."
+      },
+      {
+        "function": "claim()",
+        "visibility": "external", "accessControl": "none", "modifiers": ["nonReentrant", "whenNotPaused"],
+        "stateChanges": ["users[msg.sender].rewardDebt", "accRewardPerShare", "rewardBudget", "committedDebt", "windowEnd", "rewardRate", "lastRewardTime"],
+        "externalCalls": ["_syncBudget", "_safePay -> rewardToken.safeTransfer"],
+        "valueFlows": ["OUT: pending phUSD"],
+        "notes": "No tail recompute (totalStaked unchanged)."
+      },
+      {
+        "function": "emergencyWithdraw()",
+        "visibility": "external", "accessControl": "none", "modifiers": ["nonReentrant"],
+        "stateChanges": ["users[msg.sender]=0", "totalStaked", "committedDebt", "rewardBudget"],
+        "externalCalls": ["stakedToken.safeTransferFrom(this->msg.sender)"],
+        "valueFlows": ["OUT: full ERC1155 principal; FORFEITS pending phUSD"],
+        "notes": "ESCAPE HATCH: callable while paused, does NOT call _syncBudget/_updatePool (so a broken hook/minter/recompute can never trap principal). Forfeited pending moves committedDebt->rewardBudget to preserve solvency invariant."
+      },
+      {
+        "function": "setTargetAPY(uint256 newAPY)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["targetAPY", "(via _updatePool then _recomputeSchedule) schedule state"],
+        "externalCalls": ["_updatePool (no ext)", "_recomputeSchedule -> nftMinter.configs + rewardToken.balanceOf + dispatcherHook.mintDebt"],
+        "reverts": ["APY too high (> MAX_TARGET_APY = 0.5e18)"],
+        "notes": "Settles accrual at OLD rate before mutation. newAPY==0 supported (policy pause)."
+      },
+      {
+        "function": "topUp(uint256 amount)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["balance", "rewardBudget", "windowEnd", "rewardRate"],
+        "externalCalls": ["_updatePool", "rewardToken.safeTransferFrom(owner->this)", "_recomputeSchedule"],
+        "valueFlows": ["IN: phUSD from owner"],
+        "reverts": ["zero topUp"],
+        "notes": "Does NOT call _syncBudget (preserves dispatcher-hook-independence)."
+      },
+      {
+        "function": "setDispatcherIndex(uint256 newIndex)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["dispatcherIndex", "schedule"], "externalCalls": ["_recomputeSchedule"],
+        "reverts": ["stake outstanding (totalStaked != 0)"]
+      },
+      {
+        "function": "setNFTMinter(INFTSupply newMinter)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["nftMinter", "schedule"], "externalCalls": ["_recomputeSchedule"],
+        "reverts": ["stake outstanding", "zero nft minter"]
+      },
+      {
+        "function": "setStakedId(uint256 newId)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["stakedId"], "externalCalls": [],
+        "reverts": ["stake outstanding"]
+      },
+      {
+        "function": "setDispatcherHook(IBalancerPoolerMintDebtHook newHook)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["dispatcherHook"], "externalCalls": [],
+        "notes": "No empty-pool guard (hook rotation is a live operation)."
+      },
+      {
+        "function": "setPauser(address newPauser)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["pauser"], "externalCalls": []
+      },
+      {
+        "function": "pullAndRefresh()", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["schedule"], "externalCalls": ["_syncBudget -> dispatcherHook.pull()/reads"]
+      },
+      {
+        "function": "pause() / unpause()", "visibility": "external", "accessControl": "onlyPauser",
+        "stateChanges": ["_paused"], "externalCalls": []
+      },
+      {
+        "function": "pendingReward(address) / currentRewardRate() / totalDebt() / totalBudget() / runwaySeconds()",
+        "visibility": "external view", "accessControl": "none",
+        "externalCalls": ["rewardToken.balanceOf", "dispatcherHook.mintDebt (some)"],
+        "notes": "Read-only; totalBudget/runwaySeconds read live mintDebt from hook."
+      }
+    ],
+
+    "externalCalls": [
+      {
+        "target": "IBalancerPoolerMintDebtHook dispatcherHook (owner-set, OOS sibling)",
+        "methods": ["pull()", "mintDebt()"],
+        "trustLevel": "trusted-but-mutable (sibling implementation OOS)",
+        "notes": "pull() mints phUSD to this contract (must be the hook's configured recipient). mintDebt() feeds V in recompute. A reverting/misbehaving hook cannot trap principal (emergencyWithdraw bypasses it) and recompute clamps budget at 0 if V<committedDebt."
+      },
+      {
+        "target": "INFTSupply nftMinter (owner-set, = NFTMinterV2, OOS)",
+        "methods": ["configs(dispatcherIndex)"],
+        "trustLevel": "trusted-but-mutable (OOS)",
+        "notes": "Supplies price + growthBasisPoints driving latestPrice. price==0 -> rate 0 (safe). totalSupply(id) declared on the interface but NOT used by current code (rate is sized on totalStaked, not totalSupply, post-M-03)."
+      },
+      {
+        "target": "IERC20 rewardToken / phUSD (immutable)",
+        "methods": ["safeTransfer", "safeTransferFrom", "balanceOf"],
+        "trustLevel": "semi-trusted (assumes standard ERC20)",
+        "notes": "Solvency invariant assumes balance accounting is exact (no fee-on-transfer / rebasing)."
+      },
+      {
+        "target": "IERC1155 stakedToken (immutable)",
+        "methods": ["safeTransferFrom (in/out, stakedId)"],
+        "trustLevel": "semi-trusted (the BalancerPooler NFT)",
+        "notes": "Inbound to this (ERC1155Holder); outbound to msg.sender triggers onERC1155Received (guarded by nonReentrant)."
+      }
+    ],
+
+    "stateVariables": [
+      {"name": "stakedToken", "type": "IERC1155 immutable", "note": "ERC1155 collection"},
+      {"name": "rewardToken", "type": "IERC20 immutable", "note": "phUSD"},
+      {"name": "stakedId", "type": "uint256", "mutators": ["setStakedId (totalStaked==0)"], "note": "active token ID"},
+      {"name": "dispatcherHook", "type": "IBalancerPoolerMintDebtHook", "mutators": ["setDispatcherHook"]},
+      {"name": "nftMinter", "type": "INFTSupply", "mutators": ["setNFTMinter (totalStaked==0)"]},
+      {"name": "dispatcherIndex", "type": "uint256", "mutators": ["setDispatcherIndex (totalStaked==0)"]},
+      {"name": "targetAPY", "type": "uint256 (1e18-scaled, <= 0.5e18)", "mutators": ["setTargetAPY"]},
+      {"name": "windowEnd", "type": "uint256", "note": "derived runway end", "mutators": ["_recomputeSchedule"]},
+      {"name": "rewardRate", "type": "uint256", "note": "phUSD/sec = S*A/Y", "mutators": ["_recomputeSchedule"]},
+      {"name": "rewardBudget", "type": "uint256", "note": "V - committedDebt at last recompute", "mutators": ["_updatePool","_recomputeSchedule","_safePay","emergencyWithdraw"]},
+      {"name": "committedDebt", "type": "uint256", "note": "accrued-unpaid; solvency ledger (M-01)", "mutators": ["_updatePool","_safePay","emergencyWithdraw"]},
+      {"name": "lastRewardTime", "type": "uint256", "mutators": ["_updatePool"]},
+      {"name": "totalStaked", "type": "uint256", "mutators": ["stake","unstake","emergencyWithdraw"]},
+      {"name": "accRewardPerShare", "type": "uint256 (1e18-scaled)", "mutators": ["_updatePool"]},
+      {"name": "users", "type": "mapping(address=>UserInfo{amount,rewardDebt})", "mutators": ["stake","unstake","claim","emergencyWithdraw"]}
+    ],
+
+    "constants": ["ACC_PRECISION=1e18", "SECONDS_PER_YEAR=365 days", "APY_PRECISION=1e18", "MAX_TARGET_APY=0.5e18"],
+    "events": ["Staked","Unstaked","Claimed","EmergencyWithdrawn","Pulled","ToppedUp","DispatcherHookChanged","StakedIdChanged","PauserChanged","TargetAPYChanged","DispatcherIndexChanged","NFTMinterChanged","ScheduleRecomputed"],
+    "modifiers": ["onlyOwner (OZ)", "onlyPauser (custom)", "whenNotPaused (OZ)", "nonReentrant (OZ)"]
+  },
+
+  "localInvariantCandidates": [
+    "SOLVENCY (strong): rewardToken.balanceOf(this) == rewardBudget + committedDebt at all times (the central M-01 invariant). _updatePool moves rewardBudget->committedDebt; _safePay decrements both balance and (committedDebt then rewardBudget) by the paid amount; _recomputeSchedule resets rewardBudget = V - committedDebt; topUp raises balance and rewardBudget equally; emergencyWithdraw moves forfeited pending committedDebt->rewardBudget; pull() swaps mintDebt->balance 1:1 (invariant-neutral).",
+    "NO-OVERPAY: contract never transfers more phUSD than balance; _safePay reverts on shortfall rather than silently capping.",
+    "RATE-FORMULA: after every _recomputeSchedule, rewardRate == (S * targetAPY / APY_PRECISION) / SECONDS_PER_YEAR with S = totalStaked * latestPrice; latestPrice = price/r (r=1+growthBasisPoints*1e14/1e18), or price if growthBasisPoints==0, or 0 if price==0.",
+    "RUNWAY: after every recompute, windowEnd == block.timestamp + budget/rewardRate (floor); == block.timestamp when rewardRate==0.",
+    "APY-AS-FLOOR (M-03): per-NFT emission == latestPrice*targetAPY/Y; the latest minter earns exactly targetAPY, earlier minters >= targetAPY; NO N/totalStaked participation multiplier (lone staker does not earn N*APY).",
+    "NO-RETROACTIVE: accRewardPerShare advances only over (lastRewardTime, min(now, windowEnd)] at the current rate; new staker rewardDebt pins to current acc.",
+    "CLEAN-DEPLETION: _updatePool clamps reward to remaining rewardBudget; emissions stop at windowEnd.",
+    "TOTALSTAKED-CONSISTENCY: totalStaked == sum over users of users[a].amount.",
+    "RECONFIG-LOCK: setDispatcherIndex / setNFTMinter / setStakedId revert unless totalStaked == 0.",
+    "APY-BOUND: targetAPY <= MAX_TARGET_APY (0.5e18) always (enforced in setTargetAPY).",
+    "PRINCIPAL-NEVER-TRAPPED: emergencyWithdraw always returns full user.amount of stakedId regardless of hook/minter/recompute health (no _syncBudget/_updatePool), callable while paused.",
+    "ACC-MONOTONIC: accRewardPerShare is non-decreasing.",
+    "RATE-CADENCE-INDEPENDENCE: with unchanged totalStaked, latestPrice, targetAPY, repeated pullAndRefresh()/topUp(small) leave rewardRate unchanged (rate depends only on on-chain state, not inflow size/cadence)."
+  ],
+
+  "trustAssumptions": [
+    "dispatcherHook is the owner-configured BalancerPoolerMintDebtHook with this contract as recipient; pull() mints phUSD here; mintDebt() is honest. (OOS — interaction analysis owns hook-trust exploitability.)",
+    "nftMinter.configs(dispatcherIndex) returns honest price/growthBasisPoints; price manipulation feeds rate/runway. (OOS sibling.)",
+    "rewardToken (phUSD) and stakedToken behave as standard ERC20/ERC1155 (no fee-on-transfer / rebasing / reentrant hooks beyond the guarded ERC1155 callback).",
+    "Owner is non-malicious (Law 3); owner can pause emissions via targetAPY=0, top up, rotate hook, and reconfigure only on an empty pool.",
+    "pauser address is the trusted global Pauser."
+  ],
+
+  "noteOnDesignDoc": "docs/design.md is partially STALE relative to code: it describes the older fixed-window model (windowDuration / DEFAULT_WINDOW 540d / setWindowDuration / MIN_WINDOW / MAX_WINDOW) and the 4-field Pulled event. The shipped code uses the variable-runway APY-target model (no windowDuration; windowEnd derived = now + budget/R) per CLAUDE.md and docs/runway-dynamics-and-apy-as-policy.md, which are the authoritative specs. Treat CLAUDE.md's 'Critical Invariants' section as the source of truth.",
+
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "ERC1155Holder", "IPausable"],
+  "imports": ["@openzeppelin Ownable,Pausable,ReentrancyGuard,SafeERC20,IERC20,IERC1155,ERC1155Holder,Math", "pauser/IPausable (OOS)", "yield-claim-nft/V2 IBalancerPoolerMintDebtHook (OOS)", "./INFTSupply (OOS interface)"],
+
+  "complexity": {
+    "loc": 621,
+    "externalFunctions": 18,
+    "internalFunctions": 4,
+    "stateVariables": 15,
+    "constants": 4,
+    "externalCallSites": 8,
+    "loops": 0,
+    "assemblyBlocks": 0,
+    "uncheckedBlocks": 0
+  }
+}

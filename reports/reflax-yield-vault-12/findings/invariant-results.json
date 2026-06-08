@@ -1,0 +1,107 @@
+{
+  "project": "reflax-yield-vault",
+  "commit": "2306719",
+  "runTimestamp": "2026-06-07T00:00:00Z",
+  "scope": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol (base src/AYieldStrategy.sol)",
+  "purpose": "Empirically arbitrate code-scanner CODE-006 vs econ-scanner ECON-001/ECON-002 by encoding realizable-rate invariants in a harness where the AMM execution rate is set INDEPENDENTLY of the vault convertToAssets/Shares rate.",
+  "harness": {
+    "design": "MockERC4626Vault defines the VAULT rate p (kept at 1:1, never simulateYield); MockAMMAdapter defines the AMM REALIZABLE rate q with an independently-settable sell rate. r := q/p. Strategy holds restricted shares realizable only at q.",
+    "files": [
+      "workspace/reflax-yield-vault/test/invariant/MarketRateArbitrage.t.sol (deterministic PoCs)",
+      "workspace/reflax-yield-vault/test/invariant/MarketRateInvariant.t.sol (Foundry stateful invariant + handler)",
+      "workspace/reflax-yield-vault/test/invariant/MedusaMarketRate.sol (cheatcode-free Medusa property harness)",
+      "workspace/reflax-yield-vault/medusa-market-rate.json"
+    ]
+  },
+  "runners": { "forge": true, "medusa": true, "echidna": false },
+  "commands": [
+    "forge test --match-contract MarketRateArbitrage -vv",
+    "FOUNDRY_INVARIANT_RUNS=200 FOUNDRY_INVARIANT_DEPTH=30 forge test --match-contract MarketRateInvariant -vv",
+    "medusa fuzz --config medusa-market-rate.json"
+  ],
+  "invariants": [
+    {
+      "name": "invariant_realizableSolvency",
+      "type": "solvency",
+      "description": "INV-1: liquidating ALL remaining shares at the current AMM rate (held*q) must cover all remaining credited principal (totalDeposited). The strategy only asserts this at the VAULT rate (held*p), not the realizable AMM rate.",
+      "status": "BREAKS",
+      "maps_to": "ECON-001"
+    },
+    {
+      "name": "no_cross_client_principal_drain",
+      "type": "isolation",
+      "description": "INV-2: a single client's favorable-rate (r>1) withdraw must not reduce the realizable backing of OTHER clients' principal.",
+      "status": "HOLDS",
+      "maps_to": "CODE-006 (narrow refutation)"
+    },
+    {
+      "name": "surplus_routing",
+      "type": "value-routing",
+      "description": "INV-3: value above aggregate principal (skimmable surplus) must only ever leave via skimSurplus, never via an ordinary withdraw.",
+      "status": "BREAKS",
+      "maps_to": "ECON-002"
+    }
+  ],
+  "passed": 4,
+  "failed": 1,
+  "results_detail": {
+    "MarketRateArbitrage.test_ECON001_skim_breaks_realizable_solvency": "PASS (demonstrates INV-1 flips from solvent to broken across a skim; logged shortfall 28.5e18)",
+    "MarketRateArbitrage.test_ECON001_skim_turns_whole_exit_into_shortfall": "PASS (demonstrates last-out proportional exit drops 970e18 -> 921.5e18 because skim stripped the buffer; logged delta 48.5e18)",
+    "MarketRateArbitrage.test_CODE006_no_cross_client_principal_drain": "PASS (INV-2 holds: B fully realizable after A withdraws at premium)",
+    "MarketRateArbitrage.test_ECON002_ordinary_withdraw_extracts_skimmable_surplus": "PASS (INV-3 broken: ordinary withdraw pocketed 100e18 of skimmable surplus outside skim)",
+    "MarketRateInvariant.invariant_realizableSolvency": "FAIL (intended: the failure carries the ECON-001 counterexample)"
+  },
+  "failures": [
+    {
+      "invariant": "invariant_realizableSolvency",
+      "runner": "forge",
+      "severity": "potential-medium",
+      "maps_to": "ECON-001",
+      "counterexample": {
+        "shrunk_calls": 3,
+        "sequence": [
+          "deposit(client=A, ~1e18)  -> credited principal 0.95e18, held 1e18 shares (buffer 0.05e18)",
+          "skim()                    -> strips the 0.05e18 buffer shares at the VAULT rate; held now 0.95e18 == principal-worth",
+          "setSellRate(0.96e18)       -> AMM discount r<1"
+        ],
+        "result": "realizable 0.912000000001e18 < principal 0.950000000000e18 (held*q < totalDeposited)"
+      }
+    },
+    {
+      "invariant": "property_realizableSolvency",
+      "runner": "medusa",
+      "severity": "potential-medium",
+      "maps_to": "ECON-001",
+      "counterexample": {
+        "shrunk_calls": 3,
+        "sequence": [
+          "depositForClient(...)   -> principal credited 626988.6e18, held 626988.6e18 after skim",
+          "skim()                  -> strips buffer to vault-rate floor",
+          "setSellRate(0.9717e18)  -> AMM discount r<1"
+        ],
+        "result": "held 626988.6e18 * q 0.9717e18 < principal 626988.6e18; property returned false"
+      }
+    }
+  ],
+  "verdicts": {
+    "ECON-001": {
+      "claim": "skimSurplus prices the deposit haircut buffer at the vault rate and skims it out as yield; afterwards, under an AMM discount, the last-out staker realizes less than principal -> socialized shortfall.",
+      "verdict": "CONFIRMED",
+      "evidence": "Both forge and medusa independently break realizable-solvency with the minimal sequence deposit -> skim -> AMM-discount. The skim removes exactly the over-collateralization buffer (held*p - D) that was absorbing the discount: pre-skim held*q=970e18 >= D=950e18 (solvent), post-skim held*q=921.5e18 < D=950e18 (insolvent). Concretely, the proportional last-out exit (totalWithdrawal) realizes 970e18 WITHOUT a prior skim vs only 921.5e18 WITH a prior skim for the same 3% discount -> a 48.5e18 swing, of which the staker eats a 28.5e18 shortfall while the skim recipient walked with the buffer.",
+      "mechanism_note": "Root cause is the profile's scannerAttention #1: minOut, surplus, totalBalanceOf and the 'solvency invariant' are all denominated at the VAULT rate (convertToAssets) while funds realize only at the AMM rate. skimSurplus's aggregate-surplus ceiling (convertToShares(totalValue-td)) is a VAULT-rate ceiling, so a 'surplus' that does not exist at realizable rates is harvested, digging into realizable principal-backing.",
+      "severity": "Medium (value leak / staker principal shortfall, with an external precondition: sUSDe trading below NAV, realistic given the 7-day cooldown)"
+    },
+    "ECON-002": {
+      "claim": "a withdrawer pockets amount*(r-1) when sUSDe trades above vault fair value, defeating skimSurplus as the surplus-routing path.",
+      "verdict": "CONFIRMED (surplus-routing breach), with severity nuance",
+      "evidence": "At r=1.1 an ordinary withdraw of 1000e18 principal pays the withdrawer 1100e18 while debiting only 1000e18; the protocol's skimmable surplus dropped by exactly the pocketed 100e18 (surplus left OUTSIDE skimSurplus). INV-3 broken.",
+      "severity_note": "The extra value is paid by the AMM counterparty (see CODE-006), not taken from another client's share backing, and all authorized clients are protocol-owned, so the leak is a misallocation of protocol surplus (to the withdrawing client's stakers instead of the skim recipient) rather than external theft. Real surplus-routing defeat, but severity tempered to Medium/Low depending on whether the skim recipient is the same beneficiary as the client's stakers."
+    },
+    "CODE-006": {
+      "claim": "REFUTED: vault-rate surplus S*p - D is invariant under any withdrawal at any AMM price q; the withdraw upside is the AMM counterparty overpaying on the withdrawer's OWN share sale, not other-client value.",
+      "verdict": "CORRECT ON ITS NARROW TERMS, but it is the wrong frame for the risk",
+      "evidence": "INV-2 HOLDS: after A withdraws its full principal at r=1.1, client B's principal backing is untouched and B still realizes >= its principal. The vault-rate surplus S*p - D is indeed invariant under a withdraw (verified algebraically and empirically). So CODE-006 correctly refutes a cross-client-principal-theft reading of ECON-002.",
+      "but": "CODE-006 measures solvency at the VAULT rate, which is exactly the quantity that overstates realizable backing. The actual risks (ECON-001 last-out solvency, ECON-002 surplus mis-routing) live at the AMM-realizable rate and at the surplus-routing invariant, neither of which CODE-006's vault-rate identity addresses. The 'conflict' dissolves: CODE-006 refutes a claim ECON-002 does not need; ECON-002's real claim (surplus leaks outside skim) and ECON-001 (skim strips the discount buffer) both stand."
+    }
+  }
+}

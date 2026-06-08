@@ -1,0 +1,194 @@
+{
+  "project": "stable-yield-accumulator",
+  "scanTimestamp": "2026-06-07T17:30:00Z",
+  "scanType": "code",
+  "scanner": "code-scanner",
+  "runMode": "COLD",
+  "submoduleHead": "71abe3e088559cb5d9c10e8475dc67e7cc57fac9",
+  "contract": "src/StableYieldAccumulator.sol",
+  "scope": ["src/StableYieldAccumulator.sol"],
+  "lawHierarchyNote": "Law 1 (no exploits) > Law 2 (story faithfulness) > Law 3 (owner trusted for KNOWING actions; non-obvious footguns in scope). Owner-drain via 100% discount / unbounded exchange rate is suppressed per known issues #4/#5 and ledger C-01. New findings below are NON-OBVIOUS owner footguns that unknowingly enable a Law-1 exploit or brick a story, plus confirmation of live ledger items.",
+  "summary": {
+    "newFindings": 2,
+    "confirmedLiveLedgerItems": 3,
+    "refutedOrByDesign": 6,
+    "high": 0,
+    "medium": 1,
+    "low": 1,
+    "qa": 0
+  },
+  "findings": [
+    {
+      "id": "CODE-001",
+      "title": "Unconfigured strategy/reward token is silently treated as 18-decimals 1:1 — a single forgotten setTokenConfig lets any NFT holder drain that strategy's yield for ~0 payment (or bricks claims)",
+      "severity": "Medium",
+      "c4Bucket": "Medium",
+      "footgun": true,
+      "confidence": "high",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "_normalizeAmount / _denormalizeAmount / claim / addYieldStrategy / setRewardToken",
+      "line": 591,
+      "lineStart": 586,
+      "lineEnd": 640,
+      "relatedLines": [227, 280, 360, 484, 489, 497, 498],
+      "rootCause": "Both _normalizeAmount (L586-609) and _denormalizeAmount (L617-640) treat an UNCONFIGURED token (tokenConfigs[token].decimals == 0 && normalizedExchangeRate == 0) as 18-decimal, 1:1 passthrough (L591 / L622). Nothing in the registration/funding path enforces that a token actually IS configured: addYieldStrategy(strategy, token) (L227-236) accepts a token and never requires a TokenConfig, takes no decimals argument, and emits no warning; setRewardToken(_rewardToken) (L360-363) likewise never requires a config for the new reward token. The decimal of a registered token is therefore set in a SEPARATE, easy-to-forget owner call (setTokenConfig, L280), and the silent fallback converts a benign omission into a value-conservation break.",
+      "description": "claim() prices the payment by normalizing each strategy's skimmed underlying to 18 decimals (L489 _normalizeAmount), summing, discounting (L497), then denormalizing to reward-token decimals (L498 _denormalizeAmount). The normalization for a token relies ENTIRELY on owner-set tokenConfigs[token]. If a registered strategy's underlying token, or the reward token, is left unconfigured while it is NOT actually an 18-decimal token (e.g. 6-dec USDC/USDT), the 18-dec passthrough mis-scales the value by 10**(18 - actualDecimals) (~1e12 for 6-dec stables). This is a NON-OBVIOUS owner footgun (Law 3 in-scope hazard) that, in one direction, unknowingly enables a Law-1 fund-drain: it is permissionlessly exploitable by any NFT holder with zero owner participation at exploit time.",
+      "attackPath": [
+        "PRECONDITION (benign owner omission): owner registers a strategy whose underlying is a 6-dec stable, e.g. addYieldStrategy(stratUSDT, USDT) (L227), configures the reward token correctly (setTokenConfig(USDC, 6, 1e18)), but forgets setTokenConfig(USDT, 6, 1e18). USDT therefore has decimals==0 && rate==0.",
+        "Strategy stratUSDT accrues real yield, e.g. 1000 USDT (1000e6 native).",
+        "Any NFT holder calls claim(nftIndex, 0, []).",
+        "skimSurplus(USDT, claimer) delivers the full 1000e6 USDT to the claimer (L484) — real value received.",
+        "_normalizeAmount(1000e6, USDT) hits the unconfigured fallback (L591) and returns 1000e6 unscaled (treated as 18-dec) instead of 1000e18, so totalNormalizedYield is understated by ~1e12 (L489).",
+        "claimerPayment = 1000e6 * (10000 - discount)/10000 ~= 9.8e8 (L497).",
+        "actualPayment = _denormalizeAmount(9.8e8, USDC) divides by 10**(18-6)=1e12 (L634) => 0 (floors) (L498).",
+        "actualPayment(0) >= minRewardTokenSupplied(0), nudge checks pass; safeTransferFrom(claimer, this, 0) succeeds (L509); no payment is pulled.",
+        "Net: claimer walks away with 1000 USDT of real yield for 0 USDC. Repeatable every time the strategy accrues yield; only cost is 1 burned NFT + gas, which is trivially profitable. This is L-01's dust-only floor amplified ~1e12x into an unbounded drain by the missing config."
+      ],
+      "secondDirection": "Symmetric mis-scale on the reward token bricks claims instead of draining: if rewardToken is a 6-dec stable left unconfigured while strategy tokens ARE configured, _denormalizeAmount returns the raw 18-dec claimerPayment (no /1e12), so actualPayment is ~1e12x too large and safeTransferFrom (L509) reverts on insufficient balance/allowance — every claim with yield fails until the owner configures the reward token (availability/DoS).",
+      "impact": "Direction B (unconfigured strategy token): permissionless theft of the entire affected strategy's accrued yield by any NFT holder, no owner involvement at exploit time; fund loss. Direction A (unconfigured reward token): claim path bricked. Both stem from one forgotten setTokenConfig. The drain direction is High-impact on trigger; classified Medium because it requires the configuration precondition (a stated assumption / external requirement per C4).",
+      "footgunGuidance": "Safe config: ALWAYS call setTokenConfig(token, realDecimals, 1e18) for the reward token AND every strategy underlying BEFORE the strategy can accrue/be claimed. Treat 'register strategy' and 'configure its token' as one atomic operational step.",
+      "knownIssueDistinction": "NOT covered by the 'decimal normalization to 18 (documented)' known issue. That KI blesses the normalization MATH for CONFIGURED tokens; it does not bless (a) the silent (0,0)=>18-dec fallback masquerading as a valid config, nor (b) the absence of any link between addYieldStrategy/setRewardToken and a required TokenConfig. The hazard is the missing enforcement, not the normalization formula. Also NOT the same as ledger L-01 (which is the <1-ulp dust floor under CORRECT config); this is L-01's mechanism weaponized by misconfiguration.",
+      "rootCauseClass": "missing-config-enforcement / decimal-mis-scaling",
+      "recommendation": "Make 'unconfigured' undistinguishable-from-valid impossible for in-use tokens. Options (any one closes the drain): (1) add an explicit `bool configured` to TokenConfig set true only by setTokenConfig, and revert in _normalizeAmount/_denormalizeAmount (or in claim) when a registered/reward token is not configured, instead of silently assuming 18-dec; (2) require tokenConfigs[token].decimals != 0 (or configured flag) inside addYieldStrategy and setRewardToken so registration cannot precede configuration; (3) fold decimals into addYieldStrategy's signature. Pair with CODE-002/L-01 by also reverting when actualPayment == 0 (defense-in-depth: a 0 payment for non-zero delivered yield should never settle).",
+      "evidence": {
+        "machineProven": false,
+        "poc": [],
+        "codePaths": [
+          "L591: if (decimals == 0 && exchangeRate == 0) return amount;  (normalize passthrough)",
+          "L622: if (decimals == 0 && exchangeRate == 0) return amount;  (denormalize passthrough)",
+          "L227-236: addYieldStrategy never requires a TokenConfig",
+          "L360-363: setRewardToken never requires a TokenConfig",
+          "L484-498: skim-then-normalize-then-discount-then-denormalize payment pipeline"
+        ]
+      }
+    },
+    {
+      "id": "CODE-002",
+      "title": "setNudgeSplit(>0) does not require nudge != address(0) — owner enabling the split before setting the address bricks every claim (NudgeNotConfigured)",
+      "severity": "Low",
+      "c4Bucket": "QA",
+      "footgun": true,
+      "confidence": "high",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "setNudgeSplit / claim",
+      "line": 396,
+      "lineStart": 396,
+      "lineEnd": 402,
+      "relatedLines": [385, 506],
+      "rootCause": "setNudgeSplit (L396-402) validates only `_split > 100` (InvalidNudgeSplit) and never checks that `nudge != address(0)`. claim() enforces the coupling at L506: `if (nudgeSplit > 0 && nudge == address(0)) revert NudgeNotConfigured();`. The invariant (split>0 requires a nudge address) is enforced on the READ side (every claim) but not on the WRITE side (the setter), so the contract permits entering the inconsistent state.",
+      "description": "story-023 added the nudge split. If the owner calls setNudgeSplit(x>0) while nudge is still address(0) (or later clears nudge via setNudgeAddress(0), L385, without zeroing the split), the contract is left in a state where EVERY claim with yield reverts at L506 (NudgeNotConfigured) — after the skim loop and NFT burn, but atomically rolled back so no NFT is consumed. The permissionless claim path (the contract's sole purpose) is fully bricked until the owner sets the nudge address or returns the split to 0. This is a NON-OBVIOUS config-ordering footgun (Law 3 in-scope hazard): a competent owner enabling a new feature in the natural order (set the split, then wire the recipient) opens a brick window, and the setter gives no signal that the state is invalid.",
+      "attackPath": [
+        "Owner calls setNudgeSplit(20) intending to route 20% to a nudge recipient, before calling setNudgeAddress (L396 succeeds, no guard).",
+        "nudge is still address(0).",
+        "Any claim with yield runs the skim loop and NFT-balance check, then reverts NudgeNotConfigured at L506.",
+        "All claims revert (atomically; NFTs not consumed) until the owner calls setNudgeAddress(validAddr) or setNudgeSplit(0).",
+        "Same brick also arises if the owner later setNudgeAddress(0) without first zeroing nudgeSplit."
+      ],
+      "impact": "Availability only: permissionless claim() is bricked while the inconsistent (split>0, nudge==0) state holds. No fund loss; fully owner-recoverable; atomic (no NFT burned on the reverting path). Low/QA.",
+      "footgunGuidance": "Safe config order: set the nudge ADDRESS first (setNudgeAddress), then enable the split (setNudgeSplit). To disable, zero the split BEFORE clearing the address.",
+      "rootCauseClass": "missing-write-side-invariant / config-ordering footgun",
+      "recommendation": "Enforce the invariant on the write side so the inconsistent state is unreachable: in setNudgeSplit, `if (_split > 0 && nudge == address(0)) revert NudgeNotConfigured();`; symmetrically, in setNudgeAddress, reject clearing to address(0) while nudgeSplit > 0 (or auto-zero the split). This makes the L506 claim-time check defensive rather than load-bearing.",
+      "evidence": {
+        "machineProven": false,
+        "poc": [],
+        "codePaths": [
+          "L396-402: setNudgeSplit only checks _split > 100",
+          "L385-389: setNudgeAddress allows clearing to address(0) unconditionally",
+          "L506: claim reverts NudgeNotConfigured when nudgeSplit > 0 && nudge == address(0)"
+        ]
+      }
+    }
+  ],
+  "confirmedLiveLedgerItems": [
+    {
+      "ledgerLabel": "L-01",
+      "fingerprint": "0da2e7cf4f5ff209ef327a860420345b531a1b6fcc884f74fa33597d7cec713d",
+      "title": "claim() charges 0 payment while delivering skimmed yield (post-denormalize floor not re-guarded)",
+      "status": "CONFIRMED-LIVE",
+      "severity": "Low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 498,
+      "lineStart": 494,
+      "lineEnd": 509,
+      "confirmation": "Code unchanged at this commit. The only zero guard is L494 (totalNormalizedYield != 0, an 18-dec aggregate). actualPayment = _denormalizeAmount(claimerPayment, rewardToken) at L498 floors and is NEVER re-checked; safeTransferFrom(msg.sender, this, 0) at L509 succeeds, so a dust-yield claim settles for 0 payment (burns 1 NFT). Under CORRECT config the leak is <1 ulp of rewardToken per claim (dust, strictly unprofitable). NOTE: CODE-001 amplifies this exact mechanism ~1e12x into an unbounded drain when the strategy token is left unconfigured — the proper fix (revert if actualPayment == 0) hardens both.",
+      "reconciliation": "Matches ledger L-01 (open). Do NOT create a duplicate finding; reconcile by fingerprint.",
+      "recommendation": "Add `if (actualPayment == 0) revert ZeroAmount();` immediately after L498."
+    },
+    {
+      "ledgerLabel": "L-02",
+      "fingerprint": "8c48864824161ffc92e144478f9b4faa9b1465abbf67ba5d3bc198e93ea5f742",
+      "title": "Phlimbo allowance depletion bricks permissionless claim() until owner re-approves",
+      "status": "CONFIRMED-LIVE",
+      "severity": "Low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "approvePhlimbo / claim",
+      "line": 369,
+      "lineStart": 369,
+      "lineEnd": 374,
+      "relatedLines": [519],
+      "confirmation": "approvePhlimbo (L369-374) sets a fixed forceApprove allowance that is never topped up. claim() pulls phlimboAmount via IPhlimbo.collectReward at L519, which (verified at lib/.../phlimbo-ea/src/Phlimbo.sol:277, rewardToken.safeTransferFrom(msg.sender, this, amount)) pulls EXACTLY `amount` against SYA's standing allowance — not a max allowance, not full balance. Cumulative pulls deplete the allowance; subsequent claims revert until the owner re-approves. nudgeSplit reduces the per-claim pull (phlimboAmount = actualPayment - nudgeAmount, L513) but does not change the depletion dynamic. Live.",
+      "reconciliation": "Matches ledger L-02 (open). Reconcile by fingerprint; not re-raised.",
+      "recommendation": "Re-approve in-flow, use a max/auto-replenishing allowance, or expose a permissionless top-up."
+    },
+    {
+      "ledgerLabel": "L-03",
+      "fingerprint": "7e6197ae677a081851a47889a700be3929ac5e98f88487631caa99c8fc58bf5b",
+      "title": "claim() NatSpec says pay-then-skim; code skims-then-pays (doc/impl mismatch)",
+      "status": "CONFIRMED-LIVE",
+      "severity": "Low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 426,
+      "lineStart": 424,
+      "lineEnd": 442,
+      "relatedLines": [484, 509],
+      "confirmation": "The claim() docstring (L424-442 step 5 'Transfer rewardToken FROM claimer' then step 6 'skimSurplus ... TO the claimer') and the interface NatSpec describe pay-then-skim, but the code skims first (loop L464-492, delivery L484) then pulls payment (L509). Cosmetic; claim() is atomic + nonReentrant so a payment revert rolls back the skims and the NFT burn (this also refutes any 'yield-before-payment' exploit angle). No on-chain impact.",
+      "reconciliation": "Matches ledger L-03 (open). Reconcile by fingerprint; not re-raised.",
+      "recommendation": "Correct the NatSpec at L424-442 and the interface comment to reflect skim-then-pay ordering."
+    }
+  ],
+  "refutedOrByDesign": [
+    {
+      "ref": "SLITHER-001 / PATTERN-002",
+      "concern": "divide-before-multiply in _denormalizeAmount; gameable payout rounding",
+      "verdict": "REFUTED as a standalone bug",
+      "reasoning": "The literal divide-before-multiply ordering (divide by exchangeRate, then multiply by 10**(decimals-18)) only triggers on the decimals>18 branch (L636), which is DEAD CODE: setTokenConfig rejects decimals>18 (L282). On all reachable paths the down-scale is a single floor division (L634) that rounds in the CLAIMER's favor by <1 ulp of rewardToken per claim — that is exactly the L-01 floor surface, not a separate primitive, and it is bounded to sub-cent for the 6-18 dec stable set. Not independently gameable for meaningful value."
+    },
+    {
+      "ref": "PATTERN-001 (YIELD-PRINCIPAL-ACCOUNTING-SKEW) / PARK-06",
+      "concern": "_getYieldForStrategy does not dedup getAuthorizedClients(); preview-vs-actual divergence",
+      "verdict": "BY DESIGN / OOS root cause",
+      "reasoning": "claim() prices payment off the ACTUAL skimSurplus return (L484-489), NOT off _getYieldForStrategy. The clients-dedup and snapshot-vs-redeem divergence only affect the VIEW previews (calculateClaimAmount/getYield/getTotalYield). getAuthorizedClients() is contractually a set owned by the OOS strategy (vault CLAUDE.md), so dedup is the strategy's responsibility; divergence is the documented design (skimSurplus return is authoritative, minRewardTokenSupplied at L501 is the claimer's guard). No in-scope value impact; MEV/overpay quantification is econ-scanner's (PATTERN-006/007)."
+    },
+    {
+      "ref": "PATTERN-005 (REENTRANCY-ERC777 / CEI skim-then-pay)",
+      "concern": "Cross-contract / cross-function reentrancy via skimSurplus delivery before payment; ERC1155 burn ordering",
+      "verdict": "REFUTED (not exploitable)",
+      "reasoning": "claim() is nonReentrant (OZ), so any ERC777-style tokensReceived hook firing during a skimSurplus delivery to the claimer cannot re-enter claim(). Every other state-mutating function is onlyOwner (or onlyPauser), so a claimer-controlled callback has no SYA state to corrupt. The ERC1155 burn (L536) is a burn (no inbound receive hook) and precedes the skim loop; guarded by nonReentrant regardless. Atomicity holds: any later revert rolls back the skims and the burn. The skim recipient is msg.sender, not an arbitrary address. No exploitable cross-function path."
+    },
+    {
+      "ref": "PATTERN-003 / SLITHER-002 (DoS-UNBOUNDED-LOOP)",
+      "concern": "Unbounded loops: clients[] in previews, exemptStrategies, canClaim nextIndex, strategy-count in claim",
+      "verdict": "LOW / MITIGATED / OWNER-FOOTGUN-only",
+      "reasoning": "(a) claim()'s outer loop is over yieldStrategies[] which is owner-bounded (addYieldStrategy onlyOwner) — over-registration until claim exceeds block gas is an OWNER footgun, not a permissionless DoS, and exemptStrategies (story-024 / M-04) lets a claimer route around any single strategy whose skimSurplus runs out of gas. (b) The clients[] loop lives only in VIEW previews (_getYieldForStrategy) — an oversized strategy client set can make the preview revert, but previews are off-chain (eth_call, node gas cap) and a claimer can still claim with min=0; availability of a helper, not the claim path. (c) exemptStrategies is unbounded/undeduped but the gas is the caller's own (self-grief). (d) canClaim's 1..nextIndex loop is a view bot-helper off the claim path. None rise to an in-scope H/M; the strategy-count angle is an owner footgun for the severity-classifier, the rest are QA."
+    },
+    {
+      "ref": "PATTERN-008 (INCORRECT-OPERATOR) / boundary review",
+      "concern": "Off-by-one in claim L501 (<), canClaim i<count, _validateAndBurnNFT index>0, setTokenConfig/setDiscountRate/setNudgeSplit bounds",
+      "verdict": "REFUTED (intentional bounds)",
+      "reasoning": "All boundaries reviewed as correct and intentional: minRewardTokenSupplied uses < so equal-to-min passes (L501); decimals==18, rate==10000 (100%), split==100 are deliberately allowed (L282/L325/L397); index>0 reserves id 0 (matches INFTMinter.nextIndex 'starts at 1' semantics confirmed in lib/.../yield-claim-nft INFTMinter.sol L52); canClaim's i=1..<nextIndex matches the next-to-assign semantics (valid ids 1..nextIndex-1). No off-by-one. canClaim is a view bot-helper regardless."
+    },
+    {
+      "ref": "design-note / getTotalYield paused inconsistency + no rewardToken sweep",
+      "concern": "getTotalYield() does not skip per-token-paused strategies (unlike claim/calculateClaimAmount); SYA has no function to recover stuck rewardToken",
+      "verdict": "QA observation (no security impact under stated assumptions)",
+      "reasoning": "getTotalYield (L738-748) omits the tokenConfigs[token].paused skip that claim()/calculateClaimAmount() apply, so it can over-report total yield vs what is actually claimable — a view-layer inconsistency only, no on-chain effect. Separately, claim() conserves value exactly for standard tokens (nudgeAmount + phlimboAmount == actualPayment by subtraction, L512-513; collectReward pulls exactly phlimboAmount per L-02 verification), so no rewardToken should accrue in SYA; the absence of a sweep only matters under broken assumptions (fee-on-transfer / phlimbo under-pull) which are known-issue-excluded. Low/QA, surfaced for visibility per Law 1, not escalated."
+    }
+  ],
+  "notes": [
+    "Owner-drain framings (100% discount, unbounded normalizedExchangeRate) are deliberately NOT raised — suppressed per known issues #4/#5 and ledger C-01 (designed levers, owner trusted for knowing actions). PARK-05 re-checked: no NEW non-obvious footgun beyond C-01.",
+    "PARK-08 (rate==0 vs unset semantics; a real 0-decimal token is indistinguishable from unconfigured) folds into CODE-001's root cause (the (0,0) sentinel); the fix proposed for CODE-001 (explicit configured flag) also resolves PARK-08. No separate finding.",
+    "Recall over tidiness (Law 1): nothing plausibly security-relevant was dropped. New: CODE-001 (Medium footgun), CODE-002 (Low footgun). Live ledger: L-01/L-02/L-03 confirmed. Everything else refuted/by-design with reasoning above; econ/MEV angles (PATTERN-006/007, PARK-06) deferred to econ-scanner."
+  ]
+}

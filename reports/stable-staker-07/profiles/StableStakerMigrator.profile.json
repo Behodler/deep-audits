@@ -1,0 +1,101 @@
+{
+  "contract": "src/StableStakerMigrator.sol",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "submoduleCommit": "7e9ef80a916081148e28df60ef6daf83c9157a3b",
+  "solidityVersion": "0.8.28 (pragma ^0.8.20, foundry.toml pins 0.8.28)",
+  "scanMode": "cold",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {
+      "value": "likely",
+      "note": "Two loops in migrate(): sum amounts[] and redeposit per non-zero amount. Both bounded by the owner-supplied users[] length; owner is trusted (Law 3) and batches are paged off-chain via the staker's getStakersRange. No untrusted caller can reach either loop."
+    },
+    "checkedArithmetic": {
+      "value": "verified",
+      "note": "solc 0.8.28; the only arithmetic is `total += amounts[i]` (checked). No unchecked, no assembly."
+    },
+    "reentrancyGuarded": [],
+    "reentrancyUnguardedByDesign": [
+      {"function": "migrate", "reason": "No nonReentrant, but onlyOwner and all external calls (oldStaker.batchMigrate, newStaker.depositFor) target immutable, owner-configured trusted StableStaker instances. forceApprove(total) is set fresh each call. No user-reachable reentrancy."}
+    ],
+    "accessControlled": {
+      "onlyOwner": ["initiateMigration", "migrate"],
+      "permissionless": []
+    },
+    "initializerProtected": {
+      "value": "n/a",
+      "note": "Not upgradeable; constructor sets immutable oldStaker/newStaker and Ownable owner."
+    },
+    "pausable": {"value": false, "note": "No pause mechanism; orchestration is owner-only and one-shot per batch."}
+  },
+
+  "localFindings": [],
+
+  "notFlaggedDeferredToInteraction": [
+    "Whether the amounts[] returned by oldStaker.batchMigrate truly satisfy Sigma amounts <= R (solvency) and equal-principal-equal-credit is a property of StableStaker (profiled there as INV-SS-5/6); the migrator trusts it as an axiom. Cross-contract verification -> interaction analysis.",
+    "Wiring correctness (migrator set as `migrator` on BOTH stakers; newStaker has token registered and is a phUSD minter) is a deployment/interaction concern; misconfiguration causes a safe revert, not a silent loss."
+  ],
+
+  "interfaceAbstraction": {
+    "inheritanceChain": ["Ownable"],
+    "externalEntryPoints": [
+      {"function": "initiateMigration(address token)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyOwner", "reentrancyGuard": false, "stateChanges": [], "externalCalls": ["oldStaker.initiateMigration(token)"], "events": [], "note": "thin owner-only forwarder; reverts on the staker if already migrating (idempotent-guarded). Call once per token before first migrate()."},
+      {"function": "migrate(address token, address[] users)", "visibility": "external", "mutability": "nonpayable", "accessControl": "onlyOwner", "reentrancyGuard": false, "stateChanges": [], "externalCalls": ["oldStaker.batchMigrate(token, users) -> uint256[] amounts", "IERC20(token).forceApprove(newStaker, total)", "newStaker.depositFor(token, users[i], amounts[i]) per non-zero amount"], "events": ["Migrated"], "loop": "sum amounts[] then redeposit per non-zero (bounded by users[] length)", "note": "no-op (emits Migrated(token,0,0)) when total==0; approval(total) == Sigma deposits so no dangling allowance under standard ERC20"},
+      {"function": "oldStaker()", "visibility": "public immutable getter", "returns": "IStableStaker"},
+      {"function": "newStaker()", "visibility": "public immutable getter", "returns": "IStableStaker"}
+    ],
+
+    "externalCalls": [
+      {"target": "IStableStaker oldStaker (immutable)", "methods": ["initiateMigration", "batchMigrate"], "trustLevel": "trusted", "notes": "Owner-configured StableStaker; migrator must be its `migrator`. batchMigrate pulls principal out and mints each user's phUSD, returns per-user credits and transfers their sum to this contract."},
+      {"target": "IStableStaker newStaker (immutable)", "methods": ["depositFor"], "trustLevel": "trusted", "notes": "Owner-configured target StableStaker; migrator must be its `migrator`, must have token registered (addToken) and be a phUSD minter. depositFor pulls amounts[i] from this contract via transferFrom."},
+      {"target": "IERC20 token", "methods": ["forceApprove", "(transferFrom triggered inside newStaker.depositFor)"], "trustLevel": "semi-trusted", "notes": "Standard ERC20 assumed. forceApprove(newStaker, total) is granted then fully consumed by the redeposit loop (total == Sigma amounts), so allowance returns to 0. Fee-on-transfer would break the approval==pull equality (known-issue exclusion)."}
+    ],
+
+    "stateVariables": [
+      {"name": "oldStaker", "type": "IStableStaker (immutable)", "mutators": ["constructor"], "readers": ["initiateMigration", "migrate"]},
+      {"name": "newStaker", "type": "IStableStaker (immutable)", "mutators": ["constructor"], "readers": ["migrate"]}
+    ],
+
+    "events": ["Migrated"],
+    "modifiers": ["onlyOwner (OZ)"]
+  },
+
+  "localInvariants": [
+    {
+      "id": "INV-MIG-1-approval-matches-redeposits",
+      "statement": "migrate forceApproves newStaker for exactly `total = Sigma amounts[i]`, then redeposits exactly amounts[i] per non-zero user, so the granted allowance is fully consumed and no dangling allowance remains (under standard ERC20).",
+      "confidence": "verified",
+      "evidence": "L62-81: total summed from the same amounts[] array that drives the depositFor loop; forceApprove(total) at L73; Sigma depositFor pulls == total."
+    },
+    {
+      "id": "INV-MIG-2-transient-custody",
+      "statement": "The migrator holds the staked token only transiently within a single migrate() call: batchMigrate transfers `total` in, the redeposit loop sends `total` back out via newStaker.depositFor. Net token balance change per call is zero under standard ERC20.",
+      "confidence": "verified",
+      "evidence": "batchMigrate sends Sigma amounts to msg.sender (the migrator); migrate redeposits the same Sigma amounts. No long-term custody, no per-user balance retained."
+    },
+    {
+      "id": "INV-MIG-3-atomic-batch",
+      "statement": "A migrate() batch is all-or-nothing: any revert in batchMigrate, forceApprove, or a depositFor in the loop reverts the entire transaction, so partial/inconsistent migration state cannot persist.",
+      "confidence": "verified",
+      "evidence": "No try/catch; single transaction. Already-self-migrated users surface as amounts[i]==0 and are skipped (no double-credit)."
+    }
+  ],
+
+  "trustAssumptions": [
+    "Owner is trusted and non-malicious (Law 3); both state-changing functions are onlyOwner.",
+    "oldStaker and newStaker are the genuine, correctly-wired StableStaker instances passed at construction (immutable). The migrator address must equal `migrator` on BOTH stakers, and newStaker must have the token registered and be an authorized phUSD minter; otherwise the relevant call reverts (safe-fail, no silent loss).",
+    "The token is a standard ERC20 (no fee-on-transfer); FoT would break the total==Sigma-deposits equality and could leave residual allowance/dust.",
+    "The per-user `amounts` returned by batchMigrate are taken as axiomatic (correctness proven in StableStaker INV-SS-5/6); the migrator does not re-derive credits."
+  ],
+
+  "complexity": {
+    "loc": 85,
+    "externalStateChangingFunctions": 2,
+    "viewFunctions": 0,
+    "publicImmutableGetters": 2,
+    "internalFunctions": 0,
+    "externalCallTargets": 3,
+    "stateVariables": 2,
+    "events": 1
+  }
+}

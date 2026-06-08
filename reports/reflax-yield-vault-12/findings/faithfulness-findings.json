@@ -1,0 +1,101 @@
+{
+  "project": "reflax-yield-vault",
+  "scanTimestamp": "2026-06-07T08:46:46Z",
+  "scanType": "story-faithfulness",
+  "commit": "2306719",
+  "mode": "full",
+  "storiesChecked": ["story-037", "story-038", "story-039", "story-041", "story-042", "story-043", "story-044"],
+  "findings": [
+    {
+      "id": "FAITH-001",
+      "type": "invariant-violation",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-038/story-043",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_withdrawInternal",
+      "line": 367,
+      "lineStart": 338,
+      "lineEnd": 375,
+      "specText": "Contract NatSpec header (authored story-038, reaffirmed story-043): \"Rounding rules: All rounding favors the protocol. Principal is decremented by requested amount, not received amount, so any shortfall accumulates as protocol-owned yield.\" Inline (line 369-370): \"Decrement principal by REQUESTED amount, not RECEIVED amount / Any difference accumulates as protocol-owned yield.\" story-043 commit a65dbf0: \"good execution surfaces as protocol yield.\"",
+      "specSource": "ERC4626MarketYieldStrategy.sol NatSpec header lines 22-23 + inline comment lines 369-370; git commit a65dbf0 body",
+      "actualBehavior": "withdraw/_withdrawInternal transfers the FULL ammAdapter swap output `underlyingReceived` to recipient (line 367), then debits principal by the REQUESTED `amount` only (lines 371-372). The documented invariant only holds in the shortfall direction (received < requested). In the over-delivery direction (received > requested), the EXCESS `underlyingReceived - amount` is paid to the recipient/withdrawer, not retained by the strategy.",
+      "deviation": "The stated invariant 'All rounding favors the protocol' / 'any difference accumulates as protocol-owned yield' is one-directional in code. minOut floors the downside (received >= amount*(1-slip)) but nothing caps the upside. When the Curve-realizable rate is favorable, surplus that the design routes to the protocol via skimSurplus is instead captured by the first client to withdraw — directly contradicting the documented rounding/yield-ownership intent.",
+      "lawImpacted": [1, 2],
+      "crossReference": "Same root cause as code-scanner LOCAL-MKT-002 (local-high, uncapped withdraw upside) and profile scannerAttention #2. Exact economic exploitability (is over-delivery realizable on the configured USDe<->sUSDe Curve route, and does a protocol-owned client capturing it constitute a real value leak vs internal transfer) is the econ/interaction scanner's call; reported here as the spec-conformance angle.",
+      "recommendation": "Cap the underlying transferred to recipient at `amount` (idealUnderlying) and leave the excess in the strategy (held as shares / skimmable surplus), OR amend the design NatSpec to document that over-delivery is intentionally paid to the withdrawer so the 'all rounding favors the protocol' claim is not misleading.",
+      "confidence": "high"
+    },
+    {
+      "id": "FAITH-002",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-043",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_depositInternal / _creditedPrincipal",
+      "line": 312,
+      "lineStart": 304,
+      "lineEnd": 323,
+      "specText": "story-043 commit a65dbf0: \"minOut is derived from the same _creditedPrincipal(amount) expression so the swap floor and the credit cannot drift, keeping fairValue >= creditedPrincipal a provable solvency invariant.\" Mirrored in _creditedPrincipal NatSpec (lines 207-210): \"...which is what makes `fairValueOfShares >= creditedPrincipal` a provable solvency invariant.\"",
+      "specSource": "git commit a65dbf0 body; ERC4626MarketYieldStrategy.sol NatSpec lines 207-210",
+      "actualBehavior": "minOut = vault.convertToShares(creditedPrincipal); the swap guarantees sharesReceived >= minOut, so fairValue = convertToAssets(sharesReceived) >= convertToAssets(convertToShares(creditedPrincipal)). Because ERC4626 convertToShares and convertToAssets BOTH round down, convertToAssets(convertToShares(creditedPrincipal)) can be < creditedPrincipal by rounding dust, so the chain proves fairValue >= (a value possibly below creditedPrincipal), not fairValue >= creditedPrincipal.",
+      "deviation": "The story claims the solvency invariant is 'provable'; strictly it can be violated by sub-wei/few-wei ERC4626 double-round-down dust per deposit (accumulating on flat markets). The intent (conservative crediting) is faithfully implemented; only the absoluteness of the 'provable' claim is overstated.",
+      "lawImpacted": [2],
+      "crossReference": "Same rounding observation as code-scanner LOCAL-MKT-004 (local-low, solvency-invariant-rounding). Reported here only to make the story-claim overstatement visible in the spec-conformance report; not independently security-relevant.",
+      "recommendation": "Acknowledge the rounding dust in the invariant claim (fairValue >= creditedPrincipal - dust), or add a small protocol-favoring epsilon to minOut so the round-trip cannot dip below creditedPrincipal.",
+      "confidence": "high"
+    }
+  ],
+  "conformantStories": [
+    {
+      "storyTag": "story-037",
+      "verdict": "conformant (code) with a minor doc-staleness note",
+      "note": "SurplusTracker/SurplusWithdrawer contracts/interfaces/tests are removed; no code in scope references them. However IYieldStrategy.sol NatSpec still names the deleted systems (line 49 'the SurplusTracker system', line 61 'the SurplusWithdrawer system'). Pure NatSpec staleness, QA-level, not a behavioural finding — surfaced for the qa-bundler, not as an F."
+    },
+    {
+      "storyTag": "story-038",
+      "verdict": "conformant",
+      "note": "ERC4626MarketYieldStrategy buys shares on deposit (underlying->shares swap) and sells on withdraw (shares->underlying swap) via IAMMAdapter instead of vault.deposit()/redeem(); IAMMAdapter interface added. Matches the 'buy/sell vault tokens on the open market' intent for restriction-bearing vaults (sUSDe cooldown)."
+    },
+    {
+      "storyTag": "story-039",
+      "verdict": "conformant",
+      "note": "CurveAMMAdapter routes via Curve Router NG, stores one pre-computed route per ordered (tokenIn,tokenOut) pair, and swap() enforces the bidirectional invariant: reverts unless BOTH routes[in][out].configured AND routes[out][in].configured (lines 126-128). Does not reverse routes at runtime — matches the deliberate design. setRoute endpoint validation (path[0]==tokenIn, last-non-zero==tokenOut) is the only on-chain check; reverse-route INVERSE consistency is explicitly an off-chain/deploy-script trust assumption per the commit body and CLAUDE.md, so the .configured-flag-only check is faithful to stated intent (see code-scanner LOCAL-CRV-001/002 for the footgun lens)."
+    },
+    {
+      "storyTag": "story-041",
+      "verdict": "conformant",
+      "note": "Single skimSurplus(token,recipient) over the on-strategy EnumerableSet (base skimSurplus passes _authorizedClients.values()); ONE swap of aggregated totalShares; silent clamp replaced by the LOUD aggregate-surplus require (M-01 mitigation, line 464-467); empty client set is a no-op returning 0; backward-compatible authorizedClients(address) getter + getAuthorizedClients()/authorizedClientCount() present; principal untouched. Distinctness via EnumerableSet structurally closes M-01."
+    },
+    {
+      "storyTag": "story-042",
+      "verdict": "conformant",
+      "note": "Per-client setAsideBufferSize (percent 0-100, default 0); owner-gated setSetAsideBuffer(client!=0, percent<=100) with SetAsideBufferSet event. Fast path (totalBufferShares==0) forwards full swap output to recipient unchanged. Buffered path redeems/swaps ONCE to self then sets aside underlyingReceived*bufferShares[i]/totalShares to each client and sends remainder (+dust) to recipient, returning the reduced amount; minOut still computed on full totalShares. Matches commit 5f9abdd intent."
+    },
+    {
+      "storyTag": "story-043",
+      "verdict": "conformant (with FAITH-002 claim-overstatement note)",
+      "note": "Principal credited as amount*(MAX_BPS-slippageToleranceBps)/MAX_BPS for both clientBalances and totalDeposited; minOut derived from the same _creditedPrincipal value; Deposited event still emits the nominal amount. Conservative crediting is faithfully implemented; only the 'provable' qualifier on the solvency invariant is overstated (see FAITH-002)."
+    },
+    {
+      "storyTag": "story-044",
+      "verdict": "conformant",
+      "note": "_depositInternal returns creditedPrincipal; deposit() and depositAsOwner() both percolate it (previously void). IYieldStrategy.deposit and AYieldStrategy.deposit updated to returns(uint256 creditedPrincipal) with nominal-vs-credited NatSpec; market strategy returns the haircut, no accounting/withdraw/skim/Deposited-event changes. Matches commit 2306719 intent."
+    }
+  ],
+  "unsafeStoryFlags": [],
+  "observationsNotFindings": [
+    {
+      "topic": "emergencyWithdraw share/principal desync",
+      "detail": "_emergencyWithdraw (lines 386-395) moves raw vault shares to owner without touching clientBalances/totalDeposited. No story specifies a principal update on emergency, so this is not a Law-2 faithfulness violation; it is the owner footgun already captured by code-scanner LOCAL-MKT-003 (totalBalanceOf overstates afterward; later withdrawers clamp on a shrunken share pool). Routed to the operational-hazard lane, not a faithfulness F."
+    },
+    {
+      "topic": "totalWithdrawal cached-vs-live balance",
+      "detail": "Phase 1 caches state.balance = this.balanceOf(token,client) (principal), but ERC4626Market._totalWithdraw (lines 404-435) ignores the passed-in cached `amount` (using it only as the >0 guard) and zeroes/decrements by the LIVE clientBalances[client]. If principal changes during the 24h window the executed amount differs from the WithdrawalInitiated-announced balance. No story-036 acceptance criterion pins execution to the cached snapshot, and balance changes require protocol-owned client/owner action, so this is a documented quirk (profile note), not a faithfulness finding. Flagged for visibility only."
+    }
+  ],
+  "errors": []
+}

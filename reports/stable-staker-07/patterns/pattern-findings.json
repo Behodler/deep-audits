@@ -1,0 +1,193 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "pattern-matching",
+  "commit": "7e9ef80a916081148e28df60ef6daf83c9157a3b",
+  "scope": [
+    "src/StableStaker.sol",
+    "src/StableStakerMigrator.sol"
+  ],
+  "patternsChecked": 29,
+  "findingsCount": 1,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "type": "principal-accounting-desync",
+      "severity": "potential-medium",
+      "patternSeverity": "HIGH",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "line": 213,
+      "lineEnd": 216,
+      "description": "Adopting a yield strategy over a non-empty IDLE pool sweeps the contract's idle balance into the new strategy via strategy.deposit(token, idleBalance, address(this)) but DISCARDS the returned creditedPrincipal and never reconciles poolInfo[token].totalStaked. Everywhere else (stake/depositFor via _routeDeposit) totalStaked is credited with the strategy's returned creditedPrincipal, which a haircutting strategy (ERC4626MarketYieldStrategy: amount * (MAX_BPS - slippageToleranceBps)/MAX_BPS) books BELOW the nominal amount. After adoption, poolInfo.totalStaked retains the full nominal idle total while strategy.principalOf(this) = idleBalance*(1-slip), so totalStaked overstates strategy-backed principal by the slippage haircut.",
+      "mechanism": "totalStaked > strategy.principalOf(this) is a silent farm-vs-strategy desync. The underwater guard _isUnderwater() compares strategy-internal totalBalanceOf vs principalOf (both reflect the haircut booking) and is therefore BLIND to the gap, so healthy withdraw()s proceed and drain the strategy at full nominal `amount` each (requested), paying received balance-delta. Early withdrawers are made whole; the strategy principal is exhausted while poolInfo.totalStaked still shows remaining stake, so the LAST withdrawer(s) cannot be paid out (strategy.withdraw reverts / under-delivers). The shortfall is NOT attributed to protocol surplus (it is an unintended loss imposed on slow stakers), distinguishing it from the documented requested-vs-received rounding rule on the normal withdraw path.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "strategy.deposit(token, idleBalance, address(this))",
+        "IERC20(token).balanceOf(address(this))",
+        "totalBalanceOf / principalOf (in _isUnderwater)",
+        "yieldStrategy"
+      ],
+      "missingMitigations": [
+        "Return value of strategy.deposit (creditedPrincipal) not captured at L215",
+        "poolInfo[token].totalStaked not reconciled to credited principal after the adoption sweep",
+        "No invariant tying poolInfo.totalStaked to strategy.principalOf(address(this))"
+      ],
+      "preconditions": [
+        "Token has accumulated idle principal (staked while yieldStrategy == address(0))",
+        "Owner adopts a HAIRCUTTING strategy (e.g. ERC4626MarketYieldStrategy) over the non-empty pool; direct/full-credit ERC4626 strategies that return `amount` do not trigger the skew"
+      ],
+      "severityRationale": "Pattern class is HIGH; realistic impact bounded to the strategy's slippageToleranceBps on a single adoption event and gated on an owner config action -> Medium. Also an owner FOOTGUN under Law 3 (non-obvious consequence of an otherwise-legitimate setYieldStrategy call).",
+      "ledgerCorrelation": "Matches ledger fingerprint dab5a65613c7af50bb124ac4bcde1ed259355c7e1ba654a732031c9511fed510 (M-01 'Idle-pool strategy adoption discards creditedPrincipal, shorting last withdrawers', status=submitted, firstSeenRun=stable-staker-06, lastSeenCommit=7e9ef80). Still LIVE at HEAD; PoC PoC_M01_AdoptionHaircut.t.sol passing.",
+      "notes": "Confirms the existing submitted Medium independently via pattern signatures; not a new bug.",
+      "references": [
+        "lib/stable-staker/src/StableStaker.sol#L198-L220 (setYieldStrategy)",
+        "lib/stable-staker/src/StableStaker.sol#L656-L662 (_routeDeposit credits returned creditedPrincipal)",
+        "lib/stable-staker/lib/reflax-yield-vault/src/interfaces/IYieldStrategy.sol#L24 (deposit returns creditedPrincipal, haircut for market strategy)"
+      ]
+    }
+  ],
+  "manualReviewCount": 2,
+  "manualReview": [
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "DIVISION-PRECISION",
+      "type": "division-before-multiplication",
+      "severity": "potential-low",
+      "patternSeverity": "MEDIUM",
+      "contract": "src/StableStaker.sol",
+      "function": "phUSDPerDay",
+      "line": 169,
+      "relatedLines": [621, 549],
+      "description": "phUSDPerDay converts the daily budget to a per-second rate by integer division FIRST (perSecond = amountPerDay / SECONDS_PER_DAY, L169), and that floored rate is later multiplied by elapsed time (reward = elapsed * pool.phusdPerSecond, L621; mirrored in pendingReward L549). This is division-before-multiplication: the sub-second fractional emission is truncated permanently into the stored rate.",
+      "mechanism": "Realized daily emission = floor(amountPerDay/86400)*86400 <= amountPerDay; the lost remainder is up to 86399 wei of the reward token per day. For 18-decimal phUSD this is dust (<=8.64e4 wei vs >=1e18 budgets). It becomes meaningful only if a very small per-day budget is set (e.g. amountPerDay < 86400 wei -> perSecond == 0 -> zero emission). All accumulator math (accPhusdPerShare += reward*ACC_PRECISION/totalStaked) is correctly multiply-before-divide, so this is the only div-before-mult site.",
+      "confidence": "low",
+      "matchedSignatures": ["amountPerDay / SECONDS_PER_DAY", "elapsed * pool.phusdPerSecond"],
+      "missingMitigations": ["No higher-precision per-second representation (e.g. store amountPerDay and divide once at accrual with ACC_PRECISION scaling)"],
+      "severityRationale": "Bounded to sub-rate dust for 18-decimal phUSD and rounds DOWN (protocol-favoring). Almost certainly the project's documented/known 'integer-division dust rounds DOWN' rounding rule rather than a distinct bug. Routed to manual review for confirmation, not dropped (Law 1).",
+      "preconditions": ["Owner sets a per-day budget that is small relative to 86400 in the reward token's base units"],
+      "references": ["lib/stable-staker/src/StableStaker.sol#L167-L172", "lib/stable-staker/CLAUDE.md 'dust always rounds DOWN'"]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "unbounded-loop-with-external-calls",
+      "severity": "potential-low",
+      "patternSeverity": "MEDIUM",
+      "contract": "src/StableStaker.sol",
+      "function": "batchMigrate",
+      "line": 440,
+      "relatedLines": [445],
+      "crossContract": {
+        "contract": "src/StableStakerMigrator.sol",
+        "function": "migrate",
+        "lines": [65, 76]
+      },
+      "description": "batchMigrate iterates over a caller-supplied users[] calling _exitPosition per user (L440-445); StableStakerMigrator.migrate then iterates the same set calling newStaker.depositFor per migrated user (L76-81, each an external transferFrom + optional strategy.deposit). A batch sized larger than the block gas limit reverts wholesale.",
+      "mechanism": "Gas-bound DoS only: the array is built off-chain by the migrator (onlyMigrator) and paged via getStakers/getStakersRange (L557-577, end clamped). No per-user transfer-TO-user occurs in the credit path (batchMigrate makes a single aggregate transfer to the migrator; depositFor only pulls + credits accounting), so a single unreceivable/blacklisted user does not brick the batch. Risk is the operator over-sizing a batch.",
+      "confidence": "low",
+      "matchedSignatures": ["for (uint256 i = 0; i < users.length; i++)"],
+      "missingMitigations": ["No explicit max-batch bound in-contract (relies on operator paging)"],
+      "severityRationale": "Owner/migrator-controlled batch size with built-in pagination helpers; Law 3 trusts the operator to batch sensibly. QA/Low. Maps to existing ledger Low fingerprint 59eebbf87b... (status=open).",
+      "ledgerCorrelation": "Related to ledger 'Unbounded per-user external-call loop in migrateOut/migrate' (59eebbf8, low, open) although that entry references the removed migrateOut; the equivalent loop now lives in batchMigrate + migrator.migrate.",
+      "preconditions": ["Operator passes a users[] batch large enough to exceed the block gas limit"],
+      "references": ["lib/stable-staker/src/StableStaker.sol#L429-L450", "lib/stable-staker/src/StableStakerMigrator.sol#L61-L84"]
+    }
+  ],
+  "patternsCheckedCleanNoMatch": [
+    {
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "verdict": "no-match",
+      "reason": "_updatePool runs at the head of every stake/withdraw/claim/depositFor before any share mutation; _settle mints pending at the OLD amount/acc and rewardDebt is recomputed only after amount changes; phUSDPerDay settles at the old rate (calls _updatePool) before mutating phusdPerSecond. Empty-pool windows fast-forward lastRewardTime without accruing, so no retroactive credit to late stakers. All notVulnerableWhen conditions satisfied."
+    },
+    {
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "verdict": "no-match",
+      "reason": "phUSD.mint amount == settled pending only; _updatePool is the sole writer of accPhusdPerShare folding in exactly elapsed*phusdPerSecond; phUSDPerDay cap bounds per-window emission. Every mint path either updates rewardDebt to the current accumulator (stake/withdraw/claim/depositFor) or zeroes amount+rewardDebt (_exitPosition), so no double-mint for the same accrual. Core emission-cap invariant holds."
+    },
+    {
+      "patternId": "EMISSION-WINDOW-BOUNDARY",
+      "verdict": "no-match",
+      "reason": "Accrual strictly bounded to [lastRewardTime, now]; if (block.timestamp <= lastRewardTime) returns (correct <=); totalStaked==0 guard precedes the division so no div-by-zero and empty windows accrue nothing; pendingReward view guards totalStaked>0. No windowEnd exists (open-ended mint-on-demand emission)."
+    },
+    {
+      "patternId": "REWARD-RUNWAY-DEPLETION",
+      "verdict": "no-match",
+      "reason": "Tagged for stable-staker in the DB note, but the funded-budget machinery it keys on (rewardBudget/windowEnd/committedDebt/_safePay/_syncBudget) does not exist. Rewards are minted on demand against an infinite mint authority capped by phUSDPerDay; there is no funded runway to deplete. The relevant safety property (emission cap) is covered by MINT-ON-DEMAND-OVERMINT (clean)."
+    },
+    {
+      "patternId": "ERC4626-INFLATION / FIRST-DEPOSITOR-ATTACK",
+      "verdict": "no-match",
+      "reason": "StableStaker mints no shares; user.amount tracks principal 1:1 and accPhusdPerShare is reward accounting, not a redeemable share price. No totalSupply()==0 special-casing. Any ERC4626 first-depositor inflation lives inside the OOS reflax-yield-vault strategy, whose root cause is out of scope."
+    },
+    {
+      "patternId": "REENTRANCY-ERC777",
+      "verdict": "no-match",
+      "reason": "All external state-changing entry points (stake/withdraw/claim/emergencyWithdraw/initiateMigration/batchMigrate/userMigrate/depositFor) carry nonReentrant; the only unguarded mutator is rescueERC20 (onlyOwner), whose reserve check re-evaluates live balance per call so a transfer hook cannot bypass the principal reserve. Non-standard/hook tokens are an owner-registration choice (Law 3) and project known-invalid."
+    },
+    {
+      "patternId": "RETURN-VALUE-IGNORE",
+      "verdict": "no-match (covered)",
+      "reason": "SafeERC20 used for all token transfers/approvals. The one impactful ignored return (strategy.deposit creditedPrincipal in setYieldStrategy) is captured as PATTERN-001. EnumerableSet add/remove ignored returns are an existing info-level ledger item, not security-relevant."
+    },
+    {
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "verdict": "no-match",
+      "reason": "batchMigrate pays a fixed per-user snapshot credit p_i*min(R,P)/P bounded by the contributor's own snapshot principal; the realized pot R is snapshotted at initiateMigration BEFORE any exit loop; recipient is the onlyMigrator caller (pinned, not arbitrary). No count-only gate, no caller-chosen windfall."
+    },
+    {
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "verdict": "no-match",
+      "reason": "No two-step/commit setter exists; phUSDPerDay is single-step and settles accrual at the old rate before applying the new one. No block.number window, no setTargetAPY."
+    },
+    {
+      "patternId": "UNSAFE-DOWNCAST",
+      "verdict": "no-match",
+      "reason": "All accounting fields are uint256; no narrowing casts present (grep for uint128/96/64/32/16/8 and int128/64 returns none)."
+    },
+    {
+      "patternId": "ORACLE-STALE / ORACLE-ROUNDID / FLASH-LOAN-PRICE / MISSING-SLIPPAGE",
+      "verdict": "no-match",
+      "reason": "No oracle reads (no latestRoundData/AggregatorV3) and no in-scope spot-price/swap usage. balanceOf(address(this)) is used only for atomic balance-delta measurement, the underwater buffer sufficiency check, and the rescue reserve check, none of which derive a price; donation cannot inflate a delta. AMM/slippage exposure is internal to the OOS market strategy."
+    },
+    {
+      "patternId": "UNPROTECTED-INIT / STORAGE-COLLISION",
+      "verdict": "no-match",
+      "reason": "Not upgradeable/proxy; constructor-initialized, no initialize()/Initializable, no delegatecall."
+    },
+    {
+      "patternId": "SIGNATURE-REPLAY / PERMIT-FRONTRUN / CROSS-CHAIN-REPLAY",
+      "verdict": "no-match",
+      "reason": "No ecrecover/ECDSA/permit/lzReceive/ccipReceive/block.chainid usage."
+    },
+    {
+      "patternId": "DOUBLE-VOTING / TIMELOCK-BYPASS",
+      "verdict": "no-match",
+      "reason": "No governance/voting/timelock surface."
+    },
+    {
+      "patternId": "SELFDESTRUCT-FORCE-ETH",
+      "verdict": "no-match",
+      "reason": "No ETH handling: no payable functions, no msg.value, no address(this).balance dependence."
+    },
+    {
+      "patternId": "INCORRECT-OPERATOR",
+      "verdict": "no-match",
+      "reason": "Boundary checks reviewed (lastRewardTime <=, amount >=, range start<=end with clamped end, min(R,P) via <, reserve bal>=reserved+amount) are all correct; no off-by-one identified."
+    },
+    {
+      "patternId": "CENTRALIZATION-ADMIN",
+      "verdict": "suppressed-by-law-3",
+      "reason": "onlyOwner config (addToken/phUSDPerDay/setMigrator/setPauser/setYieldStrategy/rescueERC20) is owner-trusted; generic centralization is QA/Low and suppressed per Law 3. rescueERC20 has an explicit user-principal reserve guard. Non-obvious owner footguns are surfaced where they exist (e.g. PATTERN-001 adoption sweep; the documented replace-in-use-strategy hazard)."
+    },
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "verdict": "no-match (known-invalid)",
+      "reason": "forceApprove used for strategy/migrator allowances; approve race is project known-invalid / QA."
+    }
+  ]
+}

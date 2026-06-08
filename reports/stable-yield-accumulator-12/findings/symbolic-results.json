@@ -1,0 +1,134 @@
+{
+  "project": "stable-yield-accumulator",
+  "runTimestamp": "2026-06-07T00:00:00Z",
+  "tool": "halmos",
+  "toolVersion": "0.3.3",
+  "solver": "yices (default); z3 cross-checked; bitwuzla unavailable (download blocked, offline)",
+  "submoduleHead": "71abe3e088559cb5d9c10e8475dc67e7cc57fac9",
+  "inScopeContract": "src/StableYieldAccumulator.sol",
+  "testFile": "workspace/stable-yield-accumulator/test/SymbolicSYA.t.sol",
+  "targets": [
+    "_normalizeAmount (src L586-609)",
+    "_denormalizeAmount (src L617-640)",
+    "claim() payment math (src L494-498): claimerPayment = totalNormalizedYield * (10000 - discountRate) / 10000 ; actualPayment = _denormalizeAmount(claimerPayment, rewardToken)"
+  ],
+  "methodology": "Two engines. (A) Standalone re-implementation of _normalizeAmount/_denormalizeAmount copied VERBATIM (identical operator order, types, checked 0.8.20 arithmetic) so Halmos can reason over the math with fully-symbolic (amount, decimals, rate, discount) free of the contract's external calls/loops/storage. (B) A subclass harness (SYAHarness) exposing the REAL internal functions, configured through the real setTokenConfig. Equivalence between (A) and the real bytecode is PROVEN (check_implMatchesRealCode_* PASS), so the standalone proofs/counterexamples transfer to the deployed contract. Halmos auto-symbolizes test-function parameters; vm.assume constrains decimals<=18, discount<=10000, rate to realistic ranges.",
+
+  "testsGenerated": 24,
+  "passed": 8,
+  "failed": 4,
+  "timeout": 8,
+  "failedAreExpectedRefutations": true,
+  "note_on_failed": "All 4 [FAIL] results are EXPECTED refutations: each asserts 'payment > 0' which Halmos refutes with a concrete counterexample, thereby PROVING the zero-payment hazard is reachable. They are not test-harness errors.",
+  "note_on_timeout": "All 8 [TIMEOUT] results involve a 256-bit multiply-then-divide (x*scale then /scale, or symbolic-rate (x*rate)/1e18). This is a known SMT (yices/z3) weakness on bitvector udiv of a product, NOT a contract defect. The security-relevant direction (no over-charge: normalize(denormalize(y)) <= y) WAS discharged (check_noOvercharge_dec6_rate1_bounded PASS). bitwuzla, which handles bv-division better, could not be used (offline, download blocked).",
+
+  "findings": [
+    {
+      "id": "SYMBOLIC-001",
+      "testName": "check_realCode_denormNonZero_dec6 / check_paymentNonZero_dec6_noDiscount / _symDiscount / _discount2pct",
+      "type": "rounding-to-zero / value-leak (mispricing)",
+      "result": "FAIL (refuted: payment can be 0 while yield > 0)",
+      "severity": "verified-medium",
+      "confidence": "verified",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim / _denormalizeAmount",
+      "reconciles": ["ledger L-01", "CODE-001", "ECON-01", "profile PARK-02"],
+      "description": "Symbolic execution proves actualPayment floors to exactly 0 while a strictly positive amount of yield is skimmed and delivered to the claimer. Confirmed on BOTH the standalone math and the REAL deployed _denormalizeAmount bytecode (check_realCode_denormNonZero_dec6). For a reward token with normalizedExchangeRate == 1e18 and decimals d < 18, _denormalizeAmount divides the 18-dec discounted amount by 10**(18-d); any discounted value below 10**(18-d) becomes 0.",
+      "counterexample": {
+        "totalNormalizedYield (Y)": "549755813888 (0x8000000000, ~5.5e11 wei, 18-dec normalized)",
+        "discountRate": "0 (also reproduced at 200 = 2% and symbolic discount)",
+        "rewardTokenDecimals": 6,
+        "rewardTokenExchangeRate": "1e18 (1:1)",
+        "claimerPayment": "549755813888 (< 1e12)",
+        "actualPayment": "0",
+        "result": "claimer pays 0 reward token yet receives the underlying yield"
+      },
+      "proof": "Halmos counterexample (yices); reproduced on real bytecode via SYAHarness.exposedDenormalize."
+    },
+    {
+      "id": "SYMBOLIC-002",
+      "testName": "check_boundary_aboveThreshold_dec6 (PASS) + check_boundary_belowThreshold_dec6 (PASS)",
+      "type": "exact-boundary characterization",
+      "result": "PROVEN (both complementary halves PASS)",
+      "severity": "informational (characterization of SYMBOLIC-001)",
+      "confidence": "verified",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "_denormalizeAmount",
+      "description": "Halmos PROVES the precise zero-payment region (no counterexample for either complementary half). For a reward token with normalizedExchangeRate == 1e18 and decimals d < 18: actualPayment == 0  if-and-only-if  claimerPayment < 10**(18 - d), where claimerPayment = floor(totalNormalizedYield * (10000 - discountRate) / 10000). For USDC (d=6) the threshold is 10**12 wei of 18-dec value (= $0.000001 of discounted yield). The discount WIDENS the zero-region by a factor of 10000/(10000 - discountRate).",
+      "exactCondition": "actualPayment == 0  <=>  totalNormalizedYield * (10000 - discountRate) / 10000  <  10**(18 - rewardTokenDecimals)",
+      "mostAcuteTrigger": "An 18-decimal strategy token (DAI/DOLA/sDAI-style) delivers normalize(x,18dec)=x (no upscaling), so totalNormalizedYield can be as low as a few wei. Against a 6-dec reward token (USDC) this falls below the 1e12 floor, so dust-to-small per-claim surplus is skimmed for zero payment. minRewardTokenSupplied defaults to 0 (guard disabled), so nothing stops a zero-payment claim.",
+      "proof": "Halmos [PASS] on both check_boundary_aboveThreshold_dec6 and check_boundary_belowThreshold_dec6."
+    },
+    {
+      "id": "SYMBOLIC-003",
+      "testName": "check_noOvercharge_dec6_rate1_bounded (PASS); check_noOvercharge_dec6/8/18 (TIMEOUT)",
+      "type": "no-over-charge (SLITHER-001 divide-before-multiply over-charge check)",
+      "result": "PARTIAL-PROOF: no over-charge proven for 6-dec, 1:1 rate, y<1e15; symbolic-rate variants inconclusive (solver timeout)",
+      "severity": "informational (no over-charge found)",
+      "confidence": "verified-in-domain",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "_denormalizeAmount / _normalizeAmount",
+      "description": "Property normalize(denormalize(y)) <= y (the reward tokens actually charged re-normalize to no MORE than what was owed) is PROVEN for a 6-dec reward token at 1:1 rate over the bounded domain (PASS, 8.7s). No counterexample to over-charge was found anywhere. _denormalizeAmount only ever rounds DOWN (floor), so it cannot over-produce relative to exact arithmetic. The SLITHER-001 divide-before-multiply pattern lives exclusively in the decimals > 18 branch of _denormalizeAmount (src L635-636), which is DEAD CODE: setTokenConfig reverts InvalidDecimals for decimals > 18, so no configured token can reach it. The symbolic-rate variants (check_noOvercharge_dec6/8/18) are INCONCLUSIVE (timeout) due to the nonlinear (y*1e18)/rate bitvector division, not due to any violation.",
+      "proof": "Halmos [PASS] check_noOvercharge_dec6_rate1_bounded; [TIMEOUT] on symbolic-rate variants."
+    }
+  ],
+
+  "proofs": [
+    {
+      "testName": "check_implMatchesRealCode_normalize_dec6",
+      "result": "PASS",
+      "property": "Standalone normImpl == real _normalizeAmount bytecode for dec6 over symbolic (amount, rate). Establishes the standalone math is bit-identical to the deployed contract."
+    },
+    {
+      "testName": "check_implMatchesRealCode_denormalize_dec6",
+      "result": "PASS",
+      "property": "Standalone denormImpl == real _denormalizeAmount bytecode for dec6 over symbolic (amount, rate)."
+    },
+    {
+      "testName": "check_boundary_aboveThreshold_dec6",
+      "result": "PASS",
+      "property": "claimerPayment >= 10**(18-6)  =>  actualPayment > 0 (dec6, 1:1). Upper half of the exact zero-payment boundary."
+    },
+    {
+      "testName": "check_boundary_belowThreshold_dec6",
+      "result": "PASS",
+      "property": "0 < claimerPayment < 10**(18-6)  =>  actualPayment == 0 (dec6, 1:1). Lower half of the exact zero-payment boundary."
+    },
+    {
+      "testName": "check_paymentNonZero_dec18",
+      "result": "PASS",
+      "property": "For an 18-dec, 1:1 reward token, claimerPayment > 0 => actualPayment > 0. An 18-dec reward token is immune to the decimal floor; the hazard requires a sub-18-dec reward token (e.g. USDC)."
+    },
+    {
+      "testName": "check_roundTrip_exact_noRate_dec18",
+      "result": "PASS",
+      "property": "denormalize(normalize(x,18,1e18)) == x exactly (lossless) for an 18-dec, 1:1 token."
+    },
+    {
+      "testName": "check_noOvercharge_dec6_rate1_bounded",
+      "result": "PASS",
+      "property": "normalize(denormalize(y,6,1e18)) <= y for y < 1e15. The denormalize step never over-charges (floor-only); refutes any over-production."
+    }
+  ],
+
+  "inconclusive_timeouts": [
+    "check_roundTrip_dec6 / _dec8 / _dec18 (symbolic rate): denormalize(normalize(x)) <= x — solver timeout on (x*scale*rate)/.../scale udiv. Property holds by manual proof (each step floors).",
+    "check_roundTrip_exact_noRate_dec6 / check_roundTrip_dec6_rate1_bounded: (x*1e12)/1e12 == x (and <= x). Mathematically exact (x*1e12 divisible by 1e12, x<1e30 no overflow) but the mul-then-div inversion is intractable for yices/z3 at 256-bit. The complementary no-overcharge direction (div-then-mul) WAS proven (check_noOvercharge_dec6_rate1_bounded PASS).",
+    "check_noOvercharge_dec6/8/18 (symbolic rate) and check_noOvercharge_dec6_rateDepeg_bounded / check_roundTrip_dec*_rateDepeg_bounded: nonlinear symbolic-rate division timeout."
+  ],
+
+  "manualProofSupplement": {
+    "roundTrip": "denormalize(normalize(x)) <= x: normalize multiplies/scales-with-floor, denormalize divides-with-floor; floor(floor(x*A*r/1e18)*1e18/r / B) <= x because each floor only decreases the value and the scale factors A=10**(18-d), B=10**(18-d) cancel. When rate==1e18 (no adjustment) the round-trip is LOSSLESS (x*A divisible by A). Halmos proved the lossless case for d=18 and the no-overcharge direction for d=6.",
+    "noOvercharge": "normalize(denormalize(y)) <= y by the same floor-monotonicity; proven in-domain by Halmos.",
+    "deadCode": "decimals>18 branches in _normalizeAmount (L599-601) and _denormalizeAmount (L635-636) are unreachable because setTokenConfig enforces decimals<=18 (InvalidDecimals). The SLITHER-001 divide-before-multiply is confined to that dead denormalize branch."
+  },
+
+  "runCommands": [
+    "halmos --match-contract SymbolicSYA --solver-timeout-assertion 90000 --statistics",
+    "halmos --match-contract SymbolicSYA --function check_<name> --solver-timeout-assertion 120000   (per-property targeting)"
+  ],
+  "artifacts": {
+    "testFileAbsolute": "/home/justin/code/audits/workspace/stable-yield-accumulator/test/SymbolicSYA.t.sol",
+    "resultsAbsolute": "/home/justin/code/audits/reports/stable-yield-accumulator-12/findings/symbolic-results.json"
+  }
+}

@@ -1,0 +1,333 @@
+{
+  "contract": "src/StableYieldAccumulator.sol",
+  "scope": "IN-SCOPE (primary)",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "submoduleHead": "71abe3e088559cb5d9c10e8475dc67e7cc57fac9",
+  "contractLastChangedAt": "a9b21fd ([story-025] Adopt skimSurplus; HEAD 71abe3e is a vault interface bump)",
+  "solidityVersion": "^0.8.20",
+  "summary": "Permissionless yield-consolidation hub for the Phoenix architecture. Owner registers a dynamic set of IYieldStrategy adapters, each mapped to one underlying stablecoin. An NFT-gated external 'claimer' calls claim(): for every non-exempt, non-paused registered strategy the contract calls skimSurplus(token, claimer) — which delivers that strategy's batched multi-client surplus (yield) directly to the claimer — then charges the claimer a single rewardToken payment equal to the discounted, decimal-normalized sum of the skimmed yield. The payment is split between an optional `nudge` recipient and `phlimbo` (which PULLS its share via collectReward). Exactly one NFT (ERC1155, index-addressed) is burned per claim. No oracles/AMMs: cross-token value is reconciled via owner-set decimals + a 1:1-by-default normalizedExchangeRate. The discount incentivizes external actors to pay gas + payment in exchange for the raw yield tokens.",
+
+  "purpose": "Consolidate many per-strategy stablecoin yields into a single rewardToken stream for Phlimbo distribution, so Limbo stakers handle only 2 tokens (phUSD + one stable) and Phlimbo needs no migration as strategies change. Conversion is decentralized: external claimers, not the protocol, perform the de-facto swap (pay rewardToken, receive heterogeneous yield).",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": false,
+    "noUnboundedLoopsNote": "Several loops. Owner-bounded loops over yieldStrategies[] (claim, calculateClaimAmount, getTotalYield, removeYieldStrategy) are fine (owner controls cardinality). TWO caller-influenced loops: (a) claim()/calculateClaimAmount() nest an inner loop over caller-supplied exemptStrategies[] inside the per-strategy loop -> O(nStrategies * nExempt); exemptStrategies has NO length or dedup bound (entries need only be registered, duplicates allowed), so a caller can inflate gas, but only on their OWN tx (self-grief, not a DoS on others). (b) canClaim() (view bot-helper) loops i=1..nftMinter.nextIndex(); unbounded by the NFTMinter's dispatcher count, but it is a view never used in the claim path.",
+    "checkedArithmetic": "verified",
+    "checkedArithmeticNote": "0.8.20, no unchecked blocks, no assembly. All arithmetic reverts on overflow. Multiplications in _normalizeAmount (amount * 10**(18-decimals), scaled*exchangeRate) and the discount/nudge math are standard mul-before-div ordering. decimals>18 branches in _normalize/_denormalize are dead code (setTokenConfig rejects decimals>18).",
+    "reentrancyGuarded": ["claim"],
+    "reentrancyGuardedNote": "claim() is nonReentrant (OZ ReentrancyGuard) AND whenNotPaused. It is the only function making untrusted external calls (skimSurplus to claimer, NFT burn, rewardToken transfers, phlimbo pull). All other external calls live in owner-only setters or view functions.",
+    "accessControlled": ["setPauser", "addYieldStrategy", "removeYieldStrategy", "setTokenConfig", "pauseToken", "unpauseToken", "setDiscountRate", "setPhlimbo", "setRewardToken", "approvePhlimbo", "setNudgeAddress", "setNudgeSplit", "setNFTMinter", "pause", "unpause"],
+    "accessControlNote": "All registry/config/funding setters are onlyOwner. pause() is onlyPauser. unpause() is owner OR pauser (Behodler3 redundancy pattern). claim() is permissionless but NFT-gated (burns 1 unit). All view/preview helpers are open.",
+    "initializerProtected": "n/a",
+    "initializerProtectedNote": "Not upgradeable. constructor sets Ownable(msg.sender); pauser defaults to address(0) (pausing disabled until owner calls setPauser).",
+    "pausable": true,
+    "pausableNote": "Two-level pause: global whenNotPaused gate on claim(), plus per-token tokenConfigs[token].paused (a paused token is SKIPPED via continue in claim/calculateClaimAmount, not reverted — post-M-02 fix, enables surgical token isolation)."
+  },
+
+  "localFindings": [],
+  "localFindingsNote": "No NEW single-contract local findings surfaced at this profiling pass. Pre-existing ledger items (L-01 zero-payment floor, L-02 phlimbo allowance depletion, L-03 NatSpec pay-then-skim vs code skims-then-pays, C-01 owner config centralization) remain open and are not re-raised here — they are reconciled by the sanitizer/ledger. Several PARKED concerns below are deliberately surfaced (not findings yet) for the code-scanner / econ-scanner because their exploitability needs cross-contract or economic context. Recall over tidiness (Law 1): none are suppressed.",
+
+  "parkedConcernsForScanners": [
+    {
+      "id": "PARK-01",
+      "tag": "decimal-normalization / reward-token-config footgun",
+      "where": "claim() L498/_denormalizeAmount; _normalizeAmount fallback L591",
+      "concern": "Both _normalizeAmount and _denormalizeAmount treat an UNCONFIGURED token (decimals==0 && normalizedExchangeRate==0) as 18-decimals, 1:1. If the owner sets rewardToken to a 6-decimal token (e.g. USDC) but forgets setTokenConfig(rewardToken,6,1e18), _denormalizeAmount returns the raw 18-dec amount, so claimers are charged ~1e12x the intended payment (or, symmetrically, an unconfigured 6-dec STRATEGY token under-counts yield by 1e12). Pure config footgun (no malicious owner needed) that silently breaks the core value-conservation. Verify whether any deployment/wiring guarantees rewardToken + every strategyToken is configured.",
+      "deferReason": "Exploitability/severity depends on deployment wiring and economic impact (econ-scanner)."
+    },
+    {
+      "id": "PARK-02",
+      "tag": "skims-then-pays ordering (CEI) + L-01 zero-payment",
+      "where": "claim() loop L484 (skimSurplus to claimer) precedes payment pull L509",
+      "concern": "Claimer RECEIVES all strategy yield (skimSurplus sends underlying to msg.sender) BEFORE paying. Atomicity holds (nonReentrant + a revert rolls back the skims), and payment is derived from the actual underlyingReceived. BUT: (1) NatSpec at top + interface claim that payment happens before skim (L-03 doc/impl mismatch); (2) after discount + _denormalizeAmount to reward-token decimals, actualPayment can floor to 0 while yield was delivered (ledger L-01) — minRewardTokenSupplied defaults are caller-chosen and 0 disables the guard. Confirm L-01 still live at this commit.",
+      "deferReason": "Economic value-leak quantification belongs to econ-scanner; cross-checked against ledger L-01/L-03."
+    },
+    {
+      "id": "PARK-03",
+      "tag": "nudge misconfig bricks all claims (owner footgun)",
+      "where": "claim() L506 NudgeNotConfigured; setNudgeSplit L396 (no nudge!=0 check)",
+      "concern": "setNudgeSplit(>0) does not require nudge != address(0). If owner sets nudgeSplit>0 while nudge is unset, EVERY claim with yield reverts NudgeNotConfigured (after the skim loop, so still atomic). Permissionless claim path is fully bricked until owner sets the nudge address or zeroes the split. Non-obvious ordering footgun.",
+      "deferReason": "Availability impact; recoverable by owner. Severity for severity-classifier."
+    },
+    {
+      "id": "PARK-04",
+      "tag": "phlimbo standing-allowance / collectReward pull",
+      "where": "claim() L519 IPhlimbo.collectReward(phlimboAmount); approvePhlimbo L369",
+      "concern": "phlimbo PULLS its share from this contract via collectReward (transferFrom), requiring a standing allowance set by owner via approvePhlimbo. Once that allowance is exhausted, every claim reverts until owner re-approves (ledger L-02). Inverted-control design; the contract never tops up its own allowance. Confirm L-02 live and whether nudge-split reduces the per-claim pull (it does — phlimboAmount = actualPayment - nudgeAmount).",
+      "deferReason": "Cross-contract (phlimbo collectReward semantics) — interaction analysis; ledger L-02."
+    },
+    {
+      "id": "PARK-05",
+      "tag": "exchange-rate / discount owner authority (centralization)",
+      "where": "setTokenConfig L280 (no bound on normalizedExchangeRate); setDiscountRate L324 (cap 10000 == 100%)",
+      "concern": "normalizedExchangeRate is unbounded; discount may be set to 100% (claimer pays 0, receives all yield). These are designed owner levers (depeg handling / incentive) — ledger C-01 centralization, and known-issues #4/#5 suppress 'owner drains' High framings. Re-surfaced only so a non-obvious footgun re-check is possible; do NOT re-escalate to High.",
+      "deferReason": "Centralization C-01 already recorded; suppress owner-drain High per known issues."
+    },
+    {
+      "id": "PARK-06",
+      "tag": "preview vs actual yield divergence",
+      "where": "calculateClaimAmount/getYield use _getYieldForStrategy (snapshot estimate); claim uses skimSurplus return (post-redeem/post-swap)",
+      "concern": "The preview helpers aggregate totalBalanceOf-principalOf across getAuthorizedClients() (a snapshot ESTIMATE in vault-asset terms), whereas claim() charges based on skimSurplus's actual post-slippage/post-rounding underlyingReceived. The two can diverge (large for AMM-routed strategies per vault CLAUDE.md). This is by design (minRewardTokenSupplied is the slippage guard) but means a claimer's payment can exceed the previewed amount unless they set minRewardTokenSupplied. Front-run/MEV surface.",
+      "deferReason": "Cross-contract (strategy redeem/swap behaviour) + MEV economics — interaction/econ scanners."
+    },
+    {
+      "id": "PARK-07",
+      "tag": "exemptStrategies dedup / NFT burn-before-skim",
+      "where": "claim() L453 validation loop + L473 inner exempt loop; _validateAndBurnNFT L531",
+      "concern": "exemptStrategies validated for registration but not deduped/length-bounded (self-grief only). NFT is burned (external INFTMinter.burn) BEFORE the skim loop; if a non-exempt strategy's skimSurplus reverts, the whole tx reverts and the NFT is NOT consumed (atomic) — exemptStrategies is the documented escape hatch (M-04 mitigation) to route around such a strategy. Worth confirming skimSurplus revert cannot be used to grief other claimers (it cannot: per-claimer tx).",
+      "deferReason": "Cross-contract strategy-trust — interaction analysis (M-04 already mitigated)."
+    },
+    {
+      "id": "PARK-08",
+      "tag": "rate=0 vs unset semantics",
+      "where": "_normalizeAmount/_denormalizeAmount exchange-rate branch",
+      "concern": "normalizedExchangeRate==0 with non-zero decimals means 'no rate adjustment' (effectively 1:1 in 18-dec space), NOT 'zero value'. Only decimals==0 && rate==0 triggers the full 18-dec passthrough. Subtle semantics worth a doc note; a real 0-decimal token is indistinguishable from 'unconfigured'.",
+      "deferReason": "Low/QA semantic note."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "inheritance": ["Ownable", "Pausable", "ReentrancyGuard", "IPausable", "IStableYieldAccumulator"],
+    "externalEntryPoints": [
+      {
+        "function": "claim(uint256 nftIndex, uint256 minRewardTokenSupplied, address[] calldata exemptStrategies)",
+        "visibility": "external", "accessControl": "permissionless (NFT-gated)", "modifiers": ["whenNotPaused", "nonReentrant"],
+        "reads": ["phlimbo", "rewardToken", "isRegisteredStrategy", "nftMinter", "yieldStrategies", "strategyTokens", "tokenConfigs", "discountRate", "nudgeSplit", "nudge"],
+        "stateChanges": ["NFT balance (burns 1 unit via external INFTMinter.burn)", "no SYA storage mutated directly (transient rewardToken custody only)"],
+        "externalCalls": ["IERC1155(nftMinter).balanceOf", "INFTMinter(nftMinter).burn(caller,index,1)", "IYieldStrategy(strategy).skimSurplus(token, msg.sender) [per non-exempt non-paused strategy]", "IERC20(rewardToken).safeTransferFrom(claimer->this)", "IERC20(rewardToken).safeTransfer(nudge)", "IPhlimbo(phlimbo).collectReward(phlimboAmount) [pulls from this]"],
+        "valueFlows": ["IN(transient): rewardToken from claimer = denormalized discounted yield", "OUT: each strategy's batched surplus underlying -> claimer (via skimSurplus)", "OUT: nudgeAmount rewardToken -> nudge", "OUT(pull): phlimboAmount rewardToken -> phlimbo"],
+        "reverts": ["ZeroAddress (phlimbo/rewardToken unset)", "ExemptStrategyNotRegistered", "NoValidNFT / 'NFT minter not configured' / 'Invalid index'", "ZeroAmount (no yield)", "InsufficientYield (actualPayment < minRewardTokenSupplied)", "NudgeNotConfigured (split>0 && nudge==0)"],
+        "ordering": "exempt-validate -> burn NFT -> skim loop (delivers yield to claimer) -> compute payment -> slippage check -> nudge-config check -> pull payment -> split to nudge + phlimbo. NOTE: skim precedes payment (skims-then-pays); contradicts NatSpec (L-03).",
+        "notes": "The single security-sensitive entrypoint. Pricing: claimerPayment = totalNormalizedYield * (10000-discountRate)/10000; actualPayment = denormalize(claimerPayment, rewardToken)."
+      },
+      {
+        "function": "calculateClaimAmount(address[] calldata exemptStrategies)",
+        "visibility": "external view", "accessControl": "open",
+        "reads": ["isRegisteredStrategy", "yieldStrategies", "strategyTokens", "tokenConfigs", "discountRate", "rewardToken"],
+        "externalCalls": ["IYieldStrategy(strategy).getAuthorizedClients/totalBalanceOf/principalOf (per strategy, snapshot estimate)"],
+        "reverts": ["ExemptStrategyNotRegistered"],
+        "notes": "Preview mirror of claim() pricing but uses the snapshot estimate (_getYieldForStrategy), NOT skimSurplus — can diverge from actual (PARK-06). Used to derive minRewardTokenSupplied."
+      },
+      {
+        "function": "getYield(address strategy)",
+        "visibility": "external view", "accessControl": "open",
+        "reads": ["isRegisteredStrategy", "strategyTokens"],
+        "externalCalls": ["strategy.getAuthorizedClients/totalBalanceOf/principalOf"],
+        "reverts": ["StrategyNotRegistered"],
+        "notes": "Native-decimal estimate for one strategy (sum of per-client surplus)."
+      },
+      {
+        "function": "getTotalYield()",
+        "visibility": "external view", "accessControl": "open",
+        "reads": ["yieldStrategies", "strategyTokens", "tokenConfigs"],
+        "externalCalls": ["per-strategy getAuthorizedClients/totalBalanceOf/principalOf"],
+        "notes": "18-dec normalized estimate across all strategies (does NOT skip per-token paused — unlike claim/calculateClaimAmount). Minor inconsistency worth noting."
+      },
+      {
+        "function": "canClaim(address caller)",
+        "visibility": "external view", "accessControl": "open",
+        "reads": ["nftMinter"],
+        "externalCalls": ["INFTMinter(nftMinter).nextIndex()", "IERC1155(nftMinter).balanceOf(caller,i) [loop 1..nextIndex)"],
+        "notes": "Bot helper. Unbounded view loop over dispatcher count (PARK note). Returns false if nftMinter unset."
+      },
+      {
+        "function": "getYieldStrategies()", "visibility": "external view", "accessControl": "open",
+        "reads": ["yieldStrategies"], "externalCalls": [], "notes": "Returns full registry array."
+      },
+      {
+        "function": "getTokenConfig(address token)", "visibility": "external view", "accessControl": "open",
+        "reads": ["tokenConfigs"], "externalCalls": []
+      },
+      {
+        "function": "getDiscountRate()", "visibility": "external view", "accessControl": "open",
+        "reads": ["discountRate"], "externalCalls": []
+      },
+      {
+        "function": "addYieldStrategy(address strategy, address token)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["yieldStrategies (push)", "isRegisteredStrategy[strategy]=true", "strategyTokens[strategy]=token"],
+        "externalCalls": [], "reverts": ["ZeroAddress", "StrategyAlreadyRegistered"], "events": ["YieldStrategyAdded"]
+      },
+      {
+        "function": "removeYieldStrategy(address strategy)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["yieldStrategies (swap+pop, O(n) loop)", "isRegisteredStrategy[strategy]=false", "delete strategyTokens[strategy]"],
+        "externalCalls": [], "reverts": ["StrategyNotRegistered"], "events": ["YieldStrategyRemoved"]
+      },
+      {
+        "function": "setTokenConfig(address token, uint8 decimals, uint256 normalizedExchangeRate)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["tokenConfigs[token].decimals", "tokenConfigs[token].normalizedExchangeRate"],
+        "externalCalls": [], "reverts": ["ZeroAddress", "InvalidDecimals (decimals>18)"], "events": ["TokenConfigSet"],
+        "notes": "normalizedExchangeRate is UNBOUNDED (PARK-05). Does not touch .paused."
+      },
+      {
+        "function": "pauseToken(address token) / unpauseToken(address token)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["tokenConfigs[token].paused"], "externalCalls": [], "events": ["TokenPaused", "TokenUnpaused"],
+        "notes": "Paused token is SKIPPED (continue) in claim/calculateClaimAmount (post-M-02)."
+      },
+      {
+        "function": "setDiscountRate(uint256 rate)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["discountRate"], "externalCalls": [], "reverts": ["ExceedsMaxDiscount (rate>10000)"], "events": ["DiscountRateSet"],
+        "notes": "Cap is 100% (10000 bps) -> claimer pays 0 (PARK-05)."
+      },
+      {
+        "function": "setPhlimbo(address _phlimbo)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["phlimbo"], "externalCalls": [], "reverts": ["ZeroAddress"], "events": ["PhlimboUpdated"]
+      },
+      {
+        "function": "setRewardToken(address _rewardToken)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["rewardToken"], "externalCalls": [], "reverts": ["ZeroAddress"],
+        "notes": "No event. Does NOT reset stale phlimbo allowance or require a token config for the new reward token (PARK-01 footgun)."
+      },
+      {
+        "function": "approvePhlimbo(uint256 amount)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["ERC20 allowance(this->phlimbo)"], "externalCalls": ["IERC20(rewardToken).forceApprove(phlimbo, amount)"],
+        "reverts": ["ZeroAddress (phlimbo or rewardToken unset)"],
+        "notes": "forceApprove (M-03 USDT compat). Standing allowance feeds phlimbo's collectReward pull; depletion bricks claim (L-02/PARK-04)."
+      },
+      {
+        "function": "setNudgeAddress(address _nudge)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["nudge"], "externalCalls": [], "events": ["NudgeUpdated"], "notes": "address(0) allowed (clear)."
+      },
+      {
+        "function": "setNudgeSplit(uint256 _split)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["nudgeSplit"], "externalCalls": [], "reverts": ["InvalidNudgeSplit (split>100)"], "events": ["NudgeSplitUpdated"],
+        "notes": "Range [0,100] (PERCENT, not bps). Does NOT require nudge!=0 -> bricks claim if misconfigured (PARK-03)."
+      },
+      {
+        "function": "setNFTMinter(address _nftMinter)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["nftMinter"], "externalCalls": [], "events": ["NFTMinterUpdated"],
+        "notes": "Accepts address(0) (would brick claim via 'NFT minter not configured'). SYA must be an authorized burner on the new minter."
+      },
+      {
+        "function": "setPauser(address _pauser)", "visibility": "external", "accessControl": "onlyOwner",
+        "stateChanges": ["pauser"], "externalCalls": [], "events": ["PauserUpdated"], "notes": "address(0) disables pausing."
+      },
+      {
+        "function": "pause()", "visibility": "external (override IPausable)", "accessControl": "onlyPauser",
+        "stateChanges": ["_paused=true"], "externalCalls": []
+      },
+      {
+        "function": "unpause()", "visibility": "external (override IPausable)", "accessControl": "owner OR pauser",
+        "stateChanges": ["_paused=false"], "externalCalls": [], "notes": "Behodler3 redundancy: either role can unpause."
+      },
+      {
+        "function": "public getters: pauser, rewardToken, yieldStrategies(uint), tokenConfigs(addr), discountRate, phlimbo, nudge, nudgeSplit, isRegisteredStrategy(addr), strategyTokens(addr), nftMinter",
+        "visibility": "public view (auto)", "accessControl": "open", "externalCalls": []
+      }
+    ],
+
+    "externalCalls": [
+      {
+        "target": "IYieldStrategy strategy (owner-registered, OOS sibling = vault adapters)",
+        "methods": ["skimSurplus(token, recipient)", "getAuthorizedClients()", "totalBalanceOf(token,client)", "principalOf(token,client)"],
+        "trustLevel": "trusted-but-mutable (owner-registered; implementation OOS)",
+        "reentrancy": "skimSurplus delivers underlying to msg.sender (the claimer) and could route through AMMs/ERC4626; claim() is nonReentrant so reentry is blocked.",
+        "notes": "skimSurplus return (post-redeem/post-swap underlyingReceived) is authoritative for payment; can diverge from the snapshot estimate used by previews (PARK-06). A reverting strategy can be routed around via exemptStrategies (M-04). SYA must be an authorized withdrawer on each strategy or skimSurplus reverts."
+      },
+      {
+        "target": "IPhlimbo phlimbo (owner-set, OOS sibling = PhlimboEA / V2)",
+        "methods": ["collectReward(amount)"],
+        "trustLevel": "trusted-but-mutable (OOS)",
+        "reentrancy": "Called last in claim(); pulls phlimboAmount from this contract via transferFrom (needs standing allowance).",
+        "notes": "Inverted control: phlimbo PULLS, SYA does not push. Allowance depletion bricks claim (L-02/PARK-04). NOTE per sibling CLAUDE.md: PhlimboEA V1 has a known rate-recompute window-reset bug — OOS, but relevant to interaction analysis of how collectReward affects distribution."
+      },
+      {
+        "target": "INFTMinter / IERC1155 nftMinter (owner-set, OOS = yield-claim-nft NFTMinter)",
+        "methods": ["balanceOf(holder,id)", "burn(holder,id,1)", "nextIndex() (canClaim only)"],
+        "trustLevel": "trusted-but-mutable (OOS)",
+        "reentrancy": "burn() (ERC1155 burn, not a transfer) executes before the skim loop; no inbound receive hook on burn. Guarded by nonReentrant regardless.",
+        "notes": "Claim gate: caller must hold >=1 unit at nftIndex; exactly 1 is burned. SYA must be registered as an authorized burner on the minter or burn reverts."
+      },
+      {
+        "target": "IERC20 rewardToken (owner-set, e.g. USDC)",
+        "methods": ["safeTransferFrom", "safeTransfer", "forceApprove"],
+        "trustLevel": "semi-trusted (assumes standard ERC20; USDT-style non-standard approve handled via forceApprove)",
+        "reentrancy": "n/a for standard tokens; value-conservation assumes no fee-on-transfer / rebasing.",
+        "notes": "Decimal handling relies ENTIRELY on owner-set tokenConfigs[rewardToken]; an unconfigured non-18-dec reward token mis-prices claims by 10**(18-decimals) (PARK-01)."
+      },
+      {
+        "target": "IERC20 strategy underlying tokens (owner-mapped via strategyTokens)",
+        "methods": ["(delivered by strategy.skimSurplus to claimer; SYA does not transfer them itself)"],
+        "trustLevel": "semi-trusted",
+        "notes": "Each must have a tokenConfig (decimals + rate) or its yield is mis-normalized (PARK-01)."
+      }
+    ],
+
+    "stateVariables": [
+      {"name": "pauser", "type": "address public", "mutators": ["setPauser (owner)"], "invariant": "Only this address may pause; owner OR pauser may unpause. Defaults to 0 (pausing disabled). Satisfies IPausable.pauser() getter."},
+      {"name": "rewardToken", "type": "address public", "mutators": ["setRewardToken (owner)"], "invariant": "The single token claimers pay with and phlimbo receives. Must be configured in tokenConfigs for correct decimals (PARK-01). Non-zero required for claim."},
+      {"name": "yieldStrategies", "type": "address[] public", "mutators": ["addYieldStrategy", "removeYieldStrategy (owner)"], "invariant": "Set of registered strategy adapters; cardinality owner-bounded. Membership mirrored in isRegisteredStrategy (must stay in sync)."},
+      {"name": "tokenConfigs", "type": "mapping(address=>TokenConfig{uint8 decimals; uint256 normalizedExchangeRate; bool paused}) public", "mutators": ["setTokenConfig", "pauseToken", "unpauseToken (owner)"], "invariant": "decimals<=18; rate 18-dec (0 or 1e18 => no rate adjustment; unset (0,0) => 18-dec passthrough). paused token skipped in claim."},
+      {"name": "discountRate", "type": "uint256 public", "mutators": ["setDiscountRate (owner)"], "invariant": "Basis points, <=10000. claimerPayment = yield*(10000-rate)/10000. 10000 => free claim."},
+      {"name": "phlimbo", "type": "address public", "mutators": ["setPhlimbo (owner)"], "invariant": "Recipient (via pull) of the phlimbo share. Non-zero required for claim; receives actualPayment - nudgeAmount."},
+      {"name": "nudge", "type": "address public", "mutators": ["setNudgeAddress (owner)"], "invariant": "Optional aux recipient; address(0) allowed only while nudgeSplit==0 (else claim reverts NudgeNotConfigured)."},
+      {"name": "nudgeSplit", "type": "uint256 public", "mutators": ["setNudgeSplit (owner)"], "invariant": "PERCENT in [0,100]. nudgeAmount = actualPayment*nudgeSplit/100; phlimboAmount = actualPayment - nudgeAmount. 0 => all to phlimbo; 100 => all to nudge (skip collectReward)."},
+      {"name": "isRegisteredStrategy", "type": "mapping(address=>bool) public", "mutators": ["addYieldStrategy", "removeYieldStrategy (owner)"], "invariant": "O(1) membership oracle for yieldStrategies; gates exemptStrategies validation."},
+      {"name": "strategyTokens", "type": "mapping(address=>address) public", "mutators": ["addYieldStrategy (set)", "removeYieldStrategy (delete)"], "invariant": "strategy -> its single underlying token. 0 => strategy skipped in claim loop."},
+      {"name": "nftMinter", "type": "address public", "mutators": ["setNFTMinter (owner)"], "invariant": "ERC1155 + INFTMinter claim gate; SYA must be an authorized burner. 0 => claim reverts."}
+    ],
+
+    "constants": [],
+    "structs": ["TokenConfig{uint8 decimals; uint256 normalizedExchangeRate; bool paused}"],
+    "events": ["YieldStrategyAdded", "YieldStrategyRemoved", "TokenConfigSet", "TokenPaused", "TokenUnpaused", "DiscountRateSet", "PhlimboUpdated", "NudgeUpdated", "NudgeSplitUpdated", "RewardsClaimed", "RewardsCollected", "PauserUpdated", "NFTMinterUpdated"],
+    "errors": ["NotImplemented", "ZeroAddress", "InvalidDecimals", "ExceedsMaxDiscount", "StrategyNotRegistered", "StrategyAlreadyRegistered", "ExemptStrategyNotRegistered", "InsufficientPending", "ZeroAmount", "NoValidNFT", "InsufficientYield", "InvalidNudgeSplit", "NudgeNotConfigured"],
+    "modifiers": ["onlyOwner (OZ)", "onlyPauser (custom: msg.sender==pauser)", "whenNotPaused (OZ)", "nonReentrant (OZ)"],
+    "internalFunctions": ["_validateAndBurnNFT", "_getYieldForStrategy", "_getNormalizedYieldForStrategy", "_normalizeAmount", "_denormalizeAmount"]
+  },
+
+  "localInvariantCandidates": [
+    "REGISTRY-SYNC: isRegisteredStrategy[s] == (s ∈ yieldStrategies[]) for all s, and strategyTokens[s] != 0 iff isRegisteredStrategy[s] (addYieldStrategy sets all three; removeYieldStrategy clears all three).",
+    "PAYMENT-FORMULA: in claim(), actualPayment == denormalize( (Σ normalize(underlyingReceived_i, token_i)) * (10000 - discountRate) / 10000 , rewardToken), summed over non-exempt, non-paused, token!=0 strategies with underlyingReceived_i > 0.",
+    "SPLIT-CONSERVATION: nudgeAmount + phlimboAmount == actualPayment exactly (phlimboAmount derived by subtraction, no precision drift). nudgeAmount == actualPayment*nudgeSplit/100.",
+    "NO-RESIDUAL: after a successful claim, SYA retains no rewardToken from that claim (transferFrom in == nudge transfer out + phlimbo pull out), assuming collectReward pulls exactly phlimboAmount and a standard (non-fee) token.",
+    "DECIMAL-ROUNDTRIP: for a correctly configured token, denormalize(normalize(x, t), t) <= x (floor on the down-scale); the residual <1 ulp is the L-01 zero-payment surface when the rounded amount hits 0.",
+    "NFT-COST: exactly 1 NFT unit at nftIndex is burned per successful claim; a claim that reverts (incl. ZeroAmount / NudgeNotConfigured / InsufficientYield / strategy revert) burns nothing (validation + atomic rollback).",
+    "PAUSE-GATING: claim() unreachable while _paused; owner config setters remain reachable while paused (intended). Per-token paused strategies are skipped, not reverted (M-02).",
+    "DISCOUNT-BOUND: discountRate <= 10000 always (setDiscountRate guard).",
+    "DECIMALS-BOUND: every configured token has decimals <= 18 (setTokenConfig guard); decimals>18 normalize branches are unreachable.",
+    "EXEMPT-REGISTERED: every entry passed in exemptStrategies is a registered strategy at call time (else revert before NFT burn).",
+    "NUDGE-CONFIG: if nudgeSplit > 0 then a claim with yield requires nudge != address(0) (else revert NudgeNotConfigured).",
+    "ATOMIC-SKIM: all skimSurplus deliveries to the claimer are rolled back if the subsequent payment/split/pull reverts (single nonReentrant tx)."
+  ],
+
+  "trustAssumptions": [
+    "Owner is non-malicious (Law 3) but can footgun: must configure rewardToken + every strategyToken decimals (PARK-01), keep nudge consistent with nudgeSplit (PARK-03), maintain phlimbo allowance (PARK-04), and register SYA as authorized burner (NFTMinter) and authorized withdrawer (each strategy).",
+    "pauser is the trusted Global Pauser (EYE-burn gated); pause halts claim only.",
+    "Each registered IYieldStrategy is an honest vault adapter: skimSurplus delivers the claimer the real surplus underlying and returns the true delivered amount; getAuthorizedClients/totalBalanceOf/principalOf are honest. (OOS — interaction analysis owns strategy-trust + skim/preview divergence exploitability.)",
+    "phlimbo (PhlimboEA/V2) collectReward(amount) pulls exactly `amount` rewardToken from SYA's standing allowance. (OOS — PhlimboEA V1 rate-recompute bug noted in sibling CLAUDE.md.)",
+    "nftMinter is the yield-claim-nft NFTMinter: ERC1155 balances + burn semantics honest; index>0 maps to a real dispatcher config. (OOS.)",
+    "rewardToken and strategy underlyings behave as standard ERC20 (no fee-on-transfer / rebasing); USDT-style approve handled via forceApprove."
+  ],
+
+  "designNotes": [
+    "No oracles/AMMs by design: cross-token value uses owner-set decimals + a normalizedExchangeRate defaulting to 1:1, adjustable only for PERMANENT depegs (CLAUDE.md). The claimer's discount is the economic incentive to perform the de-facto conversion and pay gas.",
+    "Story evolution (submodule git log): story-022 simplified NFT validation (index-addressed O(1), no override resolution); story-023 added the nudge split; story-024 added exemptStrategies (mitigates audit M-04 — one bad strategy can no longer brick all claims); story-025 adopted batch skimSurplus/getAuthorizedClients and removed the old single-client withdrawFrom + minterAddress/setMinter. Earlier: M-02 (paused token -> continue not revert), M-03 (forceApprove for USDT).",
+    "ClaimArbitrage (the prior on-chain arbitrage caller) was REMOVED from this repo (commit c6d7549) in favor of the NFT burn gate; the SYA CLAUDE.md still documents ClaimArbitrage Step-5 reward-token accounting and the 'knownStables ⊇ SYA strategy tokens' one-directional invariant (audit M-01) as historical/integration context. Treat ClaimArbitrage as an external integrator, not in-scope code.",
+    "No docs/ directory exists in the submodule; [story-NNN] context is sourced from commit messages only.",
+    "getTotalYield() does NOT skip per-token-paused strategies, whereas claim()/calculateClaimAmount() do — a minor surface-area inconsistency in the view layer."
+  ],
+
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPausable", "IStableYieldAccumulator"],
+  "imports": [
+    "@openzeppelin: Pausable, Ownable, ReentrancyGuard, IERC20, SafeERC20, IERC1155",
+    "pauser/interfaces/IPausable (OOS sibling)",
+    "vault/interfaces/IYieldStrategy (OOS sibling)",
+    "phlimbo-ea/interfaces/IPhlimbo (OOS sibling)",
+    "yield-claim-nft/interfaces/INFTMinter (OOS sibling)",
+    "./interfaces/IStableYieldAccumulator"
+  ],
+
+  "complexity": {
+    "loc": 749,
+    "externalPublicFunctions": 23,
+    "internalFunctions": 5,
+    "stateVariables": 11,
+    "structs": 1,
+    "events": 13,
+    "customErrors": 13,
+    "externalCallSites": 11,
+    "loops": 8,
+    "loopsNote": "removeYieldStrategy(1), claim outer(1)+inner-exempt(1)+exempt-validate(1), calculateClaimAmount outer(1)+inner-exempt(1), getTotalYield(1), _getYieldForStrategy(1), canClaim(1); _getYieldForStrategy is itself called inside outer loops (nested O(strategies*clients)).",
+    "assemblyBlocks": 0,
+    "uncheckedBlocks": 0
+  }
+}

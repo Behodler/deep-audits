@@ -1,0 +1,98 @@
+{
+  "contract": "src/V2/NFTMinterV2.sol",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "purpose": "Central ERC1155 claim-NFT minter for V2. Users pay a per-dispatcher price in the dispatcher's prime token; the minter pulls the payment directly to the dispatcher, invokes dispatcher.dispatch(...), then mints one claim NFT (tokenId == dispatcher index) to the recipient. Also supports privileged payment-free minting (mintFor) and NFT burning by authorized roles.",
+  "inheritanceChain": ["ERC1155", "ERC1155Supply", "Ownable", "INFTMinterV2", "IPausable"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": [],
+    "accessControlled": ["setPauser", "registerDispatcher", "setDispatcherDisabled", "mintFor", "setAuthorizedMinter", "replaceDispatcher", "setPrice", "setGrowthFactor", "emergencyWithdraw", "setDispatcherActive", "setAuthorizedBurner", "burn", "pause", "unpause"],
+    "initializerProtected": "n/a (non-upgradeable, constructor-only)",
+    "pauseMechanism": "custom boolean `paused` gating mint() only; pause/unpause restricted to `pauser` (not owner)"
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-NMV2-001",
+      "type": "missing-pause-gate",
+      "severity": "local-low",
+      "function": "mintFor",
+      "line": 206,
+      "description": "mintFor() is NOT gated by the `paused` flag and NOT gated by config.disabled. Authorized minters can mint claim NFTs for a dispatcher index even while the contract is paused or while that dispatcher index is disabled. Only paid mint() honors !paused and !disabled. Whether this is intended (privileged escape hatch) or an inconsistency depends on the story; surfaced for spec review.",
+      "recommendation": "Confirm intent; if mintFor should respect global pause / per-dispatcher disable, add require(!paused) and/or require(!config.disabled)."
+    },
+    {
+      "id": "LOCAL-NMV2-002",
+      "type": "reentrancy-surface",
+      "severity": "local-info",
+      "function": "_executeMint",
+      "line": 196,
+      "description": "_mint() to recipient triggers ERC1155Receiver.onERC1155Received callback to an arbitrary recipient AFTER the external dispatcher.dispatch() call. No nonReentrant guard on the minter. CEI is followed (config.price is bumped before dispatch; the only post-callback effect is the _mint itself which has already executed when the hook fires). Dispatcher.dispatch is itself nonReentrant. Re-entrancy into mint() during the receiver hook would start a fresh, fully-validated mint (pull funds, dispatch, mint) — no stale-state window identified. Flagged for interaction analysis to confirm no cross-dispatcher invariant break.",
+      "recommendation": "Consider nonReentrant on mint() for defense-in-depth; verify in interaction analysis."
+    },
+    {
+      "id": "LOCAL-NMV2-003",
+      "type": "state-cleanup",
+      "severity": "local-info",
+      "function": "replaceDispatcher",
+      "line": 227,
+      "description": "replaceDispatcher swaps configs[index].dispatcher, dispatcherToIndex, tokenIdToDispatcher but preserves price/growthBasisPoints/disabled from the old dispatcher. The new dispatcher may have a different primeToken; the carried-over price (denominated in the old prime-token units) then applies to a possibly different token. Owner-config footgun rather than a code bug.",
+      "recommendation": "Document that price/growth carry over; owner should re-set price after replacing a dispatcher whose primeToken differs."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "mint(uint256 index, address recipient)", "visibility": "external", "stateChanges": ["configs[index].price", "ERC1155 balances/supply"], "externalCalls": ["dispatcher.primeToken()", "token.balanceOf()", "token.safeTransferFrom(user->dispatcher)", "dispatcher.dispatch()", "recipient.onERC1155Received()"], "accessControl": "none (permissionless paid mint)", "reentrancyGuard": false, "guards": ["!paused", "!config.disabled", "index registered"]},
+      {"function": "mint(uint256 index, address recipient, bytes extraData)", "visibility": "external", "stateChanges": ["configs[index].price", "ERC1155 balances/supply"], "externalCalls": ["same as above + extraData forwarded to dispatcher.dispatch()"], "accessControl": "none", "reentrancyGuard": false},
+      {"function": "mintFor(uint256 index, address recipient)", "visibility": "external", "stateChanges": ["ERC1155 balances/supply"], "externalCalls": ["recipient.onERC1155Received()"], "accessControl": "authorizedMinters[msg.sender]", "reentrancyGuard": false, "notes": "No payment, no dispatch, no price bump. Not pause/disable gated."},
+      {"function": "burn(address holder, uint256 tokenId, uint256 quantity)", "visibility": "external", "stateChanges": ["ERC1155 balances/supply"], "externalCalls": [], "accessControl": "authorizedBurners[msg.sender]", "reentrancyGuard": false},
+      {"function": "registerDispatcher / replaceDispatcher / setDispatcherDisabled / setPrice / setGrowthFactor / setAuthorizedMinter / setAuthorizedBurner / setPauser / emergencyWithdraw / setDispatcherActive", "visibility": "external", "accessControl": "onlyOwner"},
+      {"function": "pause / unpause", "visibility": "external", "accessControl": "msg.sender == pauser"},
+      {"function": "uri / getPrice / configs / dispatcherToIndex / tokenIdToDispatcher / authorizedBurners / authorizedMinters / nextIndex / paused", "visibility": "view/public"}
+    ],
+    "externalCalls": [
+      {"target": "ITokenDispatcherV2 dispatcher", "methods": ["primeToken", "dispatch", "name", "image", "description", "paused", "pause", "unpause"], "trustLevel": "trusted (owner-registered)", "notes": "H-01 fix: token to charge is read from dispatcher.primeToken(), caller cannot spoof it."},
+      {"target": "IERC20 token (= dispatcher.primeToken())", "methods": ["balanceOf", "safeTransferFrom"], "trustLevel": "semi-trusted", "notes": "Balance-before/after FOT accounting; actualReceived forwarded to dispatch."},
+      {"target": "address recipient (ERC1155 receiver)", "methods": ["onERC1155Received"], "trustLevel": "untrusted", "notes": "Standard ERC1155 acceptance-check callback; reentrancy surface."}
+    ],
+    "stateVariables": [
+      {"name": "nextIndex", "type": "uint256 (=1)", "mutators": ["registerDispatcher"], "readers": ["registerDispatcher"]},
+      {"name": "configs", "type": "mapping(uint256=>DispatcherConfig{dispatcher,price,growthBasisPoints,disabled})", "mutators": ["registerDispatcher", "replaceDispatcher", "setDispatcherDisabled", "setPrice", "setGrowthFactor", "_executeMint (price bump)"], "readers": ["mint", "mintFor", "getPrice", "uri-adjacent"]},
+      {"name": "dispatcherToIndex", "type": "mapping(address=>uint256)", "mutators": ["registerDispatcher", "replaceDispatcher"], "readers": ["registerDispatcher", "replaceDispatcher", "setDispatcherActive"]},
+      {"name": "tokenIdToDispatcher", "type": "mapping(uint256=>address)", "mutators": ["registerDispatcher", "replaceDispatcher"], "readers": ["uri"]},
+      {"name": "authorizedBurners", "type": "mapping(address=>bool)", "mutators": ["setAuthorizedBurner"], "readers": ["burn"]},
+      {"name": "authorizedMinters", "type": "mapping(address=>bool)", "mutators": ["setAuthorizedMinter"], "readers": ["mintFor"]},
+      {"name": "pauser", "type": "address", "mutators": ["setPauser"], "readers": ["pause", "unpause"]},
+      {"name": "paused", "type": "bool", "mutators": ["pause", "unpause"], "readers": ["_executeMint"]}
+    ],
+    "events": ["DispatcherRegistered", "ClaimMinted", "ClaimMintedFor", "PriceUpdated", "GrowthFactorUpdated", "EmergencyWithdraw", "DispatcherActiveChanged", "PauserChanged", "Paused", "Unpaused", "DispatcherDisabledChanged", "AuthorizedBurnerSet", "AuthorizedMinterSet", "ClaimBurned", "DispatcherReplaced"],
+    "modifiers": ["onlyOwner"]
+  },
+
+  "valueFlows": [
+    "PAID MINT: user --(price in primeToken)--> dispatcher (direct transferFrom); minter mints 1 NFT to recipient; dispatcher.dispatch(actualReceived) routes the funds (pool/burn/gather). Price grows by growthBasisPoints each mint.",
+    "FREE MINT: authorizedMinter --mintFor--> 1 NFT to recipient, no token movement (used by NFTMigrator).",
+    "BURN: authorizedBurner --burn--> NFT supply reduced (used to redeem claims)."
+  ],
+
+  "invariants": [
+    "tokenId == dispatcher index (resolvedTokenId = index).",
+    "Payment always routed to the dispatcher's own primeToken — never a caller-supplied token (H-01).",
+    "config.price is bumped before the external dispatch call (CEI on price).",
+    "dispatcherToIndex and configs[*].dispatcher stay consistent across register/replace.",
+    "Index 0 is never a valid dispatcher (nextIndex starts at 1)."
+  ],
+
+  "trustAssumptions": [
+    "Owner is trusted to register only well-behaved dispatchers whose primeToken() is honest and immutable.",
+    "Owner is trusted to authorize only honest minters (mintFor mints with no payment) and burners.",
+    "pauser is a trusted Global Pauser address that can halt paid minting.",
+    "primeToken behaves as a standard ERC20 (FOT tolerated via balance-delta; rebasing/hook tokens out of scope)."
+  ],
+
+  "complexity": {"loc": 346, "functions": 22, "externalCalls": 6, "stateVariables": 8}
+}

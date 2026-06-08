@@ -1,0 +1,99 @@
+{
+  "project": "yield-claim-nft",
+  "tier": 3,
+  "scanType": "invariant",
+  "auditedCommit": "cf75ec9520fd16b19e20c4b77ada2be28d7d4382",
+  "runTimestamp": "2026-06-07T00:00:00Z",
+  "testFile": "/home/justin/code/audits/workspace/yield-claim-nft/test/Invariant.t.sol",
+  "fuzzerConfigs": [
+    "/home/justin/code/audits/workspace/yield-claim-nft/medusa-backing.json"
+  ],
+  "runners": { "forge": true, "medusa": true, "echidna": false },
+  "focusFinding": "FAITH-002 (econ footgun): phUSD mint-debt accrues on GROSS dispatched USDS (ratio r%) while BalancerPoolerV2._dispatch exports batchDonationSize d% of that USDS to the Sky PSM, retaining only (100-d)% as sUSDS backing.",
+  "environmentNote": "A concurrent workspace sync checked the writable clone out to the audited commit cf75ec9 mid-run, removing the prior in-progress Invariant.t.sol stub AND the bit-rotted poc-ECON-RAW-* PoCs. Net effect was the clean target state, so no --skip was needed. Invariant.t.sol was authored fresh and is fully self-contained (depends only on real src/ contracts + test/mocks/MockERC4626 + test/mocks/MockSkyPSM).",
+  "mockFaithfulness": "FAITHFUL. MockSkyPSM mirrors DssLitePsm._buyGem exactly (usdsInWad = gemAmt*to18ConversionFactor*(WAD+tout)/WAD; finite reserve; reverts on dust/short-reserve). sUSDS is a 1:1 ERC4626 — conservative, since real sUSDS only appreciates (appreciation can only INCREASE backing, so a 1:1 mock can never manufacture a spurious break). Backing/debt are read LIVE from balances (no rate assumption). The break is shown with the donation actually clearing (USDS truly exported, batchMinter received USDC, zero parked), so it is not an artifact of swept-but-undonated USDS.",
+  "invariants": [
+    {
+      "name": "invariant_phUSDBackingSafe",
+      "contract": "PhUSDBackingSafeInvariants",
+      "type": "solvency/backing",
+      "regime": "safe (d + r <= 100, clamped by handler across the whole safe sub-region)",
+      "assertion": "totalPhUSDdebt (hook.mintDebt + phUSD.totalSupply) <= retainedBacking (USDS in sUSDS wrapper + USDS parked on pooler)",
+      "result": "PASS"
+    },
+    {
+      "name": "invariant_usdsConservation",
+      "contract": "PhUSDBackingSafeInvariants",
+      "type": "conservation/full-payment",
+      "assertion": "cumulative dispatched USDS == retainedBacking + donatedOut (USDS in PSM)",
+      "result": "PASS"
+    },
+    {
+      "name": "invariant_phUSDBackingShouldFailUnderAggressive",
+      "contract": "PhUSDBackingAggressiveBreak",
+      "type": "solvency/backing (intentional-fail demonstrator)",
+      "regime": "aggressive (d + r > 100)",
+      "assertion": "same solvency assertion; UNSATISFIABLE once d + r > 100",
+      "result": "FAIL (by design — substantiates the footgun)"
+    },
+    {
+      "name": "test_priceMonotonic_and_fullPayment",
+      "contract": "PhUSDBackingRegimeTest",
+      "type": "secondary / CEI corroboration of refuted L-01",
+      "assertion": "config.price strictly increases under positive growth; each mint pulls EXACTLY the quoted price into the protocol; price is bumped by growthBps BEFORE the NFT mint (CEI)",
+      "result": "PASS"
+    }
+  ],
+  "forge": {
+    "command": "forge test --match-path test/Invariant.t.sol",
+    "safeRegime": {
+      "PhUSDBackingSafeInvariants.invariant_phUSDBackingSafe": "PASS",
+      "PhUSDBackingSafeInvariants.invariant_usdsConservation": "PASS",
+      "runsXdepth": "300x64 (19200 calls, 0 reverts) and re-run 256x50 (12800 calls)",
+      "harnessNotVacuous": "PASS (single mint flows value through BOTH legs: backing>0, debt>0, donatedOut>0)"
+    },
+    "deterministicRegimeSweep": {
+      "test_backing_holds_safeConfig (d=40,r=50; d+r=90)": "PASS — backing 3e18 > debt 2.5e18 (120% backed); 0 parked",
+      "test_backing_boundary_exact100 (d=50,r=50; d+r=100)": "PASS — backing == debt == 2.5e18 (exactly 100% backed)",
+      "test_backing_breaks_aggressiveConfig (d=60,r=50; d+r=110)": "PASS (asserts the break) — backing 2e18 < debt 2.5e18; shortfall 0.5e18 (80% backed / 20% uncovered); donation cleared, batchMinter received USDC, 0 parked",
+      "test_backing_breaks_fullDonation (d=100,r=50)": "PASS (asserts the break) — backing 0, debt 2.5e18 (0% backed; ALL backing donated away while phUSD still minted on gross volume)"
+    },
+    "aggressiveBreakInvariant": {
+      "command": "forge test --match-contract PhUSDBackingAggressiveBreak",
+      "result": "FAILED as designed",
+      "shrunkCounterexample": {
+        "sequence": ["mint()"],
+        "originalCalls": 3,
+        "shrunkCalls": 1,
+        "note": "setUp wires the aggressive default d=60,r=50; the fuzzer shrank the violating sequence to a SINGLE mint(). Canonical violating state (from -vvv trace): mintDebt 5e17 > backing 4e17 for one 1e18 dispatch."
+      }
+    }
+  },
+  "medusa": {
+    "command": "medusa fuzz --config medusa-backing.json",
+    "targetContract": "PhUSDBackingMedusaTarget",
+    "regime": "safe (d + r <= 100, clamped)",
+    "calls": 27910,
+    "failures": 0,
+    "results": {
+      "invariant_phUSDBackingSafe": "PASSED",
+      "invariant_usdsConservation": "PASSED"
+    },
+    "note": "First run segfaulted in Medusa's coverage tracer (coverageEnabled=false path, a known Medusa-internal nil-deref, NOT a test issue). Re-ran with coverageEnabled=true: clean, both safe-regime properties PASSED, independently corroborating the Foundry safe-regime result."
+  },
+  "echidna": { "run": false, "reason": "Medusa (primary) succeeded; Echidna fallback unnecessary." },
+  "conclusion": {
+    "safeRegimeHolds": true,
+    "aggressiveRegimeBreaks": true,
+    "boundary": "Solvency holds iff batchDonationSize + ratio <= 100. The d+r=100 boundary is exactly 100%-backed; every step beyond it under-collateralizes phUSD by (d + r - 100)% of dispatched volume.",
+    "permissionlessExtractionPath": "NONE FOUND. The break requires the owner to set batchDonationSize (BalancerPoolerV2) and ratio (BalancerPoolerMintDebtHook) such that d+r>100. There is no caller-driven path to under-collateralization.",
+    "severitySupport": "LOW (operational footgun), NOT Medium.",
+    "severityRationale": "The test concretely confirms the FAITH-002 arithmetic and pins its exact boundary, but finds (a) NO permissionless trigger — the two knobs are owner-only and independent; (b) the default config is over-collateralized (200% at d=0, r=50); (c) phUSD redemption/backing lives off-chain and is OOS per the project known issues / suppressed DEDUP-001 (econ-scanner REFUTE-A). It is a non-obvious owner footgun (two separately-tuned contracts with no on-chain invariant linking them) and is in-scope as a hazard under Law 3, but at LOW with a precise safe-config guardrail. It does not support Medium absent an in-scope redemption/extraction path. Consistent with econ-scanner REFUTE-A (duplicate of suppressed DEDUP-001).",
+    "recommendation": "Add an on-chain or runbook guardrail enforcing batchDonationSize + ratio <= 100 (e.g. cross-check ratio when setting batchDonationSize, or document the coupling so an operator never tunes donation>100-ratio). The invariant `phUSD_debt <= retained_sUSDS_backing` is the operator's solvency guardrail."
+  },
+  "artifacts": {
+    "testFile": "/home/justin/code/audits/workspace/yield-claim-nft/test/Invariant.t.sol",
+    "medusaConfig": "/home/justin/code/audits/workspace/yield-claim-nft/medusa-backing.json",
+    "medusaCoverage": "/home/justin/code/audits/workspace/yield-claim-nft/medusa-backing-corpus/coverage/coverage_report.html"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "story-faithfulness",
+  "auditedCommit": "cf75ec9520fd16b19e20c4b77ada2be28d7d4382",
+  "mode": "full",
+  "storiesChecked": [
+    "story-022", "story-024", "story-025", "story-026", "story-027",
+    "story-028", "story-030", "story-033 (reverted)", "story-034", "924b188 (raised ratio)"
+  ],
+  "conformingStories": {
+    "story-034": "FAITHFUL. _dispatch carves donationUSDS, wraps poolingUSDS->sUSDS, sweeps remaining raw USDS, and converts it to USDC via ISkyPSM.buyGem straight to batchMinter inside a self-gated `try this._psmDonate{} catch` (silent DonationSkipped on failure). pool() is now a pure single-sided LP add taking only minBPT; minUSDC removed and the dead waUSDC/Balancer-swap donation branch fully deleted (remaining waUSDC/setSwapConfig strings are explanatory comments, not live code).",
+    "story-033-revert": "CLEAN. `git diff c67d3c9 bc99ee3` (pre-story-033 vs the revert) is empty; no `migrateMint`/`OLD_NFT_ID`/`NEW_NFT_INDEX`/`MockNFTMinterV2` references remain in src/ or test/. No dangling pause-bypass migrate path.",
+    "story-024-H01": "FAITHFUL. NFTMinterV2._executeMint reads `token = ITokenDispatcherV2(config.dispatcher).primeToken()` (line 177), not a caller-supplied token; mint() overloads carry no token param. H-01 fix present.",
+    "story-025": "FAITHFUL. _dispatch wraps the pooling portion of USDS into sUSDS via IERC4626(_sUSDS).deposit; _primeToken derived from IERC4626(sUSDS).asset().",
+    "story-026-H02": "FAITHFUL. dispatch() only wraps; pooling is the separate pool(minBPT) gated by onlyAuthorizedPooler (authVersion/poolerAuthVersion). minBPT slippage supplied by the authorized pooler, not an arbitrary user. H-02 fix present.",
+    "story-027": "FAITHFUL. rescueERC20(token,to,amount) is onlyOwner, not whenNotPaused (escape hatch works during pause).",
+    "story-028": "FAITHFUL. SafeERC20 used throughout (forceApprove / safeTransfer / safeTransferFrom).",
+    "reentrancy-guards": "PRESENT. ATokenDispatcherV2.dispatch carries nonReentrant+onlyMinter+whenNotPaused; pool() carries nonReentrant; hook.pull() carries nonReentrant."
+  },
+  "findings": [
+    {
+      "id": "FAITH-001",
+      "type": "invariant-violation",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-030 / 924b188",
+      "severity": "low",
+      "contract": "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+      "function": "setRatio / constructor",
+      "line": 78,
+      "lineStart": 23,
+      "lineEnd": 82,
+      "specText": "story-030: \"`ratio` is `uint8`, seeded to `DEFAULT_RATIO = 30`, strictly capped below `MAX_RATIO = 50`.\"  Current docstrings (HEAD): line 24 \"Exclusive upper bound on `ratio`. Max settable ratio is `MAX_RATIO - 1`.\"; line 42 \"Strictly `< MAX_RATIO`.\"; line 76 \"Must be strictly less than `MAX_RATIO` (50).\"",
+      "specSource": "git commit c94bf40 body (story-030) + in-file NatSpec at HEAD",
+      "actualBehavior": "DEFAULT_RATIO = 50, so the constructor seeds ratio == MAX_RATIO (50). setRatio reverts only on `newRatio > MAX_RATIO`, so newRatio == 50 is accepted. Commit 924b188 (\"raised ratio because sUSDS appreciation\") deliberately raised the default 30->50 and relaxed the bound check `>= MAX_RATIO` -> `> MAX_RATIO`, but left all three \"strictly < MAX_RATIO\" docstrings (and the story-030 statement) unchanged.",
+      "deviation": "The documented invariant `ratio` strictly `< 50` (max 49) is violated by both the constructor default (50) and setRatio (50 reachable). The spec is now internally self-contradictory: docstrings + story-030 say <50, code permits ==50. Per the conflicting-sources rule this is the finding itself (ambiguous/stale spec).",
+      "securityImpact": "None demonstrated. ratio=50 means 50% of dispatched USDS is accrued as phUSD mint-debt while (by default, donation disabled) 100% of that USDS is pooled as sUSDS backing — phUSD is over-backed ~2:1 and sUSDS appreciates, which is exactly the stated rationale for the raise. The hazard is a stale invariant misleading a future reviewer/integrator about the true cap, not a live exploit.",
+      "remediation": "Either re-tighten the check to `newRatio >= MAX_RATIO` and lower DEFAULT_RATIO below 50, OR update the three docstrings + DEFAULT_RATIO comment to state that 50 is the valid maximum and rename MAX_RATIO's 'exclusive upper bound' wording. Reconcile with story-030.",
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "FAITH-002",
+      "type": "story-unsafe",
+      "faithfulness": false,
+      "securityEscalation": true,
+      "storyTag": "story-034 (+ story-030)",
+      "severity": "potential-medium",
+      "contract": "src/V2/dispatchers/BalancerPoolerV2.sol",
+      "function": "_dispatch (gross-amount mint-debt accrual) + BalancerPoolerMintDebtHook.onDispatch",
+      "line": 212,
+      "lineStart": 210,
+      "lineEnd": 232,
+      "specText": "story-034: \"The base class then calls `hook.onDispatch(minter, amount)` with the **gross** amount, so mint-debt accrues on the full dispatched USDS regardless of donation outcome.\" + \"convert USDS->USDC via Sky PSM buyGem straight to batchMinter.\"",
+      "specSource": "git commit cf75ec9 body (story-034) + BalancerPoolerV2.sol _dispatch NatSpec lines 190-200; accrual at ATokenDispatcherV2.dispatch line 125; hook accrual at BalancerPoolerMintDebtHook.onDispatch line 111",
+      "actualBehavior": "On each dispatch, `donationUSDS = amount * batchDonationSize / 100` is converted to USDC and shipped out of the dispatcher to batchMinter via the PSM, so only `poolingUSDS = amount - donationUSDS` is retained as sUSDS backing. Independently, the hook accrues phUSD mint-debt of `amount * ratio / 100` on the GROSS amount and pull() later mints that phUSD. batchDonationSize (BalancerPoolerV2, cap 100) and ratio (the Hook, cap 50) are set by separate owner setters in separate contracts with no on-chain coupling.",
+      "deviation": "Story-034 is faithfully implemented (this is not an implementation gap), but the story's own design — accrue phUSD debt on gross while permanently exporting a donation slice of that same USDS — under-backs phUSD whenever `batchDonationSize + ratio > 100`: phUSD minted (ratio%) then exceeds the USDS retained as backing ((100 - donationSize)%). Default config (donation disabled, ratio 50) is over-backed ~2:1, so the design is SAFE under sane/default settings; the under-backing is a parameter-interaction footgun, not an unconditional unsafe story.",
+      "securityImpact": "Conditional. If `batchMinter` is an address whose USDC leaves protocol control (a true donation), a high donationSize combined with ratio erodes phUSD backing with no on-chain guard or warning, and the two coupled parameters live in different contracts (non-obvious -> footgun, in scope under Law 3). If donated USDC stays protocol-controlled, no net leak. The magnitude is an economic-model question -> handed off to econ-scanner. Not escalated as an unconditional High because it is safe under default/sane config and requires an owner-chosen donationSize+ratio combination.",
+      "remediation": "Couple the parameters (e.g. enforce batchDonationSize + ratio <= 100, or accrue mint-debt on the net poolingUSDS rather than gross), and/or document the backing invariant the owner must preserve. Confirm with econ-scanner whether batchMinter funds remain protocol-owned.",
+      "lawImpacted": 1,
+      "crossRef": "econ-scanner: phUSD mint-debt vs (sUSDS pooled + donated USDC) backing ratio",
+      "confidence": "medium"
+    },
+    {
+      "id": "FAITH-003",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-022",
+      "severity": "low",
+      "contract": "src/V2/NFTMinterV2.sol",
+      "function": "mintFor",
+      "line": 206,
+      "lineStart": 206,
+      "lineEnd": 214,
+      "specText": "story-022: \"Add authorizedMinters mapping and mintFor() for privileged minting.\"  DispatcherConfig.disabled (struct comment line 24 + setDispatcherDisabled): \"if true, new mints are blocked but existing NFTs remain valid.\"",
+      "specSource": "git commit 7791933 body (story-022) + NFTMinterV2.sol struct/setter NatSpec; contrast with _executeMint guards lines 171-174",
+      "actualBehavior": "mintFor() checks only `authorizedMinters[msg.sender]` and that the index is registered. It does NOT check `paused` and does NOT check `config.disabled`, so an authorized minter can mint a claim NFT for a given index even while the contract is paused or while that dispatcher index is disabled. The paid path _executeMint enforces both `require(!paused)` and `require(!config.disabled)`.",
+      "deviation": "Two sub-points. (a) Pause-bypass: consistent with the owner's stated migration design philosophy — the reverted story-033 explicitly justified a pause-bypass migrate path (\"migrations are a one-shot cleanup and must remain executable even if the standard mint path is paused\"), and mintFor is that privileged migration primitive (NFTMigrator). So pause-bypass is deliberate/faithful, not a deviation. (b) Disabled-bypass: NO story authorizes ignoring config.disabled, and it contradicts the disabled flag's documented semantics (\"new mints are blocked\"). mintFor lets an authorized minter keep minting a disabled index — an owner who disables a dispatcher to block new mints would be surprised it does not block the privileged path.",
+      "securityImpact": "Low. mintFor is gated to owner-set `authorizedMinters` (a trusted role; a malicious authorized minter is owner misconfiguration, out of scope under Law 3). Only the non-obvious disabled-bypass footgun survives: surprising interaction between setDispatcherDisabled and a still-authorized migrator. No payment/dispatch occurs, so no fund movement; impact is unexpected NFT issuance for a disabled index.",
+      "remediation": "Decide and document intent. If the disabled flag should be authoritative for ALL mint paths, add `require(!configs[index].disabled)` to mintFor (keep the deliberate pause-bypass). Otherwise document that disabled blocks only the paid path and that authorized minters bypass it.",
+      "lawImpacted": 2,
+      "confidence": "high"
+    }
+  ],
+  "notes": [
+    "No design docs exist in the repo (README is the Foundry template; CLAUDE.md covers only dependency management). Story intent was recovered from [story-NNN] commit messages, in-file NatSpec, and registered-projects.json. No criteria were invented.",
+    "story-033 (migrateMint) was reverted before HEAD; the revert is byte-clean (diff vs pre-story-033 commit is empty, no dangling references) — no finding.",
+    "FAITH-002 is the only Law-1 (story-design safety) cross-reference; it is conditional on owner parameter choice and is handed to econ-scanner for the backing-magnitude judgement. No unconditional unsafe story was found."
+  ]
+}

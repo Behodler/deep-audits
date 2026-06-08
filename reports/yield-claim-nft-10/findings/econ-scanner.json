@@ -1,0 +1,91 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "auditedCommit": "cf75ec9520fd16b19e20c4b77ada2be28d7d4382",
+  "contractsScanned": 15,
+  "scopeFocus": [
+    "src/V2/dispatchers/BalancerPoolerV2.sol",
+    "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+    "src/V2/dispatchers/ATokenDispatcherV2.sol"
+  ],
+  "findings": [
+    {
+      "id": "ECON-001",
+      "title": "Single-sided sUSDS LP add into the sUSDS/phUSD Balancer V3 pool relies solely on a keeper-supplied minBPT with no on-chain price reference; batched adds are sandwichable (permissionless MEV value-leak from protocol treasury)",
+      "severity": "low",
+      "severityNote": "Honest guess: Low, footgun-escalable to Medium. Pattern-matcher PM-02 guessed potential-medium; I land at Low because (a) real, vault-enforced slippage protection (minBPT) is present, (b) the trigger pool() is permissioned (onlyAuthorizedPooler) so an attacker can only front-run a keeper's public tx, not initiate, and (c) the project already adjudicated the structurally-identical 'off-chain slippage floor, no on-chain reference' class as Low in L-03 (now fixed on the donation leg). Escalates to Medium only under the keeper footgun (loose/stale/zero minBPT) or a pathologically thin pool.",
+      "contract": "src/V2/dispatchers/BalancerPoolerV2.sol",
+      "function": "pool / unlockCallback",
+      "line": 269,
+      "lineStart": 269,
+      "lineEnd": 314,
+      "rootCauseClass": "missing-slippage / off-chain-trusted-bound (MEV LP-add sandwich)",
+      "description": "pool(uint256 minBPT) drains the ENTIRE accumulated sUSDS balance (balanceOf(_sUSDS)) and adds it as a single-sided AddLiquidityKind.UNBALANCED join into the 2-token sUSDS/phUSD Balancer V3 pool (unlockCallback line 307). The only protection on the value received is minBptAmountOut = minBPT, a floor supplied entirely off-chain by the authorized pooler/keeper; there is no on-chain oracle/TWAP/spot lower bound. getIdealBPT() (line 318) reads CURRENT pool state via router.queryAddLiquidityUnbalanced, so a keeper that sizes minBPT off a fresh spot quote is sizing off a manipulable number. A single-sided join into a 2-asset pool is the most sandwich-prone LP shape: the join implicitly force-swaps ~half the added sUSDS into phUSD along the curve, so a front-runner who imbalances the pool makes the join mint fewer BPT, then reverses for profit. The H-02 fix (decouple pooling from per-mint dispatch) AMPLIFIES this: sUSDS now accumulates across many mints and is dumped in one large add, maximizing price impact and the extractable sandwich band relative to a stream of small per-mint adds.",
+      "valueLeakPath": {
+        "preconditions": [
+          "Owner has wired a live sUSDS/phUSD Balancer V3 pool and an authorized pooler/keeper.",
+          "Keeper's minBPT leaves a non-trivial tolerance band below the true fair BPT (either intentionally, from a stale getIdealBPT quote, or as the irreducible mempool slippage band), OR keeper passes a loose/zero minBPT (footgun).",
+          "Pool depth is comparable to the accumulated sUSDS batch, so the single-sided add has material price impact (most acute for a young/thin phUSD pool)."
+        ],
+        "attackerProfitSteps": [
+          "1. Observe the keeper's pending pool(minBPT) tx in the public mempool.",
+          "2. Front-run: swap in the sUSDS/phUSD pool to push the marginal sUSDS price down / phUSD up (imbalance the pool).",
+          "3. The keeper's pool() executes: the single-sided sUSDS add now mints fewer BPT than fair, but still >= minBPT, so it does not revert.",
+          "4. Back-run: reverse the swap. The attacker pockets the price dislocation; the protocol's treasury (the BPT it custodies) is worth less than a fair add would have produced.",
+          "Extracted value per call is bounded above by (idealBPT_fair - minBPT) in BPT terms; with a loose/zero minBPT the bound collapses and the attacker can extract a large fraction of the batch's value."
+        ],
+        "affectedParties": ["protocol treasury (BPT custodied by the dispatcher, ultimately owner-withdrawn)"],
+        "notHarmed": ["individual NFT minters — each already received their NFT and holds no residual claim on the pooled sUSDS or the BPT, so this is a treasury value-leak, not cross-user socialization"]
+      },
+      "footgunEscalation": "If the keeper passes minBPT == 0 (no default; it is a required arg, so this is a deliberate operator choice) or a stale/loose value, the single sandwich can extract up to nearly the full slippage of the entire accumulated batch in one tx. Recommend: keeper must compute minBPT from a same-tx/just-prior getIdealBPT() with a tight (e.g. <=0.5%) tolerance, or add an on-chain sanity floor; document the batch-size cap so a single pool() never exceeds a safe fraction of pool depth.",
+      "corroboratingSourceIds": ["PM-02", "SA-005"],
+      "ledgerRelation": "DISTINCT from L-03 (status=fixed). L-03 was the OLD donation-swap minUSDC floor, eliminated by story-034. The pool() LP-ADD minBPT-source is a separate, never-adjudicated surface (pattern-matcher PM-02 ledger note confirms it is distinct and still-open). Not a duplicate.",
+      "confidence": "medium"
+    }
+  ],
+  "refutedConcerns": [
+    {
+      "id": "REFUTE-A",
+      "concern": "Lead C / MR-01 / DEDUP-001: story-034 (donation redirect to Sky PSM) newly breaks phUSD collateral-backing.",
+      "verdict": "REFUTED as 'newly broken'; remains a DUPLICATE of the hard-suppressed DEDUP-001, so stays suppressed. Surfaced here visibly per Law 1, not escalated.",
+      "reasoning": "Per dispatch of `amount` USDS: poolingUSDS = (1-d)*amount is wrapped to sUSDS and retained (BalancerPoolerV2._dispatch L212-219); donationUSDS = d*amount is shipped out to batchMinter via PSM.buyGem; the hook accrues phUSD mint-debt = r*amount on the GROSS amount (ATokenDispatcherV2.dispatch L125 passes gross `amount`; BalancerPoolerMintDebtHook.onDispatch L111, r=ratio/100<=0.5). Retained-collateral-to-minted ratio = (1-d)/r. Crucially this ratio is IDENTICAL to the pre-034 baseline: pre-034 wrapped all `amount` to sUSDS then swapped d*amount of sUSDS->USDC for the donation, so retained sUSDS was also (1-d)*amount, and the hook already accrued on gross. Story-034 changed the donation MECHANISM (AMM swap -> fixed-rate PSM) and TIMING (in _dispatch vs in pool), not the backing arithmetic. Therefore story-034 does not 'newly break' backing; the under-collateralization-at-high-d concern is exactly the DEDUP-001-suppressed owner-config + out-of-scope-external-phUSD-backing issue. No new permissionless extraction path. Stays suppressed.",
+      "residualFootgunNote": "There IS a non-obvious cross-contract coupling worth one runbook line (overlaps DEDUP-001, not a new active finding): batchDonationSize (set in BalancerPoolerV2) and ratio (set in BalancerPoolerMintDebtHook) are independent knobs with NO enforced invariant linking them. Whenever d > 1 - r (e.g. batchDonationSize > 50% while ratio = 50%), per-dispatch phUSD minted exceeds the sUSDS collateral the dispatcher retains, so phUSD is under-collateralized by in-protocol holdings (the surplus USDS was donated away to batchMinter). At d=0,r=0.5: 200% backed; d=50: 100%; d=60: ~83%; d=100: 0%. An owner tuning the two contracts separately could be surprised that the phUSD debt accrues on GROSS (donation-inclusive) volume. Owner-config (no permissionless path) + backing-redemption model is OOS, so this is informational/footgun, consistent with DEDUP-001's suppression rationale.",
+      "relatedSourceIds": ["MR-01", "DEDUP-001", "LOCAL-BPV2-004", "LOCAL-HOOK-002"]
+    },
+    {
+      "id": "REFUTE-B",
+      "concern": "Lead A: _psmDonate sweeping the FULL USDS balance (vs this dispatch's donationUSDS share) donates value the protocol also mints phUSD against, or donates stranded USDS, creating a value leak / cross-user subsidy.",
+      "verdict": "REFUTED — the full-balance sweep is a benign deferred-donation RETRY, not a leak.",
+      "reasoning": "Pooling and donation operate on DIFFERENT token ledgers: poolingUSDS is wrapped to sUSDS FIRST (L216-219), so after wrapping the contract's USDS balance is exactly donationUSDS + any USDS stranded by a PRIOR failed donation. The sweep (balanceOf(USDS), L224) therefore only ever picks up (this dispatch's donation share) + (previously-accrued-but-undonated donation shares). Each dispatch's donation portion is donated exactly once (eventually); pooling sUSDS is never touched by the sweep. Worked example (two dispatches, d=r=50%): dispatch1 donation fails -> 500 USDS parks, 500 sUSDS pooled, phUSD debt +=500; dispatch2 sweeps 500+500=1000 -> donated, 500 sUSDS pooled, phUSD debt +=500. Net: 1000 sUSDS retained, 1000 USDC donated, 1000 phUSD debt, 2000 USDS in -> books balance exactly, no minter subsidizes another. The only 'extra' USDS the sweep can catch is third-party USDS accidentally transferred to the contract (benign over-donation of external funds, owner-recoverable via rescueERC20). No protocol value leak.",
+      "relatedSourceIds": ["LOCAL-BPV2-001", "LOCAL-BPV2-004"]
+    },
+    {
+      "id": "REFUTE-C",
+      "concern": "Q4 / SA-009 / MR-04: div-before-mul in _psmDonate gemAmt/usdsSpent could mis-round the PSM spend (over-spend USDS or under-approve buyGem) and leak value.",
+      "verdict": "REFUTED — rounding is exact-matching and floor-favorable; worst case is a parked-dust retry (liveness), never a value leak.",
+      "reasoning": "gemAmt = floor(usdsAmount*WAD/(conv*(WAD+tout))) (L253), then usdsSpent = gemAmt*conv*(WAD+tout)/WAD (L257). usdsSpent expands to gemAmt*conv + floor(gemAmt*conv*tout/WAD), which is INTEGER-IDENTICAL to DssLitePsm._buyGem's pull (usdsAmt = gemAmt*to18ConversionFactor; usdsAmt += usdsAmt*tout/WAD). So forceApprove(usdsSpent) (L259) is exactly what buyGem(batchMinter, gemAmt) pulls — no under-approve revert, no over-spend. All divisions floor, so the contract never over-credits batchMinter; the dust (usdsAmount - usdsSpent) parks for the next sweep. require(gemAmt > 0) (L254) reverts sub-1e12-USDS (sub-1-wei-USDC) donations into the try/catch -> parks. SA-009's 'divide-before-multiply' flag is the intentional floor-gemAmt-then-recompute-exact-spend pattern; benign.",
+      "relatedSourceIds": ["SA-009", "MR-04", "LOCAL-BPV2-002"]
+    },
+    {
+      "id": "REFUTE-D",
+      "concern": "Q5: one minter's dispatch can socialize losses/fees onto other minters via shared dispatcher balances or shared LP.",
+      "verdict": "REFUTED — no per-minter residual claim exists, so there is nothing to socialize.",
+      "reasoning": "A minter pays USDS, receives an NFT, and retains NO claim on the dispatcher's sUSDS, the donated USDC, or the BPT. The mintDebt ledger is a single protocol-level accumulator pulled only to an owner-pinned recipient (not caller-chosen), and pool()'s BPT is owner-custodied. Any loss on pool() (ECON-001) or any donation tout-haircut falls on the PROTOCOL TREASURY, not on a specific other minter. The deferred-donation retry (REFUTE-B) nets out across dispatches. No cross-user transfer of value.",
+      "relatedSourceIds": ["MR-01"]
+    },
+    {
+      "id": "REFUTE-E",
+      "concern": "PSM tout fee / maxTout as a value leak (donating USDS for less USDC).",
+      "verdict": "REFUTED as a finding — bounded, owner-controlled, external fee.",
+      "reasoning": "buyGem only executes when tout <= maxTout (L244, default maxTout=1%); a higher tout routes to the silent park. The tout haircut on donated USDS is an external Sky-PSM fee bounded by an owner knob within the documented 'owner-trusted / price-growth-bps-by-design' envelope. Setting maxTout pathologically high is an OBVIOUS owner misconfiguration (Law 3 trusted), not a non-obvious footgun. No reportable issue."
+    }
+  ],
+  "notes": [
+    "Architecture confirmed as a mint->dispatch->hook system: no MasterChef accrual, no protocol-issued ERC4626 shares, no oracle, no governance token. The only protocol-issued asset is phUSD (minted by the hook); its redemption/backing model lives off-chain and is OOS (DEDUP-001).",
+    "The single confirmed in-scope, non-suppressed economic surface is the pool() LP-add MEV (ECON-001), and even that is Low because effective slippage protection (minBPT) is present and the trigger is permissioned — the live risk is keeper minBPT-sizing competence (a footgun), not a permissionless guaranteed-profit drain.",
+    "Headline lead C (phUSD backing) was probed hard against the story-034 diff and does NOT newly break: the retained-collateral / minted-phUSD ratio is arithmetically unchanged from the pre-034 baseline already adjudicated as DEDUP-001. Surfaced visibly (REFUTE-A) rather than dropped, per Law 1.",
+    "All four secondary leads (donation sweep, PSM rounding, cross-user fairness, tout economics) refuted with concrete arithmetic; recorded so the negatives are auditable."
+  ]
+}

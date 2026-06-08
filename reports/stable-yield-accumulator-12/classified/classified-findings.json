@@ -1,0 +1,231 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-06-07T19:10:00Z",
+    "project": "stable-yield-accumulator",
+    "submoduleHead": "71abe3e088559cb5d9c10e8475dc67e7cc57fac9",
+    "reportDir": "reports/stable-yield-accumulator-12",
+    "classifier": "severity-classifier",
+    "criteria": "Code4rena High/Medium/QA (project CLAUDE.md) + three-law hierarchy (1 security > 2 story-faithfulness > 3 owner-trust; non-obvious footguns in scope at honest severity)",
+    "inputs": "reports/stable-yield-accumulator-12/dedup/sanitized-findings.json (6 KEEP: DEDUP-001,002,006,007,008,009)",
+    "scope": "Classifies ONLY the 6 surviving NEW canonical findings. Carryovers DEDUP-003/004/005 (ledger L-01/L-02/L-03, still-open Lows) and suppressed SUPPRESS-001 (ledger C-01, centralization, Law-3+KI#4/#5) are NOT re-classified here; they are reconciled by finding-manager.",
+    "pocVerifiedThisRun": "DEDUP-001 machine-verified: invariant property-4 PAYMENT-FLOOR/ZERO-PAYMENT-WITH-YIELD DRAIN (workspace/stable-yield-accumulator/test/PaymentFloor_SYA.t.sol::test_DecimalDrain_UnconfiguredStrategyToken_ZeroPayment) + halmos SYMBOLIC-001 (payment>0 refuted on real bytecode) + SYMBOLIC-002 (exact zero-payment boundary). Code re-confirmed at src/StableYieldAccumulator.sol _normalizeAmount L591 fail-open passthrough, claim L489/L497/L498/L501/L509 pipeline.",
+
+    "labelingScheme": "New labels avoid collision with the ledger, which occupies L-01/L-02/L-03 (low carryovers) and C-01 (centralization). H-/M- bands are unused in the ledger. New Medium starts at M-01; new Lows continue from L-04; QA items get QA-01/QA-02 and are bundled into the single QA report. finding-manager owns final label reconciliation.",
+
+    "classifiedFindings": [
+      {
+        "id": "CLASS-001",
+        "originalId": "DEDUP-001",
+        "label": "M-01",
+        "severity": "medium",
+        "plausibility": "Plausible-High dissent recorded (see severityDispute). Final: top-of-band Medium.",
+        "faithfulness": false,
+        "regression": false,
+        "footgun": true,
+        "confidence": "high (machine-verified)",
+        "contract": "src/StableYieldAccumulator.sol",
+        "function": "_normalizeAmount / _denormalizeAmount / claim / addYieldStrategy / setRewardToken",
+        "lineStart": 586,
+        "lineEnd": 640,
+        "classification": {
+          "assetImpact": "DRAIN direction: 100% of an unconfigured <18-decimal strategy's accrued, skimmed yield (the surplus owed to phlimbo / Limbo stakers) is delivered in full to any NFT holder for ZERO reward-token payment, repeatable on every accrual; the only attacker cost is one burned NFT + gas. The asset lost is the protocol's in-motion / in-conversion yield routed to phlimbo, NOT user principal and NOT an insolvency of SYA (SYA holds no strategy principal; it pulls payment from the claimer). BRICK direction (unconfigured reward token): actualPayment overflows ~1e12x, safeTransferFrom reverts, and every yielding claim fails until the owner configures the token (full availability outage of the sole core function, fail-safe).",
+          "attackPath": [
+            "PRECONDITION (benign owner omission, NOT attacker-controllable): owner registers a sub-18-dec strategy token via addYieldStrategy(strategy, USDT) (L227, no decimals arg, no TokenConfig required) and configures the reward token, but omits the separate setTokenConfig(USDT,6,1e18) (L280). USDT stays at the default struct state decimals==0 && normalizedExchangeRate==0.",
+            "1. The unconfigured USDT strategy accrues real yield, e.g. 1000 USDT (1000e6 native).",
+            "2. Any NFT holder calls claim(nftIndex, minRewardTokenSupplied=0, exemptStrategies=[all other correctly-configured strategies]) to isolate the misconfigured one (exemptStrategies, L473).",
+            "3. skimSurplus(USDT, msg.sender) delivers the full 1000e6 USDT to the claimer (L484) — real value received, independent of SYA pricing.",
+            "4. _normalizeAmount(1000e6, USDT) hits the fail-open fallback (L591 `return amount;`) and returns 1000e6 treated as 18-dec, so totalNormalizedYield is understated ~1e12x (L489).",
+            "5. claimerPayment = 1000e6 * (10000-discount)/10000 (L497); actualPayment = _denormalizeAmount(...) divides by 10**(18-6)=1e12 (L634) => floors to 0 (L498).",
+            "6. actualPayment(0) >= minRewardTokenSupplied(0) passes (L501); nudge/phlimbo amounts are 0; safeTransferFrom(msg.sender, this, 0) succeeds (L509). Net: claimer keeps 1000 USDT of real yield for 0 reward token; phlimbo stakers receive nothing."
+          ],
+          "likelihood": "Medium-to-high CONDITIONAL on the precondition. Once the misconfiguration exists the attack is unconditional, permissionless, deterministic and repeatable by any NFT holder. The gating precondition (a forgotten setTokenConfig on a <18-dec token) is itself highly plausible: this is a STABLE-yield hub, so 6-dec USDC/USDT are the dominant token type; setTokenConfig is a separate, unenforced, easy-to-forget call; addYieldStrategy/setRewardToken never require it; and the fail-open default emits no error to signal the omission. But the attacker cannot create or guarantee the precondition.",
+          "assumptions": "(a) the owner registers a sub-18-dec strategy token (or sets a sub-18-dec reward token) AND omits the separate setTokenConfig for it; (b) the strategy accrues yield; (c) a valid-NFT holder claims. Precondition (a) is an owner config omission outside the attacker's control.",
+          "externalRequirements": "The decisive C4 qualifier: the protocol is NOT vulnerable when configured per its own documented setup (a TokenConfig for every registered/reward token). The vulnerability requires a deviation (an owner config OMISSION) that the attacker neither controls nor can induce. This 'value leak with a stated assumption / external requirement' is the textbook Medium gate. The HIGH plausibility of that requirement (insecure-by-default for the most common token type) is what pins this to the TOP of the Medium band and makes it a must-fix footgun, but it does not erase the precondition."
+        },
+        "severityDispute": {
+          "highArgument": "Insecure-by-default for the dominant token type: the vulnerable state (decimals==0) is the DEFAULT a freshly-registered token has, not a state the owner must actively corrupt — the owner reaches it by doing LESS than the (under-documented, unenforced) full setup, on exactly the 6-dec stablecoins a 'stable yield accumulator' is built for. The impact-on-trigger is unambiguous direct theft: 100% of the strategy's yield, permissionless, repeatable, machine-verified (property-4 PoC + halmos on real bytecode). preview shows 0 so a careful owner gets no signal. Under this reading the config-omission is the EXPECTED deployment, not a mitigating 'external requirement', so it reads as 'assets lost via a valid attack path without hand-wavy hypotheticals' => Plausible-High.",
+          "mediumArgument": "(1) The C4 High bar is direct loss OR a valid attack path with NO precondition the attacker cannot satisfy; a true High works against a correctly-deployed, correctly-configured protocol (reentrancy, missing access control, accounting underflow). This bug does NOT — it requires an owner config omission the attacker cannot control or induce. (2) The C4 Medium definition explicitly carves out 'leak value ... with stated assumptions, but external requirements'; the forgotten setTokenConfig IS that stated assumption / external requirement. (3) The asset at risk is in-motion / in-conversion yield owed to phlimbo, not principal and not matured/owed debt — the loss-of-yield special-case caps in-motion yield at Medium. (4) No insolvency: SYA holds no principal and pulls payment from the claimer; the brick variant is fail-safe (availability, Medium ceiling). (5) Both independent LLM scanners rated Medium. (6) Direct precedent: phoenix CLASS-001, a PoC-confirmed drain gated on an external condition the attacker could not guarantee, was held to Medium on exactly this 'value leak with stated assumptions + external requirements' clause.",
+          "resolution": "MEDIUM (M-01), at the TOP of the band. Rationale tied to C4 text: the no-precondition slice of this bug is empty — there is no attack against a correctly-configured protocol — so it fails the High 'valid attack path without hypotheticals / direct loss against a functioning protocol' bar and lands on the Medium 'value leak with stated assumptions, but external requirements' definition. Crucially, the Medium ceiling here is set by the C4 external-requirement criterion, NOT by the Law-3 footgun framing (per the footgun rule a footgun CAN be High when it enables direct asset loss); the footgun framing only establishes that this is in-scope and impact-classified, and the impact analysis lands on a (high) Medium because the attack path is gated by an owner omission the attacker cannot control. If argued as High it is Implausible-High in the strict C4 sense (predicated on a misconfiguration), but the precondition's realism makes 'Plausible-High' a defensible minority view — hence the formal dissent below for the severity-auditor to second-opinion.",
+          "dissentForAuditor": "DISSENT FLAGGED. A reasonable judge could rate this Plausible-High on the 'insecure-by-default for the most common (6-dec) token type + direct 100% theft' reading, treating the config-omission as the expected deployment rather than a mitigating external requirement. Classifier verdict is Medium-top-of-band on strict C4 external-requirement text + scanner consensus + the loss-of-yield (in-motion) cap + the phoenix CLASS-001 precedent. severity-auditor: please second-opinion the Medium-vs-High call explicitly. The Medium-vs-High delta does not change the remediation urgency — fix is mandatory either way."
+        },
+        "justification": "Medium (M-01), top of band. A single forgotten setTokenConfig on a sub-18-decimal strategy token (the common case for a stablecoin yield hub) silently turns the fail-open (0,0)=>18-dec passthrough (_normalizeAmount L591) into a permissionless ZERO-PAYMENT drain: skimSurplus delivers the full real underlying to the claimer (L484) while totalNormalizedYield is understated ~1e12x, actualPayment floors to 0 (L498), the default minRewardTokenSupplied=0 disables the only guard (L501), and the claimer keeps 100% of the yield owed to phlimbo for nothing (machine-verified). The symmetric reward-token misconfig bricks all yielding claims (availability). It is firmly above QA/Low (real, repeatable, 100%-of-yield asset loss + a full availability outage variant, not dust and not pure state-handling), and capped below High because the attack path is gated by an owner config OMISSION that the attacker neither controls nor can induce — the C4 'value leak with stated assumptions, but external requirements' clause — and because the asset is in-motion yield (Medium ceiling per the loss-of-yield rule). This is the in-scope NON-OBVIOUS Law-3 owner FOOTGUN that unknowingly enables a Law-1 exploit; explicitly NOT the suppressed malicious-owner C-01 framing (needs no malice, just a forgotten setter). A Plausible-High dissent is recorded for the severity-auditor.",
+        "recommendation": "Make the unconfigured state FAIL-CLOSED. Any one closes the drain: (1) add an explicit `bool configured` to TokenConfig (set only by setTokenConfig) and revert in _normalizeAmount/_denormalizeAmount (or in claim) when a registered/reward token is unconfigured instead of assuming 18-dec; (2) require tokenConfigs[token].decimals != 0 (or the configured flag) inside addYieldStrategy AND setRewardToken; (3) fold decimals into addYieldStrategy's signature. Defense-in-depth (also hardens DEDUP-003/L-01): revert when actualPayment == 0 for non-zero delivered yield. Ship a deploy checklist: every strategy token AND the reward token MUST be configured before claims are enabled. The proposed `configured` flag also resolves PARK-08 (real 0-decimal token indistinguishable from unconfigured)."
+      },
+      {
+        "id": "CLASS-002",
+        "originalId": "DEDUP-002",
+        "label": "L-04",
+        "severity": "low",
+        "plausibility": "n/a (no value-extraction path)",
+        "faithfulness": false,
+        "regression": false,
+        "footgun": true,
+        "confidence": "high",
+        "contract": "src/StableYieldAccumulator.sol",
+        "function": "setNudgeSplit / setNudgeAddress / claim",
+        "lineStart": 396,
+        "lineEnd": 402,
+        "classification": {
+          "assetImpact": "None. No value is lost or stolen. The only consequence is a temporary availability gap: while the inconsistent (nudgeSplit>0, nudge==address(0)) state holds, every yielding claim runs the skim loop and NFT-balance check then reverts NudgeNotConfigured at L506 — atomically, so no NFT is consumed and no funds move.",
+          "attackPath": [
+            "1. Owner calls setNudgeSplit(20) to route 20% to a nudge recipient, before wiring the recipient (L396 only checks _split > 100, no nudge!=0 guard).",
+            "2. nudge is still address(0).",
+            "3. Any claim with yield runs the skim loop + NFT-balance check, then reverts NudgeNotConfigured at L506 (atomic rollback; NFT preserved).",
+            "4. All yielding claims revert until the owner sets a valid nudge address or sets nudgeSplit(0). The same brick arises if the owner later calls setNudgeAddress(0) without first zeroing the split."
+          ],
+          "likelihood": "low - requires the owner to enable the split before wiring the recipient (a natural config order), and is immediately self-recoverable by a single owner setter. No external attacker can trigger or sustain it.",
+          "assumptions": "Owner enables the nudge split out of order (set split, then address) or clears the nudge address while a split is active.",
+          "externalRequirements": "None code-side; the trigger and the fix are both owner actions. No third party is involved."
+        },
+        "justification": "Low. The permissionless core function (claim) is fully bricked for yielding claims while the inconsistent state holds — an availability impact — but it is owner-self-inflicted, immediately owner-recoverable by a single setter, causes no value loss, and rolls back atomically (no NFT burned). C4 places trivially-recoverable, no-value-loss, self-inflicted availability hazards at Low/QA rather than Medium (which is reserved for availability impacts driven by external conditions or not trivially recoverable). It clears QA because the sole core function is genuinely bricked while the window holds. This is an in-scope NON-OBVIOUS Law-3 config-ordering footgun: the setter gives no signal the state is invalid, so a competent non-malicious owner can be surprised — not an 'obvious admin mistake'. The L506 read-side revert itself is documented/intended (story-faithful); the gap is purely that the write-side setter does not enforce it.",
+        "recommendation": "Enforce the invariant on the write side so the inconsistent state is unreachable: in setNudgeSplit, `if (_split > 0 && nudge == address(0)) revert NudgeNotConfigured();`; symmetrically in setNudgeAddress reject clearing to address(0) while nudgeSplit > 0 (or auto-zero the split). This makes the L506 claim-time check defensive rather than load-bearing. Safe config order today: set the nudge ADDRESS first, then enable the split; to disable, zero the split before clearing the address."
+      },
+      {
+        "id": "CLASS-003",
+        "originalId": "DEDUP-006",
+        "label": "L-05",
+        "severity": "low",
+        "plausibility": "n/a (no permissionless trigger)",
+        "faithfulness": false,
+        "regression": false,
+        "footgun": true,
+        "confidence": "medium",
+        "contract": "src/StableYieldAccumulator.sol",
+        "function": "_getYieldForStrategy / claim / calculateClaimAmount / getTotalYield",
+        "lineStart": 552,
+        "lineEnd": 564,
+        "classification": {
+          "assetImpact": "No value loss. Operational impairment only: above a gas-vs-incentive threshold the permissionless consolidation stops being profitable, so strategy surplus accrues unconsolidated and phlimbo stops receiving rewards; preview (calculateClaimAmount/getTotalYield) can also revert on gas for an oversized client set, denying claimers the quote they use to size minRewardTokenSupplied (a claimer can still claim with min=0).",
+          "attackPath": [
+            "0. No permissionless trigger: claim loops registered strategies (L464, addYieldStrategy is onlyOwner) and previews nest the clients[] loop (L556, over getAuthorizedClients(); IYieldStrategy.setClient is owner-gated). econ-scanner CORRECTED the static/pattern 'anyone depositing grows the set' premise — both growable dimensions are owner / strategy-owner authorized.",
+            "1. Owner registers many strategies and/or strategy owners authorize many clients (benign growth).",
+            "2. claim gas (and preview gas) silently rises above discount*pending-yield.",
+            "3. No rational claimer claims; consolidation stalls until the owner raises the discount or prunes strategies. A claimer can route around ONE pathological strategy via exemptStrategies (story-024) but cannot fix aggregate cardinality."
+          ],
+          "likelihood": "low - requires owner/strategy-owner-authorized growth past a gas threshold; no external party can force it, and it is self-correcting (owner raises discount or prunes; exemptStrategies mitigates single-strategy pathologies).",
+          "assumptions": "Owner-authorized strategy count x typical authorized-client count grows large enough that total claim/preview gas exceeds the discounted pending yield.",
+          "externalRequirements": "None attacker-controllable. The static/pattern 'permissionless unbounded-loop DoS' premise is explicitly refuted (setClient and addYieldStrategy are both owner-gated)."
+        },
+        "justification": "Low. The static/pattern tools flagged a potential-medium permissionless DoS, but econ-scanner authoritatively corrected the premise: both growable dimensions (strategies, authorized clients) are owner / strategy-owner gated, so NO external party can force the stall. The residual is a genuine operational protocol-function impairment (consolidation stalls, phlimbo stops receiving) but it is entirely owner/OOS-bounded, self-correcting, and mitigated per-strategy by exemptStrategies — below the Medium availability bar (no external trigger, owner-recoverable) and above pure QA because there is a real, non-obvious function-impairment surprise (silent gas-death of the claim incentive). Root cause is SYA's OWN loop over strategies/clients (in-scope), so KI#7 (external strategy behavior OOS) does not cover it. In-scope NON-OBVIOUS Law-3 operational footgun.",
+        "recommendation": "Document a safe-config bound on (strategy count x typical client count) vs the chosen discount; consider pagination / batched claim over a strategy subrange; keep the discount tunable to track gas. exemptStrategies already mitigates single-strategy pathologies. Point owner guidance at testing claim gas against the live strategy/client cardinality before relying on permissionless consolidation."
+      },
+      {
+        "id": "CLASS-004",
+        "originalId": "DEDUP-007",
+        "label": "L-06",
+        "severity": "low",
+        "plausibility": "n/a (no profitable adversarial path)",
+        "faithfulness": false,
+        "regression": false,
+        "footgun": false,
+        "confidence": "medium",
+        "contract": "src/StableYieldAccumulator.sol",
+        "function": "claim / calculateClaimAmount / getTotalYield",
+        "lineStart": 651,
+        "lineEnd": 688,
+        "classification": {
+          "assetImpact": "No protocol value loss and no third-party griefing. A claimer's payment always tracks the yield they actually receive (payment = (1-discount)*value-of-delivered-yield under correct config), so an attacker who inflates the victim's actualPayment by donating surplus also gifts the victim discount*donation — econ-scanner concluded NO profitable sandwich exists. Impact is claimer-side UX/self-DoS (revert on safeTransferFrom when actual>preview, NFT preserved, wasted gas) plus unreliable bot quoting because getTotalYield (L738) omits the per-token paused skip that claim()/calculateClaimAmount() apply, so the global view over-reports vs the claimable set.",
+          "attackPath": [
+            "1. Preview (calculateClaimAmount/getYield/getTotalYield) prices off the snapshot estimate sum(totalBalanceOf - principalOf); claim() prices off skimSurplus's post-redeem/post-swap underlyingReceived (L484) — documented to diverge (story-025-faithful, two-source design).",
+            "2. minRewardTokenSupplied (L501) is a FLOOR only, with no MAX-payment ceiling.",
+            "3a. A claimer who pre-approves exactly the quote can have claim() revert on safeTransferFrom when actual > preview (self-DoS, wasted gas, NFT preserved).",
+            "3b. Bots relying on getTotalYield mis-size approvals/min because it counts paused tokens (view inconsistency)."
+          ],
+          "likelihood": "low - benign divergence; the only adverse outcomes are a claimer's own wasted-gas revert and integrator mis-quoting. No value leaves the protocol incorrectly and no attacker profits.",
+          "assumptions": "Claimer pre-approves exactly the preview quote without buffer, or an integrator trusts getTotalYield over the paused-aware claim path.",
+          "externalRequirements": "None; no adversarial path. The two-source preview-vs-actual design is faithful/documented (story-025)."
+        },
+        "justification": "Low (near the QA boundary). Two SYA-side issues fold here: (a) claim() has only a min-payment floor and no max ceiling, so preview-vs-actual divergence can cause a claimer's own approval to revert (self-DoS, no value loss, NFT preserved); (b) getTotalYield omits the per-token paused skip that claim()/calculateClaimAmount() apply, a real view inconsistency that over-reports to integrators. econ-scanner explicitly down-weighted the pattern-matcher's potential-high/medium MEV framings: no profitable sandwich exists because inflating the victim's payment also gifts them the corresponding yield. No protocol value leak and no third-party harm => below Medium; it is a state-handling / view-consistency + UX-slippage issue, the canonical Low/QA. The strategy-side magnitude of the divergence roots in the OOS strategy adapter (KI#7) and is scoped out; only the SYA-side slice is classified.",
+        "recommendation": "Add an optional maxRewardTokenSupplied ceiling to claim() (symmetric to the floor) so claimers can bound overpay; make getTotalYield skip paused tokens for consistency with claim()/calculateClaimAmount(); document that calculateClaimAmount is an estimate and that integrators should buffer approvals."
+      },
+      {
+        "id": "CLASS-005",
+        "originalId": "DEDUP-008",
+        "label": "QA-01",
+        "severity": "qa",
+        "plausibility": "n/a (by-design incentive)",
+        "faithfulness": false,
+        "regression": false,
+        "footgun": false,
+        "confidence": "high",
+        "contract": "src/StableYieldAccumulator.sol",
+        "function": "claim",
+        "lineStart": 484,
+        "lineEnd": 501,
+        "classification": {
+          "assetImpact": "None beyond the budgeted incentive. claim() skims all non-exempt strategies' surplus and applies the discount to the whole sum in a single permissionless call (L497); the first valid-NFT caller captures the full accumulated discount. But the protocol pays exactly discount*yield regardless of WHO claims, so there is no protocol value leak — this IS the designed decentralized-conversion incentive (registry designDecisions[0]: 'Discount rate incentivizes external claimers to pay gas costs for conversion').",
+          "attackPath": [
+            "1. Accumulated yield is a growing pot; a searcher backruns a large surplus accrual / a paused-token unpause.",
+            "2. The searcher wins the claim with a higher gas bid and captures the full discount on the pot in one shot.",
+            "3. Losers of the race revert with ZeroAmount (NFT preserved, gas wasted) — ordinary MEV friction. There is no shared post-loop balance to skim (the first claim empties the pot), so no sandwich exists.",
+            "4. Residual note: minRewardTokenSupplied defaults to 0, disabling the per-claim floor — a careless/bot claimer accepting any amount can hit the dust/zero-payment edge (cross-ref DEDUP-003/L-01), harming only their own economics."
+          ],
+          "likelihood": "n/a - working as designed; the claim-race is intended MEV competition, not an exploit.",
+          "assumptions": "A discount is funded (by design) and claimers compete to perform the conversion.",
+          "externalRequirements": "None; by-design behavior."
+        },
+        "justification": "QA / informational. The 'first permissionless claimer captures the whole accumulated discount' is the INTENDED decentralized-conversion incentive; the protocol pays exactly discount*yield regardless of who claims, so there is no protocol value leak beyond the budgeted incentive and the claim-race is ordinary MEV working as designed. The pattern-matcher's nudge winner-take-all signature is a documented red herring (nudge pays a proportional share to an owner-set recipient). The only in-scope residual worth surfacing is the minRewardTokenSupplied=0 default (cross-linked to DEDUP-003/L-01). Kept visible per Law 1 rather than silently dropped as by-design.",
+        "recommendation": "None required for security. Optionally document the MEV/race expectation for integrators and recommend claim bots always pass a non-zero minRewardTokenSupplied derived from calculateClaimAmount (with a buffer) to avoid the dust/zero-payment edge."
+      },
+      {
+        "id": "CLASS-006",
+        "originalId": "DEDUP-009",
+        "label": "QA-02",
+        "severity": "qa",
+        "plausibility": "n/a (no exploit path)",
+        "faithfulness": false,
+        "regression": false,
+        "footgun": false,
+        "confidence": "low",
+        "contract": "src/StableYieldAccumulator.sol",
+        "function": "claim",
+        "lineStart": 447,
+        "lineEnd": 447,
+        "classification": {
+          "assetImpact": "None. claim() declares `whenNotPaused nonReentrant` (L447), so whenNotPaused executes before the reentrancy guard engages. whenNotPaused is a pure storage read of the `paused` flag with no external call and no state change, so the ordering is harmless in context.",
+          "attackPath": [
+            "1. Static tool (aderyn) flags nonReentrant not being the first modifier.",
+            "2. In context, the preceding modifier only reads storage and makes no external call, so no reentrancy window is opened by the ordering. No exploit path exists."
+          ],
+          "likelihood": "n/a - no exploit; likely a contextual false-positive.",
+          "assumptions": "None.",
+          "externalRequirements": "None."
+        },
+        "justification": "QA. A defensive modifier-ordering note (put nonReentrant first) from a single static source, harmless in context because whenNotPaused is a pure storage read with no external call. No security impact; kept visible as a one-line QA item (Law 1 recall over tidiness) rather than dropped.",
+        "recommendation": "Optionally reorder to `nonReentrant whenNotPaused` for defensive consistency. No functional impact."
+      }
+    ],
+
+    "specConformanceRouting": {
+      "note": "Faithfulness (Law 2) routing. None of the 6 NEW classified findings is a [story-NNN] behavioural deviation — story-faithfulness confirmed story-022/023/024/025 all FAITHFUL. DEDUP-001/006/007 are state-handling / config-enforcement / view-consistency issues, not story deviations; DEDUP-002's read-side revert is documented/intended; DEDUP-008 is by-design; DEDUP-009 is defensive QA. The one live faithfulness item this run (F-01, the claim() NatSpec doc/impl drift extension) belongs to the L-03 carryover (DEDUP-005), which is reconciled by finding-manager and not re-classified here.",
+      "newFaithfulnessItems": []
+    },
+
+    "ledgerCarryoverNote": "DEDUP-003 (L-01, low), DEDUP-004 (L-02, low), DEDUP-005 (L-03, low) are still-open ledger carryovers — NOT re-classified; finding-manager bumps lastSeenRun to stable-yield-accumulator-12 and writes carryover stubs. SUPPRESS-001 (C-01, centralization) stays SUPPRESSED under Law 3 + KI#4/#5; keep the open centralization entry, do not re-raise as High. Zero regressions this run. DEDUP-003/L-01 MUST NOT be re-escalated (dust-only standalone); only CLASS-001/DEDUP-001 weaponizes that floor ~1e12x via misconfig.",
+
+    "severityRankedSummary": {
+      "high": [],
+      "medium": [
+        "M-01 (CLASS-001 / DEDUP-001) — fail-open unconfigured-token default => permissionless zero-payment yield drain (or symmetric claim brick); top-of-band Medium, Plausible-High dissent recorded"
+      ],
+      "low": [
+        "L-04 (CLASS-002 / DEDUP-002) — setNudgeSplit(>0) with nudge==0 bricks all yielding claims; owner-recoverable availability footgun",
+        "L-05 (CLASS-003 / DEDUP-006) — gas-scaling consolidation stall; owner/OOS-bounded operational footgun (no permissionless DoS)",
+        "L-06 (CLASS-004 / DEDUP-007) — preview-vs-actual divergence (no max ceiling) + getTotalYield ignores per-token pause; no profitable sandwich"
+      ],
+      "qa": [
+        "QA-01 (CLASS-005 / DEDUP-008) — first-claimer captures accumulated discount (by-design incentive) + min=0 default note",
+        "QA-02 (CLASS-006 / DEDUP-009) — nonReentrant after whenNotPaused; harmless modifier-ordering note"
+      ]
+    },
+
+    "labelSuggestions": {
+      "newMedium": ["M-01 (DEDUP-001)"],
+      "newLow": ["L-04 (DEDUP-002)", "L-05 (DEDUP-006)", "L-06 (DEDUP-007)"],
+      "newQA": ["QA-01 (DEDUP-008)", "QA-02 (DEDUP-009)"],
+      "ledgerCarryoverNoNewLabel": ["L-01 (DEDUP-003)", "L-02 (DEDUP-004)", "L-03 (DEDUP-005)", "C-01 (SUPPRESS-001, suppressed)"],
+      "labelBasis": "Ledger occupies L-01/L-02/L-03 (low) and C-01 (centralization); H-/M- bands unused. Next free Medium=M-01, next free Low=L-04. QA items bundled in the single QA report as QA-01/QA-02. finding-manager owns final reconciliation.",
+      "humanReviewFlag": "CLASS-001/M-01 carries a formal Medium-vs-High dissent (severityDispute.dissentForAuditor) for the severity-auditor to second-opinion."
+    }
+  }
+}

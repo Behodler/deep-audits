@@ -1,0 +1,231 @@
+{
+  "project": "reflax-yield-vault",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "pattern-matching",
+  "patternDbVersion": "1.0",
+  "patternsChecked": 29,
+  "scope": [
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+    "src/AMMAdapters/CurveAMMAdapter.sol",
+    "src/AYieldStrategy.sol (base context)"
+  ],
+  "findingsCount": 4,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE",
+      "type": "spot-price-as-oracle / share-price manipulation of slippage floor",
+      "severity": "potential-high",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 312,
+      "description": "The strategy derives EVERY economically-critical quantity from the external ERC4626 vault's SPOT conversion rate, read and consumed in the same transaction: deposit minOut = vault.convertToShares(creditedPrincipal) (L312); withdraw/skim/total minOut = vault.convertToAssets(sharesToSell) * (1 - slip) (L357-358, L419-420, L470-471); per-client surplus and totalBalanceOf = vault.convertToAssets(vault.balanceOf(this)) * principal / totalDeposited (L151-155, L457, L516). convertToShares/convertToAssets are acting as a price oracle for the swap's only slippage floor. If the underlying vault's conversion rate is manipulable (donation/flash inflation of a vault whose totalAssets tracks balanceOf, or transient share-price movement), an attacker can depress the computed minOut and sandwich the Curve swap, extracting value within the resulting gap. The slippage tolerance bps is measured against this manipulable rate, not against an independent oracle. sUSDe (the only currently-wired pair) uses a vesting model that resists flash manipulation, but the strategy is GENERIC over any IERC4626 vault, so the safety depends entirely on the deployed vault's convert* implementation.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "vault.balanceOf(address(this))",
+        "vault.convertToAssets(...)",
+        "vault.convertToShares(...)"
+      ],
+      "missingMitigations": [
+        "No TWAP / independent oracle for the swap value floor",
+        "convert* read and used to bound the swap in the same tx",
+        "Generic over arbitrary ERC4626 vault; no allowlist of manipulation-resistant vaults"
+      ],
+      "notes": "Strongest Tier-2 (econ-scanner) candidate. Mitigated for sUSDe specifically; the open question is whether any deployed vault has a flash/donation-manipulable convertToAssets. Confidence is about applicability, not impact: if it applies it is a High value-extraction path.",
+      "references": [
+        "patterns/vulnerability-patterns.json#FLASH-LOAN-PRICE"
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "incomplete slippage protection / no swap deadline",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 318,
+      "description": "Swaps DO carry a non-zero minOut (good), but three of the pattern's risk conditions hold. (1) NO DEADLINE: neither IAMMAdapter.swap nor CurveAMMAdapter.swap (CurveAMMAdapter.sol:138 router.exchange) passes a deadline to Curve Router NG; grep confirms no block.timestamp/deadline anywhere in the swap path. A pending deposit/withdraw tx can be held by validators/searchers and executed later at the most adverse moment still above minOut. (2) USER CANNOT SPECIFY minOut: the end staker (via stable-staker) cannot pass their own floor; minOut is auto-derived from a single owner-set slippageToleranceBps applied to a vault-spot rate. (3) minOut CAN BE ZERO: for dust deposits creditedPrincipal = amount*(MAX_BPS-slip)/MAX_BPS rounds to 0 -> minOut = convertToShares(0) = 0 (only require(sharesReceived>0) remains, satisfiable by 1 wei under a sandwich); and it is 0 for ANY amount if slippageToleranceBps is set to MAX_BPS (see PATTERN-004).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "ammAdapter.swap(..., minOut)",
+        "router.exchange(r.path, r.swapParams, amountIn, minAmountOut, r.pools, msg.sender)"
+      ],
+      "missingMitigations": [
+        "No deadline parameter on the swap path (Curve exchange called without expiry)",
+        "Caller/staker cannot supply their own minAmountOut",
+        "minOut floor is 0 for dust amounts and for slippageToleranceBps == MAX_BPS"
+      ],
+      "notes": "Couples with PATTERN-001 (the floor itself is spot-derived) and PATTERN-004 (the floor collapses to 0 at MAX_BPS).",
+      "references": [
+        "patterns/vulnerability-patterns.json#MISSING-SLIPPAGE"
+      ]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "type": "requested-vs-received principal skew on AMM exit / loss borne by exiting user",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 369,
+      "description": "_withdrawInternal pays the recipient the ACTUAL underlyingReceived from the AMM sell (L364-367) but decrements principal by the REQUESTED amount (L371-372). The NatSpec assumes 'any difference accumulates as protocol-owned yield', i.e. received >= requested. But the sell can return as little as minOut = convertToAssets(sharesToSell)*(1-slip), which is LESS than the requested principal, so the EXITING user is short-paid by up to the slippage tolerance while their principal is debited in full; the shortfall is a user loss, not a protocol surplus. This is not blocked by stable-staker's 'underwater' guard: that guard compares totalBalanceOf (a FAIR-rate convert* metric) to principal, but execution goes through the AMM at rate*(1-slip), so an exit that is 'not underwater' by the metric can still pay below principal. The gap is widened by skimSurplus, which can remove the slippage-haircut buffer (creditedPrincipal is booked at amount*(1-slip), so fair value of shares exceeds credited principal by the haircut from the moment of deposit, and that excess is immediately skimmable surplus) leaving exactly creditedPrincipal-worth of shares to sell at a further -slip on the way out.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "balanceAfter/Before delta pattern (underlyingReceived from swap)",
+        "totalBalanceOf",
+        "principalOf",
+        "skimSurplus"
+      ],
+      "missingMitigations": [
+        "Shortfall (received < requested) is not attributed to protocol surplus; it is silently borne by the exiting user",
+        "Underwater check uses fair convert* rate, not AMM execution rate net of slippage",
+        "skimSurplus can drain the deposit-time haircut buffer that would otherwise cushion the exit"
+      ],
+      "notes": "Partially consistent with stable-staker known-issue #5 (sub-amount differences are protocol-owned yield/loss) and the strategy's 'all rounding favors protocol' rule, but the per-exit slip% haircut and the skim-removes-buffer interaction warrant econ-scanner confirmation. Verify against docs/stories before final severity.",
+      "references": [
+        "patterns/vulnerability-patterns.json#YIELD-PRINCIPAL-ACCOUNTING-SKEW"
+      ]
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "CENTRALIZATION-ADMIN",
+      "type": "owner footgun (Law-3 operational hazard) — slippage param silently zeroes principal credit + slippage floor",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 194,
+      "description": "setSlippageTolerance only enforces require(_bps <= MAX_BPS) (L195), permitting _bps == 10000 (100%). At that setting _creditedPrincipal(amount) = amount*(MAX_BPS-10000)/MAX_BPS = 0, so a deposit (a) pulls and swaps the full amount of underlying yet credits ZERO principal to the depositor (silent total principal loss, funds become protocol/other-client surplus), and (b) sets deposit minOut = convertToShares(0) = 0 and withdraw minOut = idealUnderlying*0 = 0, fully disabling slippage protection. Even a merely high value (e.g. 9000 = 90%) credits only 10% of nominal as principal. A non-malicious owner raising 'slippage tolerance' to stop swaps reverting would not expect it to also slash credited principal and remove the swap floor — the parameter is overloaded as both the slippage knob AND the principal-haircut basis. This is a non-obvious footgun, in scope per CLAUDE.md Law 3 (operational hazard, not a malicious-owner finding).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "onlyOwner setSlippageTolerance",
+        "require(_bps <= MAX_BPS)",
+        "_creditedPrincipal = amount * (MAX_BPS - slippageToleranceBps) / MAX_BPS"
+      ],
+      "missingMitigations": [
+        "No sane upper bound on slippageToleranceBps below MAX_BPS",
+        "No floor ensuring creditedPrincipal > 0 / minOut > 0 for normal amounts",
+        "Slippage tolerance and principal-credit haircut share one parameter with no warning"
+      ],
+      "notes": "Report as operational hazard with safe-config guidance (cap slippage well below MAX_BPS, decouple principal haircut from slippage, require minOut>0). Do NOT frame as 'malicious owner'.",
+      "references": [
+        "patterns/vulnerability-patterns.json#CENTRALIZATION-ADMIN",
+        "CLAUDE.md Three-Law Hierarchy (Law 3 footgun)"
+      ]
+    }
+  ],
+  "manualReviewCount": 5,
+  "manualReview": [
+    {
+      "id": "PATTERN-ML-001",
+      "source": "pattern-db",
+      "patternId": "ERC4626-INFLATION",
+      "type": "share-inflation / donation adjacent",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 142,
+      "description": "Internal proportional accounting totalBalanceOf = vault.convertToAssets(vault.balanceOf(this)) * principal / totalDeposited (L142-155) depends on the strategy's raw vault-share balance, which anyone can inflate by transferring (donating) vault shares directly to the strategy address. A donation increases every client's totalBalanceOf proportionally (and the skimmable surplus). Classic first-depositor/inflation harm is largely neutralized: deposits are onlyAuthorizedClient (clients are protocol-owned contracts), principal is credited conservatively (haircut), and a donation benefits existing principal holders rather than stealing from them. Flagged for review because the proportional metric and the external vault's convert* are donation/manipulation-sensitive (overlaps PATTERN-001).",
+      "confidence": "low",
+      "matchedSignatures": [
+        "(totalValue * principal) / totalDeposited",
+        "vault.balanceOf(address(this))"
+      ],
+      "missingMitigations": [
+        "totalBalanceOf/surplus include directly-donated vault shares (totalAssets-style)",
+        "no virtual offset on the internal proportional metric"
+      ],
+      "notes": "Likely not independently exploitable due to access control + conservative credit; routed for human/Tier-2 adjudication alongside PATTERN-001."
+    },
+    {
+      "id": "PATTERN-ML-002",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC777",
+      "type": "CEI ordering / cross-contract reentrancy",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 318,
+      "description": "State is mutated AFTER external calls in both flows: _depositInternal updates clientBalances/totalDeposited (L322-323) after the ammAdapter.swap (L318); _withdrawInternal updates them (L371-372) after the swap (L364) and the safeTransfer to recipient (L367). CEI is violated. Same-contract reentry is blocked by nonReentrant on deposit/withdraw/depositAsOwner/withdrawAsOwner (confirmed L229/248/265/279) and skimSurplus/totalWithdrawal (base). Residual concern: token type is unrestricted (generic IERC20 underlying + arbitrary ERC4626 share token) so a callback-bearing token could enable read-only reentrancy against totalBalanceOf/principalOf mid-swap for an integrating reader; underlyingReceived is read post-swap (untrusted) before the state write. emergencyWithdraw is onlyOwner and lacks nonReentrant but only transfers shares to the owner.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "safeTransferFrom / safeTransfer with state change after external call",
+        "external ammAdapter.swap before storage write"
+      ],
+      "missingMitigations": [
+        "CEI not followed (effects after interactions)",
+        "token type not restricted (generic vault/underlying)"
+      ],
+      "notes": "Mitigated by nonReentrant for direct reentry; surfaced for read-only-reentrancy / non-standard-token review only."
+    },
+    {
+      "id": "PATTERN-ML-003",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "gas-bound DoS on skim",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 509,
+      "description": "_accrueSurplusShares and _distributeBuffer iterate over the full _authorizedClients set (L509, L547) in a single skimSurplus call. The set is owner-managed (setClient) and expected to be small (protocol contracts), so this is bounded by trusted configuration; CurveAMMAdapter.setRoute's loop is a fixed 11 iterations. If an owner authorizes a very large client set, skimSurplus could exceed the block gas limit and become uncallable (skim DoS). Mild owner footgun, not attacker-controllable.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "for (uint256 i = 0; i < clients.length; i++)"
+      ],
+      "missingMitigations": [
+        "no pagination / batch cap on the client set in skimSurplus"
+      ],
+      "notes": "Owner-bounded; low priority."
+    },
+    {
+      "id": "PATTERN-ML-004",
+      "source": "pattern-db",
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "type": "two-phase withdrawal re-reads live state",
+      "severity": "potential-low",
+      "contract": "src/AYieldStrategy.sol",
+      "line": 488,
+      "description": "totalWithdrawal caches the balance at Phase 1 (_initiateWithdrawal, state.balance) and passes it as `amount` to _totalWithdraw at Phase 2 (L499). However ERC4626MarketYieldStrategy._totalWithdraw IGNORES that cached `amount` for the economic computation: it recomputes sharesToSell = totalShares * clientBalances[client] / totalDeposited from CURRENT state and zeroes the client (L414-430). The cached value only gates require(amount>0). So the 24h/48h window protects the right-to-withdraw but the withdrawn value tracks live state, not the snapshot. Consistent with snapshot-at-step-1 intent for authorization, but the value is not snapshotted; review whether deposits/withdrawals between phases can shift another client's proportional share unexpectedly.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "state.balance cached at initiation",
+        "_totalWithdraw recomputes from current clientBalances/totalDeposited"
+      ],
+      "missingMitigations": [
+        "Phase-2 value derived from live state rather than the Phase-1 snapshot"
+      ],
+      "notes": "Likely benign (per-client zero-out is self-contained) but flagged so it is adjudicated rather than dropped."
+    },
+    {
+      "id": "PATTERN-ML-005",
+      "source": "pattern-db",
+      "patternId": "FRONTRUN-APPROVE",
+      "type": "approval handling review (checked, appears clean)",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 315,
+      "description": "Reviewed per scope's 'approval handling (residual approvals, approve-to-nonzero)' emphasis. CurveAMMAdapter uses forceApprove(router, amountIn) with a reset-then-set each swap (CurveAMMAdapter.sol:135) — USDT/approve-to-nonzero safe and leaves no residual (Curve exchange consumes exactly amountIn). The strategy uses safeIncreaseAllowance(ammAdapter, amount|sharesToSell) (L315/361/423/472); the adapter pulls exactly that amount via transferFrom, so net residual allowance is zero per call. No raw approve(nonzero->nonzero). No finding; recorded so the check is visible rather than silently dropped.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "forceApprove(address(router), amountIn)",
+        "safeIncreaseAllowance(address(ammAdapter), amount)"
+      ],
+      "missingMitigations": [],
+      "notes": "Pattern explicitly marked QA/known-issue in DB; included as a documented no-finding."
+    }
+  ],
+  "patternsNoMatch": [
+    "ORACLE-STALE (no Chainlink/AggregatorV3 in scope)",
+    "ORACLE-ROUNDID (no Chainlink in scope)",
+    "SIGNATURE-REPLAY (no ecrecover/ECDSA/permit)",
+    "UNPROTECTED-INIT (constructor + Ownable, no initializer/proxy)",
+    "STORAGE-COLLISION (no delegatecall/proxy)",
+    "UNSAFE-DOWNCAST (all uint256, no narrowing casts)",
+    "DIVISION-PRECISION (all sites multiply-before-divide; intentional protocol-favoring floors)",
+    "RETURN-VALUE-IGNORE (SafeERC20 everywhere; swap return values consumed)",
+    "SELFDESTRUCT-FORCE-ETH (no address(this).balance / msg.value logic; router.exchange payable but no ETH forwarded)",
+    "DOUBLE-VOTING / governance patterns (N/A)",
+    "PERMIT-FRONTRUN (no permit)",
+    "CROSS-CHAIN-REPLAY (no chainid/bridge)",
+    "TIMELOCK-BYPASS (no timelock)",
+    "INCORRECT-OPERATOR (boundary checks reviewed; no obvious off-by-one)",
+    "REWARD-ACCRUAL-ORDER / REWARD-RUNWAY-DEPLETION / EMISSION-WINDOW-BOUNDARY / MINT-ON-DEMAND-OVERMINT / BATCH-PAYOUT-FIXED-POT (no MasterChef accumulator or mint-on-demand emission in this strategy; skimSurplus snapshots BEFORE the swap and recipient is owner-authorized, not caller-griefable)",
+    "FIRST-DEPOSITOR-ATTACK (deposits access-controlled to protocol clients; proportional-accounting sensitivity folded into PATTERN-ML-001)"
+  ]
+}

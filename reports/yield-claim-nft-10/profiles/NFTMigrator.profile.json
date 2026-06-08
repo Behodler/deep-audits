@@ -1,0 +1,84 @@
+{
+  "contract": "src/V2/NFTMigrator.sol",
+  "profileTimestamp": "2026-06-07T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "purpose": "One-shot migration helper: burns a caller's V1 ERC1155 claim NFTs and mints the equivalent V2 NFTs based on an owner-configured V1-index -> V2-index map. Must hold authorizedBurner on V1 NFTMinter and authorizedMinter on V2 NFTMinterV2.",
+  "inheritanceChain": ["Ownable"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": false,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": [],
+    "accessControlled": ["setMapping", "setMappings", "setInitialized"],
+    "initializerProtected": "custom one-way `initialized` flag set by setInitialized()"
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-MIG-001",
+      "type": "unbounded-loop",
+      "severity": "local-medium",
+      "function": "migrate",
+      "line": 70,
+      "description": "Nested loop: outer over [1, v1.nextIndex()), inner `for (j=0; j<balance; j++) v2.mintFor(...)` where `balance` is the caller's V1 NFT holding for that index — unbounded and attacker/holder-controlled. A holder of a large balance for any index pays O(balance) mintFor calls (each an ERC1155 _mint with a receiver callback) in a single tx; migrate() can exceed the block gas limit and permanently fail for that holder with no pagination/partial path. Primarily self-DoS, but it bricks migration for legitimate large holders.",
+      "recommendation": "Mint in a single batched call (mint quantity = balance) or add an index-scoped / paginated migrate(indexFrom,indexTo) entry point."
+    },
+    {
+      "id": "LOCAL-MIG-002",
+      "type": "init-staleness-footgun",
+      "severity": "local-low",
+      "function": "setInitialized",
+      "line": 51,
+      "description": "setInitialized validates mappings only for indexes [1, v1.nextIndex()) at call time and is one-way (no de-init). If the V1 minter registers a new dispatcher after initialization (v1.nextIndex() grows), migrate() will read indexMapping[newIndex]==0 and call v2.mintFor(0, ...), which reverts ('index not registered') for any holder of the new index — bricking migration for those holders until the owner adds the mapping. There is no on-chain guard that the V1 set is frozen.",
+      "recommendation": "Document that V1 dispatcher registration must be frozen before/after migration, or skip indexes with zero mapping inside migrate() instead of reverting."
+    },
+    {
+      "id": "LOCAL-MIG-003",
+      "type": "reentrancy-surface",
+      "severity": "local-info",
+      "function": "migrate",
+      "line": 62,
+      "description": "migrate() makes external calls (v1.balanceOf, v1.burn, v2.mintFor -> recipient onERC1155Received) with no nonReentrant guard. The receiver is msg.sender; a reentrant migrate() call re-reads balances after the V1 NFTs for the in-progress index were already burned, so double-mint via reentrancy is not obviously possible, but cross-index ordering should be confirmed in interaction analysis.",
+      "recommendation": "Add nonReentrant to migrate() for defense-in-depth; verify no double-credit path."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "migrate()", "visibility": "external", "stateChanges": ["(none local)"], "externalCalls": ["v1.nextIndex()", "v1.balanceOf(user,i)", "v1.burn(user,i,balance)", "v2.mintFor(v2Index,user) x balance"], "accessControl": "none (permissionless, acts on caller's own NFTs)", "reentrancyGuard": false, "guards": ["initialized == true"]},
+      {"function": "setMapping / setMappings", "visibility": "external", "stateChanges": ["indexMapping"], "accessControl": "onlyOwner"},
+      {"function": "setInitialized", "visibility": "external", "stateChanges": ["initialized"], "externalCalls": ["v1.nextIndex()"], "accessControl": "onlyOwner"}
+    ],
+    "externalCalls": [
+      {"target": "INFTMinter v1", "methods": ["nextIndex", "burn", "balanceOf(via IERC1155)"], "trustLevel": "trusted (constructor-set, owner deployment)", "notes": "Migrator must be an authorizedBurner on V1 for burn() to succeed."},
+      {"target": "INFTMinterV2 v2", "methods": ["mintFor"], "trustLevel": "trusted (constructor-set)", "notes": "Migrator must be an authorizedMinter on V2 for mintFor() to succeed."},
+      {"target": "address msg.sender (ERC1155 receiver)", "methods": ["onERC1155Received"], "trustLevel": "untrusted", "notes": "Reentrancy surface during mintFor."}
+    ],
+    "stateVariables": [
+      {"name": "v1", "type": "INFTMinter (immutable-by-convention, set in ctor)", "mutators": ["constructor"], "readers": ["migrate", "setInitialized"]},
+      {"name": "v2", "type": "INFTMinterV2", "mutators": ["constructor"], "readers": ["migrate"]},
+      {"name": "initialized", "type": "bool (one-way)", "mutators": ["setInitialized"], "readers": ["migrate"]},
+      {"name": "indexMapping", "type": "mapping(uint256=>uint256)", "mutators": ["setMapping", "setMappings"], "readers": ["migrate", "setInitialized"]}
+    ],
+    "events": ["MappingSet", "Initialized", "Migrated"],
+    "modifiers": ["onlyOwner"]
+  },
+
+  "valueFlows": [
+    "MIGRATION: caller's V1 NFTs (all indexes 1..n) burned on V1 minter; for each burned unit, one V2 NFT (mapped index) minted to caller. No ERC20 value moves; this is a pure NFT re-issuance."
+  ],
+
+  "invariants": [
+    "Post-migration, for each index i with V1 balance b: V1 balance becomes 0 and V2 balance[indexMapping[i]] increases by b.",
+    "migrate() reverts unless initialized; initialized requires every V1 index in [1,nextIndex) to have a non-zero mapping at init time.",
+    "v2Index 0 is invalid (would revert in mintFor)."
+  ],
+
+  "trustAssumptions": [
+    "Owner correctly maps every V1 index to a valid registered V2 index before setInitialized.",
+    "V1 dispatcher set is frozen relative to the configured mappings (see LOCAL-MIG-002).",
+    "Migrator is wired as authorizedBurner on V1 and authorizedMinter on V2 (the central cross-contract trust edge for this contract)."
+  ],
+
+  "complexity": {"loc": 77, "functions": 4, "externalCalls": 4, "stateVariables": 4}
+}
