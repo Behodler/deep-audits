@@ -1,0 +1,152 @@
+{
+  "project": "reflax-yield-vault",
+  "scanTimestamp": "2026-06-08T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scanMode": "regression",
+  "submoduleHead": "2f6774d",
+  "stories": ["story-045", "story-046"],
+  "changedSurface": [
+    "src/AYieldStrategy.sol",
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+    "src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+    "src/interfaces/IYieldStrategy.sol"
+  ],
+  "patternsChecked": 28,
+  "findingsCount": 2,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "type": "principal-share-accounting-desync",
+      "severity": "potential-medium",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "_relinquishInternal / totalBalanceOf",
+      "line": 638,
+      "description": "story-045 relinquishPrincipal writes down recorded principal (clientBalances + totalDeposited) WITHOUT redeeming/disposing any vault shares. The vault shares that backed the relinquished principal stay in the strategy, so _positionValue() is unchanged while totalDeposited shrinks. totalBalanceOf() = totalValue * principal / totalDeposited then re-attributes that orphaned vault value pro-rata to the REMAINING clients as surplus/yield. This is the documented intent ('release dormant principal so the corresponding vault value flows to yield on recovery'), but it is precisely the requested-vs-received skew shape: principal decremented without a matching share movement. Plausibility hinges on WHO can call it: relinquishPrincipal is onlyAuthorizedClient and relinquishPrincipalAsOwner is onlyOwner, so the write-down is privileged, not permissionless. The residual risk is (a) a client relinquishing its own principal hands its still-backed vault value to sibling clients as yield (cross-client value transfer between protocol-owned contracts), and (b) if totalDeposited is driven to 0 while shares remain, the orphaned value becomes unattributable until the next deposit. Confirm the calling client (stable-staker) only relinquishes principal it has already been paid out for, else value leaks to other clients' surplus.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "clientBalances[token][balanceHolder] -= amount",
+        "totalDeposited[token] -= amount",
+        "totalBalanceOf -> (totalValue * principal) / totalDeposited",
+        "principalOf"
+      ],
+      "missingMitigations": [
+        "No share disposal paired with the principal write-down (by design)",
+        "No invariant tying relinquished principal to value the client already received",
+        "No guard against totalDeposited reaching 0 while _positionValue()/getTotalShares() remain > 0 (orphaned value)"
+      ],
+      "presentMitigations": [
+        "onlyAuthorizedClient / onlyOwner gating (privileged, not permissionless)",
+        "nonReentrant",
+        "amount capped to caller's available principal (protocol-favouring)",
+        "all clients are protocol-owned contracts (Law 3: no external attacker profits directly)"
+      ],
+      "crossReference": "stable-staker M-05 (fingerprint 0dca43f3, valid Medium, owner-accepted) — the pro-rata-haircut fix was DEFERRED pending exactly this relinquishPrincipal story. This finding is the reflax-side counterpart: the relinquish primitive is the mechanism stable-staker intends to call. Verify the two sides agree on whether relinquished value should haircut remaining users or accrue as protocol surplus.",
+      "needsManualVerification": "Tier-2/econ-scanner: trace the stable-staker caller path to confirm relinquished principal was already paid out (no double-claim of the backing shares' value).",
+      "references": ["stable-staker ledger M-05"]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "ERC4626-INFLATION",
+      "type": "erc4626-read-hook-decoupling / share-price-read",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_positionValue / _acquireShares / _disposeShares / _skimSurplus",
+      "line": 77,
+      "description": "story-046 decoupled the base from IERC4626 and routes all valuation through the _positionValue() read hook, which calls vault.convertToAssets(vault.balanceOf(this)) live on every totalBalanceOf/skim. The market strategy's deposit credit and swap minOut are also both derived from live vault.convertToShares/convertToAssets reads. convertTo* on a manipulable ERC4626 (donation to inflate share price, or a low-liquidity/attacker-influenced vault) is the classic inflation read. Here the reads are used for (a) crediting conservative principal — haircut by slippageToleranceBps, with minOut from the SAME value, so credited principal and swap floor cannot drift (the strategy's stated solvency invariant); and (b) surplus attribution in skim. Direct first-depositor/donation inflation is mitigated because principal is credited at a slippage-haircut worst-case and the vault is an external trusted yield source (sUSDe-class), not a fresh attacker vault. Residual: _positionValue() is an uncached spot read of an external convertToAssets — if the chosen vault's exchange rate is donation-manipulable, totalBalanceOf and skim surplus can be transiently inflated/deflated within a tx. Low-to-medium because all entry points are client/withdrawer-gated and the WARNING in the contract restricts to non-rebasing, monotonic-share-price vaults.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "vault.convertToAssets(vault.balanceOf(address(this)))",
+        "vault.convertToShares(creditedPrincipal)",
+        "balanceOf(address(this))"
+      ],
+      "missingMitigations": [
+        "No TWAP / no caching of share price — _positionValue is a live spot read",
+        "No explicit check that the external ERC4626 is donation-resistant (relies on vault choice + non-rebasing WARNING)"
+      ],
+      "presentMitigations": [
+        "Principal credited at slippage-haircut worst-case (_creditedPrincipal), minOut tied to same value",
+        "Swap minOut floors on every deposit/withdraw/skim",
+        "All mutating entry points gated (onlyAuthorizedClient / onlyAuthorizedWithdrawer / onlyOwner)",
+        "Contract restricts to non-rebasing, monotonic-share-price vaults by design"
+      ],
+      "needsManualVerification": "code-scanner: confirm the deployed vault (per AMMRoutes.json target, e.g. sUSDe) has a donation-resistant convertToAssets; if a future deployment wires a manipulable ERC4626, _positionValue spot-read becomes exploitable in skim surplus attribution.",
+      "references": ["https://blog.openzeppelin.com/a-novel-defense-against-erc4626-inflation-attacks"]
+    }
+  ],
+  "manualReviewCount": 3,
+  "manualReview": [
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "EMERGENCY-WITHDRAW-SCHEDULE-SKIP",
+      "type": "privileged-writedown-skips-recompute",
+      "severity": "potential-low",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "_relinquishInternal",
+      "line": 649,
+      "description": "Cross-project pattern check against the emergencyWithdraw-style schedule-skip over-emission seen in phoenix-nft-staking (M-02) and stable-staker. relinquishPrincipal mutates totalDeposited (the denominator of the proportional-value formula) WITHOUT any accrual/recompute step — analogous to emergencyWithdraw skipping schedule recompute. Here, however, there is NO MasterChef-style accRewardPerShare accumulator in AYieldStrategy: yield is computed instantaneously as totalValue*principal/totalDeposited at read time, so there is no stale per-share rate to settle and no over-emission analogue. The 'skip' instead manifests as the immediate pro-rata re-attribution captured in PATTERN-001. Routed to manual review to confirm no downstream client (stable-staker / SYA) caches a per-share figure that would go stale across a relinquish. Confidence low — the schedule-skip mechanism does not structurally exist in this base, but the denominator mutation without settlement warrants a human glance at the consuming accumulators.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "totalDeposited[token] -= amount",
+        "no _updatePool / _recomputeSchedule before mutation"
+      ],
+      "missingMitigations": [
+        "No settle/recompute hook before totalDeposited mutation (but no accumulator exists to settle)"
+      ],
+      "needsManualVerification": "Confirm stableYieldAccumulator / stable-staker do not snapshot totalBalanceOf or a derived per-share value that a relinquish would silently invalidate.",
+      "references": ["phoenix-nft-staking M-02 emergencyWithdraw over-emission", "stable-staker"]
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "REFACTOR-HOIST-REGRESSION",
+      "type": "hoist-access-control-or-value-divergence",
+      "severity": "potential-low",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "deposit / withdraw / depositAsOwner / withdrawAsOwner / _depositInternal / _withdrawInternal",
+      "line": 562,
+      "description": "story-046 hoist regression check: deposit/withdraw principal booking moved from the two concrete strategies up into AYieldStrategy._depositInternal/_withdrawInternal. Verified against the pre-hoist concrete at 5cf462e: modifiers are PRESERVED byte-for-byte (deposit: onlyAuthorizedClient+nonReentrant+whenNotPaused; withdraw same; depositAsOwner/withdrawAsOwner: onlyOwner+nonReentrant, deliberately NO whenNotPaused for owner emergency action). The protocol-favouring write-down (decrement by REQUESTED capped amount, not RECEIVED) is preserved in the base with an explicit SECURITY comment. The cap-before-share-computation ordering is preserved. The value computed (creditedPrincipal) is now returned by the concrete _acquireShares hook rather than booked in the concrete — same haircut formula. No access-control modifier was dropped in the move; no invariant that held in the concrete is broken in the base. Routed to manual review only to confirm ERC4626YieldStrategy (the OTHER concrete, also rewritten in this hoist) credits full nominal principal as before and did not silently inherit the market strategy's haircut.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "function deposit(...) onlyAuthorizedClient nonReentrant whenNotPaused",
+        "_acquireShares returns (creditedPrincipal, sharesReceived)",
+        "decrement by REQUESTED capped amount"
+      ],
+      "missingMitigations": [],
+      "presentMitigations": [
+        "Modifiers preserved vs pre-hoist 5cf462e",
+        "Protocol-favouring write-down preserved with SECURITY comment",
+        "Cap-before-compute ordering preserved"
+      ],
+      "needsManualVerification": "Diff ERC4626YieldStrategy._acquireShares to confirm it still credits full nominal (no accidental haircut) post-hoist.",
+      "references": []
+    },
+    {
+      "id": "PATTERN-005",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC777",
+      "type": "skim-reentrancy-surface",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_skimSurplus / _distributeBuffer",
+      "line": 344,
+      "description": "story-046 surface check: _distributeBuffer performs a loop of safeTransfer to caller-influenced client addresses AFTER the single swap, then a final transfer to recipient. The public skimSurplus entry is nonReentrant + onlyAuthorizedWithdrawer + whenNotPaused, and principal accounting is untouched during distribution, so a reentrant token callback cannot corrupt clientBalances/totalDeposited. Clients are protocol-owned set members (not arbitrary). Flagged at low confidence only because the buffer distribution adds N external transfers in a loop (DOS-UNBOUNDED-LOOP adjacency over the authorized-client set) and pays caller-adjacent addresses; bounded by the owner-controlled client set size, so not a griefing vector under Law 3. No state-after-transfer accounting write exists to exploit.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "underlyingToken.safeTransfer(clients[i], buf)",
+        "loop over clients.length with external transfer"
+      ],
+      "missingMitigations": [],
+      "presentMitigations": [
+        "nonReentrant on public skimSurplus",
+        "principal accounting untouched during/after transfers",
+        "client set is owner-controlled (bounded, distinct via EnumerableSet)"
+      ],
+      "needsManualVerification": "Confirm authorized-client set is expected to stay small (gas bound on skim loop).",
+      "references": []
+    }
+  ]
+}

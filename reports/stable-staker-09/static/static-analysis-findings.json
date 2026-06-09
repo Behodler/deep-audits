@@ -1,0 +1,148 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-06-08T23:15:03Z",
+  "scanType": "static-regression",
+  "headCommit": "93b7ce6ebe31f71c70a5841e074cdbfad9bced91",
+  "inScope": [
+    "src/StableStaker.sol",
+    "src/StableStakerMigrator.sol"
+  ],
+  "tools": {
+    "slither": "0.11.3",
+    "aderyn": "0.6.8",
+    "semgrep": "1.163.0"
+  },
+  "missingTools": [],
+  "findingsCount": 9,
+  "filteredCount": 100,
+  "notes": [
+    "Semgrep p/smart-contracts produced 54 findings, all INFO severity (performance/best-practice: use-custom-error, prefix-increment, short-revert-string, ownable2step, etc.) -> all discarded per Informational->discard rule. The only security-adjacent one, use-ownable2step, is a known centralization design decision (owner trusted, KI#8) and duplicates Aderyn centralization-risk.",
+    "All 9 Slither divide-before-multiply + 1 incorrect-exp + 1 too-many-digits hits are in lib/openzeppelin-contracts/contracts/utils/math/Math.sol (OOS dependency, OOS root cause) -> dropped.",
+    "Slither missing-zero-check, Aderyn state-no-address-check, push-zero-opcode, unspecific-solidity-pragma, modifier-used-only-once -> QA/noise per filter list, dropped.",
+    "Slither missing-inheritance (StableStaker should inherit IStableStaker) -> Informational, dropped.",
+    "Timestamp/block-dependency findings RETAINED per suite rule (time-driven reward accrual is load-bearing), but assessed as tool-noise: all are standard MasterChef _updatePool elapsed-time accrual or non-timestamp comparisons Slither mislabels; no manipulable window."
+  ],
+  "findings": [
+    {
+      "id": "STATIC-001",
+      "source": "aderyn",
+      "corroboratedBy": ["slither"],
+      "type": "reentrancy-state-change",
+      "severity": "potential-high",
+      "contract": "src/StableStaker.sol",
+      "function": "initiateMigration",
+      "line": 440,
+      "description": "State written after external strategy call: initiateMigration calls _routeExit (strategy.withdraw/relinquishPrincipal) then post-checks strategy.principalOf and writes poolState=Migrating, yieldStrategy=0, migrationInfo. Slither flags same as reentrancy-no-eth at L417.",
+      "confidence": "high",
+      "rawCheck": "aderyn:reentrancy-state-change / slither:reentrancy-no-eth",
+      "assessment": "LIKELY NOISE. Function is nonReentrant + onlyMigrator (trusted permissioned role). External callee is the configured yield strategy (reflax-yield-vault, in-ecosystem). Reentrancy is blocked by the guard; the post-call writes are intentional CEI-relaxed migration bookkeeping. Worth a manual glance at strategy-callback trust boundary but not a standalone exploit."
+    },
+    {
+      "id": "STATIC-002",
+      "source": "slither",
+      "corroboratedBy": ["aderyn"],
+      "type": "reentrancy-no-eth",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "line": 219,
+      "description": "Reentrancy: _routeExit (strategy.relinquishPrincipal/withdraw) and strategy.deposit external calls precede yieldStrategy[token]/allowance state writes; YieldStrategySet emitted after. Aderyn unchecked-return at L241/L258 overlaps.",
+      "confidence": "medium",
+      "rawCheck": "slither:reentrancy-no-eth",
+      "assessment": "WORTH A LOOK. This is the ONE state-mutating principal-moving path WITHOUT a nonReentrant guard (onlyOwner only). Calls old strategy (drain) then new strategy (deposit) with state writes interleaved (yieldStrategy[token]=strategy at L248 sits between the drain and the sweep-deposit). Owner is trusted (Law 3) and strategies are in-ecosystem, so practical risk is low, but the missing guard + interleaved write on a strategy-swap is the most interesting static signal here -> flag for code-scanner (yield-strategy external-call + state-machine)."
+    },
+    {
+      "id": "STATIC-003",
+      "source": "slither",
+      "type": "reentrancy-no-eth",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "stake",
+      "line": 281,
+      "description": "Reentrancy: _settle (phUSD.mint) and _routeDeposit (strategy.deposit) external calls before user.amount/pool.totalStaked/rewardDebt writes and _stakers.add.",
+      "confidence": "medium",
+      "rawCheck": "slither:reentrancy-no-eth",
+      "assessment": "LIKELY NOISE. nonReentrant + whenNotPaused. phUSD.mint is the trusted in-ecosystem reward token; strategy.deposit is the configured strategy. Standard MasterChef settle-then-credit ordering under a guard."
+    },
+    {
+      "id": "STATIC-004",
+      "source": "slither",
+      "type": "reentrancy-no-eth",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "depositFor",
+      "line": 608,
+      "description": "Reentrancy: _settle (phUSD.mint) and _routeDeposit (strategy.deposit) external calls before position-accounting writes and _stakers.add. Migrator-only deposit path on the new staker.",
+      "confidence": "medium",
+      "rawCheck": "slither:reentrancy-no-eth",
+      "assessment": "LIKELY NOISE. nonReentrant + onlyMigrator (trusted role). Mirrors stake ordering; reentrancy guarded."
+    },
+    {
+      "id": "STATIC-005",
+      "source": "slither",
+      "corroboratedBy": ["aderyn"],
+      "type": "unused-return",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "line": 258,
+      "description": "Return value of strategy.deposit(token, idleBalance, address(this)) ignored at L258 (sweep of idle balance into new strategy). Aderyn unchecked-return corroborates (L258).",
+      "confidence": "high",
+      "rawCheck": "slither:unused-return",
+      "assessment": "WORTH A LOOK. Unlike stake/withdraw which capture _routeDeposit/_routeExit deltas, the setYieldStrategy idle-sweep discards strategy.deposit's booked-principal return. If a strategy haircuts on deposit (market/ERC4626 rounding, per CLAUDE.md), the swept balance's booked principal can diverge from internal totalStaked, desyncing principalOf vs poolInfo.totalStaked. Flag for code-scanner: accounting-desync on strategy adoption/swap. (Other unused-return hits at L297/317/357/529/627 are EnumerableSet add/remove -> intentional, noise.)"
+    },
+    {
+      "id": "STATIC-006",
+      "source": "slither",
+      "type": "unused-return",
+      "severity": "potential-low",
+      "contract": "src/StableStaker.sol",
+      "function": "stake/withdraw/emergencyWithdraw/_exitPosition/depositFor",
+      "line": 297,
+      "description": "Return value of EnumerableSet add()/remove() ignored at L297 (stake), L317 (withdraw), L357 (emergencyWithdraw), L529 (_exitPosition), L627 (depositFor). Aderyn unchecked-return corroborates.",
+      "confidence": "high",
+      "rawCheck": "slither:unused-return",
+      "assessment": "NOISE. Intentional idempotent set membership management (add returns false if present, remove false if absent); the bool is not actionable here. QA at most."
+    },
+    {
+      "id": "STATIC-007",
+      "source": "slither",
+      "corroboratedBy": ["aderyn"],
+      "type": "uninitialized-local",
+      "severity": "potential-low",
+      "contract": "src/StableStakerMigrator.sol",
+      "function": "migrate",
+      "line": 64,
+      "description": "Local accumulators total (L64) and migratedCount (L75) in migrate, and total (L491) in StableStaker.batchMigrate, declared without explicit initialization. Aderyn uninitialized-local-variable corroborates StableStakerMigrator L75.",
+      "confidence": "high",
+      "rawCheck": "slither:uninitialized-local",
+      "assessment": "NOISE. uint256 default-zero accumulators incremented in a loop; correct by Solidity semantics. False positive."
+    },
+    {
+      "id": "STATIC-008",
+      "source": "slither",
+      "type": "calls-loop",
+      "severity": "potential-low",
+      "contract": "src/StableStakerMigrator.sol",
+      "function": "migrate",
+      "line": 61,
+      "description": "External call newStaker.depositFor inside the user loop (migrate, L78); StableStaker._exitPosition has phUSD.mint inside the batchMigrate loop (L532). Aderyn costly-loop corroborates StableStaker L492.",
+      "confidence": "medium",
+      "rawCheck": "slither:calls-loop",
+      "assessment": "LOW / DESIGN. Per-user external calls in batch migration are inherent to the batched-migrate design; gas-griefing/partial-batch DoS is a known operational concern (batches built off-chain via getStakersRange). Note for code-scanner state-machine review but not a static-only finding; severity Low."
+    },
+    {
+      "id": "STATIC-009",
+      "source": "slither",
+      "type": "timestamp",
+      "severity": "potential-low",
+      "contract": "src/StableStaker.sol",
+      "function": "_updatePool/pendingReward/_routeExit/finalizeAndReset",
+      "line": 697,
+      "description": "block.timestamp used in comparisons: _updatePool (L705/L714 elapsed accrual), pendingReward (L639), _routeExit (L775, actually a balanceOf compare mislabeled), finalizeAndReset (L588, actually a totalStaked==0 compare mislabeled). RETAINED per time-driven-suite rule.",
+      "confidence": "low",
+      "rawCheck": "slither:timestamp",
+      "assessment": "RETAINED-BUT-NOISE. Reward accrual is genuinely time-driven (elapsed * phusdPerSecond), but there is no attacker-controllable window: emission is linear in real elapsed time, dust rounds down, empty-pool windows accrue nothing (KI#1/#2). The _routeExit (L775) and finalizeAndReset (L588) hits are balance/totalStaked comparisons Slither misattributes to timestamp. No miner-timestamp manipulation lever. Kept visible for severity-classifier per suite policy."
+    }
+  ]
+}
