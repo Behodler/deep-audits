@@ -1,0 +1,72 @@
+[
+  {
+    "title": "Leg1 broadcast is dead on arrival: owner is not an authorized withdrawer on any of the 3 old strategies, so the first mutating call (skimSurplus) reverts and no suite step grants the permission",
+    "severity": "medium",
+    "category": "intent-mismatch",
+    "rootCauseClass": "MissingPreStepConfiguration",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "contract": "script/SkimAndLeg1Migration.s.sol",
+    "function": "run (skim step) / _globalPreflight",
+    "location": "script/SkimAndLeg1Migration.s.sol:196-200 (skim calls), :126-138 (preflight checks owner() only); root cause lib/vault/src/AYieldStrategy.sol:461-471 (skimSurplus onlyAuthorizedWithdrawer), :224-229 (modifier), :309 (setWithdrawer, the only grant path)",
+    "description": "skimSurplus is gated on the authorizedWithdrawers registry, which is fully separate from owner — the owner is never implicitly authorized. On live state the ONLY authorized withdrawer on YS_DOLA_OLD/YS_USDC_OLD/YS_USDE is the post-replace-sya SYA (0x3C690EC3B2524104dE269bf0F9baa7f045eF8270, wired by ReplaceSYAMainnet step 12 'setWithdrawer(newSYA, true)'); authorizedWithdrawers[OWNER]==false on all three (verified on fork). SkimAndLeg1Migration calls skimSurplus as the owner EOA, and neither this script nor any other story-060 step calls setWithdrawer(OWNER, true). The script's own preflight verifies owner() on all three strategies but never checks withdrawer status, so the failure is only discovered at execution. Empirically (fork preview, unmodified script, valid inputs): revert 'AYieldStrategy: unauthorized, only authorized withdrawers' at IOldYS(YS_DOLA_OLD).skimSurplus. In broadcast mode (--skip-simulation --slow) the failed skim would be a real failed mainnet tx and the suite halts at step 2 of 5. Confirms and roots upstream finding F2.",
+    "impact": "The story-060 migration suite cannot execute as written: step 2 deterministically fails before any migration occurs (fail-safe — no partial state, one wasted failed tx). Migration of the buggy DOLA/USDC strategies is blocked until out-of-band setWithdrawer transactions are crafted manually.",
+    "evidence": "side-effects.json executed[1] (exact revert), preconditionResults (missing check), fork reads: authorizedWithdrawers(OWNER)==false x3, authorizedWithdrawers(SYA)==true x3. Fork fixup #2 (setWithdrawer(OWNER,true) x3 from the strategies' owner) is sufficient: preview and broadcast-equivalent then complete end-to-end.",
+    "recommendation": "Add to the script (inside the broadcast block, before the skims): IOldYS(ys).setWithdrawer(OWNER_ADDRESS, true) for all three strategies — the strategies' owner is the same signing EOA, so no extra signer is needed — and optionally revoke after the skims. Add a preflight require(authorizedWithdrawers(OWNER_ADDRESS)) (or perform the grant) so the script refuses to broadcast into a guaranteed failure."
+  },
+  {
+    "title": "gather-migration-inputs.js off-by-one: half-open getStakersRange treated as inclusive drops the last staker of every pool, making leg1's count preflight permanently unsatisfiable (suite DoS) with a misleading 're-run gather' remedy",
+    "severity": "medium",
+    "category": "intent-mismatch",
+    "rootCauseClass": "OffByOnePagination",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "contract": "scripts/gather-migration-inputs.js",
+    "function": "main (paging loop)",
+    "location": "scripts/gather-migration-inputs.js:271-284 (end = Math.min(start+PAGE_SIZE, countNum) - 1 passed as exclusive end); contract semantics lib/stable-staker/src/StableStaker.sol:662-678 (getStakersRange is half-open [start,end))",
+    "description": "StableStaker.getStakersRange(token, start, end) returns the half-open slice [start, end) — its NatSpec says so explicitly. The gather script computes end = min(start+200, count) - 1 and passes it as if inclusive, so every page silently loses its final element; with counts <= 200 this is exactly the last staker of each pool. Empirically on a quiescent fork (no concurrent txs possible): DOLA fetched 2 of stakerCount 3 (dropped 0x25AdA296…), USDC fetched 5 of 6 (dropped 0x0f254C40…). The script then (a) prints a WARNING attributing the mismatch to 'stakers joined between reads' and advising a re-run — which can never converge because the bug is deterministic — and (b) writes count = fetched length into leg1-stakers.json. SkimAndLeg1Migration's preflight requires that count to equal live stakerCount exactly, so leg1 (preview AND broadcast) reverts 'Preflight: stale DOLA staker count in leg1-stakers.json - re-run gather' forever. Verified end-to-end on the fork. The same pager is used for --leg 2, so Leg2Migration inherits the identical block.",
+    "impact": "Hard, deterministic denial of the entire story-060 migration runbook at step 2 (and again at step 4) until the JS is fixed or the input file is hand-built. Fail-safe today only by accident of double-bookkeeping: had the script written the on-chain count instead of the fetched length, the preflight would pass and the dropped staker would be silently stranded in a terminally-migrating pool (recoverable only via permissionless userMigrate or a manual migrator batch). Operator time is also burned by the actively wrong 're-run' guidance.",
+    "evidence": "side-effects.json inputGathering (gathered 2/3 and 5/6 on a quiescent fork; dropped addresses identified) and executed[0] (exact preflight revert). Input fixup #1 (hand-rebuilt JSON from getStakers()) immediately unblocks the preflight.",
+    "recommendation": "Use the half-open convention: const end = Math.min(start + PAGE_SIZE, countNum); pass end directly and advance start = end. Make the fetched-vs-count mismatch fatal (exit non-zero) rather than a warning, and cross-check the final list against getStakers() when count <= a sanity bound. Apply identically for leg 2."
+  },
+  {
+    "title": "Skim proceeds diverge from the migration doc: sent to the original staker instead of the treasury, leaving ~13.5 USDe orphaned as idle staker balance and ~0.15 USDC + ~2.9 USDe parked on the phUSD minter via the old strategies' per-client buffer routing",
+    "severity": "low",
+    "category": "drift",
+    "rootCauseClass": "IntentDocDivergence",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "contract": "script/SkimAndLeg1Migration.s.sol",
+    "function": "run (skim step)",
+    "location": "script/SkimAndLeg1Migration.s.sol:196-201 vs docs/stable-staker-migrations/yield-strategy-swap-June-12-2026.md:133-135, 224-234; buffer routing: deployed pre-story-025 bytecode at the 3 strategies (no setAsideBufferRecipient — selector reverts on-chain; pinned ad12cb1 source routes the aggregate buffer to setAsideBufferRecipient instead)",
+    "description": "The intent doc's step 1a skims all three strategies to 'treasuryAddress' and its Post-Migration Options section reasons about surplus 'sitting at the treasury address as raw tokens'. The script instead skims to ORIGINAL_STABLE_STAKER, relying (per its post-assert comment) on ResetAndRewire's setYieldStrategy sweep to fold the idle balance into the V2 strategies as a principal buffer. That plan only covers DOLA and USDC: the USDe pool is never re-wired, so the USDe proceeds observed on the fork (+12.31 USDe recipient share + ~1.19 USDe staker buffer share = ~13.49 USDe) sit as unreserved idle balance on the staker indefinitely — reachable only via a manual StableStaker.rescueERC20 (StableStaker.sol:808) that no suite step performs. Additionally, the DEPLOYED old-strategy bytecode routes each client's 25% set-aside buffer to the client contract itself (observed: 0.152660 USDC and 2.916739 USDe transferred to the phUSD minter 0x435B0A18…), a behavior that differs from the pinned ad12cb1 source and is mentioned nowhere in story-060. All flows are protocol-owned (no user funds at risk) but the doc's accounting of where surplus ends up is wrong on three counts.",
+    "impact": "Protocol-owned value scattered across unintended resting places: ~13.5 USDe orphaned on the staker (manual rescue required, undocumented), ~$3 equivalent on the phUSD minter contract. Doc-driven follow-ups (e.g. 'option 2: re-inject from treasury') would target an address holding nothing. Operationally non-obvious — a competent operator following the doc would be surprised (Law-3 footgun, low value at current scale).",
+    "evidence": "side-effects.json stateWrites (USDe/USDC balance deltas incl. minter receipts), unintendedEffects, on-fork probe: setAsideBufferRecipient() selector reverts on deployed strategies while setAsideBufferSize(staker)==25.",
+    "recommendation": "Update the migration doc to match the implemented destination and sweep plan; add an explicit step (cleanup script is the natural place) that rescueERC20s the idle USDe to the intended treasury; document the minter-side buffer receipts or zero the buffers before skimming."
+  },
+  {
+    "title": "Staleness guard is count-equality only: equal-count membership drift between gather and broadcast passes preflight, strands the unlisted staker in a terminally-migrating pool, and the script is not re-runnable (initiateMigration is one-shot)",
+    "severity": "low",
+    "category": "cluster-interaction",
+    "rootCauseClass": "WeakDriftGuard",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "contract": "script/SkimAndLeg1Migration.s.sol",
+    "function": "_globalPreflight / run (migrate loop)",
+    "location": "script/SkimAndLeg1Migration.s.sol:146-157 (count-only check), :269-278 (post-assert after broadcasts); lib/stable-staker/src/StableStaker.sol:425 (initiateMigration one-way)",
+    "description": "The preflight compares only .count against live stakerCount. If one staker exits and another enters between the gather snapshot and the broadcast (counts equal, membership different), preflight passes; batchMigrate then processes the stale list — the departed address yields amount 0 (skipped) and the new staker is never migrated. The post-assert stakerCount==0 does catch it, but in broadcast mode (--skip-simulation --slow) it fires only AFTER all on-chain txs have landed: both pools are then in terminal Migrating state with one stranded staker, and simply re-running the script reverts at initiateMigration (already migrating; the staker contract blocks re-engagement). Recovery is possible but undocumented: the stranded user can self-rescue via permissionless userMigrate, or the owner can run a manual migrator1.migrate(token,[missed]) — neither appears in the runbook. The exposure window is short (stake/withdraw freeze once initiateMigration lands, so only gather → initiateMigration), but this repo has prior history of exactly this snapshot-vs-broadcast drift biting on this staker slice (story-055 ResumeStableStakerMigration). With the current 3/6-staker population the probability is low; the cost is an aborted mainnet run mid-suite.",
+    "impact": "Operational footgun: a benign user action in the gather→broadcast window can leave the migration half-finished on mainnet with no scripted recovery path. No funds lost (userMigrate exists); availability/runbook risk only.",
+    "evidence": "Code reading of preflight + StableStaker terminal-migration semantics; story-055 resume script as prior drift evidence (closure manifest cluster note). Not fork-demonstrated (would require staged user txs); flagged as analysis-supported.",
+    "recommendation": "Strengthen the guard: have gather also store keccak256 of the sorted staker list and have preflight recompute it from getStakers() on-chain; or migrate from a fresh on-chain getStakers() read inside the script instead of a JSON snapshot (counts are tiny). Document the userMigrate/manual-batch recovery in the runbook."
+  },
+  {
+    "title": "viem is not declared in package.json: the mandatory gather prerequisite cannot run from a clean checkout",
+    "severity": "low",
+    "category": "unintended-side-effect",
+    "rootCauseClass": "MissingDependencyDeclaration",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "contract": "scripts/gather-migration-inputs.js",
+    "function": "loadViem",
+    "location": "scripts/gather-migration-inputs.js:130-136; package.json dependencies (cors, express only; devDependencies: @wagmi/cli)",
+    "description": "gather-migration-inputs.js requires viem and exits with 'viem not installed. Run `npm install` in the project root first.' — but viem is absent from both dependencies and devDependencies, so npm install does not provide it and the suggested remedy fails, mirroring LEG1-02's misleading-guidance pattern. The operator must know to npm install viem manually. Since leg1 hard-depends on the gather output (preflight reads leg1-stakers.json), this is a setup blocker on any fresh machine — exactly the environment a Ledger-signing mainnet operation is likely to run from.",
+    "impact": "Runbook friction/blocker only; no on-chain effect.",
+    "evidence": "side-effects.json inputGathering.viemDependency; package.json deps block verified at b27c6ac.",
+    "recommendation": "Add viem (pinned) to package.json dependencies."
+  }
+]

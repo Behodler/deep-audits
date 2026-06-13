@@ -1,0 +1,128 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-06-09T00:00:00Z",
+  "scanType": "pattern-matching",
+  "mode": "regression",
+  "changedRange": "93b7ce6..125f585",
+  "regressionFocus": "story-010 empty-pool-only gate on setYieldStrategy (src/StableStaker.sol:228) + interactions with story-009 lifecycle enum / finalizeAndReset",
+  "scope": ["src/StableStaker.sol", "src/StableStakerMigrator.sol"],
+  "patternsChecked": 27,
+  "findingsCount": 1,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "LIFECYCLE-STUCK-STATE",
+      "patternNote": "No exact DB pattern; extrapolated from the lifecycle/state-machine focus of this regression run. Nearest DB anchors: EMISSION-WINDOW-BOUNDARY (boundary/empty-set gating) and the finalizeAndReset drain-gate introduced in story-009.",
+      "type": "state-machine-permanent-dos",
+      "severity": "potential-medium",
+      "contract": "src/StableStaker.sol",
+      "line": 595,
+      "relatedLines": {
+        "depositForMissingGuard": "src/StableStaker.sol:631-635 (no require(credited > 0); unconditional _stakers[token].add(user))",
+        "stakeHasTheGuard": "src/StableStaker.sol:301 (require(credited > 0) — asymmetry suggests oversight, not design)",
+        "exitPositionEarlyReturn": "src/StableStaker.sol:522-524 (amt == 0 returns BEFORE _stakers.remove)",
+        "finalizeAndResetGate": "src/StableStaker.sol:595 (require(_stakers[token].length() == 0))"
+      },
+      "description": "Phantom zero-amount staker permanently bricks finalizeAndReset, freezing the pool in Migrating forever. depositFor (onlyMigrator) pulls amount > 0 but credits strategy-booked principal; a haircutting market strategy can book credited == 0 for a dust redeposit. Unlike stake(), depositFor has no require(credited > 0) and unconditionally adds the user to _stakers, creating a staker with amount == 0. No path can ever remove them: withdraw/emergencyWithdraw require amount > 0; _exitPosition (used by batchMigrate AND userMigrate) early-returns on amt == 0 WITHOUT removing from the set; while Migrating, depositFor is blocked (requires Active) so the position cannot be topped up to heal. finalizeAndReset then reverts 'stakers remain' forever — the pool slot is permanently stuck in Migrating, which is precisely the 'frozen forever / redeploy required' limitation story-009's finalizeAndReset was introduced to remove. All real principal can still exit via userMigrate/batchMigrate (no direct fund loss), but the token can never be revived: availability impact -> potential-medium under C4.",
+      "confidence": "medium",
+      "confidenceRationale": "All code signatures verified by reading the source (guard asymmetry, early return, set gate). Reaching credited == 0 requires the NEW staker to have a haircutting strategy wired and a dust-sized per-user credit (small min(R,P)/P credits from an underwater old pool make dust redeposits realistic in exactly the migration flow depositFor exists for). Trigger plausibility, not mechanism, is the open question — Tier-2/PoC should confirm a real strategy books 0 on dust.",
+      "matchedSignatures": [
+        "uint256 credited = _routeDeposit(token, received); (depositFor, no credited > 0 check)",
+        "_stakers[token].add(user); (unconditional)",
+        "if (amt == 0) { return 0; } (before _stakers.remove)",
+        "require(_stakers[token].length() == 0, \"StableStaker: stakers remain\");"
+      ],
+      "missingMitigations": [
+        "depositFor lacks stake()'s require(credited > 0, 'nothing credited')",
+        "_exitPosition does not remove zero-amount accounts from the staker set",
+        "finalizeAndReset has no owner-side purge for zero-amount set entries"
+      ],
+      "ledgerCrossRef": "Existing ledger entry 'depositFor missing require(credited > 0) guard' (status: submitted-qa) covers the missing guard in isolation. The story-009 stakerCount == 0 gate on finalizeAndReset is NEW in this range's baseline and escalates the consequence from cosmetic set-pollution to a permanent Migrating-state brick. Flagging as an escalation/regression-interaction candidate, NOT a duplicate — deduplicator should link to the QA entry and severity-classifier should re-weigh.",
+      "references": ["story-009 (93b7ce6) finalizeAndReset", "ledger: depositFor credited>0 QA entry"]
+    }
+  ],
+  "manualReviewCount": 3,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "type": "third-party-forces-gate-failure",
+      "severity": "potential-low",
+      "contract": "src/StableStaker.sol",
+      "line": 228,
+      "description": "Dust-stake grief of the empty-pool gate. The new require(totalStaked == 0) (line 228) is permissionlessly flippable: any 1-wei stake makes the gate fail. Two windows: (a) revival — between finalizeAndReset (pool returns to Active, idle-hold) and the owner's setYieldStrategy, a front-running 1-wei staker forces the owner to run an ENTIRE new terminal-migration cycle (initiateMigration -> eject -> finalizeAndReset) just to wire the strategy; (b) first adoption — a brand-new pool (addToken -> users stake) can never adopt a strategy without the full migration cycle once anyone has staked. Maps to the TWO-STEP-COMMIT-WINDOW vulnerableWhen 'a third party can force re-arm/reset the pending commit'.",
+      "confidence": "low",
+      "confidenceRationale": "Mechanism confirmed, but a documented procedural mitigation exists: stake is whenNotPaused while finalizeAndReset and setYieldStrategy are deliberately pause-tolerant, and the finalizeAndReset natspec + CLAUDE.md prescribe wrapping revival in pause/unpause. The hazard is therefore an owner FOOTGUN (operator who skips the pause), and the warning is written down — leaning 'obvious -> trusted' under Law 3, but the cost asymmetry (1 wei vs a full migration cycle) is surprising enough to merit a human call. (b) first-adoption is intentional story-010 design per the updated CLAUDE.md (Law 2 faithful).",
+      "matchedSignatures": ["require(poolInfo[token].totalStaked == 0, \"StableStaker: pool not empty\");"],
+      "presentMitigations": [
+        "stake() is whenNotPaused; setYieldStrategy/finalizeAndReset work while paused",
+        "finalizeAndReset natspec: 'recommended revival runbook wraps the reconfiguration in pause/unpause'",
+        "story-010 docs (CLAUDE.md) document the empty-pool-only rule"
+      ],
+      "suggestedDisposition": "QA/Low footgun at most; verify against ledger entry 'finalizeAndReset revives pool without resetting phusdPerSecond / re-wiring yield' (open) — same revival-runbook surface, possible bundle."
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "pattern-db",
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "type": "gate-soundness-assumption",
+      "severity": "potential-low",
+      "contract": "src/StableStaker.sol",
+      "line": 246,
+      "description": "The empty-pool gate's safety silently depends on the totalStaked <-> strategy.principalOf lockstep invariant (restored by story-007 relinquishPrincipal). If any future/odd strategy leaves principalOf > 0 while totalStaked == 0 (the pre-story-007 buffer-path desync direction, now fixed), setYieldStrategy at line 246-249 SKIPS the drain ('staked == 0 must be a no-op'), revokes the old strategy's allowance (line 253) and decouples it — permanently stranding that residual client principal in the old strategy. The underwater check at line 238 does not catch it (principalOf > 0 with totalBalanceOf >= principalOf passes; and even underwater would merely revert, not strand). Today no in-repo path produces the desync; this is an assumption-dependency note for the incomplete-fix lens the run asked for, not a live bug.",
+      "confidence": "low",
+      "confidenceRationale": "vulnerableWhen condition (principal desync) currently unreachable with shipped strategies given the story-007 fix (ledger: buffer-path desync entry is status fixed). Matches the pattern's signature set (principalOf/yieldStrategy/balance-delta) but the notVulnerableWhen mitigations hold at HEAD. Park for invariant-generator: assert principalOf == 0 whenever totalStaked == 0.",
+      "matchedSignatures": ["uint256 staked = poolInfo[token].totalStaked; if (staked > 0) { _routeExit(token, staked, false); }", "IERC20(token).forceApprove(address(old), 0);"],
+      "presentMitigations": ["story-007 relinquishPrincipal keeps totalStaked/principalOf in lockstep (ledger desync entry: fixed)"],
+      "suggestedDisposition": "Feed to invariant-generator as a Tier-3 invariant candidate rather than a finding."
+    },
+    {
+      "id": "PATTERN-MR-003",
+      "source": "pattern-db",
+      "patternId": "INCORRECT-OPERATOR",
+      "type": "dead-guard-after-fix",
+      "severity": "potential-low",
+      "contract": "src/StableStaker.sol",
+      "line": 238,
+      "description": "QA: the story-010 gate makes the story-008 M-06 underwater guard (line 238) and the in-place drain branch (lines 247-249) effectively dead code. With totalStaked forced to 0 at line 228 and lockstep holding, the old strategy's principalOf is 0 (never underwater under strict <) and 'staked > 0' is unreachable. Harmless belt-and-suspenders, but the layered guards now obscure which one is load-bearing; future refactors could remove the wrong one. Not a vulnerability — code-quality observation only.",
+      "confidence": "low",
+      "confidenceRationale": "Pure reachability reasoning; zero exploit content. QA at best per the quality bar — kept visible per Law 1 routing rather than silently dropped.",
+      "matchedSignatures": ["require(!_isUnderwater(token, old), \"StableStaker: old strategy underwater\");"],
+      "suggestedDisposition": "QA bundle candidate."
+    }
+  ],
+  "checkedClean": [
+    {
+      "patternId": "FIRST-DEPOSITOR-ATTACK / ERC4626-INFLATION (donation lens on the empty check)",
+      "verdict": "clean",
+      "rationale": "The gate reads internal accounting (poolInfo[token].totalStaked), NOT balanceOf — direct token donations cannot flip the emptiness check in either direction. The idle sweep at lines 264-267 does use balanceOf, so a pre-set donation is swept into the new strategy, but at totalStaked == 0 that balance is purely protocol-owned buffer/dust (no user principal, no share-pricing) — no inflation or first-depositor surface. Principal-credit model, not shares: no exchange-rate special-casing at zero."
+    },
+    {
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "verdict": "clean",
+      "rationale": "setYieldStrategy touches custody only, never rate/shares — no _updatePool needed. All share/rate mutators in the changed baseline (stake/withdraw/depositFor/phUSDPerDay/initiateMigration) settle via _updatePool first (pattern notVulnerableWhen satisfied)."
+    },
+    {
+      "patternId": "EMISSION-WINDOW-BOUNDARY",
+      "verdict": "clean",
+      "rationale": "finalizeAndReset fast-forwards lastRewardTime = block.timestamp (line 601) so the frozen Migrating window is never retro-accrued; _updatePool no-ops while Migrating and fast-forwards on empty pools. Pattern mitigations all present."
+    },
+    {
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "verdict": "clean",
+      "rationale": "_updatePool remains the single accPhusdPerShare writer; _exitPosition zeroes the position before/with the pending mint so batchMigrate-then-userMigrate (or repeats) cannot double-mint (amt == 0 second pass)."
+    },
+    {
+      "patternId": "TIMELOCK-BYPASS / UNPROTECTED-INIT / SIGNATURE-REPLAY / ORACLE-* / FLASH-LOAN-PRICE / CROSS-CHAIN-REPLAY / STORAGE-COLLISION",
+      "verdict": "not-applicable",
+      "rationale": "No timelock, no initializer/proxy, no signatures, no oracles, no AMM spot reads in scope contracts."
+    },
+    {
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "verdict": "known-carryover",
+      "rationale": "batchMigrate / StableStakerMigrator.migrate loops are caller-paged; the residual concern is already ledgered ('Unbounded per-user external-call loop in batchMigrate + StableStakerMigrator.migrate', status open). No new instance in the changed range."
+    }
+  ]
+}

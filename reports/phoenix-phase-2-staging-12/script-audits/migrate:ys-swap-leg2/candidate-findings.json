@@ -1,0 +1,62 @@
+[
+  {
+    "title": "Leg2 re-deposit silently haircuts each user's principal by ~0.026% (DOLA) / ~0.016% (USDC); intent doc states principal is preserved 1:1",
+    "severity": "low",
+    "category": "intent-mismatch",
+    "entryPoint": "migrate:ys-swap-leg2",
+    "contract": "lib/stable-staker/src/StableStaker.sol",
+    "function": "depositFor",
+    "lineStart": 616,
+    "lineEnd": 638,
+    "rootCauseClass": "UndisclosedReDepositHaircut",
+    "description": "migrator2.migrate -> depositFor -> _routeDeposit deposits each migrating user's snapshot credit into the FIXED V2 ERC4626YieldStrategy, which (per story-060's own fix) credits convertToAssets(sharesReceived) rather than the nominal amount. The integer-rounding shortfall (received - credited) stays protocol-owned in the strategy, so each user's withdrawable principal on the original staker is strictly less than what they held on the temp staker. Measured on-fork: every DOLA position lost ~0.0260-0.0262% and every USDC position lost ~0.0157-0.0158% (e.g. 0x4B75.. DOLA 1018.123 -> 1017.858, -0.265 DOLA). The story-060 intent doc (User Impact) states 'Principal is preserved 1:1 (subject to any below-par haircut from the old buggy strategy)' — it discloses the OLD-strategy (R,P) haircut but NOT this fresh re-deposit haircut introduced by the leg2 deposit into the new strategy.",
+    "impact": "Real, permanent per-user principal reduction (small, uniform, proportional). Not a 1:1 round-trip as documented. Because tempStaker holds principal idle (no strategy), leg1's deposit was lossless, so this is a SINGLE fresh ERC4626 haircut, not a compounded one — but it is undisclosed value leakage from the user's perspective and accrues to the protocol/strategy buffer.",
+    "evidence": "side-effects.json perUserValuePreservation: DOLA total before 1033.6189 -> after 1033.3501 (loss 0.2688 DOLA, 0.0260%); USDC total before 1954.5707 -> after 1954.2630 (loss 0.3077 USDC, 0.0157%). yieldStrategy(DOLA)==yieldStrategy(USDC)==address(0) on temp confirms leg1 was lossless. The shortfall is the conservative-rounding behaviour the fix intends (consistent with the underwater-guard design) — it is the DOC that overstates preservation.",
+    "recommendation": "Update the story-060 intent doc User Impact section to disclose that the leg2 re-deposit into the new ERC4626 strategy applies a small (~0.02-0.03%) conservative convertToAssets haircut to each position, distinct from the old-strategy (R,P) socialization. No code change required — the haircut is the correct, conservative accounting; only the 1:1-preservation claim is inaccurate."
+  },
+  {
+    "title": "gather-migration-inputs.js --leg 2 drops the last staker of each pool (LEG1-02); halts leg2 at the count-equality preflight rather than silently partial-migrating",
+    "severity": "low",
+    "category": "cluster-interaction",
+    "entryPoint": "migrate:ys-swap-leg2",
+    "contract": "scripts/gather-migration-inputs.js",
+    "function": "main (getStakersRange paging loop)",
+    "lineStart": 271,
+    "lineEnd": 291,
+    "rootCauseClass": "OffByOneHalfOpenRange",
+    "description": "LEG1-02 (already filed for leg1) applies IDENTICALLY to migrate:ys-swap-gather-leg2 against the temp staker. The loop computes end = Math.min(start+PAGE_SIZE, countNum) - 1 and passes it as the EXCLUSIVE end of the on-chain half-open getStakersRange(token,start,end), so the final staker per pool is never fetched. Confirmed on-fork: gather wrote count=2 (DOLA) and count=5 (USDC), dropping 0x25AdA296.. (DOLA) and 0x0f254C40.. (USDC). The gather only emits a NON-FATAL console.log WARNING ('fetched 2 stakers but stakerCount returned 3'), which an operator running under automation could miss. NOTE: this is a duplicate root cause of LEG1-02 — recorded here only to document its leg2 reachability and the downstream fail-safe; do not double-count severity.",
+    "impact": "If the operator does not notice the WARNING and runs leg2 with the raw gather output, Leg2Migration's _globalPreflight count-equality guard (leg2DolaCount == tempStaker.stakerCount(DOLA)) reverts with 'Preflight: stale DOLA staker count - re-run gather' (verified on-fork). So LEG1-02 cannot cause a silent partial migration via leg2 — it causes a hard, fail-loud halt. The residual risk is operational friction + a dropped staker being temporarily stranded on temp until the operator regenerates the input. Without the workaround the dropped stakers (0x25Ad.. / 0x0f25..) would remain on tempStaker after leg2 with no automated path back.",
+    "evidence": "side-effects.json gatherResult + unmodifiedPreview (revert reason 'Preflight: stale DOLA staker count in leg2-stakers.json - re-run gather', 2 != 3). leg2-stakers.BUGGY-LEG1-02.json captured. Fixed by regenerating from getStakers() full membership (3/6).",
+    "recommendation": "Fix the gather loop (pass count as the exclusive end, or use getStakers()), and/or make the count-mismatch WARNING a hard process.exit(2) so the gatherer cannot emit an under-count file. The on-chain preflight is a good last line of defense and should be kept."
+  },
+  {
+    "title": "Leg2 broadcast is non-idempotent: a halted/partial broadcast leaves temp pools in terminal Migrating state and re-running the documented command reverts at initiateMigration with no resume path",
+    "severity": "low",
+    "category": "unintended-side-effect",
+    "entryPoint": "migrate:ys-swap-leg2",
+    "contract": "script/Leg2Migration.s.sol",
+    "function": "run",
+    "lineStart": 188,
+    "lineEnd": 217,
+    "rootCauseClass": "NonIdempotentBroadcastNoResume",
+    "description": "The broadcast variant uses --skip-simulation (a deliberate response to the story-055 RESUME stale-calldata incident). If the broadcast halts after Step 1 (initiateMigration(DOLA)/(USDC)) but before all migrate chunks land — RPC drop, gas spike, manual Ctrl-C, or a chunk reverting — the temp pools are left in PoolState.Migrating. Re-running the SAME documented command (`migrate:ys-swap-leg2`) reverts immediately at the first action, because StableStaker.initiateMigration requires poolState == Active ('StableStaker: pool not active'). Unlike the project's resilient progress.<chainId>.json deploy scripts, Leg2Migration has no checkpoint/skip-completed logic and no resume mode: it always tries initiateMigration first. There is also no in-script guard that detects an already-Migrating pool and jumps straight to the migrate loop.",
+    "impact": "Operational halt footgun. A non-malicious operator who sees a half-completed broadcast will reach for the obvious recovery (re-run the script) and hit a confusing revert. Recovery requires out-of-band action: calling migrator2.migrate(token, remainingChunks) directly for the not-yet-migrated stakers (or affected users self-rescuing via userMigrate). Funds are not lost (idle pile + snapshot credit are intact and migrate is replay-safe per-user since _exitPosition skips zeroed positions), but the system is left half-configured and the documented runbook command cannot finish it. Same failure class as story-055 ResumeStableStakerMigration, which existed precisely to repair this.",
+    "evidence": "StableStaker.sol:initiateMigration require(poolState==Active) (verified). Leg2Migration.s.sol always calls initiateMigration before the migrate loops with no Active/Migrating branch. The migrate loop itself IS idempotent (batchMigrate skips amount==0 positions), so a resume path is feasible — it just isn't implemented.",
+    "recommendation": "Add a resume-aware branch in run(): before Step 1, read tempStaker.poolState(DOLA/USDC); if already Migrating, skip initiateMigration for that token and proceed directly to the migrate chunk loop (which is replay-safe). Optionally persist a tiny progress marker consistent with this repo's progress.<chainId>.json convention so a half-completed leg2 can be finished by re-running the documented command instead of ad-hoc cast calls."
+  },
+  {
+    "title": "Leg2 preflight guards staleness only by staker-count equality, not set membership; a same-count membership change between gather and broadcast slips the drift guard",
+    "severity": "low",
+    "category": "drift",
+    "entryPoint": "migrate:ys-swap-leg2",
+    "contract": "script/Leg2Migration.s.sol",
+    "function": "_globalPreflight",
+    "lineStart": 126,
+    "lineEnd": 136,
+    "rootCauseClass": "CountOnlyStalenessGuard",
+    "description": "The only freshness guard on leg2-stakers.json is leg2{Dola,Usdc}Count == tempStaker.stakerCount(token). This catches additions and removals that change the count but NOT a count-preserving membership swap. Between the gather snapshot and the in-script Step-1 initiateMigration the temp pools are still Active, so a user can stake into temp and another can withdraw to zero (net count unchanged), changing the set while preserving the count. The gathered chunk would then migrate a now-exited address (no-op, _exitPosition returns 0, skipped) while NOT migrating the new joiner (absent from the chunk).",
+    "impact": "Low and largely self-fail-safing. The new joiner is left on temp, so the post-assert tempStaker.stakerCount(token) == 0 FAILS and the run reverts (fail-loud) — no silent loss. Residual risk is the operational halt + a brief window where a same-count swap is possible (requires a withdraw-to-zero and a fresh stake within the gather->broadcast window, on a transit staker most users never interact with directly). The set-membership exposure is narrower for leg2 than a general staker because temp is a short-lived transit contract, but the guard is weaker than it could be.",
+    "evidence": "Leg2Migration.s.sol:126-136 (count-only require). StableStaker stake/withdraw permitted while Active (poolState gating). closure-manifest cluster note flags the same count-equality-only weakness for gather staleness.",
+    "recommendation": "Strengthen the guard: either (a) hash the gathered staker set and compare against an on-chain enumeration in preflight, or (b) since temp is transit-only, freeze it before gather (e.g. set phUSDPerDay to 0 and socially/technically prevent new stakes), or (c) run gather immediately before broadcast and rely on the existing post-assert as the backstop (current de-facto practice). Document the gather->broadcast window as a no-new-stakes operational window."
+  }
+]

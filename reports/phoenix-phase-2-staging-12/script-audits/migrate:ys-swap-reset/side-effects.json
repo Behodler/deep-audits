@@ -1,0 +1,139 @@
+{
+  "entryPoint": "migrate:ys-swap-reset",
+  "mode": "fork-preview+fork-broadcast-equivalent",
+  "fork": {
+    "rpc": "http://127.0.0.1:8546",
+    "forkBlock": 25297358,
+    "blockAtAuditStart": 25297386,
+    "blockAfterBroadcastEquivalent": 25297397,
+    "sharedForkAdvanced": true,
+    "note": "Shared persistent anvil mainnet fork; steps 1+2 (ys-swap-deploy, ys-swap-leg1) executed previously. This audit ADVANCED the fork through step 3 (broadcast-equivalent + patcher) for the leg2 auditor."
+  },
+  "unmodifiedPreview": {
+    "command": "PREVIEW_MODE=true forge script script/ResetAndRewire.s.sol:ResetAndRewire --rpc-url http://127.0.0.1:8546 --slow -vvvv",
+    "reverted": true,
+    "haltPoint": "Step 2, FIRST setYieldStrategy call — ResetAndRewire.s.sol:201 IStakerOwnable(ORIGINAL_STABLE_STAKER).setYieldStrategy(DOLA, ysDolaV2). finalizeAndReset(DOLA) and finalizeAndReset(USDC) both SUCCEEDED before it.",
+    "revertReason": "StateChangeDuringStaticCall (bubbled to forge as 'Error: script failed: <empty revert data>'). Trace: 'unrecognized function selector 0x5917e2a6 for contract 0x2016E96297474F14cc2E4EeEca4A425F700BE458, which has no fallback function' tagged [StateChangeDuringStaticCall].",
+    "revertChain": [
+      "StableStaker.setYieldStrategy(DOLA, 0xc4D5F377c1dD84BF131348a70287AA241588c7c7) — idle sweep branch",
+      "ysDolaV2.deposit(DOLA, 26785198715928544274, staker) [strategy deposit inside StableStaker's sweep — NOT a script-level deposit]",
+      "ERC4626YieldStrategy._acquireShares: vault.deposit(...) SUCCEEDED (22926504414635205702 shares minted to strategy)",
+      "ERC4626YieldStrategy._acquireShares line 113: vault.previewRedeem(sharesReceived) [STATICCALL to autoDOLA 0x79eB84B5E30Ef2481c8f00fD0Aa7aAd6Ac0AA54d]",
+      "Tokemak AutopoolETH.previewRedeem -> AutopoolDebt lib selector 0x5917e2a6 performs a NON-static internal call that writes state -> StateChangeDuringStaticCall"
+    ],
+    "confirms": "Upstream finding F1 (deploy entry, proposed High): Tokemak Autopools' previewRedeem mutates state internally, so EVERY contract-mediated deposit into ysDolaV2/ysUsdcV2 reverts; the story-060 suite bricks at step 3 tx#3 on mainnet with 9 stakers (1033.6 DOLA + 1954.57 USDC) parked in the temp staker. ysUsdcV2 would fail identically (autoUSDC same implementation); DOLA is simply hit first.",
+    "evidence": "unmodified-preview.log (this directory)"
+  },
+  "forkFixups": [
+    {
+      "id": "FX-1",
+      "what": "Workspace source patch: lib/vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol line 113 'creditedPrincipal = vault.previewRedeem(sharesReceived)' -> 'vault.convertToAssets(sharesReceived)' (the doc-prescribed fix from docs/stable-staker-migrations/yield-strategy-swap-June-12-2026.md).",
+      "scope": "workspace nested-submodule copy ONLY (lib/ submodule in read-only tree untouched); commented in-source as AUDIT FORK-FIXUP. NOT a source fix — exists solely so the rest of the suite can be audited."
+    },
+    {
+      "id": "FX-2",
+      "what": "anvil_setCode of the patched runtime bytecode onto the two LIVE V2 strategies: ysDolaV2 0xc4D5F377c1dD84BF131348a70287AA241588c7c7 and ysUsdcV2 0x0C2d75165bd5cf7B0e5Dcdc5799Da056a4E56a8a. Bytecode sourced from fresh reference deployments with IDENTICAL constructor args (owner 0xCad1..., underlying DOLA/USDC, vault autoDOLA 0x79eB.../autoUSDC 0xa756...) so the embedded immutables match; addresses + storage preserved (ys-swap-deployments.json stays valid).",
+      "verified": "post-setCode: owner, vault(), underlyingToken() correct; authorizedClients(original staker)=true and setAsideBufferSize(original)=10 preserved (storage intact).",
+      "incident": "DISCLOSED: a first scripting attempt captured empty bytecode variables and setCode'd EMPTY code onto both addresses for a few seconds; immediately restored with the correct patched bytecode. Storage was never touched; no suite-relevant state perturbed. Reference deploys left inert on the fork at 0xE1688355Db76D69F6dfE49FD75C27810bBB5e677 (DOLA ref) and 0x29B45fc4c3Cd8682C3A198a4DdDAad169a833C68 (USDC ref)."
+    },
+    {
+      "id": "FX-3",
+      "what": "Chainlink ETH/USD aggregator 0x7d4E742018fb52E48b08BE73d041C18B21de6Fb5 (behind EACAggregatorProxy 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419) anvil_setCode'd with audit-fixups/FreshAgg.sol(answer=167931308898, decimals=8): returns the SAME last real price with updatedAt = block.timestamp - 60.",
+      "why": "Fork-aging artifact, NOT a script bug: anvil mines at wall clock (now 1781230049) while the feed froze at fork time (updatedAt 1781216051, age ~233 min). Tokemak's ChainlinkOracle staleness window (between 75 and 233 min for ETH/USD) made vault.deposit revert InvalidDataReturned() on direct anvil txs, even though the forge preview (which executes at fork-block timestamp 1781220573, age ~75 min) passed. On real mainnet the feed is fresh.",
+      "leg2Relevance": "Leg2's depositFor deposits hit the same oracle path; if the fork ages further, additional feeds may need the same FreshAgg treatment (USDe/USD feed 0xcC16f670... was 16.9h old and still passing — its timeout is longer)."
+    },
+    {
+      "id": "FX-4",
+      "what": "1-token smoke deposits used to validate FX-1..FX-3 were executed under evm_snapshot and REVERTED afterwards (verified: principalOf back to 0, staker DOLA balance and ETH balance restored). audit-fixups/FreshAgg.sol added to workspace; temp probe script __AuditTmpExit0Probe.s.sol created and deleted.",
+      "smokeResult": "deposit(DOLA, 1e18) credited 999737968173264904 (-0.0262%); deposit(USDC, 1e6) credited 999842 (-0.0158%) — convertToAssets accounting works as story-048 intends."
+    }
+  ],
+  "inheritedForkFixups": [
+    "From predecessors (kept, flagged by leg1 audit): owner granted withdrawer role on the 3 old strategies; leg1-stakers.json regenerated to work around the gather-migration-inputs.js off-by-one (LEG1-02)."
+  ],
+  "executed": {
+    "variant": "preview (with FX-1..FX-3) then broadcast-equivalent (forge script --broadcast --unlocked --sender 0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6 --slow) then node scripts/patch-mainnet-addresses-ys-swap.js; backup-mainnet-addresses.js run before broadcast",
+    "reverted": false,
+    "revertReason": null,
+    "txs": [
+      { "n": 1, "to": "StableStaker 0xbce8...079A", "fn": "finalizeAndReset(DOLA)", "status": "0x1" },
+      { "n": 2, "to": "StableStaker 0xbce8...079A", "fn": "finalizeAndReset(USDC)", "status": "0x1" },
+      { "n": 3, "to": "StableStaker 0xbce8...079A", "fn": "setYieldStrategy(DOLA, ysDolaV2)", "status": "0x1" },
+      { "n": 4, "to": "StableStaker 0xbce8...079A", "fn": "setYieldStrategy(USDC, ysUsdcV2)", "status": "0x1" },
+      { "n": 5, "to": "tempStaker 0xAb51...6EC1", "fn": "setMigrator(migrator2)", "status": "0x1" },
+      { "n": 6, "to": "StableStaker 0xbce8...079A", "fn": "setMigrator(migrator2)", "status": "0x1" }
+    ],
+    "broadcastJson": "workspace/phoenix-phase-2-staging/broadcast/ResetAndRewire.s.sol/1/run-latest.json"
+  },
+  "preconditionResults": [
+    { "check": "block.chainid == 1", "passed": true },
+    { "check": "ys-swap-deployments.json present + 4 addresses non-zero (ysDolaV2 0xc4D5..., ysUsdcV2 0x0C2d..., tempStaker 0xAb51..., migrator2 0xd263...)", "passed": true },
+    { "check": "original stakerCount(DOLA)==0 && totalStaked(DOLA)==0", "passed": true },
+    { "check": "original stakerCount(USDC)==0 && totalStaked(USDC)==0", "passed": true },
+    { "check": "original.migrator() != 0 (was migrator1 0x7281...)", "passed": true },
+    { "check": "migrator2.owner()==OWNER && tempStaker.owner()==OWNER && original.owner()==OWNER", "passed": true }
+  ],
+  "stateWrites": [
+    { "contract": "StableStaker", "address": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A", "slotDesc": "poolState[DOLA]", "from": "Migrating(1)", "to": "Active(0)", "intended": true },
+    { "contract": "StableStaker", "address": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A", "slotDesc": "poolState[USDC]", "from": "Migrating(1)", "to": "Active(0)", "intended": true },
+    { "contract": "StableStaker", "address": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A", "slotDesc": "migrationInfo[DOLA] (R,P)", "from": "(1033618871590054282103, 1033887800000000000000)", "to": "(0,0)", "intended": true },
+    { "contract": "StableStaker", "address": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A", "slotDesc": "migrationInfo[USDC] (R,P)", "from": "(1954570705, 1954731400)", "to": "(0,0)", "intended": true },
+    { "contract": "StableStaker", "address": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A", "slotDesc": "poolInfo[DOLA].lastRewardTime / poolInfo[USDC].lastRewardTime", "from": "1781220572 / 1781220573", "to": "1781230449 (fast-forward, no retro-accrual)", "intended": true },
+    { "contract": "StableStaker", "address": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A", "slotDesc": "yieldStrategy[DOLA]", "from": "0x0 (cleared by leg1 initiateMigration)", "to": "0xc4D5F377c1dD84BF131348a70287AA241588c7c7", "intended": true },
+    { "contract": "StableStaker", "address": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A", "slotDesc": "yieldStrategy[USDC]", "from": "0x0", "to": "0x0C2d75165bd5cf7B0e5Dcdc5799Da056a4E56a8a", "intended": true },
+    { "contract": "DOLA token", "address": "0x865377367054516e17014CcdED1e7d814EDC9ce4", "slotDesc": "allowance[staker][ysDolaV2]", "from": "0", "to": "type(uint256).max", "intended": true, "note": "unlimited approval is setYieldStrategy's documented design" },
+    { "contract": "USDC token", "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "slotDesc": "allowance[staker][ysUsdcV2]", "from": "0", "to": "type(uint256).max", "intended": true },
+    { "contract": "DOLA token", "address": "0x865377367054516e17014CcdED1e7d814EDC9ce4", "slotDesc": "balanceOf[staker] (idle sweep)", "from": "26785198715928544274", "to": "0", "intended": true },
+    { "contract": "USDC token", "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "slotDesc": "balanceOf[staker] (idle sweep)", "from": "27234202", "to": "0", "intended": true },
+    { "contract": "ysDolaV2", "address": "0xc4D5F377c1dD84BF131348a70287AA241588c7c7", "slotDesc": "clientBalances[DOLA][staker] == totalDeposited[DOLA]", "from": "0", "to": "26778181479418247579", "intended": true, "note": "credited client is the ORIGINAL STAKER itself — the swept skim-surplus/migration-residue becomes unattributed (no-user) principal buffer owned by the staker-as-client. Sweep haircut 7017236510296695 wei (~0.026%) left in vault as above-principal value, consistent with convertToAssets crediting." },
+    { "contract": "ysUsdcV2", "address": "0x0C2d75165bd5cf7B0e5Dcdc5799Da056a4E56a8a", "slotDesc": "clientBalances[USDC][staker] == totalDeposited[USDC]", "from": "0", "to": "27229913", "intended": true, "note": "haircut 4289 (~0.016%)" },
+    { "contract": "tempStaker", "address": "0xAb510b164e425F055De94C75B5fCcc4669546EC1", "slotDesc": "migrator", "from": "migrator1 0x7281310825e455A6aAb709AA5D5809d321B1b071", "to": "migrator2 0xd263E31873202605bD46E6dDFd82F1bA214DfFfC", "intended": true },
+    { "contract": "StableStaker", "address": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A", "slotDesc": "migrator", "from": "migrator1 0x7281...", "to": "migrator2 0xd263...", "intended": true, "note": "single-slot overwrite: migrator1 retains NO residual authority on either staker after this (verified via migrator() reads)" },
+    { "contract": "Tokemak autoDOLA / autoUSDC vaults", "address": "0x79eB84B5E30Ef2481c8f00fD0Aa7aAd6Ac0AA54d / 0xa7569A44f348d3D70d8ad5889e50F78E33d80D35", "slotDesc": "internal share mint + NAV/debt accounting from the two sweep deposits (shares 22926016912074120166 autoDOLA -> ysDolaV2; 25058012260935453126 autoUSDC -> ysUsdcV2)", "from": "-", "to": "-", "intended": true, "note": "expected externality of strategy.deposit" }
+  ],
+  "events": [
+    "StableStaker: PoolReset(DOLA), PoolReset(USDC)",
+    "DOLA: Approval(staker->ysDolaV2, max), Transfer(staker->ysDolaV2, 26785198715928544274), Transfer(ysDolaV2->autoDOLA, same)",
+    "autoDOLA: Deposit/Nav + share Transfer(0x0->ysDolaV2, 22926016912074120166)",
+    "ysDolaV2: Deposited(DOLA, depositor=staker, recipient=staker, 26785198715928544274, shares 22926016912074120166)",
+    "StableStaker: YieldStrategySet(DOLA, old=0x0, new=ysDolaV2)",
+    "USDC: Approval(staker->ysUsdcV2, max), Transfer(staker->ysUsdcV2, 27234202), Transfer(ysUsdcV2->autoUSDC, same)",
+    "autoUSDC: Deposit/Nav + share Transfer(0x0->ysUsdcV2, 25058012260935453126)",
+    "ysUsdcV2: Deposited(USDC, staker, staker, 27234202, shares 25058012260935453126)",
+    "StableStaker: YieldStrategySet(USDC, old=0x0, new=ysUsdcV2)",
+    "tempStaker: MigratorSet(migrator2)",
+    "StableStaker: MigratorSet(migrator2)"
+  ],
+  "externalCalls": [
+    { "target": "autoDOLA 0x79eB... (Tokemak Autopool)", "fn": "deposit(26785198715928544274, ysDolaV2) then convertToAssets(shares) [post-FX-1]", "reverted": false },
+    { "target": "autoUSDC 0xa756...", "fn": "deposit(27234202, ysUsdcV2) then convertToAssets(shares)", "reverted": false },
+    { "target": "Tokemak RootPriceOracle/ChainlinkOracle", "fn": "getPriceInEth(...) during vault NAV checks", "reverted": false, "note": "only after FX-3; fork-aging staleness, see forkFixups" }
+  ],
+  "unintendedEffects": [],
+  "postconditionResults": [
+    { "check": "ysDolaV2.principalOf(DOLA, original) <= dolaIdleSwept (26778181479418247579 <= 26785198715928544274)", "passed": true },
+    { "check": "dolaIdleSwept > 0 => principalOf > 0", "passed": true },
+    { "check": "ysUsdcV2.principalOf(USDC, original) <= usdcIdleSwept (27229913 <= 27234202)", "passed": true },
+    { "check": "usdcIdleSwept > 0 => principalOf > 0", "passed": true },
+    { "check": "original poolInfo(DOLA).totalStaked == 0 after reset", "passed": true },
+    { "check": "original poolInfo(USDC).totalStaked == 0 after reset", "passed": true },
+    { "check": "(logged, not asserted) setAsideBufferSize(original)==10 and setAsideBufferRecipient()==original staker on both V2 strategies", "passed": true }
+  ],
+  "postState": {
+    "poolState": { "DOLA": "Active", "USDC": "Active", "USDe": "Active (never left)" },
+    "phusdPerSecond": { "DOLA": "57870370370370 (~5 phUSD/day) UNCHANGED", "USDC": "81018518518518 (~7 phUSD/day) UNCHANGED", "note": "ss9l1 surface: finalizeAndReset does not reset emission rates; carry-over is consistent with story-060's restore-identical intent" },
+    "yieldStrategy": { "DOLA": "ysDolaV2 0xc4D5...", "USDC": "ysUsdcV2 0x0C2d...", "USDe": "0xaC2e5936... UNCHANGED" },
+    "migrator": { "original": "migrator2 0xd263...", "tempStaker": "migrator2 0xd263..." },
+    "withdrawDisabled": { "DOLA": false, "USDC": false, "USDe": false },
+    "v2Principal": { "ysDolaV2": "26778181479418247579 (== totalDeposited)", "ysUsdcV2": "27229913 (== totalDeposited)" },
+    "idleOnStaker": { "DOLA": "0", "USDC": "0", "USDe": "40178982445146081569 (~40.18 USDe) — CONFIRMED untouched; remains idle on the staker (task brief said 13.49; empirical value is 40.179). Benign for this entry: USDe pool Active with its own strategy; the idle merely sits as extra withdraw liquidity / future-sweep buffer." },
+    "tempStaker": "3 DOLA + 6 USDC stakers still parked, awaiting leg2",
+    "paused": { "original": false, "tempStaker": false },
+    "mainnetAddressesTs": "YieldStrategyDola 0x90ce274b... -> 0xc4D5F377...; YieldStrategyUSDC 0x90af002E... -> 0x0C2d7516...; +1 header comment line; backup at server/deployments/mainnet.backup.2026-06-12_02-26-58-024.ts; StableStaker/YieldStrategyUSDe untouched (verified by diff)"
+  },
+  "knownIssueCompliance": {
+    "ss9l1 (finalizeAndReset revival footgun, open Low)": "AVOIDED in the happy path: the script is precisely the missing-reconfig companion ss9l1 prescribes — setYieldStrategy is wired in the SAME broadcast immediately after finalizeAndReset, and lastRewardTime fast-forward prevents retro-accrual. The emission-rate half (phusdPerSecond NOT reset: 5/7 phUSD/day carry over) is consistent with the suite's restore-identical intent, so not a violation here. RESIDUAL: in the F1 halt scenario (see finding SCRIPT-RESET-01) the pools sit revived-Active with NO strategy and stale emission config — ss9l1's exact exposure, reachable mid-suite.",
+    "story-010 (totalStaked==0 gate on setYieldStrategy)": "COMPLIANT: preflight mirrors the gate off-chain and the on-chain require held (totalStaked==0 at both wire calls).",
+    "ss9m7 (no in-place YS swap on a strategy with staked users)": "COMPLIANT: this suite is the prescribed full-migration pattern. Both YieldStrategySet events show oldStrategy == address(0) (cleared by leg1 initiateMigration) and the pool was empty — no in-place drain branch executed, no staked users present."
+  }
+}

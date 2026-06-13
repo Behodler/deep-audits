@@ -1,0 +1,170 @@
+{
+  "project": "stable-staker",
+  "run": "stable-staker-10",
+  "stage": "deduplication",
+  "dedupTimestamp": "2026-06-09T20:10:00Z",
+  "mode": "regression",
+  "scopeCommit": "125f585",
+  "changedRange": "93b7ce6..125f585",
+  "changedHunks": [
+    {
+      "file": "src/StableStaker.sol",
+      "lines": "221-228",
+      "story": "story-010 empty-pool setYieldStrategy gate"
+    }
+  ],
+  "inputs": {
+    "static": 28,
+    "patterns": "1 finding + 3 manual-review + checkedClean",
+    "code": 3,
+    "econ": 3,
+    "faithfulness": 1
+  },
+  "consolidatedFindings": [
+    {
+      "id": "DEDUP-001",
+      "title": "Zero-credit depositFor strands a phantom (amount==0) staker in _stakers, permanently bricking finalizeAndReset (destination pool wedged in Migrating forever)",
+      "contract": "src/StableStaker.sol",
+      "function": "depositFor (creation) ; _exitPosition + finalizeAndReset (detonation)",
+      "lines": {
+        "primary": "616-637 (depositFor; unconditional _stakers.add at 635, no require(credited>0))",
+        "secondary": [
+          "301 (stake() HAS the require(credited>0) guard depositFor lacks)",
+          "519-543 (_exitPosition amt==0 early-return at 522-524 does NOT _stakers.remove)",
+          "593-604 (finalizeAndReset require stakerCount==0 at 595 reverts 'stakers remain' forever)",
+          "756-762 (_routeDeposit returns strategy.deposit() == creditedPrincipal, 0 for dust under ERC4626MarketYieldStrategy)"
+        ]
+      },
+      "mergedFrom": ["CODE-001", "PATTERN-001"],
+      "alsoTouchedBy": ["SLITHER-004 (depositFor reentrancy, distinct/known)", "SLITHER-010 (depositFor unused-return _stakers.add — same line 635, the very call that strands the phantom; corroborating, not separate)"],
+      "severityEstimate": "Medium",
+      "severityRationale": "Permanent loss of pool availability (token pool can never return Migrating->Active; slot must be redeployed). No direct principal theft — real stakers exit at the snapshot. Availability/DoS under C4 Medium. Footgun (Law 3): a non-malicious operator running the documented migration runbook is surprised by a routine dust migration permanently bricking the destination pool.",
+      "newVsLedgered": "SPLIT / ESCALATION. The missing require(credited>0) guard in depositFor is previously ledgered as submitted-qa, fingerprint eae10d60. The NEW consequence — permanent finalizeAndReset brick — exists only because story-009 added the lifecycle state machine + finalizeAndReset(stakerCount==0). This elevates the QA guard-omission to a Medium availability finding. Recommend re-scoping the eae10d60 ledger entry or opening a linked Medium; severity-classifier to re-weigh.",
+      "dedupRationale": "CODE-001 and PATTERN-001 are the same root cause (asymmetric missing credited>0 guard) and same detonation path (phantom staker blocks stakerCount==0). Merged into one; CODE-001 carries the more complete analysis (ERC4626MarketYieldStrategy floor-division dust mechanism, preconditions, fix). SLITHER-010 flags the exact unconditional _stakers.add(user) at line 635 and is folded in as corroboration, not a separate finding.",
+      "preservedDetails": "CODE-001 has the most complete analysis (mechanism, preconditions, fixSuggestion, law3Note). PATTERN-001 contributes the LIFECYCLE-STUCK-STATE framing and missingMitigations list.",
+      "humanReviewFlag": "CONFLICT — REQUIRES HUMAN ADJUDICATION. The faithfulness scanner (F-01 nonFindings + run summary) asserts this brick CANNOT arise because stake() and depositFor() both require amount>0, so 'no path inserts a zero-amount staker' and stakerCount==0 <=> totalStaked==0. CODE-001/PATTERN-001 rebut this precisely: depositFor's amount>0 check is on the PRE-haircut input, while _stakers.add fires after _routeDeposit haircuts the CREDIT (credited) to 0 via ERC4626MarketYieldStrategy floor division — so a staker with userInfo.amount==0 IS insertable despite amount>0. This is a genuine Tier-2-vs-faithfulness disagreement on a Law-1 security finding. Per Law 1 (recall beats tidiness), the finding is PRESERVED at Medium pending a PoC that confirms a conforming strategy books credited==0 on a realistic dust credit. Do NOT suppress on the faithfulness 'cannot arise' verdict alone."
+    },
+    {
+      "id": "DEDUP-002",
+      "title": "Empty-pool gate relocates the b5218ab2 non-uniform AMM haircut from the migration EXIT side to the depositFor RE-ENTRY side: per-user sequential re-deposits into an AMM-backed new strategy credit identical-principal migrants differently by batch order",
+      "contract": "src/StableStakerMigrator.sol (+ src/StableStaker.sol depositFor)",
+      "function": "StableStakerMigrator.migrate -> StableStaker.depositFor -> _routeDeposit -> newStrategy.deposit",
+      "lines": {
+        "primary": "src/StableStakerMigrator.sol:76-81 (per-user depositFor loop, single tx)",
+        "secondary": ["src/StableStaker.sol:616-637 (depositFor)", "src/StableStaker.sol:756-762 (_routeDeposit -> strategy.deposit AMM swap)"]
+      },
+      "mergedFrom": ["ECON-001"],
+      "severityEstimate": "Medium",
+      "severityRationale": "Identical-principal migrants receive non-uniform credited principal purely by batch ordering — real, permanent redistribution/value loss among migrants; plus the batched same-block AMM deposits are a deterministic, public, sandwichable sequence (MEV). Value leak with stated external requirement (AMM-backed new strategy + non-trivial price impact) = C4 Medium.",
+      "newVsLedgered": "NEW root-cause-LOCATION; conceptual REVIVAL of b5218ab2 (submitted Medium, ledger marks CONFIRMED-CLOSED at f5f6039 because migrateOut was deleted). The single-realization design closed the defect on the EXIT side; this run finds the same non-uniform-AMM-haircut re-enter on the depositFor RE-ENTRY side, gated/nudged by story-010. Distinct fingerprint (StableStakerMigrator.migrate/depositFor re-deposit vs old migrateOut exit). KEEP AS ITS OWN FINDING, cross-ref b5218ab2 — recommend a fresh entry, NOT reopening b5218ab2.",
+      "dedupRationale": "No duplicate; ECON-001 is a standalone economic finding. Kept separate from DEDUP-001 (different root cause: AMM ordering/slippage vs missing guard) and cross-referenced to ledger b5218ab2 per instructions. Note the story-010 gate is the enabling nudge: it forbids the safe ordering (depositFor into idle pool, then setYieldStrategy on non-empty pool), pushing operators to wire the AMM strategy before the migrate batch.",
+      "preservedDetails": "ECON-001 retained in full (attackScenario, MEV sandwich note, profitability scaling, recommendation options a/b/c)."
+    },
+    {
+      "id": "DEDUP-003",
+      "title": "Stale NatSpec + structurally-dead in-place drain branch and underwater guard on setYieldStrategy/finalizeAndReset under the story-010 empty-pool gate",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy (NatSpec L204-217, drain branch L247-250, underwater guard L238) ; finalizeAndReset (NatSpec L580-583)",
+      "lines": {
+        "deadDrainBranch": "247-250 (if (staked>0) _routeExit — unreachable, totalStaked forced 0 at gate L228)",
+        "deadUnderwaterGuard": "238 (require(!_isUnderwater) — cannot trip for conforming strategy at totalStaked==0)",
+        "staleNatSpec": ["204-217 (setYieldStrategy: still describes whole-position YS1->YS2 in-place move)", "580-583 (finalizeAndReset: still credits story-008 underwater guard as the in-place forbidder; gate is now the stronger forbidder)"]
+      },
+      "mergedFrom": ["ECON-003", "F-01", "CODE-002", "PATTERN-MR-003"],
+      "alsoTouchedBy": ["profile LOCAL-001 (stale NatSpec)", "SLITHER stale-docstring (per task note)"],
+      "severityEstimate": "QA / Low",
+      "severityRationale": "No security or value impact. Maintenance/refactor hazard (a future maintainer may extend a never-executing branch or remove the wrong load-bearing guard) plus operator-misleading on-source NatSpec for a contract whose comments are explicitly written for a future operator. Law-2 doc-staleness, QA at best.",
+      "newVsLedgered": "NEW this range (the gate is what makes the branch dead and the NatSpec stale). Same family as ss9f3-cl (CLAUDE.md terminal-migration doc-lag) but a DISTINCT doc surface: ss9f3 is the CLAUDE.md doc (proposed RESOLVED by the 125f585 CLAUDE.md rewrite, per faithfulness nonFindings — do not auto-flip), whereas this is the in-SOURCE Solidity NatSpec, which the same commit did NOT update — an internal contradiction within commit 125f585.",
+      "dedupRationale": "Four sources describe one QA issue with two facets sharing the same root cause (a stronger precondition added without pruning the now-redundant code/docs): ECON-003 + F-01 = stale NatSpec; CODE-002 + PATTERN-MR-003 = dead drain branch / dead underwater guard. Both facets are the same maintenance-hazard finding and are consolidated into one QA bundle item. F-01 confirms it is pure doc staleness with no H/M cross-reference.",
+      "preservedDetails": "F-01 has the sharpest spec-vs-actual diff (commit-internal contradiction). CODE-002 has the dead-code reachability proof and fixSuggestion (remove drain branch, convert guard to assert/comment, update NatSpec)."
+    },
+    {
+      "id": "DEDUP-004",
+      "title": "Empty-pool gate makes residual-strategy-principal recovery structurally unreachable IF a strategy ever desyncs principalOf>0 at totalStaked==0 (profile O-2) — refuted as a live finding against the conforming reflax strategies",
+      "contract": "src/StableStaker.sol (+ reflax-yield-vault strategies)",
+      "function": "setYieldStrategy / initiateMigration interaction with strategy.principalOf",
+      "lines": {
+        "primary": "247-250 (in-place drain branch, now dead under gate)",
+        "secondary": ["238 (underwater guard could trip and block setYieldStrategy(token,0))", "228 (gate)"]
+      },
+      "mergedFrom": ["ECON-002", "CODE-003", "PATTERN-MR-002"],
+      "alsoTouchedBy": ["profile O-2 (residual-principal wedge observation)"],
+      "severityEstimate": "Low (likely out-of-scope trust-assumption)",
+      "severityRationale": "CODE-003 refutes this as a finding against the real strategies: both ERC4626YieldStrategy and ERC4626MarketYieldStrategy (shared AYieldStrategy base) maintain principalOf <-> totalStaked lockstep EXACTLY on every conforming path (deposit credits +creditedPrincipal, withdraw/relinquishPrincipal decrement the requested/capped amount — the same quantities StableStaker moves). principalOf>totalStaked can only arise from a NON-conforming strategy or a strategy-owner KNOWING action behind StableStaker's back (Law-3 trusted). PATTERN-MR-002 concurs the desync is currently unreachable given the story-007 relinquishPrincipal fix (ledger buffer-desync entry: fixed). Therefore likely OUT OF SCOPE as a non-conforming-strategy trust assumption; Low at most.",
+      "newVsLedgered": "NEW (consequence of story-010 gate) but refuted at HEAD. Related to ledger 0790a76a (rescueERC20 vs buffer), 69c7666 (buffer FCFS), and story-007 lockstep fix — but distinct (re-wiring wedge, not buffer payout). No new live finding.",
+      "dedupRationale": "ECON-002 (economic framing), CODE-003 (the refutation), profile O-2, and PATTERN-MR-002 are all the same residual-desync-wedge lead at different confidence. Merged. The code-scanner's refutation (CODE-003) is the authoritative verdict: conforming strategies hold lockstep, so this is a strategy-conformance trust boundary, not a live bug. Preserved per Law-1 recall as a Low/OOS note + invariant-generator candidate rather than dropped.",
+      "preservedDetails": "CODE-003 conformance proof is load-bearing (kept verbatim in spirit). ECON-002 recommendation retained: add a residual-recovery escape — allow setYieldStrategy(token,0) to skip the underwater guard and drain any residual principalOf when totalStaked==0.",
+      "downstreamRouting": "Feed PATTERN-MR-002's invariant to invariant-generator (Tier-3): assert principalOf==0 whenever totalStaked==0."
+    },
+    {
+      "id": "DEDUP-005",
+      "title": "Dust-stake grief of the new empty-pool gate (1-wei stake forces a full terminal-migration cycle to rewire a strategy)",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "lines": {"primary": "228 (require(totalStaked==0) is permissionlessly flippable by any 1-wei stake)"},
+      "mergedFrom": ["PATTERN-MR-001"],
+      "severityEstimate": "Low (owner footgun, documented mitigation)",
+      "severityRationale": "Two windows: (a) revival — a front-running 1-wei staker between finalizeAndReset and setYieldStrategy forces an entire new terminal-migration cycle; (b) first-adoption — intentional story-010 design per CLAUDE.md (Law-2 faithful, not a defect). Mechanism confirmed, but a documented mitigation exists (stake is whenNotPaused; setYieldStrategy/finalizeAndReset are pause-tolerant; the finalizeAndReset natspec + CLAUDE.md prescribe wrapping revival in pause/unpause). Leans 'obvious -> trusted' under Law 3, but the cost asymmetry (1 wei vs a full migration cycle) is surprising enough to keep visible.",
+      "newVsLedgered": "NEW this range (the gate at L228 is the new attack surface). Overlaps ledger ss9l1 (finalizeAndReset revival footgun — same revival-runbook surface, possible QA bundle). ss9l1 itself is UNCHANGED by this range.",
+      "dedupRationale": "Standalone footgun on the changed line; not a duplicate of any other consolidated finding. Kept (not dropped) because it is the one finding that directly intersects the new gate and carries a surprising cost asymmetry — Law-1 recall. Flagged for human call on the trusted-vs-footgun boundary; possible bundle with ss9l1.",
+      "humanReviewFlag": "BORDERLINE Law-3: documented pause/unpause runbook mitigation exists (leans trusted), but cost asymmetry leans footgun. Human to decide QA-keep vs suppress; verify bundle with ledger ss9l1."
+    }
+  ],
+  "droppedAsNoise": [
+    {
+      "ids": ["SLITHER-001", "SLITHER-002", "SLITHER-003", "SLITHER-004", "SLITHER-016", "SLITHER-017", "SLITHER-018", "SLITHER-019", "ADERYN reentrancy-state-change"],
+      "category": "reentrancy (no-eth / benign / events)",
+      "disposition": "LOW-VALUE / KNOWN — pre-existing, owner-trusted / trusted-token surfaces. All external calls are into trusted strategies (reflax) or phUSD mint; none intersect the story-010 gate meaningfully (SLITHER-002/019 are in the changed function but flag the pre-existing drain path, not the new require at L228). SLITHER-004 reentrancy on depositFor is noted under DEDUP-001 as 'alsoTouchedBy' but the reentrancy angle itself is not the finding. No new HM exploit path. CLAUDE.md: common tool findings without demonstrated HM path are out of scope.",
+      "law1Note": "Retained visibly here (not silently dropped). None upgrade to a security finding on this regression range."
+    },
+    {
+      "ids": ["SLITHER-005", "SLITHER-006", "SLITHER-007"],
+      "category": "uninitialized-local (total/migratedCount default-0 accumulators)",
+      "disposition": "NOISE — Solidity zero-inits these; they are loop accumulators. No security impact."
+    },
+    {
+      "ids": ["SLITHER-008", "SLITHER-009", "SLITHER-011", "SLITHER-012", "SLITHER-013", "ADERYN-002"],
+      "category": "unused-return (_stakers.add/remove EnumerableSet bool; _routeExit return at setYieldStrategy L249)",
+      "disposition": "NOISE for the set ops (EnumerableSet bool return is conventionally ignored). NOTE: SLITHER-010 (unused-return on depositFor _stakers.add line 635) is the EXCEPTION — folded into DEDUP-001 as corroboration since that exact unconditional add is the phantom-staker mechanism. ADERYN-002 (_routeExit return ignored at the now-dead L249 drain) is subsumed by DEDUP-003's dead-branch observation."
+    },
+    {
+      "ids": ["SLITHER-014", "SLITHER-015", "ADERYN-001"],
+      "category": "calls-loop / costly-loop (batchMigrate, StableStakerMigrator.migrate external call in loop)",
+      "disposition": "KNOWN-CARRYOVER — already ledgered ('Unbounded per-user external-call loop in batchMigrate + StableStakerMigrator.migrate', status open). No new instance in the changed range. Not re-reported."
+    },
+    {
+      "ids": ["SLITHER-020", "SLITHER-021", "SLITHER-022", "SLITHER-023", "SLITHER-024"],
+      "category": "timestamp comparisons",
+      "disposition": "NOISE — these are balance/state/equality comparisons (e.g. totalStaked==0, balanceOf>=amount) that Slither's timestamp heuristic mislabels; no block.timestamp manipulation surface. SLITHER-021 flags the new gate L228 (totalStaked==0) — a false positive, not timestamp-dependent."
+    },
+    {
+      "ids": ["SEMGREP-001", "SEMGREP-002"],
+      "category": "use-ownable2step",
+      "disposition": "QA-level owner-footgun, pre-existing, not in changed range. Single-step Ownable transferOwnership mistake is an obvious owner action (Law 3 trusted) — dropped. Could be a QA-bundle line if the qa-bundler wants it, but adds no unique insight on this regression."
+    },
+    {
+      "ids": ["PATTERN-checkedClean entries"],
+      "category": "patterns verified clean / not-applicable / known-carryover",
+      "disposition": "No findings (FIRST-DEPOSITOR/ERC4626-INFLATION clean, REWARD-ACCRUAL-ORDER clean, EMISSION-WINDOW-BOUNDARY clean, MINT-ON-DEMAND-OVERMINT clean, no oracles/timelock/proxy, DOS-UNBOUNDED-LOOP = known-carryover). Recorded for completeness; nothing to report."
+    },
+    {
+      "ids": ["econ investigationsCleared", "faithfulness nonFindings"],
+      "category": "cleared investigations",
+      "disposition": "No findings (emission double-claim cleared, exit-side migration fairness cleared, phUSD mint/burn backing cleared; story-010 core gate FAITHFUL + intended design SAFE). ss9f3 CLAUDE.md doc-lag proposed RESOLVED at 125f585 (route to /ledger, do not auto-flip). Recorded for traceability."
+    }
+  ],
+  "ledgerCrossReferences": {
+    "eae10d60": "depositFor missing require(credited>0) — submitted-qa; DEDUP-001 is its escalation to Medium.",
+    "b5218ab2": "non-uniform AMM haircut (exit side) — submitted Medium, CONFIRMED-CLOSED at f5f6039; DEDUP-002 is the re-entry-side revival, new entry recommended.",
+    "ss9f3": "CLAUDE.md terminal-migration doc-lag — proposed RESOLVED at 125f585 (faithfulness); DEDUP-003 is the DISTINCT in-source NatSpec surface, still open.",
+    "ss9l1": "finalizeAndReset revival footgun — open, unchanged this range; possible bundle with DEDUP-005.",
+    "story-007": "relinquishPrincipal lockstep fix — basis for refuting DEDUP-004 at HEAD.",
+    "M-01/dab5a656, M-06/dbdc3ac9, M-07/969722dc": "in-place-principal-move root cause, collapsed by the totalStaked==0 gate (acknowledged/will-fix). DEDUP-002 caveat: the haircut is relocated, not eliminated."
+  },
+  "summary": {
+    "consolidatedCount": 5,
+    "bySeverity": {"Medium": 2, "Low": 2, "QA": 1},
+    "droppedNoiseCount": "24 of 28 static-tool findings + checkedClean/nonFindings (none security-relevant on this range)",
+    "humanReviewFlags": ["DEDUP-001 (faithfulness vs Tier-2 conflict on whether the brick can arise)", "DEDUP-005 (Law-3 trusted-vs-footgun boundary)"]
+  }
+}

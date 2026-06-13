@@ -1,0 +1,116 @@
+{
+  "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+  "role": "PRIMARY in-scope target",
+  "profileTimestamp": "2026-06-10T00:00:00Z",
+  "commit": "ad12cb1",
+  "regressionBaseline": "2f6774d",
+  "solidityVersion": "^0.8.13 declared; effective >=0.8.20 (OZ v5)",
+  "purpose": "Yield strategy that acquires/disposes ERC4626 vault SHARES via an AMM swap (IAMMAdapter/Curve) instead of vault.deposit()/redeem() — built for restricted vaults (sUSDe 7-day cooldown). Since the story-045/046 hoist this contract is a thin concrete: it implements only the yield-source hooks; ALL principal accounting lives in AYieldStrategy. Rebasing vaults unsupported; assumes share price only rises or stays flat.",
+
+  "inheritanceChain": ["AYieldStrategy", "IYieldStrategy", "IPausable", "Ownable", "ReentrancyGuard", "Pausable"],
+  "relatedContractsNotedNotAnalyzed": ["src/AYieldStrategy.sol (base — profiled separately, AYieldStrategy.profile.json)", "src/AMMAdapters/IAMMAdapter.sol", "external IERC4626 vault (sUSDe etc.)", "CurveAMMAdapter (unchanged since 2306719, carried profile)"],
+
+  "changedSinceBaseline": {
+    "story-047 (933620d)": [
+      "_skimSurplus L289-294: NEW loud guard — if totalBufferShares > 0 and setAsideBufferRecipient == address(0), revert 'AYieldStrategy: setAsideBufferRecipient not set'. Guard sits AFTER the single swap, but the revert unwinds the whole tx (no funds move; only a gas-waste quirk).",
+      "_distributeBuffer L353-372: REMOVED the per-client `underlyingToken.safeTransfer(clients[i], buf)` inside the loop; the loop now only SUMS totalSetAside, then ONE aggregate `safeTransfer(setAsideBufferRecipient, totalSetAside)` (L368). Remainder to `recipient` unchanged; rounding dust still favors recipient; return value still reduced by totalSetAside."
+    ],
+    "story-048 (ad12cb1)": [
+      "NO direct changes to this file. Inherits the 6h/72h totalWithdrawal timing from the base. The creditedPrincipal fix and the new preview functions apply ONLY to ERC4626YieldStrategy (out of scope) — this contract already credited a slippage-haircut principal (_creditedPrincipal, L106-108) and gains NO previewDeposit/previewRedeem (asymmetry note below)."
+    ]
+  },
+
+  "verifiedProperties": {
+    "noUnboundedLoops": "violated-bounded-by-clientset (unchanged): _accrueSurplusShares/_distributeBuffer loop over the owner-curated EnumerableSet — DoS-by-growth is owner-gated, not attacker-gated",
+    "checkedArithmetic": "verified (0.8.x, no unchecked, no assembly)",
+    "reentrancyGuarded": ["deposit(base)", "withdraw(base)", "depositAsOwner(base)", "withdrawAsOwner(base)", "skimSurplus(base)", "totalWithdrawal(base)", "relinquish*(base)"],
+    "reentrancyNotGuarded": ["emergencyWithdraw(base, onlyOwner, only transfers raw shares to owner)"],
+    "accessControlled": {
+      "onlyAuthorizedClient(base)": ["deposit", "withdraw", "relinquishPrincipal"],
+      "onlyOwner": ["setSlippageTolerance"],
+      "onlyOwner(base)": ["setClient", "setWithdrawer", "setSetAsideBuffer", "setSetAsideBufferRecipient", "setPauser", "emergencyWithdraw", "totalWithdrawal", "depositAsOwner", "withdrawAsOwner", "relinquishPrincipalAsOwner"],
+      "onlyAuthorizedWithdrawer(base)": ["skimSurplus"],
+      "onlyPauser(base)": ["pause"]
+    },
+    "initializerProtected": "n/a (immutable constructor, non-upgradeable)",
+    "principalAccountingInvariant": "verified (in base): sum(clientBalances) == totalDeposited; this concrete's hooks never touch the ledger except _totalWithdraw (zeroes client, subtracts same amount) — preserved",
+    "skimNeverSellsBeyondSurplus": "verified (unchanged): loud aggregate-surplus ceiling require(totalShares <= convertToShares(aggregateSurplus)) at L269-272",
+    "bufferConservation": "verified (story-047 path): totalSetAside = sum(floor(underlyingReceived*bufferShares[i]/totalShares)) <= underlyingReceived (each bufferShares[i] <= per-client surplus shares, sum(bufferShares) <= totalShares); toRecipient = underlyingReceived - totalSetAside >= 0; exactly underlyingReceived distributed across the two transfers; dust favors recipient",
+    "loudGuardCompleteness": "verified: guard covers exactly the case totalBufferShares > 0 && recipient unset; totalBufferShares == 0 takes the fast path and never reads setAsideBufferRecipient (back-compat: zero-buffer deployments unaffected by story-047)"
+  },
+
+  "stateVariables": [
+    {"name": "vault", "type": "IERC4626 immutable", "invariant": "non-zero; convertToShares/convertToAssets are the fair-value oracle for minOut, surplus, totalBalanceOf"},
+    {"name": "ammAdapter", "type": "IAMMAdapter immutable", "invariant": "non-zero; sole swap venue; trusted to honor minOut"},
+    {"name": "slippageToleranceBps", "type": "uint256", "mutators": ["setSlippageTolerance(onlyOwner, <=MAX_BPS)"], "invariant": "DEFAULT 0 -> deposit/withdraw minOut demands full vault-rate output -> effective DoS until owner configures (carried LOCAL-MKT-001)"},
+    {"name": "MAX_BPS", "type": "uint256 constant = 10000"},
+    {"name": "(inherited) clientBalances/totalDeposited/setAsideBufferSize/setAsideBufferRecipient/withdrawalStates", "notes": "see AYieldStrategy.profile.json"}
+  ],
+
+  "externalEntryPoints": [
+    {"function": "getTotalShares() view", "notes": "vault.balanceOf(this)"},
+    {"function": "setSlippageTolerance(uint256 bps)", "accessControl": "onlyOwner", "notes": "require bps <= MAX_BPS"},
+    {"function": "(all value-moving entry points are inherited from AYieldStrategy — see that profile)", "notes": "this concrete contributes only hooks"}
+  ],
+
+  "internalHooks": [
+    {"function": "_positionValue()", "behavior": "vault.convertToAssets(vault.balanceOf(this)) — VAULT rate, not AMM-realizable (carried scanner lead)"},
+    {"function": "_acquireShares(amount, depositor)", "calledBy": "base _depositInternal", "behavior": "pull `amount` underlying from depositor; creditedPrincipal = amount*(MAX_BPS-slip)/MAX_BPS; minOut = convertToShares(creditedPrincipal); swap ALL underlying -> shares via ammAdapter; require sharesReceived > 0", "invariant": "credit and swap floor derived from the SAME haircut value -> fairValueOfShares >= creditedPrincipal (modulo ERC4626 round-down dust, carried LOCAL-MKT-004)"},
+    {"function": "_disposeShares(amount, recipient)", "calledBy": "base _withdrawInternal", "behavior": "sharesToSell = convertToShares(amount) capped to held shares; minOut = convertToAssets(sharesToSell)*(1-slip); swap shares -> underlying; transfer FULL underlyingReceived to recipient", "fragile": "upside uncapped — recipient keeps any over-delivery while principal is debited by requested amount only (carried LOCAL-MKT-002)"},
+    {"function": "_emergencyWithdraw(amount)", "calledBy": "base emergencyWithdraw (onlyOwner)", "behavior": "transfer min(amount, heldShares) RAW vault shares to owner(); NO swap, NO ledger update", "fragile": "share/principal desync (carried LOCAL-MKT-003)"},
+    {"function": "_totalWithdraw(token, client, amount)", "calledBy": "base _executeWithdrawal", "behavior": "sharesToSell = heldShares*clientStoredBalance/totalDeposited; swap; zero client; totalDeposited -= clientStoredBalance; underlying to owner(); `amount` param used only for the >0 guard (live re-read semantics, unchanged)"},
+    {"function": "_skimSurplus(token, clients, recipient)", "calledBy": "base skimSurplus (onlyAuthorizedWithdrawer)", "behavior": "snapshot totalValue at vault rate; _accrueSurplusShares sums per-client FLOORED surplus shares + bufferShares (= surplusShares * setAsideBufferSize[client] / 100); loud aggregate-surplus ceiling; SINGLE swap of totalShares with minOut on the aggregate; FAST PATH (no buffers): all to recipient; STORY-047 PATH: require setAsideBufferRecipient != 0, then _distributeBuffer", "story-047": "OLD: per-client safeTransfer(clients[i], buf) inside the loop — each client got its own set-aside back. NEW: buf amounts only summed; ONE safeTransfer(setAsideBufferRecipient, totalSetAside); remainder to recipient. Per-client SurplusSkimmed events unchanged (snapshot surplus, vault-asset terms)."}
+  ],
+
+  "valueFlows": {
+    "in": ["client/owner -> deposit: underlying in, swapped to vault shares held by strategy"],
+    "out": [
+      "withdraw/withdrawAsOwner: shares swapped to underlying -> recipient (FULL actual output)",
+      "skimSurplus fast path: full swap output -> skim recipient",
+      "skimSurplus buffered path (story-047): aggregate set-aside -> setAsideBufferRecipient (ONE transfer), remainder -> skim recipient",
+      "emergencyWithdraw: raw shares -> owner",
+      "totalWithdrawal phase 2: client's proportional shares swapped -> underlying -> owner"
+    ],
+    "heldAssets": "vault SHARES only (underlying held only transiently mid-tx)"
+  },
+
+  "externalCalls": [
+    {"target": "IERC20 underlyingToken (e.g. USDe)", "methods": ["safeTransferFrom", "safeTransfer", "safeIncreaseAllowance"], "trustLevel": "semi-trusted", "notes": "standard non-FoT, non-rebasing, no-hook ERC20 assumed (registry assumption). story-047 adds one more safeTransfer destination: setAsideBufferRecipient"},
+    {"target": "IERC4626 vault (e.g. sUSDe)", "methods": ["convertToShares", "convertToAssets", "balanceOf", "transfer (as IERC20)"], "trustLevel": "semi-trusted (external protocol)", "notes": "fair-value oracle for minOut/surplus/solvency; assumes monotone non-decreasing share price; vault rate may diverge from AMM-realizable rate (carried top scanner lead)"},
+    {"target": "IAMMAdapter ammAdapter (CurveAMMAdapter)", "methods": ["swap"], "trustLevel": "trusted (protocol-deployed, immutable)", "notes": "relied on to honor minOut and report true amountOut"},
+    {"target": "address setAsideBufferRecipient (owner-configured, e.g. stable-staker)", "methods": ["(receives safeTransfer)"], "trustLevel": "semi-trusted (owner-set protocol address)", "notes": "NEW story-047 trust boundary: a plain ERC20 transfer — no callback, no interface requirement; misconfiguration to a non-protocol address is an owner-trust issue (Law 3), but the contract cannot verify the recipient does anything sensible with the buffer"}
+  ],
+
+  "trustAssumptions": [
+    "underlyingToken standard ERC20 (no FoT/rebase/hooks).",
+    "vault is a well-behaved ERC4626 with monotone non-decreasing share price; convertTo* not manipulable within a block in a way that breaks minOut.",
+    "ammAdapter / Curve Router NG trusted to enforce minOut and report true output.",
+    "Owner sets a sane slippageToleranceBps post-deploy (default 0 is a deposit/withdraw DoS — carried).",
+    "Owner sets setAsideBufferRecipient BEFORE configuring any nonzero client buffer, or accepts that skims revert loudly until it is set (story-047 intended behavior).",
+    "setAsideBufferRecipient is a protocol-owned sink (intended: stable-staker) that correctly accounts for unsolicited ERC20 inflows — verification of the consumer side is an INTERACTION concern.",
+    "Authorized clients and withdrawers are protocol-owned contracts."
+  ],
+
+  "localFindings": [
+    {"id": "LOCAL-MKT-047-001", "type": "asymmetry-note", "severity": "local-info", "origin": "new (story-048 asymmetry)", "function": "(absent) previewDeposit/previewRedeem", "line": "n/a", "description": "story-048 added previewDeposit/previewRedeem to ERC4626YieldStrategy only; this market strategy exposes no preview surface even though its execution is AMM-priced (where a preview would arguably matter more, and where vault.preview* would be the WRONG oracle anyway). Not declared in IYieldStrategy, so no interface break — but a downstream integrator written against ERC4626YieldStrategy's preview functions will revert on this strategy. Deliberate-looking; flag for story-faithfulness to confirm story-048 scoped previews to the direct strategy on purpose.", "recommendation": "If previews are wanted here, they must be AMM-quote based, not vault.preview* based; otherwise document the asymmetry."},
+    {"id": "LOCAL-MKT-047-002", "type": "observability-gap", "severity": "local-info", "origin": "new (story-047)", "function": "_distributeBuffer", "line": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:368", "description": "The aggregate buffer transfer to setAsideBufferRecipient emits no strategy-level event (only the token Transfer). SurplusSkimmed events still carry per-client SNAPSHOT surplus in vault-asset terms, so off-chain accounting cannot reconstruct the realized recipient-vs-buffer split from strategy events alone. Pre-existing gap made slightly wider by 047 (the buffer leg's destination changed and its amount is still unlogged).", "recommendation": "Emit e.g. BufferSetAside(recipient, totalSetAside, toRecipient) in the buffered path."}
+  ],
+
+  "carriedFindings": [
+    {"id": "LOCAL-MKT-001", "status": "still-present at ad12cb1", "line": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:37,106-108,139,168", "summary": "slippageToleranceBps default 0 -> minOut demands full vault-rate output -> fresh deployment deposit/withdraw DoS until setSlippageTolerance"},
+    {"id": "LOCAL-MKT-002", "status": "still-present at ad12cb1", "line": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:174-179", "summary": "withdraw transfers FULL underlyingReceived to recipient while base debits requested amount only — upside uncapped (econ-scanner lead)"},
+    {"id": "LOCAL-MKT-003", "status": "still-present at ad12cb1", "line": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:191-200", "summary": "emergencyWithdraw moves raw shares without ledger update -> totalBalanceOf overstates, later withdrawers clamped (owner footgun)"},
+    {"id": "LOCAL-MKT-004", "status": "still-present at ad12cb1", "summary": "ERC4626 double round-down can put round-trip value slightly below creditedPrincipal (dust)"},
+    {"id": "LOCAL-MKT-005", "status": "still-present at ad12cb1 (now in base _withdrawInternal/_depositInternal)", "summary": "principal written AFTER external swap/transfer — CEI violation neutralized by nonReentrant + non-hooked-ERC20 assumption"},
+    {"id": "LOCAL-MKT-006", "status": "still-present at ad12cb1 (base balanceOf -> this.principalOf external self-call)", "summary": "gas/surface nit"}
+  ],
+
+  "scannerAttention": [
+    "CHANGED-CODE FOCUS (regression mode): the only behavioral deltas in this contract are the loud guard + aggregate buffer transfer. Key interaction question: does the intended setAsideBufferRecipient (stable-staker) correctly absorb a bare ERC20 inflow of aggregated buffers from MULTIPLE clients (it previously would have received only flows it initiated)? -> interaction/econ + story-faithfulness vs stable-staker M-05 deferral (ledger ss7m5/0dca43f3).",
+    "skimSurplus return value semantics unchanged in form (reduced by totalSetAside) but the set-aside no longer lands at the clients — any client (e.g. SYA) that previously counted on its buffer coming back as a dip-absorption reserve has silently lost that reserve. Check downstream assumptions. -> interaction.",
+    "Vault-rate vs AMM-realizable-rate divergence remains the highest-value standing lead (minOut/surplus/totalBalanceOf all vault-rate denominated). -> econ-scanner (carried).",
+    "Guard-after-swap in _skimSurplus is correct (full revert) — do not re-report as fund risk; at most a gas nit."
+  ],
+
+  "complexity": {"loc": 373, "externalFunctions": 2, "internalHooks": 7, "immutables": 3, "externalCallTargets": 4, "loops": "2 (skim path, bounded by owner-curated client set)"}
+}

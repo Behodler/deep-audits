@@ -1,0 +1,97 @@
+{
+  "contract": "src/AYieldStrategy.sol",
+  "role": "ABSTRACT BASE — scope-context parent (changed by story-047 + story-048; profiled FULL because all principal accounting + the new global buffer recipient live here since the story-045/046 hoist)",
+  "profileTimestamp": "2026-06-10T00:00:00Z",
+  "commit": "ad12cb1",
+  "regressionBaseline": "2f6774d",
+  "solidityVersion": "^0.8.13 declared; effective >=0.8.20 (OZ v5 Ownable(initialOwner), pauser IPausable ^0.8.20)",
+  "purpose": "Abstract base for yield-strategy adapters. Since the story-045/046 hoist it owns ALL principal accounting (clientBalances/totalDeposited, deposit/withdraw/relinquish entry points, totalBalanceOf) and exposes the yield source only via hooks (_positionValue/getTotalShares/_acquireShares/_disposeShares/_skimSurplus/_emergencyWithdraw/_totalWithdraw). Story-047 adds a single GLOBAL setAsideBufferRecipient that receives the aggregated set-aside from every client on each skim. Story-048 changes the two-phase totalWithdrawal timing to 6h wait / 72h window.",
+
+  "inheritanceChain": ["IYieldStrategy", "IPausable", "Ownable", "ReentrancyGuard", "Pausable"],
+
+  "changedSinceBaseline": {
+    "story-047 (933620d)": [
+      "NEW state: address public setAsideBufferRecipient (default address(0), L63)",
+      "NEW setter: setSetAsideBufferRecipient(address) onlyOwner, rejects zero address (L352-357)",
+      "NEW event: SetAsideBufferRecipientSet(old, new) (L117)",
+      "SEMANTIC CHANGE (enforced in concretes): set-aside buffers no longer return to each client; they are aggregated into ONE transfer to setAsideBufferRecipient per skim"
+    ],
+    "story-048 (ad12cb1)": [
+      "WAITING_PERIOD: 24 hours -> 6 hours (L84)",
+      "EXECUTION_WINDOW: 48 hours -> 72 hours (L85)",
+      "TOTAL_DURATION: 72 hours -> 78 hours (L86)",
+      "WithdrawalStatus enum comments updated to match"
+    ]
+  },
+
+  "stateVariables": [
+    {"name": "_pauser", "type": "address private", "mutators": ["setPauser(onlyOwner)"], "readers": ["pauser", "onlyPauser", "unpause"]},
+    {"name": "_authorizedClients", "type": "EnumerableSet.AddressSet private", "mutators": ["setClient(onlyOwner)"], "readers": ["onlyAuthorizedClient", "authorizedClients", "getAuthorizedClients", "authorizedClientCount", "skimSurplus"], "invariant": "distinct membership -> skimSurplus cannot over-skim via duplicates (M-01 structural fix, unchanged)"},
+    {"name": "authorizedWithdrawers", "type": "mapping(address=>bool) public", "mutators": ["setWithdrawer(onlyOwner)"], "readers": ["onlyAuthorizedWithdrawer"]},
+    {"name": "underlyingToken", "type": "IERC20 immutable", "invariant": "set once, non-zero; the ONLY supported token (every accounting entry point requires token==underlyingToken)"},
+    {"name": "clientBalances", "type": "mapping(token=>mapping(client=>uint256)) internal", "mutators": ["_depositInternal(+credited)", "_withdrawInternal(-requested capped)", "_relinquishInternal(-capped)", "(concrete) _totalWithdraw(=0)"], "readers": ["principalOf", "balanceOf", "totalBalanceOf", "(concrete) _accrueSurplusShares/_totalWithdraw"], "invariant": "booked principal, NOT nominal input, NOT mark-to-market"},
+    {"name": "totalDeposited", "type": "mapping(token=>uint256) internal", "mutators": ["_depositInternal", "_withdrawInternal", "_relinquishInternal", "(concrete) _totalWithdraw"], "invariant": "totalDeposited[token] == sum(clientBalances[token][*]) — preserved by all four mutators (each moves both by the same amount)"},
+    {"name": "setAsideBufferSize", "type": "mapping(address=>uint256) public", "mutators": ["setSetAsideBuffer(onlyOwner, <=100)"], "readers": ["(concrete) _accrueSurplusShares"], "units": "PERCENT 0-100 (NOT bps — differs from slippageToleranceBps)", "stale-doc": "L51-53 NatSpec still describes per-client return semantics superseded by story-047 (see LOCAL-BASE-047-001)"},
+    {"name": "setAsideBufferRecipient", "type": "address public", "mutators": ["setSetAsideBufferRecipient(onlyOwner, non-zero)"], "readers": ["(concrete) _skimSurplus loud guard + _distributeBuffer"], "invariant": "NEW story-047. Default address(0) = unset. Once set it can be repointed but NEVER reset to zero (setter rejects zero) — disabling buffer redirection requires zeroing every client's setAsideBufferSize instead.", "notes": "When any client buffer > 0 and this is unset, every skimSurplus reverts loudly (guard lives in the concretes, after the swap — full-tx revert, no funds move)"},
+    {"name": "withdrawalStates", "type": "mapping(token=>mapping(client=>WithdrawalState)) public", "mutators": ["totalWithdrawal flow"], "notes": "two-phase state machine None->Initiated->Executable->Expired; timing now 6h+72h (story-048)"}
+  ],
+
+  "externalEntryPoints": [
+    {"function": "setClient(client,bool)", "accessControl": "onlyOwner", "notes": "idempotent EnumerableSet add/remove"},
+    {"function": "setWithdrawer(withdrawer,bool)", "accessControl": "onlyOwner"},
+    {"function": "setSetAsideBuffer(client,bufferPercent<=100)", "accessControl": "onlyOwner", "notes": "front-run-a-skim quirk doc (L322-334) is now PARTIALLY STALE: under story-047 a client front-running a skim with a fresh deposit no longer redirects buffer to ITSELF — it enlarges the aggregate flowing to the global setAsideBufferRecipient at the expense of the skim recipient. Still protocol-internal (both protocol-owned), but the in-code rationale describes the old per-client flow."},
+    {"function": "setSetAsideBufferRecipient(address)", "accessControl": "onlyOwner", "stateChanges": ["setAsideBufferRecipient"], "notes": "NEW story-047. Rejects zero. Emits SetAsideBufferRecipientSet. No constraint vs client set / skim recipient (owner-config, intended target is stable-staker per NatSpec L346-347)."},
+    {"function": "setPauser(newPauser)", "accessControl": "onlyOwner"},
+    {"function": "pause()", "accessControl": "onlyPauser"},
+    {"function": "unpause()", "accessControl": "owner OR pauser"},
+    {"function": "emergencyWithdraw(amount>0)", "accessControl": "onlyOwner (NO nonReentrant, NO whenNotPaused)", "delegates": "_emergencyWithdraw (concrete: raw shares to owner, principal untouched)"},
+    {"function": "totalWithdrawal(token,client)", "accessControl": "onlyOwner + nonReentrant + whenNotPaused", "notes": "two-phase; phase 1 caches this.balanceOf; phase 2 valid in [initiatedAt+6h, initiatedAt+78h]; _executeWithdrawal zeroes state BEFORE _totalWithdraw (effects-before-interaction). STALE DOC: L414 still says 24h/48h."},
+    {"function": "skimSurplus(token,recipient)", "accessControl": "onlyAuthorizedWithdrawer + nonReentrant + whenNotPaused", "notes": "passes on-chain _authorizedClients.values() to concrete _skimSurplus; empty set is a 0-returning no-op; returns ACTUAL underlying delivered to recipient (NET of buffer set-aside under story-047)"},
+    {"function": "deposit(token,amount,recipient) returns(creditedPrincipal)", "accessControl": "onlyAuthorizedClient + nonReentrant + whenNotPaused", "stateChanges": ["clientBalances[recipient]+=credited", "totalDeposited+=credited"], "delegates": "_acquireShares (concrete)"},
+    {"function": "withdraw(token,amount,recipient)", "accessControl": "onlyAuthorizedClient + nonReentrant + whenNotPaused", "stateChanges": ["clientBalances[recipient]-=requested(capped)", "totalDeposited-=same"], "delegates": "_disposeShares (concrete)", "notes": "recipient==balanceHolder; principal decremented by REQUESTED capped amount, not received (protocol-favouring rule pinned in base, L728-731)"},
+    {"function": "depositAsOwner(token,amount,client)", "accessControl": "onlyOwner + nonReentrant (NO whenNotPaused)", "notes": "tokens pulled from owner; credits client"},
+    {"function": "withdrawAsOwner(client,recipient,amount)", "accessControl": "onlyOwner + nonReentrant (NO whenNotPaused)", "notes": "debits client, pays arbitrary recipient"},
+    {"function": "relinquishPrincipal(token,amount)", "accessControl": "onlyAuthorizedClient + nonReentrant", "notes": "writes down caller's principal (capped), shares untouched (story-045/046; QA-09 orphan edge already ledgered)"},
+    {"function": "relinquishPrincipalAsOwner(client,amount)", "accessControl": "onlyOwner + nonReentrant"},
+    {"function": "views: underlying/principalOf/totalBalanceOf/balanceOf/getTotalDeposited/getTotalShares/authorizedClients/getAuthorizedClients/authorizedClientCount/pauser/setAsideBufferRecipient", "accessControl": "none", "notes": "totalBalanceOf = _positionValue()*principal/totalDeposited — VAULT-rate, not AMM-realizable"}
+  ],
+
+  "verifiedProperties": {
+    "checkedArithmetic": "verified (0.8.x, no unchecked, no assembly except none)",
+    "noUnboundedLoops": "verified in base (the only loop is _uint256ToString over digits); client-set loops live in concretes, bounded by owner-curated set",
+    "reentrancyGuarded": ["deposit", "withdraw", "depositAsOwner", "withdrawAsOwner", "relinquishPrincipal", "relinquishPrincipalAsOwner", "totalWithdrawal", "skimSurplus"],
+    "reentrancyNotGuarded": ["emergencyWithdraw (onlyOwner; concrete only moves shares to owner)"],
+    "accessControlOnNewSurface": "verified: setSetAsideBufferRecipient is onlyOwner + non-zero-validated; no other new entry point added by 047/048",
+    "principalLedgerInvariant": "verified: sum(clientBalances) == totalDeposited preserved by _depositInternal/_withdrawInternal/_relinquishInternal (all move both by the same value); concrete _totalWithdraw zeroes client and subtracts the same clientStoredBalance; skim/emergencyWithdraw never touch it. UNCHANGED by 047/048 (neither commit touches principal accounting in this repo's in-scope strategy).",
+    "twoPhaseWithdrawalOrdering": "verified: _executeWithdrawal zeroes state before _totalWithdraw",
+    "timingConstantsConsistency": "verified: TOTAL_DURATION == WAITING_PERIOD + EXECUTION_WINDOW (6h+72h=78h); _updateWithdrawalStatus boundaries (>= waiting, <= total) unchanged in logic",
+    "initializerProtected": "n/a (immutable constructor, non-upgradeable)"
+  },
+
+  "trustAssumptions": [
+    "Owner is non-malicious (Law 3); owner controls client/withdrawer/buffer/bufferRecipient/pauser config plus emergency + migration paths.",
+    "setAsideBufferRecipient is intended to be a protocol contract (stable-staker per NatSpec); all clients' set-aside value flowing to ONE address is the story-047 design intent, not a leak.",
+    "STORY-048 TIMING: the anti-rug community-reaction window on totalWithdrawal shrank 4x (24h -> 6h) while the owner's execution window grew (48h -> 72h). Intentional per commit message; downstream consumers of the old 24h guarantee must be re-checked (story-faithfulness / interaction concern, not local).",
+    "Pauser is the trusted Global Pauser; totalWithdrawal is whenNotPaused so a paused strategy still blocks migration (carried LOCAL-BASE-002)."
+  ],
+
+  "localFindings": [
+    {"id": "LOCAL-BASE-047-001", "type": "stale-natspec-footgun", "severity": "local-low", "origin": "new (story-047)", "function": "setAsideBufferSize doc / setSetAsideBuffer AUDITOR NOTE", "line": "src/AYieldStrategy.sol:51-53 and 318-341", "description": "The NatSpec for setAsideBufferSize still says the buffer percentage 'is returned to the client instead of going to recipient, giving the client a reserve to absorb below-par dips', and the setSetAsideBuffer AUDITOR NOTE still reasons about a client redirecting buffer 'to itself'. Story-047 changed the flow: ALL clients' set-asides are aggregated into a single transfer to the global setAsideBufferRecipient; no client ever receives its buffer back. A competent owner configuring a per-client buffer from these in-code docs would expect client-reserve semantics and be surprised that the value lands at the global recipient (surprise test passes -> footgun). Documentation-only; code behavior is consistent and loud-guarded.", "recommendation": "Update both NatSpec blocks to describe the aggregated-to-recipient flow and rewrite the front-run-quirk rationale for the new beneficiary."},
+    {"id": "LOCAL-BASE-048-001", "type": "stale-natspec", "severity": "local-info", "origin": "new (story-048)", "function": "totalWithdrawal", "line": "src/AYieldStrategy.sol:414 and src/interfaces/IYieldStrategy.sol:101", "description": "Both doc comments still describe a '24-hour waiting period' and '48-hour execution window'; the constants are now 6h/72h (78h total). The enum comments and constant comments WERE updated, these two were missed.", "recommendation": "Update the two @dev lines to 6-hour / 72-hour."},
+    {"id": "LOCAL-BASE-048-002", "type": "trust-assumption-shift", "severity": "local-low", "origin": "new (story-048)", "function": "WAITING_PERIOD / EXECUTION_WINDOW constants", "line": "src/AYieldStrategy.sol:84-86", "description": "totalWithdrawal's rugpull-protection delay (the documented purpose, L415-416) shrank from 24h to 6h — a 4x reduction in the window the community has to react to an owner-initiated total fund migration — while the owner's execution window widened 48h->72h. Locally this is a parameter choice by a trusted owner (Law 3, not reportable as malice); flagged because the commit message gives no rationale and any downstream component or doc that assumed the 24h guarantee silently loses it. Hand to story-faithfulness: confirm story-048's intent actually covers the security-parameter relaxation and that no sibling doc/story still promises 24h.", "recommendation": "Document the rationale for 6h in the story/docs; confirm no downstream consumer encodes the old 24h assumption."},
+    {"id": "LOCAL-BASE-047-002", "type": "config-irreversibility-note", "severity": "local-info", "origin": "new (story-047)", "function": "setSetAsideBufferRecipient", "line": "src/AYieldStrategy.sol:352-357", "description": "Once set, setAsideBufferRecipient can be repointed but never cleared back to address(0) (zero rejected by design to avoid locking tokens). 'Turning off' buffer redirection therefore requires zeroing every client's setAsideBufferSize. Minor operational note; the loud guard makes the unset state safe.", "recommendation": "None required; note in ops runbook."}
+  ],
+
+  "carriedFindings": [
+    {"id": "LOCAL-BASE-001", "status": "still-present at ad12cb1", "summary": "unit mismatch: setAsideBufferSize is PERCENT (0-100), slippageToleranceBps is BPS (0-10000)"},
+    {"id": "LOCAL-BASE-002", "status": "still-present at ad12cb1", "summary": "totalWithdrawal is whenNotPaused -> paused strategy blocks even legitimate migration until unpause (emergencyWithdraw remains available)"},
+    {"id": "QA-09 (run-14, ledgered)", "status": "still-present at ad12cb1 (relinquish logic untouched by 047/048)", "summary": "relinquish-to-zero orphans residual vault value; first re-depositor's skim captures it"}
+  ],
+
+  "scannerNotes": [
+    "skimSurplus return value is now NET of the aggregate set-aside (story-047 keeps the pre-existing 'RETURN VALUE REDUCED by totalSetAside' contract but changes WHO gets the set-aside). Downstream callers (SYA 'yield collected' bookkeeping, stable-staker) must treat the return as recipient-delivered amount only — interaction scanner should re-check consumers against the new beneficiary.",
+    "No event reports the aggregate buffer transfer or totalSetAside; observability of the recipient leg relies on the underlying token's Transfer event. SurplusSkimmed still emits per-client SNAPSHOT surplus (vault-asset terms) which never equaled the realized split — unchanged, but now also silent about the buffer leg's destination amount.",
+    "story-047 is plausibly the integration half of stable-staker M-05 (set-aside routed to stable-staker as the pro-rata-haircut funding leg) — story-faithfulness should verify against the M-05 deferral record (ledger ss7m5/0dca43f3).",
+    "Client front-run-the-skim quirk now dilutes the SKIM RECIPIENT in favor of the GLOBAL BUFFER RECIPIENT (both protocol-owned). Econ-scanner: confirm no configuration exists where these two diverge in a way that matters (e.g. recipient floor minRewardTokenSupplied vs enlarged set-aside causing skim revert at the consumer)."
+  ]
+}

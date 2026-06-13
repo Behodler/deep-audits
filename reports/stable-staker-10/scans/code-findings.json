@@ -1,0 +1,79 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-06-09T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "commit": "125f585c95c3ff9fcf9deda6f5c8ea4da307ac77",
+  "regressionRange": "93b7ce6..125f585 (story-010 empty-pool gate)",
+  "contractsScanned": 4,
+  "findings": [
+    {
+      "id": "CODE-001",
+      "title": "Zero-credit depositFor strands a phantom staker in _stakers, permanently bricking finalizeAndReset (pool stuck in Migrating forever)",
+      "type": "denial-of-service / availability",
+      "rootCauseClass": "missing input validation (asymmetric guard) + irreversible set-membership invariant break",
+      "severity": "medium",
+      "plausibility": "requires market (AMM-haircut) strategy on the destination pool + a dust-sized migration credit; realistic-but-narrow",
+      "confidence": "high",
+      "contract": "src/StableStaker.sol",
+      "function": "depositFor (creation) ; _exitPosition + finalizeAndReset (brick)",
+      "line": 635,
+      "lineStart": 616,
+      "lineEnd": 637,
+      "secondaryLocations": [
+        {"function": "_exitPosition", "lineStart": 519, "lineEnd": 543, "note": "amt==0 early-return at 522-524 does NOT call _stakers.remove"},
+        {"function": "finalizeAndReset", "lineStart": 593, "lineEnd": 604, "note": "require stakerCount==0 at 595 reverts forever"},
+        {"function": "stake", "line": 301, "note": "has require(credited > 0) — the guard depositFor is missing"},
+        {"function": "_routeDeposit", "lineStart": 756, "lineEnd": 762, "note": "returns strategy.deposit() == creditedPrincipal, which is 0 for a dust amount under ERC4626MarketYieldStrategy"}
+      ],
+      "codeSnippet": "uint256 credited = _routeDeposit(token, received);\n// NO require(credited > 0) here (contrast stake() line 301)\ninfo.amount += credited;            // += 0\npool.totalStaked += credited;       // += 0\ninfo.rewardDebt = ...;\n_stakers[token].add(user);          // adds a zero-amount staker",
+      "description": "depositFor (onlyMigrator) omits the `require(credited > 0, \"StableStaker: nothing credited\")` guard that stake() enforces at line 301, yet still unconditionally calls `_stakers[token].add(user)` at line 635. If `_routeDeposit` returns 0, a staker is added with `userInfo.amount == 0` while `totalStaked` is unchanged. `_routeDeposit` returns `strategy.deposit(...)` == `creditedPrincipal`. For `ERC4626MarketYieldStrategy`, `creditedPrincipal = amount * (MAX_BPS - slippageToleranceBps) / MAX_BPS` (floor division), which evaluates to 0 for a dust `amount` (e.g. amount==1 wei at any realistic slippage bps), while the strategy's `require(sharesReceived > 0)` still passes (a tiny share is acquired). The migrator's `amounts[i] > 0` gate in StableStakerMigrator.migrate (line 77) does NOT protect against this: it checks the pre-haircut snapshot credit, not the post-haircut `credited` that depositFor computes against the DESTINATION pool's strategy. Once created, the phantom (amount==0) staker is un-removable: _exitPosition early-returns on amt==0 (lines 522-524) WITHOUT calling _stakers.remove; userMigrate requires amount>0 (line 557); withdraw/emergencyWithdraw/stake/depositFor all require PoolState.Active so are blocked while Migrating, and even while Active withdraw/emergencyWithdraw revert on a zero position. Consequently, after the destination pool itself later enters terminal migration (initiateMigration -> Migrating), every REAL staker exits via batchMigrate/userMigrate driving totalStaked to 0, but stakerCount stays 1 (the phantom). finalizeAndReset requires `_stakers[token].length() == 0` (line 595) and therefore reverts \"StableStaker: stakers remain\" forever. The pool is permanently wedged in Migrating: stake/withdraw/emergencyWithdraw are all blocked (require Active), so the token's pool slot is dead and can never be revived or re-staked — it would have to be redeployed.",
+      "attackVector": "No attacker required; it is an operational footgun triggered by ordinary migration. Preconditions: (1) destination StableStaker has an ERC4626MarketYieldStrategy (AMM-haircut) wired for the token; (2) a migrated user's batchMigrate credit amounts[i] is dust (amount==1 wei is the realistic trigger at typical slippage bps; larger zero-credit needs slippageToleranceBps near 100%). Such dust credits arise naturally for tiny positions in an underwater migration (credit = p_i*min(R,P)/P). The migrator then calls depositFor with amounts[i]>0, the destination strategy haircuts it to credited==0, and a phantom staker is permanently minted into _stakers. The damage detonates later, when the operator attempts the documented strategy-rotation runbook (initiateMigration -> drain -> finalizeAndReset) on that destination pool.",
+      "preconditions": [
+        "destination pool uses ERC4626MarketYieldStrategy (the only IYieldStrategy impl that haircuts deposits; ERC4626YieldStrategy credits full nominal and idle-hold credits full amount, so neither can produce credited==0 for amount>0)",
+        "a migrated user's credit floors to a dust amount (amount==1 wei at realistic slippage) so that amount*(MAX_BPS-bps)/MAX_BPS == 0",
+        "destination pool subsequently enters terminal migration (to detonate the finalizeAndReset brick); the phantom is otherwise dormant"
+      ],
+      "impact": "Permanent loss of pool availability: the affected token pool can never be returned from Migrating to Active (no theft of user principal — real stakers already exited at the snapshot). The pool slot must be redeployed; the empty-pool strategy-rotation lifecycle (the whole point of story-009/story-010) is defeated for that token. Also, even before migration, the phantom permanently inflates stakerCount and pollutes getStakers/batchMigrate paging.",
+      "fixSuggestion": "Mirror stake(): add `require(credited > 0, \"StableStaker: nothing credited\")` after line 631 in depositFor, OR gate the `_stakers[token].add(user)` on `info.amount > 0`. Defensively, _exitPosition could also `_stakers[token].remove(account)` on the amt==0 early-return path so any already-stranded phantom is reaped during batchMigrate.",
+      "newVsLedgered": "SPLIT: the missing `require(credited > 0)` guard half is previously ledgered as submitted-qa (fingerprint eae10d60). The permanent-brick consequence on finalizeAndReset (stakerCount==0 unreachable, pool stuck in Migrating forever) is NEW — it only exists because story-009 added the lifecycle state machine + finalizeAndReset(stakerCount==0). This consequence elevates the issue from QA to Medium (availability/DoS). Recommend re-scoping the ledger entry or opening a linked Medium.",
+      "law3Note": "Not an owner-malice vector. A competent non-malicious operator running the documented migration runbook would be surprised that a routine dust migration silently and permanently bricks the destination pool's lifecycle. This is a footgun (Law 3) and is in scope."
+    },
+    {
+      "id": "CODE-002",
+      "title": "setYieldStrategy in-place drain branch and underwater guard are now structurally dead code under the empty-pool gate",
+      "type": "dead-code / refactor-hazard",
+      "rootCauseClass": "redundant defensive code left reachable-looking after a stronger precondition was added",
+      "severity": "qa",
+      "confidence": "high",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy",
+      "line": 248,
+      "lineStart": 238,
+      "lineEnd": 250,
+      "description": "With the new `require(poolInfo[token].totalStaked == 0)` gate (line 228), the local variable `staked = poolInfo[token].totalStaked` (line 247) is provably 0, so the `if (staked > 0) { _routeExit(...) }` in-place-drain branch (lines 248-250) is unreachable. Likewise the story-008 underwater guard `require(!_isUnderwater(token, old))` (line 238) cannot trip for a conforming strategy: at totalStaked==0 the lockstep invariant gives principalOf==0, totalBalanceOf returns 0 (AYieldStrategy line 511 early-return), and `0 < 0` is false. Both survive only as defense against a non-conforming strategy that desyncs principalOf upward — which is the O-2 trust-assumption case, out of scope. This is a maintenance hazard (and the NatSpec at lines 206-214 / 580-583 still describes the now-impossible in-place YS1->YS2 whole-position drain), not an exploit.",
+      "attackVector": "n/a (no exploit path; documentation/maintenance risk only)",
+      "preconditions": [],
+      "impact": "Future maintainer may reason about or extend a code path that can never execute; stale NatSpec misleads the operator the contract is explicitly written for.",
+      "fixSuggestion": "Remove the dead drain branch (lines 247-250) and either remove the underwater guard or convert it to an assert/comment documenting it as non-conforming-strategy defense; update setYieldStrategy and finalizeAndReset NatSpec to describe the empty-pool-only contract.",
+      "newVsLedgered": "Overlaps profile LOCAL-001 (stale NatSpec) and O-2; recorded here for Tier-2 completeness. QA, not H/M."
+    },
+    {
+      "id": "CODE-003",
+      "title": "O-2 residual-principal wedge requires a non-conforming strategy — confirmed NOT a finding against the real reflax strategies",
+      "type": "trust-assumption (refuted lead)",
+      "rootCauseClass": "n/a",
+      "severity": "informational",
+      "confidence": "high",
+      "contract": "src/StableStaker.sol + reflax-yield-vault strategies",
+      "function": "setYieldStrategy / initiateMigration",
+      "line": 228,
+      "description": "Investigated whether a conforming strategy can report principalOf > totalStaked (or principalOf>0 at totalStaked==0), which would wedge both re-wiring paths. Both real strategies (ERC4626YieldStrategy, ERC4626MarketYieldStrategy via the shared AYieldStrategy base) define principalOf == clientBalances[token][client], incremented by exactly the returned creditedPrincipal on deposit and decremented by exactly the requested (capped) amount on withdraw/relinquishPrincipal — the SAME quantities StableStaker uses to move totalStaked. Lockstep totalStaked == principalOf is therefore maintained exactly for every conforming path, including the buffer relinquishPrincipal path. principalOf > totalStaked can only arise from a non-conforming strategy or from the strategy owner directly calling depositAsOwner/withdrawAsOwner/relinquishPrincipalAsOwner behind StableStaker's back (a different contract's owner KNOWING action, Law 3 trusted). Therefore O-2 is purely a non-conforming-strategy trust assumption and is OUT OF SCOPE as a finding.",
+      "attackVector": "n/a",
+      "preconditions": ["non-conforming IYieldStrategy implementation (none of the in-scope reflax strategies qualify)"],
+      "impact": "none against conforming strategies",
+      "fixSuggestion": "n/a — documented as a strategy-conformance trust boundary.",
+      "newVsLedgered": "refutes profile observation O-2 as a live finding."
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "id": "YS-01",
+  "entryPoint": "migrate:ys-swap-deploy",
+  "rootCauseFamily": "previewRedeem-vs-Tokemak-Autopool-brick",
+  "fingerprint": "28d5044e4edd593698f433e77a477c5693e21a5b34ddf68d05cae474ddb26e51",
+  "title": "Story-060 fix line (vault.previewRedeem) reverts against the real Tokemak Autopool vaults — ysDolaV2/ysUsdcV2 deposit() is dead-on-arrival and the migration suite cannot complete",
+  "severity": "medium",
+  "proposedSeverity": "high",
+  "category": "intent-mismatch",
+  "contract": "lib/vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+  "function": "_acquireShares",
+  "location": "ERC4626YieldStrategy.sol:113 (vault@ad12cb1); consumed by script/DeployTempStableStakerAndMigrators.s.sol:143,147",
+  "faithfulness": false,
+  "footgun": false,
+  "description": "The story-060 fix credits `creditedPrincipal = vault.previewRedeem(sharesReceived)` inside `_acquireShares`; the intent doc prescribed `vault.convertToAssets(sharesReceived)`. The deployment targets are NOT plain ERC4626 vaults: autoDOLA (0x79eB…A54d) and autoUSDC (0xa756…0D35) are Tokemak Autopool proxies whose previewRedeem mutates state internally (withdrawal-queue simulation). Solc compiles the external `view` call as STATICCALL, so the inner state write raises StateChangeDuringStaticCall and consumes all forwarded gas: EVERY `deposit()` into the freshly deployed ysDolaV2/ysUsdcV2 reverts. Top-level eth_call previewRedeem succeeds (no static frame), which is why off-chain checks and the committed preview JSON never caught it. Downstream, ResetAndRewire's `setYieldStrategy` idle sweep and every Leg2Migration `depositFor -> _routeDeposit -> strategy.deposit` revert: the suite bricks at step 3/4, after leg 1 has drained the original staker into the temp staker, and the underwater-withdraw outage the suite exists to fix remains unfixed. CONSEQUENCE manifests downstream as the reset-step-3 revert and the leg2 dependency; those reset/leg2 mentions are impact evidence for this finding, not separate findings.",
+  "impact": "Migration suite cannot complete; if broadcast in order, users end up parked in the temp staker (funds recoverable via withdraw, zero emissions) with no working path back; the live DOLA withdrawal block persists. New strategy contracts are unusable as deployed.",
+  "classification": {
+    "assetImpact": "No direct asset loss: 9 users (1033 DOLA + 1954 USDC) end up parked in the temp staker with their funds withdrawable (zero emissions) while original pools sit in terminal Migrating. Funds are frozen mid-migration, not lost.",
+    "attackPath": [
+      "1. Operator broadcasts the suite in order; leg1 drains the original staker into the temp staker (lossless).",
+      "2. ResetAndRewire step-3 setYieldStrategy idle-sweep / leg2 depositFor calls strategy.deposit on the freshly deployed V2 strategies.",
+      "3. deposit() reverts because the story-060 fix line vault.previewRedeem(...) runs under STATICCALL against Tokemak Autopool proxies that mutate state internally (StateChangeDuringStaticCall).",
+      "4. Suite bricks at step 3/4; users remain parked in temp until owner redeploys V2 strategies with convertToAssets and re-runs."
+    ],
+    "likelihood": "Deterministic on the real mainnet target vaults (autoDOLA/autoUSDC). No attacker required; it is a guaranteed failure of the committed remediation.",
+    "assumptions": "Suite broadcast against the actual deployed Tokemak Autopool vaults; recovery requires the owner to redeploy the V2 strategies with the doc-prescribed convertToAssets and re-run, given the reset is non-idempotent and finalizeAndReset is one-shot.",
+    "externalRequirements": "Owner-feasible recovery (redeploy + re-run). Parked principal is withdrawable throughout, so no permanent lock."
+  },
+  "evidence": "workspace/phoenix-phase-2-staging/test/AuditYsSwapDeployStep1.t.sol — 3 passing fork tests at block 25297374: (1) ysDolaV2-equivalent deposit of 1,000 DOLA reverts; (2) ysUsdcV2-equivalent deposit of 1,000 USDC reverts; (3) root-cause isolation: previewRedeem via contract STATICCALL reverts on both vaults while convertToAssets succeeds (autoDOLA convertToAssets(1e18)=1.16799e18, autoUSD=1086674). Trace shows revert at AutopoolETH::previewRedeem with StateChangeDuringStaticCall. side-effects.json postconditionResults[6]. Reset-entry side-effects.json unmodifiedPreview reverts at FIRST setYieldStrategy with StateChangeDuringStaticCall (downstream confirmation).",
+  "recommendation": "Change the fix to the doc-prescribed `vault.convertToAssets(sharesReceived)` (verified static-callable on both Autopools), or cache previewRedeem semantics via a non-view pattern. Re-deploy V2 strategies before any later leg runs. Add a deposit smoke test (1-wei depositAsOwner) or an in-script `try IERC4626(vault).previewRedeem(1e18)` static probe to step-1 preflight so strategy/vault incompatibility fails at deploy time, not mid-migration.",
+  "dedupNotes": "Canonical raw: deploy F1 (migrate:ys-swap-deploy/idx0). Downstream consequences (reset-step-3 revert, leg2 brick) are folded as impact/evidence here per auditor cross-reference — they are NOT separate findings. NOTE: the SCRIPT-LEVEL amplification of this brick at the reset entry (skip-simulation + non-idempotent ordering + unpaused halt window) is kept as a distinct finding YS-09 (same family, different root cause class: operational non-resumability vs the vault-call bug itself).",
+  "sanitizationReason": "Per-entryPoint reconciliation: migrate:ys-swap-deploy is a new entry point (no phStaging ledger entry shares it) -> NEW. Not KI#9 'external vault/yield strategy behavior OOS': root cause is the story-060 committed FIX line (previewRedeem vs convertToAssets) being incompatible with the deployed Tokemak Autopool vaults, i.e. a script/remediation defect surfaced by external behavior, not the vault's intrinsic behavior being out of scope. High-severity finding -> extra scrutiny applied, KEPT (Law 1).",
+  "severityJustification": "Deterministic deposit revert that halts the migration after leg1 has moved funds into the temp staker, but C4 caps this at Medium: there is no direct asset theft or permanent loss — parked principal stays withdrawable and the frozen-mid-migration state is recoverable by the non-malicious owner redeploying the V2 strategies with convertToAssets and re-running. This is a protocol-availability / function-impact bug (the migration cannot complete and the live DOLA-withdraw outage persists), squarely Medium under the script-operational calibration. The worse non-resumable on-chain halt-window amplification is carried separately as YS-09.",
+  "crossLinks": [
+    "YS-01 <-> YS-09 <-> YS-13: YS-01 is the vault-call brick (root cause); YS-09 is the reset-entry script-level amplification (Medium, most severe halt); YS-13 is the deploy/leg2 non-idempotent-no-resume family (Low). Same brick consequence, distinct root-cause classes."
+  ],
+  "status": "NEW",
+  "provisional": false,
+  "referral": false,
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-12",
+  "metadata": {
+    "createdAt": "2026-06-12T03:14:24Z",
+    "updatedAt": "2026-06-12T03:26:47Z",
+    "scanOrigin": "audit-script:migrate:ys-swap (story-060)",
+    "auditedCommit": "b27c6ac"
+  },
+  "reportPath": "reports/phoenix-phase-2-staging-12/findings/medium/YS-01-previewRedeem-vs-Tokemak-Autopool-brick.json",
+  "pocPath": "workspace/phoenix-phase-2-staging/test/PoC_YS01_PreviewRedeemBrick.t.sol",
+  "pocStatus": "VALIDATED (5/5 passing, fork block 25297358)",
+  "pocCommand": "forge test --match-path test/PoC_YS01_PreviewRedeemBrick.t.sol -vv",
+  "pocNote": "PoC proves the empty-returndata StateChangeDuringStaticCall mechanism: STATICCALL reverts while the top-level CALL + convertToAssets succeed."
+}

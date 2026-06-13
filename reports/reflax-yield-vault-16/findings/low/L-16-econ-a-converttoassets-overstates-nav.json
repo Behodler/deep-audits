@@ -1,0 +1,89 @@
+{
+  "id": "L-16",
+  "ledgerLabel": "ECON-A",
+  "project": "reflax-yield-vault",
+  "status": "draft",
+  "severity": "low",
+  "footgun": true,
+  "faithfulness": false,
+  "regression": false,
+  "title": "ERC4626YieldStrategy credits principal via fee-blind convertToAssets, persistently over-stating redeemable NAV",
+  "contract": "src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+  "function": "_acquireShares",
+  "line": 115,
+  "lineStart": 110,
+  "lineEnd": 115,
+  "additionalLocations": [
+    "ERC4626YieldStrategy.sol:115 (creditedPrincipal = vault.convertToAssets(sharesReceived) — the fee-blind idle-NAV credit, source-verified)",
+    "ERC4626YieldStrategy.sol:62 (principalOf read propagates the over-credit)",
+    "ERC4626YieldStrategy.sol:153 (totalBalanceOf / valuation read)",
+    "ERC4626YieldStrategy.sol:224 (downstream NAV read)",
+    "src/AYieldStrategy.sol:748 (base write-down site the over-stated principal feeds)",
+    "lib/stable-staker/src/StableStaker.sol:786 (F-03 / M-05 cross-protocol consumer of principalOf — integration gate)"
+  ],
+  "entryPoint": null,
+  "fingerprint": "c50c08f9ee587c02e38e089dd7aa2ee3ae64a9623bb1e6f1d138154b21fc7887",
+  "fingerprintBasis": "sha256(src/concreteYieldStrategies/ERC4626YieldStrategy.sol:_acquireShares:fee-blind-converttoassets-overstates-redeemable-nav) — empty entryPoint, legacy hash form",
+  "origin": "new",
+  "story": "story-049 (YS-01: credit principal via convertToAssets — Autopool STATICCALL fix)",
+  "description": "story-049 changed the deposit credit in ERC4626YieldStrategy._acquireShares from previewRedeem(sharesReceived) to convertToAssets(sharesReceived) to fix the Tokemak Autopool STATICCALL brick (YS-01: some real vaults mutate state inside previewRedeem and revert with StateChangeDuringStaticCall when called as an external view). convertToAssets is the fee-blind idle-NAV exchange rate: on the deployed Tokemak autopools convertToAssets(shares) >= previewRedeem(shares), because previewRedeem reflects exit fees / curve effects that convertToAssets ignores. As a result principalOf / totalBalanceOf persistently OVER-STATE the redeemable NAV — the strategy books more principal than it could actually realise by redeeming. The over-statement propagates to the base write-down site (AYieldStrategy.sol:748) and out to the cross-protocol consumer StableStaker.sol:786 (the F-03 / stable-staker M-05 integration callsite).",
+  "impact": "No value leaves the protocol on this commit's wiring and no external attacker exists. The defect is a persistent NAV over-statement whose MEASURED magnitude on the deployed autopools is below protocol slippage tolerances (see measuredMagnitude), which is why this is an honest Low at this configuration. CRITICAL: the magnitude is bound to the EXTERNAL vault's fee/curve config, not to this contract — the same code path becomes a Medium if a future strategy is wired to a vault with a non-trivial exit fee (see severityScaling).",
+  "measuredMagnitude": {
+    "method": "mainnet fork, re-verified via cast",
+    "autoDOLA": {
+      "address": "0x79eB84B5E30Ef2481c8f00fD0Aa7aAd6Ac0AA54d",
+      "overStatementBps": 0.2107
+    },
+    "autoUSD": {
+      "address": "0xa7569A44f348d3D70d8ad5889e50F78E33d80D35",
+      "overStatementBps": 1.0742
+    },
+    "scaleBehavior": "FLAT across 1 unit -> 5M units; rises to ~3 bps only near full-pool-drain.",
+    "conclusion": "Below protocol slippage tolerances on the deployed autopools -> honest Low at this configuration."
+  },
+  "severityScaling": {
+    "boundTo": "external vault fee / curve config — NOT this contract",
+    "mechanism": "Over-credit scales LINEARLY with the external vault exit fee. PoC: a 1% exit-fee vault yields a 10e18 over-credit on a 1000e18 deposit.",
+    "escalation": "If a future strategy is wired to a non-trivial-exit-fee vault, this SAME code path is a MEDIUM (depositors over-credited, last-out shortfall realisable). Retain the F-03 StableStaker:786 integration gate with a 'magnitude = external vault fee config' annotation so a future high-fee vault does not silently inherit a stale Low.",
+    "severityAuditorCarryForward": true
+  },
+  "lawBasis": "Law-3 non-obvious owner/integrator footgun (surprise test PASSES: a non-trivial exit fee silently inflates booked principal). Law-1 recall: parked at honest Low with a documented magnitude-bound escalation note rather than dropped. NOT an unsafe story — story-049's convertToAssets choice correctly fixes the STATICCALL brick; the residual is the fee-blindness it introduces.",
+  "documentationCheck": "NOT-BLESSED. knownIssuesCount=0; no designDecision documents that booked principal is the fee-blind idle-NAV rather than the realizable redeem value. The _acquireShares NatSpec (ERC4626YieldStrategy.sol:93/95) actively MIS-states the behaviour ('credits the full nominal amount (no haircut)') — that doc-contradiction is the faithfulness leg F-16-003.",
+  "tier3Evidence": "Two workspace PoCs. poc-econ-a-exitfee-overcredit.t.sol (mechanism: a non-zero-exit-fee vault over-credits principal linearly with the fee; a zero-fee vault shows no gap) PASSES 2/2 (re-run this run). fork-econ-a-autodola-navgap.t.sol (real magnitude: convertToAssets vs previewRedeem gap on autoDOLA / autoUSD, flat across deposit size) PASSES 6/6.",
+  "recommendation": "Mirror the sibling ERC4626MarketYieldStrategy._creditedPrincipal conservative haircut (lines ~106-133) — credit the conservative (lower) realizable value — or credit a STATICCALL-safe realizable value rather than the fee-blind convertToAssets. Do NOT revert to previewRedeem (that reintroduces the YS-01 Autopool STATICCALL brick). Until fixed, retain the F-03 StableStaker:786 integration gate annotated 'magnitude = external vault fee config' so a future high-fee vault is re-evaluated at Medium.",
+  "crossReferences": [
+    "F-16-003 (doc-contradiction leg: NatSpec :93/95 says 'no haircut' but :115 credits convertToAssets)",
+    "F-03 (52f9b84a — StableStaker:786 cross-protocol integration gate; annotate 'magnitude = external vault fee config')",
+    "M-05 stable-staker (0dca43f3 — deferred cross-protocol consumer)",
+    "DEDUP-15-006 (previewRedeem round-trip bound — RESOLVED-INTO this finding this run)",
+    "F-01 (ec9191e4 — distinct: ERC4626MarketYieldStrategy double-round-down solvency overstatement; different contract+function+rootCauseClass)"
+  ],
+  "resolves": "DEDUP-15-006 (manual-review, previewRedeem(previewDeposit(x)) <= x round-trip bound) — marked resolved-into-ECON-A this run.",
+  "poc": {
+    "files": [
+      {
+        "file": "workspace/reflax-yield-vault/test/poc-econ-a-exitfee-overcredit.t.sol",
+        "role": "mechanism (exit-fee linear over-credit)",
+        "status": "passing",
+        "result": "2/2 passing",
+        "lastRun": "2026-06-12"
+      },
+      {
+        "file": "workspace/reflax-yield-vault/test/fork-econ-a-autodola-navgap.t.sol",
+        "role": "real magnitude (autoDOLA / autoUSD convertToAssets-vs-previewRedeem gap, flat across size)",
+        "status": "passing",
+        "result": "6/6 passing",
+        "lastRun": "2026-06-12"
+      }
+    ]
+  },
+  "report": "qa-report.md (operational-footgun section). NO individual H/M report owed at this configuration.",
+  "metadata": {
+    "createdAt": "2026-06-12T00:00:00Z",
+    "updatedAt": "2026-06-12T00:00:00Z",
+    "scanOrigin": "reflax-yield-vault-16",
+    "classificationOrigin": "CLASS-16-001",
+    "deduplicationOrigin": "ECON-A",
+    "stories": ["story-049"]
+  }
+}

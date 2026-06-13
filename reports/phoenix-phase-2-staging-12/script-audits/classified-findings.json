@@ -1,0 +1,420 @@
+[
+  {
+    "id": "YS-01",
+    "entryPoint": "migrate:ys-swap-deploy",
+    "proposedSeverity": "high",
+    "severity": "medium",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": false,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No direct asset loss: 9 users (1033 DOLA + 1954 USDC) end up parked in the temp staker with their funds withdrawable (zero emissions) while original pools sit in terminal Migrating. Funds are frozen mid-migration, not lost.",
+      "attackPath": [
+        "1. Operator broadcasts the suite in order; leg1 drains the original staker into the temp staker (lossless).",
+        "2. ResetAndRewire step-3 setYieldStrategy idle-sweep / leg2 depositFor calls strategy.deposit on the freshly deployed V2 strategies.",
+        "3. deposit() reverts because the story-060 fix line vault.previewRedeem(...) runs under STATICCALL against Tokemak Autopool proxies that mutate state internally (StateChangeDuringStaticCall).",
+        "4. Suite bricks at step 3/4; users remain parked in temp until owner redeploys V2 strategies with convertToAssets and re-runs."
+      ],
+      "likelihood": "Deterministic on the real mainnet target vaults (autoDOLA/autoUSDC). No attacker required; it is a guaranteed failure of the committed remediation.",
+      "assumptions": "Suite broadcast against the actual deployed Tokemak Autopool vaults; recovery requires the owner to redeploy the V2 strategies with the doc-prescribed convertToAssets and re-run, given the reset is non-idempotent and finalizeAndReset is one-shot.",
+      "externalRequirements": "Owner-feasible recovery (redeploy + re-run). Parked principal is withdrawable throughout, so no permanent lock."
+    },
+    "justification": "Deterministic deposit revert that halts the migration after leg1 has moved funds into the temp staker, but C4 caps this at Medium: there is no direct asset theft or permanent loss — parked principal stays withdrawable and the frozen-mid-migration state is recoverable by the non-malicious owner redeploying the V2 strategies with convertToAssets and re-running. This is a protocol-availability / function-impact bug (the migration cannot complete and the live DOLA-withdraw outage persists), squarely Medium under the script-operational calibration. The worse non-resumable on-chain halt-window amplification is carried separately as YS-09."
+  },
+  {
+    "id": "YS-02",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "proposedSeverity": "medium",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "None. The script reverts at its first mutating call (skimSurplus) before any funds move; fully atomic clean revert, no partial state.",
+      "attackPath": [
+        "1. Operator broadcasts leg1 as the owner EOA.",
+        "2. skimSurplus is onlyAuthorizedWithdrawer; authorizedWithdrawers[OWNER]==false on all three old strategies.",
+        "3. First call reverts 'unauthorized'; one wasted failed tx, no migration begun."
+      ],
+      "likelihood": "Deterministic on live state, but fails safe at the very first action with zero funds moved.",
+      "assumptions": "Owner has not separately granted itself withdrawer; fix is a one-line setWithdrawer(OWNER,true) in step 1 (and revoke in cleanup).",
+      "externalRequirements": "None beyond owner adding the missing authorization step."
+    },
+    "justification": "Clean deterministic revert at the first mutation with no funds moved and a trivial one-line fix (setWithdrawer), so per the script-operational calibration this is a Low availability/operational footgun rather than Medium. It blocks the runbook but causes no partial state, no value leak, and no asset risk; the non-obvious missing-authorization wiring makes it a reportable footgun, not invalid admin-trust."
+  },
+  {
+    "id": "YS-03",
+    "entryPoint": "migrate:ys-swap-deploy",
+    "proposedSeverity": "medium",
+    "severity": "medium",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "Value leak: post-migration, staker DOLA/USDC yield on the two largest pools becomes uncollectable (SYA is never authorized/registered as withdrawer/client on the V2 strategies), and the configured 10% buffer is dead config. Principal is safe; ongoing protocol yield silently stops accruing to Phlimbo/NFT holders.",
+      "attackPath": [
+        "1. Deploy script wires V2 clients/buffers but never calls setWithdrawer(SYA,true) and no sibling re-points the SYA strategy list.",
+        "2. Migration completes; all staker DOLA/USDC principal sits in V2 strategies.",
+        "3. SYA.skimSurplus cannot reach V2 strategies; yield collection is severed silently.",
+        "4. Cleanup 'verify final state' asserts buffer size/recipient but never checks a consumer exists, green-lighting the dead config."
+      ],
+      "likelihood": "Deterministic and silent (no revert), the most dangerous trait — the finalizer declares success while a yield-routing leg is unwired.",
+      "assumptions": "Migration otherwise succeeds (depends on YS-01 being fixed); recoverable only by manual owner rewire (setWithdrawer + addYieldStrategy on V2).",
+      "externalRequirements": "Owner must perform a later rewire; until then yield is continuously lost."
+    },
+    "justification": "Genuine, ongoing value leak (not dust) on the protocol's two largest staker pools with stated assumptions and an external requirement (owner rewire), which is the textbook C4 Medium profile. The silence is the aggravating factor: the migration appears successful and the cleanup gate even asserts buffer config without verifying any consumer, so the leak persists undetected until manual intervention. No direct asset theft and principal is safe, so it does not reach High."
+  },
+  {
+    "id": "YS-04",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "proposedSeverity": "medium",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "None. The off-by-one drops the last staker per pool, making the count-equality preflight unsatisfiable, so leg1 (and leg2) revert fail-loud before any funds move.",
+      "attackPath": [
+        "1. gather-migration-inputs.js treats half-open getStakersRange [start,end) as inclusive, dropping the final staker of each page.",
+        "2. It writes count = fetched length (under by one) and prints misleading 're-run gather' guidance that never converges.",
+        "3. SkimAndLeg1Migration preflight requires count==live stakerCount; reverts permanently. Same pager bricks leg2 at its own gate."
+      ],
+      "likelihood": "Deterministic suite DoS at two gates, but fail-loud with no partial state and no fund movement (fail-safe by double-bookkeeping accident).",
+      "assumptions": "Fix is a JS one-liner (use half-open end directly); had the script written on-chain count instead, the dropped staker would have been silently stranded — but as written it fails loud.",
+      "externalRequirements": "None beyond fixing the JS or hand-building the input file."
+    },
+    "justification": "Hard but fully fail-loud availability bug with no fund movement, no partial state, and a trivial JS one-line fix, so per the calibration (prefer Low for clean-revert availability bugs with trivial fixes) this is Low rather than Medium. It denies the runbook deterministically, which is real operational pain, but the double-bookkeeping makes it fail safe before any on-chain mutation and the misleading 're-run' guidance is a footgun aggravator, not an asset/value risk."
+  },
+  {
+    "id": "YS-05",
+    "entryPoint": "migrate:ys-swap-leg2",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": true,
+    "footgun": false,
+    "regression": false,
+    "classification": {
+      "assetImpact": "Tiny uniform per-user principal haircut (~0.026% DOLA / ~0.016% USDC) from the conservative convertToAssets rounding on the single fresh leg2 re-deposit; accrues to the protocol/strategy buffer. Measured ~0.27 DOLA / ~0.31 USDC total at current scale.",
+      "attackPath": [
+        "1. migrator2.migrate -> depositFor -> _routeDeposit credits convertToAssets(sharesReceived) into the V2 strategy.",
+        "2. Integer-rounding shortfall stays protocol-owned; each user's withdrawable principal is slightly less than held in temp."
+      ],
+      "likelihood": "Deterministic post-fix steady state (depends on YS-01 being fixed first); not compounded since leg1 was lossless.",
+      "assumptions": "Haircut is correct conservative accounting; only the intent doc's 1:1-preservation claim is inaccurate.",
+      "externalRequirements": "None."
+    },
+    "justification": "Dust-magnitude (~0.02%) value leak that is the correct conservative rounding behavior, so the only real defect is the Law-2 doc-faithfulness gap: the intent doc claims 1:1 principal preservation while a small uniform convertToAssets haircut applies. Tagged faithfulness for the spec-conformance report; severity is Low (rounding-dust, no code change needed)."
+  },
+  {
+    "id": "YS-06",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No funds lost (permissionless userMigrate exists as recovery). A benign user join/exit in the gather->broadcast window can leave one staker unmigrated and the pool in terminal Migrating with no scripted recovery path.",
+      "attackPath": [
+        "1. Count-only preflight passes when one staker exits and another enters (counts equal, membership differs).",
+        "2. Batch processes the stale list; departed address yields 0, new staker never migrated.",
+        "3. In --skip-simulation broadcast the post-assert fires only after txs land, leaving terminal Migrating; re-run reverts at one-shot initiateMigration."
+      ],
+      "likelihood": "Low — requires a benign user action in a narrow window at the current 3/6-staker population; not fork-demonstrated, analysis-supported.",
+      "assumptions": "Recovery via permissionless userMigrate or manual migrator.migrate is possible but undocumented.",
+      "externalRequirements": "User action in the gather->broadcast window."
+    },
+    "justification": "Operational footgun (weak count-only staleness guard) with low likelihood at current scale and a recovery path (userMigrate) that prevents fund loss, so Low. The hazard is availability/runbook risk — a half-finished mainnet migration with no scripted recovery — which is a non-obvious owner footgun worth surfacing with safe-config guidance but does not meet the Medium value-leak/availability-impact bar."
+  },
+  {
+    "id": "YS-07",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": true,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "~13.5 USDe orphaned as idle staker balance (manual rescueERC20 required, undocumented) and ~$3 USDC+USDe parked on the phUSD minter via deployed per-client buffer routing. Protocol-owned value scattered to unintended resting places; no user funds at risk.",
+      "attackPath": [
+        "1. Script skims to ORIGINAL_STABLE_STAKER (not treasury per doc), relying on the setYieldStrategy sweep.",
+        "2. Sweep only covers DOLA/USDC; the USDe pool is never re-wired, so USDe proceeds sit idle indefinitely.",
+        "3. Deployed old-strategy bytecode routes 25% buffer to the client contract (minter), differing from pinned source."
+      ],
+      "likelihood": "Deterministic but small value at current scale; doc-driven follow-ups would target a treasury holding nothing.",
+      "assumptions": "Recovery via manual rescueERC20; intent doc says treasury, implementation parks on staker.",
+      "externalRequirements": "Manual rescue + doc correction."
+    },
+    "justification": "Small-value (~13.5 USDe + ~$3) doc-divergence footgun: protocol-owned value lands in unintended resting places requiring an undocumented manual rescue, a non-obvious operator surprise (Law-3) and a Law-2 doc divergence (skim destination differs from the intent doc). Low given the trivial magnitude and no user-fund risk; tagged faithfulness for the destination doc drift."
+  },
+  {
+    "id": "YS-08",
+    "entryPoint": "migrate:ys-swap-deploy",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No direct loss. Stakers' set-aside reserve against below-par dips is silently set to 10% of skimmed surplus instead of the user-specified 25% chosen two days earlier — a 60% reduction in below-par insulation.",
+      "attackPath": [
+        "1. Intent doc claims live staker has 10% buffer; script hardcodes SETASIDE_BUFFER=10 with a pinning require.",
+        "2. ReplaceSYAMainnet had set 25% ('USER-SPECIFIED 2026-06-10') on all three live strategies.",
+        "3. V2 strategies silently revert to 10%; operator believes they are preserving protection."
+      ],
+      "likelihood": "Deterministic config; moot until YS-03 is fixed (no skims reach V2 strategies).",
+      "assumptions": "Non-obvious footgun — operator surprised they reduced rather than preserved the buffer.",
+      "externalRequirements": "Owner confirmation of intended buffer; one-value fix."
+    },
+    "justification": "Non-obvious owner footgun (Law-3 in-scope): the operator believes they are preserving existing protection while silently reverting a deliberate user-specified 25% buffer to 10%, surprise that meets the footgun test. No direct asset loss and the effect is moot until YS-03 is resolved, so Low with safe-config guidance to confirm the intended value rather than an obvious-misconfig invalid."
+  },
+  {
+    "id": "YS-09",
+    "entryPoint": "migrate:ys-swap-reset",
+    "proposedSeverity": "medium",
+    "severity": "medium",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No direct fund loss but the most severe halt-state: --skip-simulation lands the YS-01 deposit revert mid-suite on mainnet after tx1/tx2 succeed, leaving both pools Active with yieldStrategy==0, migrator still migrator1, ~27 DOLA + ~27 USDC idle unswept, and 9 users parked yield-less in temp. The entry point is not re-runnable (finalizeAndReset requires Migrating) and the unpaused halt window is griefable.",
+      "attackPath": [
+        "1. Broadcast with --skip-simulation --slow sends txs one-by-one with no pre-bundle simulation.",
+        "2. tx1/tx2 finalizeAndReset succeed; tx3 setYieldStrategy reverts (YS-01 brick) on-chain mid-suite.",
+        "3. Pools left Active/strategyless/unpaused; finalizeAndReset reverts on every retry (one-shot), burning more reverted txs.",
+        "4. Anyone deposits 1 wei (or innocent stake) into the Active strategyless pool -> totalStaked>0 re-locks setYieldStrategy behind the story-010 empty-pool gate, forcing a full second terminal-migration cycle."
+      ],
+      "likelihood": "Plausible given YS-01 is deterministic; the gate-relock grief is a cheap permissionless action during the public halt window.",
+      "assumptions": "Recovery is out-of-runbook and itself griefable; a default forge simulation would have caught the tx3 revert and sent nothing.",
+      "externalRequirements": "An (innocent or malicious) deposit in the unpaused halt window to trigger the gate-relock amplification."
+    },
+    "justification": "Protocol-availability and operational hazard at Medium: the script-level amplification (--skip-simulation + non-idempotent ordering + unpaused halt window) turns the YS-01 brick into a mid-suite on-chain halt that leaves users parked and makes recovery non-resumable and publicly griefable via the story-010 gate-relock. No direct asset theft and principal remains recoverable, so it does not reach High, but the part-way mainnet halt after funds were moved is materially worse than a clean atomic revert and is a genuine, plausibly-griefable function/availability impact — the dangerous class the calibration flags."
+  },
+  {
+    "id": "YS-10",
+    "entryPoint": "migrate:ys-swap-cleanup",
+    "proposedSeverity": "medium",
+    "severity": "medium",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": false,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No fund loss — underlying state is solvent (principalOf > totalStaked on both pools) and user funds are already restored by leg2. But the finalizer reverts on its own correctly-migrated state, so phUSD.setMinter(tempStaker,false) never runs and the temp staker keeps a live phUSD minter authorization indefinitely (a standing mint-capable surface).",
+      "attackPath": [
+        "1. Cleanup verify-5b requires buffer in [usdcSkimmed/2, usdcSkimmed*2], premised on buffer~=skim.",
+        "2. Real buffer is dominated by the leg1 realize-over-credit surplus, not the skim: ~27.2 USDC actual vs 0.53 skimmed, 51.1x over the band.",
+        "3. Unmodified script reverts 'Verify 5b FAILED' before its sole mutation; minter revocation never executes; 'migration COMPLETE' never signalled."
+      ],
+      "likelihood": "Deterministic on the correct post-migration state; the band, not the state, is wrong (FX4 variant with band removed passes all 12 checks).",
+      "assumptions": "Funds safe and solvent; fix is to drop the band and keep the hard solvency invariant.",
+      "externalRequirements": "None for the revert; the dangling minter is a standing privilege until manually revoked."
+    },
+    "justification": "An independent second suite-blocker: the finalizer deterministically reverts on its own correctly-migrated mainnet state (wrong post-condition band), so the migration can never be declared complete and — more importantly — the temp staker's phUSD minter authorization is never revoked, leaving a standing mint-capable surface the cleanup exists to remove. Funds are solvent and not at risk, so this is availability/operational-integrity of the finalizer plus a dangling privilege: Medium, not High."
+  },
+  {
+    "id": "YS-11",
+    "entryPoint": "migrate:ys-swap-cleanup",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No fund loss absent owner action. migrator2 remains set on the live original (and temp) staker after 'migration COMPLETE', leaving a one-call irreversible terminal-migration surface on a now-active, user-funded pool with permissionless userMigrate follow-through.",
+      "attackPath": [
+        "1. No story-060 script calls original.setMigrator(address(0)) after leg2; cleanup revokes the minter but not the migrator.",
+        "2. migrator2 stays an authorized initiateMigration path on the live repopulated pool.",
+        "3. A single owner call to migrator2.initiateMigration would freeze emissions, decouple the strategy, set the pool active — irreversible, then exposing permissionless userMigrate."
+      ],
+      "likelihood": "Low — requires an owner action the owner believes is unnecessary; no unprivileged-attacker entry.",
+      "assumptions": "Non-obvious footgun: owner believes migration COMPLETE while a privileged bricking surface persists.",
+      "externalRequirements": "Owner mistakenly invoking the standing migrator."
+    },
+    "justification": "Non-obvious owner footgun (Law-3 in-scope): a step that prints 'migration COMPLETE' leaves migrator2 standing on a live user-funded pool, a one-call irreversible bricking surface the owner would be surprised still exists. No unprivileged-attacker path and no fund loss absent owner action, so Low/QA operational hazard with safe-config guidance (revoke the migrator or verify-and-warn), not a malicious-admin vector."
+  },
+  {
+    "id": "YS-12",
+    "entryPoint": "migrate:ys-swap-deploy",
+    "proposedSeverity": "medium",
+    "severity": "medium",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": false,
+    "regression": false,
+    "provisional": true,
+    "referral": true,
+    "classification": {
+      "assetImpact": "Provisional/out-of-slice: phUSD stable-minter retains ~13,817 DOLA + ~11,936 USDC principal on the buggy old strategies (~13x/6x the staker's exposure) after story-060; the over-credit bug persists for that client. Whether it distorts minter redemptions/collateralization requires minter-side analysis.",
+      "attackPath": [
+        "1. Intent doc scopes the replacement to the StableStaker client only.",
+        "2. The over-credit bug lives in the strategy contracts, which serve two clients.",
+        "3. After story-060 the minter keeps depositing/accounting against the known-buggy strategies; accounting distortion accrues per deposit."
+      ],
+      "likelihood": "Undetermined — depends on phUSD-stable-minter accounting logic outside this script-audit closure.",
+      "assumptions": "Root cause partly in lib/phUSD-stable-minter; not exploitable conclusions can be drawn from this slice alone.",
+      "externalRequirements": "Scoped /analyze of the minter-strategy interaction before any submission."
+    },
+    "justification": "REFERRAL, not a finalized submission: kept visible per Law 1 because the largest client of the known-buggy strategies is left on them indefinitely, but the actual impact (redemption/collateralization distortion) depends on minter-side accounting outside this entry point's closure. Severity stays provisional Medium pending a scoped /analyze of phUSD-stable-minter; do not submit directly from this script audit."
+  },
+  {
+    "id": "YS-13",
+    "entryPoint": "migrate:ys-swap-deploy",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No fund loss (idle pile + snapshot credit intact; per-user migrate is replay-safe). A halted/partial deploy or leg2 broadcast leaves half-wired or terminally-Migrating mainnet state with a stale/absent deployments JSON; recovery requires out-of-band cast calls.",
+      "attackPath": [
+        "1. Deploy: only pre-flight guards; a mid-sequence failure under --skip-simulation+Ledger leaves e.g. setMinter applied but migrators unset, with no idempotent re-run (re-running redeploys all five contracts, orphaning JSON consumers).",
+        "2. Leg2: --skip-simulation halt after initiateMigration but before all migrate chunks land leaves temp pools Migrating; re-running the same command reverts 'pool not active'."
+      ],
+      "likelihood": "Low — requires a broadcast halt; the migrate loop itself is idempotent so a resume branch is feasible but unimplemented.",
+      "assumptions": "story-055 ResumeStableStakerMigration precedent shows this failure mode is real; funds not lost.",
+      "externalRequirements": "A broadcast interruption plus out-of-band recovery."
+    },
+    "justification": "Operational-robustness footgun (non-idempotent broadcast / no resume path) distinct from and less severe than the mid-suite reset halt (YS-09): a partial deploy/leg2 halt leaves half-wired or Migrating state recoverable only via out-of-band cast calls, but funds are not lost and the halt is not mid-suite-after-users-parked. Low operational hazard with a clear resume-aware fix shape."
+  },
+  {
+    "id": "YS-14",
+    "entryPoint": "migrate:ys-swap-deploy",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No direct loss. V2 strategies and temp staker are deployed with pauser==address(0), so the global Pauser cannot reach the contracts that custody all staker DOLA/USDC principal post-migration (and the temp staker during the bounce window). Incident-response coverage gap.",
+      "attackPath": [
+        "1. Live system registers global Pauser on the original staker and all old strategies.",
+        "2. Script deploys ysDolaV2/ysUsdcV2/tempStaker without setPauser; no sibling adds it.",
+        "3. Post-migration the V2 strategies (and temp during bounce) are outside emergency-pause coverage."
+      ],
+      "likelihood": "Low — only matters if an incident requires pausing; owner can still act via Ownable functions.",
+      "assumptions": "Non-obvious footgun: operator assumes the new contracts inherit the existing pause coverage.",
+      "externalRequirements": "An incident requiring the pauser pathway."
+    },
+    "justification": "Non-obvious incident-response footgun (Law-3 in-scope): the replacement contracts custody all staker principal yet are deployed outside the emergency-pause coverage the rest of the system has, a gap the operator would be surprised by. No direct asset loss and owner can still act via Ownable controls, so Low with safe-config guidance to mirror the old strategies' pauser registration."
+  },
+  {
+    "id": "YS-15",
+    "entryPoint": "migrate:ys-swap-reset",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No direct loss demonstrated (all observed fork addresses were correct). Reset preflight wires JSON-sourced strategy addresses and grants unlimited token approval without verifying code presence, vault, underlying, or client authorization; a stale/preview-contaminated JSON could halt the suite mid-broadcast or wire a max-allowance to an unvetted contract.",
+      "attackPath": [
+        "1. _globalPreflight only checks the V2 addresses are non-zero in the mutable deployments JSON.",
+        "2. setYieldStrategy grants unlimited token approval before the first compatibility check.",
+        "3. A stale/preview/foreign address (closure manifest documents a 0x190cBd... collision with live foreign code) passes preflight and either reverts mid-sweep or leaves a max-allowance to an unvetted contract."
+      ],
+      "likelihood": "Low — requires JSON drift; the build artifact is rewritten by step 1 and preview contamination is documented but not realized here.",
+      "assumptions": "Non-obvious weak-drift-guard footgun; fix is on-chain identity asserts in preflight.",
+      "externalRequirements": "A stale or contaminated deployments JSON."
+    },
+    "justification": "Non-obvious weak-drift-guard footgun (Law-3 in-scope): the reset trusts a mutable JSON build artifact and grants unlimited approval before any on-chain identity check, and address drift in this file is documented (foreign-address collision). No loss was demonstrated and all fork values were correct, so Low operational hazard with a concrete preflight-hardening fix."
+  },
+  {
+    "id": "YS-16",
+    "entryPoint": "migrate:ys-swap-reset",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "No funds at risk. A leaked PREVIEW_MODE=true env turns the broadcast entry into a zero-tx no-op that exits 0, so the && chain still runs the patcher and rewrites mainnet-addresses.ts — the off-chain registry claims V2 strategies are live while mainnet is still Migrating with no strategies wired.",
+      "attackPath": [
+        "1. Operator has PREVIEW_MODE=true exported from running preview entries.",
+        "2. npm run migrate:ys-swap-reset runs forge --broadcast but the script takes the prank branch, records zero txs, prints a warning, exits 0.",
+        "3. patch-mainnet-addresses-ys-swap.js unconditionally rewrites the registry; UI/API desyncs from mainnet with exit-code success."
+      ],
+      "likelihood": "Plausible env leak, but no on-chain effect — the system simply is not migrated and an off-chain file lies.",
+      "assumptions": "Non-obvious env-mode-confusion footgun; one-word fix to pin PREVIEW_MODE=false in package.json.",
+      "externalRequirements": "A stale env export in the operator's shell."
+    },
+    "justification": "Non-obvious env-mode-confusion footgun (Law-3 in-scope): a leaked env var silently turns the broadcast into a no-op that still patches the off-chain address registry with exit-code success, desyncing the UI/runbook checkpointing from mainnet. No funds at risk (the chain is simply not migrated), so Low with a one-word pin fix plus an on-chain verification in the patcher."
+  },
+  {
+    "id": "YS-17",
+    "entryPoint": "migrate:ys-swap-reset",
+    "proposedSeverity": "low",
+    "severity": "low",
+    "plausibility": null,
+    "faithfulness": true,
+    "footgun": false,
+    "regression": false,
+    "classification": {
+      "assetImpact": "None. Three-way disagreement between the intent doc (principalOf==0), script NatSpec header (>0), and code (correct two-sided bound) on the expected post-wire principal; the code is right and passed on the fork.",
+      "attackPath": [
+        "1. Doc instructs verify principalOf==0, written before the decision to park skim surplus as idle balance.",
+        "2. Code folds the swept idle into V2 principal (26.778 DOLA / 27.229 USDC), so principalOf is >0 and bounded by swept.",
+        "3. An operator cross-checking against the doc's ==0 during a live broadcast would wrongly conclude the migration mis-fired."
+      ],
+      "likelihood": "Deterministic doc lag; risk is a false alarm or training the operator to ignore verification mismatches.",
+      "assumptions": "Coded asserts supersede the doc and are correct.",
+      "externalRequirements": "None."
+    },
+    "justification": "Law-2 faithfulness / QA doc-lag: the runbook's stated verification value (principalOf==0) contradicts the implemented and correct behavior (a two-sided swept-idle bound), which can cause a false alarm or desensitize the operator to verification mismatches during a live migration. No on-chain impact (coded asserts are correct and passed), so Low; tagged faithfulness for the spec-conformance report."
+  },
+  {
+    "id": "YS-18",
+    "entryPoint": "migrate:ys-swap-deploy",
+    "proposedSeverity": "low",
+    "severity": "qa",
+    "plausibility": null,
+    "faithfulness": true,
+    "footgun": false,
+    "regression": false,
+    "classification": {
+      "assetImpact": "None. Stale NatSpec: _acquireShares @return/@dev still say principal credited is 'the full nominal amount (no haircut)' while the implementation credits vault.previewRedeem(sharesReceived).",
+      "attackPath": [
+        "1. story-060 fix changed credited principal from nominal to previewRedeem but left the doc comments describing pre-fix behavior."
+      ],
+      "likelihood": "Documentation only; misleads the next reviewer/auditor about credited-principal semantics.",
+      "assumptions": "Part of the YS-01 fix-without-review pattern.",
+      "externalRequirements": "None."
+    },
+    "justification": "Pure documentation/comment defect (code-vs-spec divergence on the fixed strategy) with no on-chain impact, so QA. Tagged faithfulness because it is a code-vs-spec divergence tied to the YS-01 fix family; bundle into the QA report, and the NatSpec should be corrected when the YS-01 fix is reworked to convertToAssets."
+  },
+  {
+    "id": "YS-19",
+    "entryPoint": "migrate:ys-swap-leg1",
+    "proposedSeverity": "low",
+    "severity": "qa",
+    "plausibility": null,
+    "faithfulness": false,
+    "footgun": true,
+    "regression": false,
+    "classification": {
+      "assetImpact": "None. viem is required by the mandatory gather prerequisite but absent from package.json deps/devDeps, so npm install does not provide it and the script's own suggested remedy ('run npm install') fails; the operator must know to install viem manually.",
+      "attackPath": [
+        "1. gather-migration-inputs.js requires viem and exits with a misleading remedy.",
+        "2. On a clean checkout npm install does not provide viem; the gather prereq cannot run; leg1 hard-depends on its output."
+      ],
+      "likelihood": "Setup blocker on any fresh machine — exactly the environment a Ledger-signing mainnet operation runs from; no on-chain effect.",
+      "assumptions": "Packaging defect with a misleading remedy, not a user-input mistake.",
+      "externalRequirements": "Fresh checkout."
+    },
+    "justification": "Packaging/setup-blocker defect (undeclared viem dependency with a misleading remedy) that blocks the mandatory gather step from a clean checkout but has no on-chain effect and a one-line fix, so QA. The misleading-remedy angle gives it real operator-surprise value (footgun), so it is kept (not dropped as tool-noise) and folded into the QA bundle."
+  }
+]

@@ -1,0 +1,47 @@
+[
+  {
+    "title": "PostMigrationCleanup verify-5b USDC skim band reverts on the very state the migration produces, bricking the finalizer (temp minter never revoked)",
+    "severity": "medium",
+    "category": "intent-mismatch",
+    "entryPoint": "migrate:ys-swap-cleanup",
+    "contract": "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol",
+    "function": "run",
+    "lineStart": 197,
+    "lineEnd": 202,
+    "rootCauseClass": "WrongPostConditionInvariant",
+    "description": "The cleanup gate's per-token 'buffer sanity band' requires `buffer = principalOf(token,original) - poolInfo(token).totalStaked` to lie in `[<token>Skimmed/2, <token>Skimmed*2]`, on the stated premise (script comment L169-180) that `buffer ≈ <token>Skimmed`. That premise is false. The buffer is dominated NOT by the leg-1 skim but by the leg-1 `initiateMigration` realize-over-credit surplus: `initiateMigration` realizes the whole old-strategy position `R` into idle balance, which exceeds the credited `P` by the strategy's accrued yield; ResetAndRewire's `setYieldStrategy` idle-sweep then folds that whole excess into V2 principal. On the real post-migration fork state the USDC buffer is 27,229,913 (~27.2 USDC) while the recorded `usdcSkimmed` is only 532,748 (~0.53 USDC) — 51.1x over the band's upper bound. The UNMODIFIED script therefore REVERTS at `Verify 5b FAILED: USDC buffer not within sanity band of usdcSkimmed`, BEFORE the sole mutation, so `phUSD.setMinter(tempStaker,false)` never runs and the migration can never be declared COMPLETE by this script as written. The DOLA pool has the same shape (~26.78 DOLA buffer) and escapes only because `dolaSkimmed==0` disables its band branch — confirming the band, not the state, is wrong.",
+    "impact": "The story-060 final step is non-functional against its own correctly-migrated mainnet state. Operators running the documented runbook hit an unexplained revert at the finalizer; the temp staker retains live phUSD minter authorization indefinitely (a standing mint-capable surface the cleanup exists to remove), and 'migration COMPLETE' is never signalled. Funds are not at risk and the underlying state is solvent (principalOf > totalStaked on both pools, hard-solvency checks pass), so this is availability/operational-integrity of the finalizer, not loss — Medium.",
+    "evidence": "side-effects.json unmodifiedPreview: reverted=true, revertReason 'Verify 5b FAILED…', revertedBeforeMutation=true. bandMath: usdcBufferActual 27229913 vs band [266374,1065496], ratio 51.1x. FX4 variant (band removed, hard solvency kept) passes all 12 and revokes the minter — proving the band is the sole blocker. DOLA band SKIPPED only because dolaSkimmed==0 (V4b-band postcondition result).",
+    "recommendation": "Drop the `[skim/2, skim*2]` band entirely and keep only the hard solvency invariant (`principalOf >= totalStaked`, already asserted at 4b/5b) — that is the real safety property and the script's own comment admits the band is 'diagnostic-only … inexact'. If a surplus sanity bound is desired, base it on the realize-over-credit accounting (leg-1 realized `R` minus credited `P`, available from the migrator's emitted totals), not the skim alone, and log the `≈skim` comparison rather than asserting it."
+  },
+  {
+    "title": "Story-060 leaves migrator2 set on the live original staker after declaring migration COMPLETE — a standing terminal-migration footgun on a now-active pool",
+    "severity": "low",
+    "category": "cluster-interaction",
+    "entryPoint": "migrate:ys-swap-cleanup",
+    "contract": "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol",
+    "function": "run",
+    "lineStart": 248,
+    "lineEnd": 296,
+    "rootCauseClass": "MissingPostStepConfiguration",
+    "description": "No story-060 script ever calls `original.setMigrator(address(0))` (or any reset) after leg 2. PostMigrationCleanup revokes the temp staker's phUSD minter but neither clears nor verifies the migrator. On the fork, after cleanup, `original.migrator()` and `tempStaker.migrator()` both still return migrator2 (0xd263…FFfC), an immutable `StableStakerMigrator(old=temp,new=original)`. Because `StableStaker.initiateMigration` is `onlyMigrator`, migrator2 remains an authorized path to terminally migrate the LIVE, repopulated original pool: a single owner call to `migrator2.initiateMigration(DOLA/USDC)` would freeze emissions, realize+decouple the V2 strategy, and set the pool `active=true` — which is irreversible (no resume path; staker docs: 'migration is terminal'; ledger ss9l1) and thereafter exposes a PERMISSIONLESS `userMigrate`. The intent doc's 'Post-Migration Options' section only justifies leaving the migrator set for the optional surplus re-injection and explicitly frames revocation as the expected terminal action ('do it before revoking migrator permissions'). Leaving it standing after a step whose own summary prints 'migration COMPLETE' is therefore an undocumented, non-obvious privileged surface (Law-3 footgun), not the documented option-2 state. migrator2 is also still set on the drained temp staker (harmless there, but equally never cleaned up).",
+    "impact": "A non-malicious owner, believing the migration COMPLETE, retains a one-call irreversible bricking surface on a live, user-funded pool with permissionless follow-through. No unprivileged-attacker path and no fund loss absent owner action, so Low/QA — an operational hazard surfaced for safe-config, consistent with Law 3 (surprise ⇒ footgun ⇒ report).",
+    "evidence": "side-effects.json preStateSummary + post-broadcast checks: original.migrator()==0xd263…FFfC and tempStaker.migrator()==0xd263…FFfC after cleanup. StableStaker.sol L148-149 onlyMigrator, L425 initiateMigration onlyMigrator nonReentrant, L555 userMigrate permissionless. StableStakerMigrator immutables old=temp/new=original (constructor L36-41). Doc 'Post-Migration Options' L224-235.",
+    "recommendation": "Either (a) add `original.setMigrator(address(0))` (and on temp) as an explicit step-6 action after the verifies, or (b) if option-2 re-injection is genuinely intended, have cleanup VERIFY the migrator is the expected migrator2 and emit a loud operator instruction that revocation is still pending — and document the standing privilege in the runbook. At minimum, cleanup should assert the post-migration migrator state it is leaving behind rather than silently ignoring it."
+  },
+  {
+    "title": "PostMigrationCleanup 'verify final state' omits any SYA-wiring / V2-yield-collectability check — green-lights F3 dead-buffer config as the last gate",
+    "severity": "low",
+    "category": "intent-mismatch",
+    "entryPoint": "migrate:ys-swap-cleanup",
+    "contract": "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol",
+    "function": "run",
+    "lineStart": 137,
+    "lineEnd": 246,
+    "rootCauseClass": "MissingPostStepConfiguration",
+    "description": "The doc bills step 6 as 'verify final state'. The script verifies V2 principal, buffer SIZE (==10) and buffer RECIPIENT on the new strategies, but never checks that the StableYieldAccumulator (SYA) / minter client was repointed to the V2 strategies or registered as a client/buffer holder on them. No story-060 script touches the SYA (cluster skipped-step b); the SYA's strategy registry and 25% buffer config still point at the OLD, post-skim-drained DOLA/USDC strategies, and the V2 strategies have only the StableStaker as a 10% client. Consequence (= deploy-entry F3 root cause): post-swap DOLA/USDC organic yield is uncollectable on the SYA side and the very 10% set-aside buffer cleanup proudly verifies (V8/V10) is dead config with no SYA consumer. Cleanup is the LAST place the suite could have caught this, and it asserts a buffer is correctly wired while not checking that anything can use it.",
+    "impact": "Verification-completeness gap: the finalizer declares the end-state good while a material yield-routing leg is unwired. The economic loss (uncollectable V2 yield) is owned by F3 at the deploy entry — this finding is the missing-verification angle only, so Low/QA to avoid double-counting F3's severity. Cross-reference F3 (deploy entry) and the SYA-not-rewired cluster skipped-step.",
+    "evidence": "closure-manifest cluster skipped-step 'SYA NOT REWIRED' (sharedAddresses ysDolaV2/ysUsdcV2/old strategies/SYA) and sibling replace-sya (25% buffer on OLD strategies for minter+staker clients). Script L212-232 asserts setAsideBufferSize==10 / recipient==original but no SYA reference anywhere in the file. Upstream F3.",
+    "recommendation": "Add a verify that the SYA (and any minter client) is a registered client on ysDolaV2/ysUsdcV2 with the intended buffer, OR explicitly document in the runbook that SYA re-wiring is a required follow-up the cleanup deliberately does not cover and add a loud console warning. Do not assert a buffer size without asserting a consumer exists for it."
+  }
+]

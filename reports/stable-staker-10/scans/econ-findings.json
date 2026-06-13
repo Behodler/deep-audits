@@ -1,0 +1,95 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-06-09T00:00:00Z",
+  "scanType": "economic",
+  "run": "stable-staker-10",
+  "mode": "regression",
+  "commitRange": "93b7ce6..125f585 (story-010 empty-pool gate on setYieldStrategy)",
+  "contractsScanned": 3,
+  "scope": [
+    "src/StableStaker.sol",
+    "src/StableStakerMigrator.sol",
+    "src/interfaces/IStableStaker.sol"
+  ],
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "amm-haircut-relocation / non-uniform-haircut",
+      "title": "Empty-pool gate relocates the M-01/b5218ab2 non-uniform AMM haircut from the OLD-side exit to the NEW-side re-deposit: forced full migration re-deposits per-user sequentially into the new AMM strategy, so identical-principal migrants are credited different principal by batch ordering",
+      "severity": "medium",
+      "contract": "src/StableStakerMigrator.sol (+ src/StableStaker.sol depositFor)",
+      "function": "StableStakerMigrator.migrate -> StableStaker.depositFor -> _routeDeposit -> newStrategy.deposit",
+      "lineStart": 76,
+      "lineEnd": 81,
+      "secondaryLocation": "src/StableStaker.sol:616-637 (depositFor), :756-762 (_routeDeposit)",
+      "description": "story-009/010 collapsed the OLD-side realization into a single AMM exit in initiateMigration (R = _routeExit(token, P, false)), which correctly fixed b5218ab2 / ss2m1: every migrant's snapshot credit amounts[i] = p_i*min(R,P)/P now takes ONE uniform exit haircut, order-independent. But the empty-pool gate forces ALL live-pool strategy changes through the full terminal-migration cycle, and the migrator's re-deposit side (StableStakerMigrator.migrate, lines 76-81) loops depositFor per user IN A SINGLE TX. When the NEW staker has an AMM-backed strategy wired (ERC4626MarketYieldStrategy), each depositFor routes through _routeDeposit -> strategy.deposit, which performs an INDEPENDENT ammAdapter.swap. Sequential same-block swaps move the pool price, so user[i] is credited credited_i = amounts[i]*(1 - slip_i) with slip_i monotonically dependent on position in the batch. Two users with identical old-pool principal therefore land in the new pool with DIFFERENT credited principal purely by batch ordering. This is the exact economic defect of b5218ab2 (submitted Medium), structurally relocated from the realization (withdraw) side to the re-entry (deposit) side by the new migration design.",
+      "rootCause": "The single-realization fix only unifies the EXIT haircut (one strategy.withdraw). It does not unify the ENTRY haircut: the migrator re-deposits each user separately, and an AMM-backed new strategy haircuts every deposit at its own current price. The fix moved the AMM round-trip from one side of the migration to the other rather than eliminating ordering-dependence.",
+      "economicImpact": "Identical-principal migrants receive non-uniform credited principal in the new pool. The difference is real, permanent value loss/redistribution among migrants (and the aggregate slippage is a haircut the migrants collectively bear, distinct from the protocol-owned above-par yield left behind). Also sandwichable: the batched same-block AMM deposits are a deterministic, public price-moving sequence (MEV).",
+      "attackScenario": "1. Owner must rotate the strategy on a live pool (the only way post-gate is full terminal migration).\n2. initiateMigration realizes R uniformly (good).\n3. Operator runs migrate(token, [u1..uN]); new staker has an AMM market strategy.\n4. depositFor(u1) swaps at price p0; depositFor(u2) swaps at the moved price p1; ... credited principal differs by slot.\n5. (Optional MEV) a searcher sandwiches the predictable multi-deposit sequence, extracting from every migrant.",
+      "profitability": "Loss magnitude scales with batch size, per-deposit notional vs AMM pool depth, and configured slippage tolerance. For a thin/volatile market pool and large batches, divergence can be material (basis points to low percent); for a deep stable pool it is dust. MEV extraction profitable whenever sandwich gain > gas.",
+      "affectedParties": "Migrants (non-uniform credit among them); migrant cohort collectively (aggregate AMM slippage on re-entry); searchers gain.",
+      "preconditions": "(a) The NEW staker's pool for the token has an AMM-backed strategy wired (ERC4626MarketYieldStrategy) at the time migrate runs; (b) migrate batches multiple users (the migrator's own loop is single-tx sequential); (c) the AMM pool has non-trivial price impact at the deposit notionals. If the new pool is idle-hold (no strategy) at deposit time, _routeDeposit returns full amount -> NO finding (uniform). NOTE: the runbook's safe sequencing is depositFor into an idle new pool, THEN setYieldStrategy once on the now-non-empty pool -- but story-010's gate FORBIDS that (totalStaked!=0), so an operator who wants the new pool to earn yield is pushed toward wiring the AMM strategy BEFORE the migrate batches, which is exactly the precondition that triggers this finding. The gate's empty-pool constraint nudges the operator into the vulnerable ordering.",
+      "confidence": "medium-high",
+      "newVsLedgered": "NEW root-cause-location, but it is the conceptual REVIVAL of b5218ab2 (submitted Medium, marked CONFIRMED-CLOSED at f5f6039 because migrateOut was deleted). The single-realization design closed it on the exit side; this run finds the same non-uniform-AMM-haircut defect re-enters on the depositFor re-entry side, gated/encouraged by story-010. Distinct fingerprint (StableStakerMigrator.migrate / depositFor re-deposit vs old migrateOut exit). Recommend a fresh entry cross-referencing b5218ab2 rather than reopening it.",
+      "recommendation": "Either (a) re-deposit on the new staker in a single aggregate position then split accounting off-chain (not possible with current per-user depositFor + AMM), or (b) document that the new pool MUST be idle-hold during migration intake and wire its strategy only after, and relax/condition the empty-pool gate to permit that ordering, or (c) credit depositFor on the requested (pre-AMM) amount and let the aggregate slippage be socialized via a single batched deposit. As-is, the gate's empty-pool requirement actively pushes operators toward the per-user-AMM-deposit ordering that reintroduces the haircut."
+    },
+    {
+      "id": "ECON-002",
+      "type": "value-leak / residual-desync-wedge (trust-boundary)",
+      "title": "Forced full-migration cycle inherits the gated setYieldStrategy's inability to recover residual strategy principal (profile O-2): a non-conforming or partially-impaired strategy can wedge BOTH re-wiring paths after the pool reads empty",
+      "severity": "low",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy / initiateMigration interaction with strategy.principalOf",
+      "lineStart": 247,
+      "lineEnd": 250,
+      "description": "Profile observation O-2 promoted to a Tier-2 check against the real reflax strategies. With the gate, setYieldStrategy's old-strategy drain branch only runs when totalStaked > 0, which is now impossible (gate requires totalStaked == 0). So if a strategy ever holds principalOf > 0 while the staker's totalStaked == 0 (a desync that can arise from relinquishPrincipal write-downs in the underwater-buffer path, which decrement clientBalances/totalDeposited WITHOUT moving shares, or from any non-1:1 deposit/withdraw bookkeeping), the residual strategy principal is NEVER recovered by setYieldStrategy (drain skipped, only allowance revoked). Worse, the story-008 underwater guard can then TRIP (totalBalanceOf < principalOf) and block even setYieldStrategy(token, 0), and initiateMigration on the empty pool reverts too (strategy.withdraw(token, 0) reverts on zero, and the principalOf==0 post-check fails). Both re-wiring paths wedge for that token.",
+      "rootCause": "The empty-pool gate makes the in-place residual-recovery drain structurally dead; the contract now assumes lockstep totalStaked == principalOf holds at the gate, but relinquishPrincipal (buffer path, story-045/046) and AMM rounding can leave principalOf > 0 == totalStaked.",
+      "economicImpact": "Operational: a token's pool can become permanently un-rewireable and residual protocol-owned principal stranded in the decoupled strategy. No direct user theft (users already exited if totalStaked==0), but value leak (stranded principal) + availability (pool slot frozen).",
+      "attackScenario": "1. Pool uses an AMM market strategy. 2. Underwater-buffer withdrawals (69c7666 path) call relinquishPrincipal, writing down clientBalances but leaving shares; over time strategy-side principalOf and staker totalStaked drift. 3. Last user exits; totalStaked == 0 but strategy.principalOf > 0 (residual). 4. Owner tries setYieldStrategy -> drain skipped, allowance revoked, residual stranded; or guard trips and blocks. initiateMigration also reverts. Pool wedged.",
+      "profitability": "Not attacker-profitable; a value-leak/footgun. Requires the relinquish/rounding desync to leave residual principalOf at exactly the totalStaked==0 point.",
+      "affectedParties": "Protocol (stranded residual principal); operator (frozen pool slot).",
+      "preconditions": "A strategy whose principalOf can exceed the staker's totalStaked at the empty-pool boundary. reflax relinquishPrincipal decrements both clientBalances and totalDeposited in lockstep, which mitigates the classic case, but AMM share/rounding residue and the buffer-at-par path (par credit vs sub-par share value) are the realistic desync sources. Whether this is reachable in practice depends on reflax internals -- flagged for verification, held Low pending a concrete desync path.",
+      "confidence": "low-medium",
+      "newVsLedgered": "NEW (consequence of story-010 gate). Related to 0790a76a (rescueERC20 vs buffer) and 69c7666 (buffer FCFS) but distinct: this is the re-wiring wedge, not the buffer payout. Held Low absent a demonstrated reflax desync; promote if a relinquish/rounding residual path is confirmed.",
+      "recommendation": "Add a residual-recovery escape: allow setYieldStrategy(token, 0) to skip the underwater guard when totalStaked == 0 (there is no user to protect), and/or have it call strategy.relinquishPrincipal/withdraw of any residual principalOf so the pool can always be cleared. Verify against reflax that relinquishPrincipal cannot leave principalOf > totalStaked == 0."
+    },
+    {
+      "id": "ECON-003",
+      "type": "intent-vs-implementation / spec-drift",
+      "title": "setYieldStrategy and finalizeAndReset NatSpec still describe the now-dead in-place YS1->YS2 drain and credit story-008's guard as the in-place-swap forbidder, contradicting the story-010 empty-pool gate that is now the actual (stronger) forbidder",
+      "severity": "low",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy (NatSpec L204-217), finalizeAndReset (NatSpec L580-583)",
+      "lineStart": 204,
+      "lineEnd": 217,
+      "description": "The setYieldStrategy docstring still states 'The whole position therefore moves YS1->YS2 in this single call, with no per-user migration' and 'Blocked during a terminal migration' as the operative model -- behaviour now structurally impossible (totalStaked==0 required, drain branch dead). finalizeAndReset's NatSpec still says an impaired strategy reaches reset 'NEVER via an in-place setYieldStrategy swap, which story 008's underwater guard forbids' -- but story-010's empty-pool gate is now the (strictly stronger) forbidder; the underwater guard is mostly dead code under the gate. The on-chain comments, which the contract explicitly says are written for a future operator years out, now mis-describe the live mechanism.",
+      "economicImpact": "No direct economic impact; operator-misleading documentation that could cause an incorrect mental model of the migration/rewire flow (Law-2 spec-conformance, Law-3 footgun-adjacent).",
+      "attackScenario": "N/A (documentation drift).",
+      "profitability": "N/A",
+      "affectedParties": "Future operator / auditor.",
+      "preconditions": "None.",
+      "confidence": "high",
+      "newVsLedgered": "NEW this range; same family as ss9f3-cl (CLAUDE.md terminal-migration doc-lag) but on-source NatSpec rather than CLAUDE.md. Profile flagged this as LOCAL-001. Bundle into QA.",
+      "recommendation": "Update both docstrings to describe the empty-pool-only model: setYieldStrategy is now an empty-pool operation, the drain branch is dead defensive code, and the empty-pool gate (not the underwater guard) is what forbids in-place swaps."
+    }
+  ],
+  "investigationsCleared": [
+    {
+      "area": "Investigation 2 -- reward emission / phUSDPerDay across migrate->finalize->re-activate",
+      "verdict": "No NEW emission double-claim/over-emission. _updatePool no-ops while Migrating (L709) so pending is frozen at the snapshot and minted once per exit (_exitPosition L532/539). finalizeAndReset fast-forwards lastRewardTime to now (L601), so the frozen migration window is never retro-accrued into the revived pool -- correct. The phUSDPerDay floor-to-0 (d47619d2, ledgered Low) and the ss9l1 footgun (finalizeAndReset does not reset phusdPerSecond, so a revived pool silently resumes the OLD rate) are the known carryovers; story-010 does not change either. No new emission finding."
+    },
+    {
+      "area": "Investigation 3 -- migration snapshot fairness (exit side)",
+      "verdict": "The (R,P) single-snapshot mechanism distributes the realized strategy value FAIRLY and order-independently on the EXIT side: credit_i = p_i*min(R,P)/P with fixed R,P; Sigma floor(credit_i) <= R (conservation, L407 comment verified). No staker can extract more than their pro-rata share by ordering/timing on the exit. b5218ab2's exit-side defect is genuinely closed. The residual non-uniformity is on the RE-ENTRY side -> ECON-001."
+    },
+    {
+      "area": "Investigation 4 -- phUSD mint/burn backing",
+      "verdict": "phUSD minted is rewards-only and bounded by elapsed*phusdPerSecond (emission-cap invariant intact; no writer of accPhusdPerShare added in range). Principal is always returned in `token`, never minted as phUSD; no path mints phUSD against principal. Terminal exits pay token credit from the realized idle pile (Sigma <= R) and mint frozen pending phUSD -- backing intact. emergencyWithdraw FCFS underwater socialization (0dca43f3, acknowledged Medium) is unchanged by this range and is principal-side, not a phUSD-backing break. No new mint/burn backing finding."
+    }
+  ],
+  "ledgerCrossReference": {
+    "fixedConfirmedByGate": "M-01/dab5a656 (acknowledged, will-fix), M-06/dbdc3ac9 (acknowledged), M-07/969722dc (acknowledged) -- all three share the in-place-principal-move root cause, now unreachable (totalStaked==0 gate). Local profile G-5 confirms; Tier-2 confirms no economic re-introduction of the IN-PLACE haircut. CAVEAT: the haircut is relocated, not eliminated -- see ECON-001.",
+    "stillOpenUnaffected": "0dca43f3/M-05 (emergencyWithdraw FCFS, acknowledged, fix deferred), 3d61c955 (acknowledged), 69c7666 (wont-fix), e4567dc3 (wont-fix), 0790a76a / 59eebbf8 / 4f143a95 / a56f8778 / d47619d2 / ss9l1 (open Low/QA).",
+    "b5218ab2": "submitted Medium, ledger marks CONFIRMED-CLOSED at f5f6039 -- ECON-001 argues the underlying non-uniform-AMM-haircut economic defect re-enters on the depositFor re-entry side under the story-010 migration-forced flow; recommend new entry cross-referencing it."
+  }
+}

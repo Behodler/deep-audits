@@ -1,0 +1,139 @@
+{
+  "project": "reflax-yield-vault",
+  "scanTimestamp": "2026-06-10T00:00:00Z",
+  "scanType": "pattern-matching",
+  "runMode": "regression",
+  "baselineCommit": "2f6774dcf4275f73c46d510cd1db40f1743eb87d",
+  "auditedCommit": "ad12cb171d64b59103cbe81c7f7d896c38370cf1",
+  "scope": [
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+    "src/AMMAdapters/CurveAMMAdapter.sol",
+    "src/AYieldStrategy.sol"
+  ],
+  "patternsChecked": 29,
+  "findingsCount": 2,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "type": "two-step-setter-window-race",
+      "severity": "potential-medium",
+      "contract": "src/AYieldStrategy.sol",
+      "line": 846,
+      "relatedLocations": [
+        "src/AYieldStrategy.sol:822-837 (_initiateWithdrawal snapshots state.balance)",
+        "src/AYieldStrategy.sol:84-86 (story-048 retimed constants: WAITING_PERIOD 24h->6h, EXECUTION_WINDOW 48h->72h)",
+        "src/AYieldStrategy.sol:414 (stale docstring still says 24-hour wait / 48-hour window)",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:219-220 (_totalWithdraw re-reads LIVE clientBalances, ignores the Phase-1 snapshot)"
+      ],
+      "description": "totalWithdrawal is a two-step commit bounded by a time window, and step 2 executes against a LIVE value instead of the value snapshotted at step 1 - a direct vulnerableWhen hit. _initiateWithdrawal caches `state.balance = balanceOf(client)` and announces it in WithdrawalInitiated; _executeWithdrawal forwards that cached amount, but ERC4626MarketYieldStrategy._totalWithdraw uses it only for `require(amount > 0)` and then sells shares proportional to the live clientBalances[token][client] / totalDeposited at execution time. Any client deposits between Phase 1 and Phase 2 are swept WITHOUT a fresh waiting period, so the executed amount can exceed the publicly announced balance - undermining the 'community protection against rugpulls' purpose stated in the docstring. story-048 makes the divergence window materially worse: the reaction window before execution shrank 24h->6h while the execution window in which live state can drift grew 48h->72h (announced-vs-executed drift horizon now 78h). The function docstring (line 414) was not updated and still documents the old 24h/48h phases.",
+      "confidence": "medium",
+      "matchedSignatures": ["commit/pending two-phase state machine", "block.timestamp window bounds", "step 2 re-reads live value instead of step-1 snapshot"],
+      "missingMitigations": ["executed amount not pinned to the step-1 snapshot (no `min(cached, live)` cap)", "no re-initiation required when live balance grew past the announced balance"],
+      "lawContext": "totalWithdrawal is onlyOwner (Law 3, non-malicious), but the two-phase window exists precisely as a community-visible commitment; executing more than was announced is a non-obvious consequence a competent owner/community would be surprised by. Severity likely lands Low/QA after owner-trust discount - severity-classifier to decide.",
+      "knownIssueCrossRef": "Possible overlap with ledger carryover L-13 (zero-snapshot). L-13 concerned the snapshot going stale toward ZERO (benign no-op); the live-re-read-GREW direction plus the story-048 6h/72h retiming is the new, diff-relevant angle. Deduplicator should reconcile rather than auto-drop.",
+      "references": ["story-048 ad12cb1 'adjust withdrawal timing'"]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "TIMELOCK-BYPASS",
+      "type": "timelock-weakening",
+      "severity": "potential-low",
+      "contract": "src/AYieldStrategy.sol",
+      "line": 84,
+      "relatedLocations": [
+        "src/AYieldStrategy.sol:402-408 (emergencyWithdraw: no delay)",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:191-200 (_emergencyWithdraw transfers raw vault shares to owner, bypassing the two-phase flow entirely)",
+        "src/AYieldStrategy.sol:417 (totalWithdrawal docstring: 'community protection against rugpulls')"
+      ],
+      "description": "Pattern hit on 'emergency function has no delay' plus a diff-relevant weakening: story-048 cut the totalWithdrawal WAITING_PERIOD from 24h to 6h, shrinking the community reaction window of the advertised rugpull-protection timelock by 4x, while emergencyWithdraw remains a zero-delay full bypass (raw vault-share transfer to owner). The timelock's protective story (docstring) is now weaker in both directions and the doc comments were not updated to reflect or justify the retiming. Pattern DB severity is HIGH, but per Law 3 (owner non-malicious, bypass is owner-only and already triaged as centralization C-01) the residual finding is the STORY/timing regression, not a theft path - mapped down to potential-low/centralization with the 6h retiming as the only genuinely new element in this range.",
+      "confidence": "medium",
+      "matchedSignatures": ["delay constants", "execute( two-phase path", "emergency function with no delay"],
+      "missingMitigations": ["no changelog/story justification in code for why 6h is a sufficient community-reaction window", "stale 24h/48h doc comments"],
+      "lawContext": "Law 3: malicious-owner framing suppressed; surfaced only as the non-obvious operational consequence that the advertised protection window silently shrank 4x in story-048.",
+      "knownIssueCrossRef": "emergencyWithdraw-bypasses-timelock is covered by existing centralization triage (run-11 H-01/H-03 -> C-01). Only the WAITING_PERIOD 24h->6h reduction is new at ad12cb1.",
+      "references": ["story-048 ad12cb1 'adjust withdrawal timing'"]
+    }
+  ],
+  "manualReviewCount": 4,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE",
+      "type": "spot-nav-pricing",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 262,
+      "relatedLocations": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:139 (deposit minOut from vault.convertToShares spot NAV)",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:167-168 (withdraw minOut from convertToAssets spot NAV)",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:268-276 (skim aggregate-surplus ceiling + minOut from spot NAV)"
+      ],
+      "description": "Signature match (vault.balanceOf(address(this)), spot convertToAssets/convertToShares used for minOut and the skim surplus ceiling, executed against an AMM in the same tx). The NAV-rate-vs-AMM-execution gap is real but is the ALREADY-ACKNOWLEDGED M-02 NAV cluster (incl. L-09/L-11); run-12 PoC collapsed the realizable-solvency escalation and MEMORY guards forbid re-escalation. No diff line in 2f6774d..ad12cb1 changes this surface. Parked here for visibility per Law 1, NOT for re-escalation.",
+      "confidence": "low",
+      "matchedSignatures": ["balanceOf(address(this))", "convertToAssets/convertToShares spot price used in same tx as swap"],
+      "knownIssueCrossRef": "Acknowledged ledger M-02 NAV cluster; reflax-yield-vault-realizable-solvency-collapse memory: do not re-escalate.",
+      "recommendedAction": "Sanitizer should fold into M-02 lastSeenRun bump only."
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "pattern-db",
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "type": "credited-principal-rebase",
+      "severity": "potential-medium",
+      "contract": "src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "line": 110,
+      "relatedLocations": [
+        "src/concreteYieldStrategies/ERC4626YieldStrategy.sol:65-84 (new previewDeposit/previewRedeem pass-throughs)",
+        "src/AYieldStrategy.sol:696-716 (_depositInternal books whatever the hook reports)"
+      ],
+      "description": "story-048 changed _acquireShares in ERC4626YieldStrategy to book creditedPrincipal = vault.previewRedeem(sharesReceived) instead of the nominal amount. Direction is protocol-favoring (entry fees / share rounding no longer over-credit principal), and previewRedeem(previewDeposit(x)) <= x holds for well-behaved ERC4626 rounding - but this bound is VAULT-DEPENDENT: a vault with asymmetric preview rounding or fee logic could make previewRedeem(sharesReceived) exceed the nominal amount (over-credit) or a manipulated/transient NAV at deposit time could skew the booked figure. NOTE: this file is OUTSIDE the registered scope for run-15 (per run-meta notes) but is squarely inside the story-048 regression diff - parked here rather than dropped (Law 1). Low confidence on exploitability; the uncertainty is about whether any target vault violates the round-trip bound.",
+      "confidence": "low",
+      "matchedSignatures": ["principalOf/creditedPrincipal", "preview-based booking at deposit"],
+      "recommendedAction": "Manual/Tier-2 check: prove previewRedeem(previewDeposit(x)) <= x (and previewRedeem monotonicity) for the concrete target vaults (autoDOLA etc.); confirm scope decision on ERC4626YieldStrategy.sol for this run."
+    },
+    {
+      "id": "PATTERN-MR-003",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "type": "buffer-redirect-spec-drift",
+      "severity": "potential-low",
+      "contract": "src/AYieldStrategy.sol",
+      "line": 51,
+      "relatedLocations": [
+        "src/AYieldStrategy.sol:51-57 (STALE docstring: buffer 'is returned to the client... giving the client a reserve to absorb below-par dips')",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:360-368 (story-047: aggregate buffer now sent in a SINGLE transfer to global setAsideBufferRecipient, per-client transfers removed)",
+        "src/AYieldStrategy.sol:352-357 (setSetAsideBufferRecipient, owner-set, non-zero enforced)"
+      ],
+      "description": "Weak pattern match (recipient-pinning of a pooled payout) but a real story/spec drift: after story-047, NO client receives its own set-aside any more - every client's buffer share funnels to the single global setAsideBufferRecipient - yet the setAsideBufferSize state-variable docstring still promises a per-client reserve to absorb below-par dips. If the owner intends per-client insulation for more than one client, configuring buffers under the new semantics silently strips that insulation from every client except (at most) the recipient - a Law-3 non-obvious footgun candidate. The implementation IS faithful to story-047's stated intent (global redirect to e.g. stable-staker); the in-code spec is what lags. Loud revert when recipient unset is correctly implemented (not a footgun).",
+      "confidence": "low",
+      "matchedSignatures": ["pooled payout to pinned recipient", "setAsideBufferRecipient"],
+      "recommendedAction": "story-faithfulness agent: reconcile setAsideBufferSize docstring with story-047; confirm single-client buffer deployment assumption. QA-level doc fix at minimum."
+    },
+    {
+      "id": "PATTERN-MR-004",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "slippage-config-coupling",
+      "severity": "potential-low",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "line": 88,
+      "relatedLocations": [
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:88-93 (setSlippageTolerance allows _bps == MAX_BPS)",
+        "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:106-108 (_creditedPrincipal = amount * (MAX_BPS - bps) / MAX_BPS)"
+      ],
+      "description": "All swaps DO carry a minOut (pattern's primary condition is mitigated), but slippageToleranceBps is bounded only by MAX_BPS=10000: at high values minOut approaches 0 AND - via the deliberate coupling - depositors' creditedPrincipal shrinks by the same factor (at 10000: minOut=0 and creditedPrincipal=0 while the full nominal amount is pulled). The coupling is well documented in-code and the downstream stable-staker story-011 zero-credit guard protects depositFor users, so a competent owner is arguably NOT surprised (Law 3 leans suppress). Parked low-confidence rather than dropped because an owner raising tolerance temporarily to push a withdrawal through may not register that concurrent DEPOSITS book haircut principal at the same elevated tolerance.",
+      "confidence": "low",
+      "matchedSignatures": ["swap( with minOut", "slippageToleranceBps bound only by MAX_BPS"],
+      "knownIssueCrossRef": "Adjacent to acknowledged M-02 NAV/slippage cluster and existing centralization triage.",
+      "recommendedAction": "Severity-classifier/sanitizer call: likely QA safe-config guidance (cap setSlippageTolerance well below MAX_BPS, e.g. <= 1000)."
+    }
+  ],
+  "notes": {
+    "unchangedSurfaces": "CurveAMMAdapter.sol has no diff lines in this range; its known items (L-07 setRoute validation) stand, no new pattern hits. DOS-UNBOUNDED-LOOP over clients is owner-bounded EnumerableSet (known QA-06) - no change. Run-14's low-confidence REENTRANCY-ERC777 loop concern (PATTERN-005) is IMPROVED by story-047: the per-client safeTransfer loop was replaced by a single aggregate transfer inside nonReentrant skimSurplus.",
+    "noMatch": "ERC4626-INFLATION (strategy is not itself an ERC4626; proportional principal accounting has no supply-ratio mint), ORACLE-STALE/ORACLE-ROUNDID (no Chainlink), SIGNATURE-REPLAY/PERMIT-FRONTRUN (no signatures), UNPROTECTED-INIT/STORAGE-COLLISION (no proxy/initializer), UNSAFE-DOWNCAST, DIVISION-PRECISION (all mul-before-div), RETURN-VALUE-IGNORE (SafeERC20/forceApprove throughout), SELFDESTRUCT-FORCE-ETH (no ETH logic), DOUBLE-VOTING, CROSS-CHAIN-REPLAY, FIRST-DEPOSITOR-ATTACK (zero-totalDeposited paths guarded), INCORRECT-OPERATOR (window boundary operators >=/<=/> consistent), REWARD-ACCRUAL-ORDER, REWARD-RUNWAY-DEPLETION, EMISSION-WINDOW-BOUNDARY, MINT-ON-DEMAND-OVERMINT (no emission/mint machinery), FRONTRUN-APPROVE (skipped per DB note, QA), CENTRALIZATION-ADMIN (covered by existing C-01 triage)."
+  }
+}
