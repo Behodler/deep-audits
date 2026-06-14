@@ -1,0 +1,159 @@
+{
+  "run": "phoenix-phase-2-staging-13",
+  "baseline": "b27c6ac (run-12)",
+  "head": "e935a05",
+  "purpose": "Per-story line/function deltas and the on-chain writes / preconditions each adds or removes vs run-12. This is the primary input for the script-auditor.",
+
+  "story-061": {
+    "commit": "333251f",
+    "title": "Repoint live SYA at V2 yield strategies (audit YS-03)",
+    "touchedScripts": ["script/DeployTempStableStakerAndMigrators.s.sol (+48)", "script/PostMigrationCleanup.s.sol (+35)"],
+    "intent": "Wire the live StableYieldAccumulator (SYA, 0x3C69...8270) to the freshly-deployed V2 DOLA/USDC strategies so the buffer has a consumer (a buffer with no authorized withdrawer is dead value-leakage).",
+    "newConstant": "address public constant SYA = 0x3C690EC3B2524104dE269bf0F9baa7f045eF8270 (both scripts)",
+    "newInterface": "interface ISYAAdmin { owner(); addYieldStrategy(address,address); getYieldStrategies(); } (deploy); cleanup adds getYieldStrategies() + IYSView.authorizedWithdrawers()",
+    "deploy_changes": {
+      "function": "_wireStrategyToOriginal(ys, token) [DeployTempStableStakerAndMigrators.s.sol:342-378]",
+      "newOnChainWrites": [
+        "ys.setWithdrawer(SYA, true)  [guarded by authorizedWithdrawers(SYA)] — per V2 strategy (ysDolaV2, ysUsdcV2)",
+        "SYA.addYieldStrategy(address(ys), token)  [guarded by membership scan of getYieldStrategies()] — per V2 strategy"
+      ],
+      "newPostAssert": "_verifySyaWiring() [lines 383-397]: require both V2 strategies authorizedWithdrawers(SYA) and both present in SYA.getYieldStrategies(). Mirrors ReplaceSYAMainnet.s.sol:295-301.",
+      "newCrossContractReach": "SYA (0x3C69...8270) is now a WRITE target of the deploy step (was not in run-12 closure). SYA.addYieldStrategy is callable because SYA.owner()==OWNER_ADDRESS."
+    },
+    "cleanup_changes": {
+      "newPreconditionAsserts": "Verify 11a-11d [PostMigrationCleanup.s.sol:268-285]: require ysDolaV2/ysUsdcV2 authorizedWithdrawers(SYA) AND both registered in SYA.getYieldStrategies(). Read-only asserts, no mutation. Abort cleanup if a configured buffer has no SYA consumer.",
+      "note": "Old YS_DOLA/YS_USDC SYA entries deliberately NOT removed here (deferred to YS-12/story-064); their presence is benign and unchecked."
+    },
+    "deltaVsRun12": "ADDS SYA as a mutated address (deploy: setWithdrawer + addYieldStrategy x2) and as an asserted precondition (cleanup). No address removed. No old-strategy deregistration. Closes the run-12 'dead buffer / silent value-leak' gap (buffer existed but had no consumer)."
+  },
+
+  "story-062": {
+    "commit": "38e7a20",
+    "title": "Harden YS-swap migration against mid-suite mainnet halt (YS-09)",
+    "touchedFiles": ["package.json (+/-10)", "DeployTempStableStakerAndMigrators.s.sol (+182)", "Leg2Migration.s.sol (+33)", "PostMigrationCleanup.s.sol (+82)", "ResetAndRewire.s.sol (+103)", "SkimAndLeg1Migration.s.sol (+50)", "test/YsSwapMigrationHardening.t.sol (NEW +220)"],
+    "packageJsonDelta": {
+      "removed": "--skip-simulation from ALL 5 ys-swap broadcast keys (deploy, leg1, reset, leg2, cleanup)",
+      "added": "`npm run <key>-preview && ` HARD GATE prepended to each broadcast key — a failing forge simulation under the PREVIEW_MODE owner-prank now aborts before the ledger broadcast.",
+      "unchanged": "the two gather (node) keys and all *-preview keys",
+      "notApplied": "PhusdMinterRepoint (story-064) has no npm key, so it received NEITHER change."
+    },
+    "deploy_changes": {
+      "newOnChainWrites": [
+        "ORIGINAL_STABLE_STAKER.setPauser(OWNER_ADDRESS) [guarded; line 264-269]",
+        "tempStaker.setPauser(OWNER_ADDRESS) [guarded; 270-275]",
+        "ORIGINAL_STABLE_STAKER.pause() [guarded; 276-281]",
+        "tempStaker.pause() [guarded; 282-287]"
+      ],
+      "newPrecondition": "require(origPauser != address(0)) [line 262] — refuse if original pauser can't be restored.",
+      "newPersistedState": "ys-swap-deployments.json now includes origPauser + tempPauser keys [lines 295-305].",
+      "idempotencyGuards": "every wiring call wrapped in skip-if-already-target-state: phUSD setMinter (215), addToken (_addTokenIdempotent 328-338 via getStakedTokens scan), tempStaker/original setMigrator (226/233), _wireStrategyToOriginal sub-calls (345-377).",
+      "newInterfaceMembers": "IStakerOwnable += pauser(), paused(), setPauser(address), pause(), getStakedTokens(); IPhUSDSetMinter += authorizedMinters(); IYSWiringView added."
+    },
+    "leg1_changes": {
+      "newPrecondition": "_globalPreflight HARD-asserts BOTH stakers paused [SkimAndLeg1Migration.s.sol:141-148] — 'run deploy step (pause) first'. Closes the empty-pool-gate stake() grief window.",
+      "resumeGuards": "initiateMigration(DOLA/USDC) skipped when poolState != Active [241-252]; batch migrate loop already re-run-safe (batchMigrate returns 0 for migrated users).",
+      "newInterfaceMembers": "IStakerView += poolState(address), paused()."
+    },
+    "reset_changes": {
+      "resumeGuards": "finalizeAndReset skipped when poolState != Migrating [201-212]; setYieldStrategy skipped when yieldStrategy(token) already == V2 [229-244] (THE YS-01 brick point — guard prevents double-sweep mis-accounting on resume); setMigrator skipped when already set [251-262]. dolaWired/usdcWired flags gate the swept-amount post-assert to only freshly-wired pools [285-299].",
+      "newInterfaceMembers": "IStakerOwnable += poolState(address) returns(PoolState), yieldStrategy(address) returns(IYieldStrategy); enum PoolState{Active,Migrating} declared."
+    },
+    "leg2_changes": {
+      "resumeGuards": "migrator2.initiateMigration skipped when TEMP staker poolState != Active [202-213]; chunk loop re-run-safe.",
+      "newInterfaceMembers": "IStakerView += poolState(address)."
+    },
+    "cleanup_changes": {
+      "newOnChainWrites": [
+        "ORIGINAL_STABLE_STAKER.unpause() [guarded; 329-334]",
+        "tempStaker.unpause() [guarded; 335-340]",
+        "ORIGINAL_STABLE_STAKER.setPauser(recordedOrigPauser) [guarded; 342-351]",
+        "tempStaker.setPauser(recordedTempPauser) [guarded; 352-361]"
+      ],
+      "newStateRead": "origPauser/tempPauser read from deployments JSON via try/catch [132-143] — a pre-hardening JSON degrades to a loud 'pauser NOT restored' warning instead of reverting.",
+      "newPostAsserts": "both stakers !paused, pausers == recorded [371-384].",
+      "newInterfaceMembers": "IStakerFull += paused(), pauser(), unpause(), setPauser(address)."
+    },
+    "deltaVsRun12": "BIGGEST behavioural delta. NEW on-chain mutations of the LIVE original staker's pauser role + global pause flag (deploy pauses/takes-pauser; cleanup unpauses/restores). Contract-global pause also freezes the un-migrated USDe pool for the window (in-comment accepted, anti-grief). NEW persisted off-chain state (origPauser/tempPauser). NEW hard preflight (leg1 requires both paused). Every state transition is now resume-idempotent. npm: --skip-simulation gone + preview hard-gate added on all 5 keys.",
+    "auditFocus": [
+      "setYieldStrategy resume guard (reset 229-244): does skipping on yieldStrategy==V2 correctly avoid a second idle-sweep, and is the dolaWired-gated swept-amount assert sound on resume?",
+      "global pause side effect on the un-migrated USDe pool during the leg1->leg2 window (DoS scope, duration).",
+      "pauser restore correctness: deploy records pre-existing pauser; require(origPauser != 0) but tempPauser may be 0 (fresh staker) — cleanup restores 0 to a decommissioned temp staker (harmless?). What if the original pauser was a contract (e.g. story-052 global Pauser) — round-trip write-back is the SAME address, fine.",
+      "preview-gate: the && chain means a preview revert blocks broadcast — confirm preview prank (vm.startPrank OWNER) faithfully reproduces ledger-signer authorization for every onlyOwner call so a passing preview implies a passing broadcast."
+    ]
+  },
+
+  "story-063": {
+    "commit": "4cbe524",
+    "title": "Drop buffer sanity band from PostMigrationCleanup (YS-10); log-only diagnostics",
+    "touchedScripts": ["script/PostMigrationCleanup.s.sol (+27/-30)"],
+    "removed": [
+      "the [dolaSkimmed/2, dolaSkimmed*2] REQUIRE at verify 4b (Verify 4b FAILED: DOLA buffer not within sanity band)",
+      "the [usdcSkimmed/2, usdcSkimmed*2] REQUIRE at verify 5b",
+      "bool dolaSkimRecorded / usdcSkimRecorded tracking vars (no longer needed)"
+    ],
+    "retained": "the HARD solvency invariant require(dolaP >= dolaTotalStaked) / require(usdcP >= usdcTotalStaked) at 4b/5b [PostMigrationCleanup.s.sol:223-224]. dolaSkimmed/usdcSkimmed are now read for diagnostic logs ONLY [225-230].",
+    "rationale": "buffer = skim + realize-over-credit surplus, surplus dominating (on fork USDC buffer ~51x skim). The old band falsely assumed buffer ~= skim and would REVERT valid migrated state before the minter-revocation mutation could run.",
+    "onChainDelta": "NONE — story-063 removes a REVERT GATE (a require), not a mutation. Net effect: cleanup is strictly LESS likely to false-revert; no new write, no removed write. The remaining solvency require is the real safety property.",
+    "auditFocus": "Confirm removing the band cannot now let a genuinely-misaccounted (but still principal>=totalStaked) buffer pass silently. The solvency invariant catches under-collateralization; an OVER-large buffer (e.g. an accidental extra deposit / wrong-token sweep) would no longer trip a band — is that a real risk or just expected surplus? (run-12 economic context: surplus is protocol-owned yield, benign.)"
+  },
+
+  "story-064": {
+    "commit": "b6dd0dd",
+    "title": "Add PhusdMinterRepoint script (YS-12): repoint minter to V2 strategies",
+    "touchedScripts": ["script/PhusdMinterRepoint.s.sol (NEW +349)"],
+    "wiredAsNpmScript": false,
+    "unwiredFlag": "NO package.json key added. Committed-but-unwired. Operator must hand-invoke forge. Did NOT receive the story-062 --skip-simulation drop or preview hard-gate; its NatSpec header still prescribes --skip-simulation.",
+    "newImports": [
+      "@vault/concreteYieldStrategies/ERC4626YieldStrategy.sol (heavy-import; resolves to vault@0110ce4 — the convertToAssets build)",
+      "@phUSD-stable-minter/PhusdStableMinter.sol (heavy-import; NEW contract in scope — run-12 suite never imported the minter)"
+    ],
+    "newConstant": "PHUSD_MINTER = 0x435B0A1884bd0fb5667677C9eb0e59425b1477E5 (NEW on-chain target)",
+    "phaseA_repointFutureMints_perToken": [
+      "read live stablecoinConfigs(token) -> exchangeRate, decimals, maxMintPerDay (savedCap) BEFORE register",
+      "ysTV2.setClient(PHUSD_MINTER, true)",
+      "minter.registerStablecoin(token, ysTV2, exchangeRate, decimals)  [zeros maxMintPerDay/mintedToday/lastMint, enabled=true]",
+      "minter.approveYS(token, ysTV2)  [max-approve]",
+      "minter.setMaxMintPerDay(token, savedCap)  [restore]"
+    ],
+    "phaseB_evacuatePosition_perToken": [
+      "p = oldT.principalOf(token, minter)",
+      "oldT.withdrawAsOwner(minter, owner, p)  [redeems backing shares to owner, zeroes minter stale accounting]",
+      "recovered = owner balance delta (may be < p if autopool below par — logged WARNING, NOT reverted)",
+      "token.approve(minter, recovered)",
+      "minter.noMintDeposit(ysTV2, token, recovered)  [re-seed V2, NO new phUSD minted]"
+    ],
+    "postVerify_perToken": [
+      "ysTV2.authorizedClients(minter) == true",
+      "token.allowance(minter, ysTV2) == type(uint256).max",
+      "getStablecoinConfig(token).yieldStrategy == ysTV2",
+      "getStablecoinConfig(token).maxMintPerDay == savedCap",
+      "oldT.principalOf(token, minter) == 0",
+      "ysTV2.principalOf(token, minter) > 0"
+    ],
+    "dependency": "Reads ys-swap-deployments.json (.ysDolaV2/.ysUsdcV2) — depends on the deploy step. NatSpec requires running AFTER the FULL story-060 suite so the minter is the SOLE residual client on each old strategy (clean withdrawAsOwner, no cross-client dilution).",
+    "deltaVsRun12": "ENTIRELY NEW script + NEW on-chain targets (PHUSD_MINTER + its 8 mutations/token-pair) + NEW source-in-scope (PhusdStableMinter). It is the YS-12 follow-up that finally deregisters the minter from the old strategies (the deregistration story-061 deliberately deferred).",
+    "auditFocus": [
+      "UNWIRED entry point: no preview-gate, NatSpec keeps --skip-simulation — broadcast risk the 5 wired scripts no longer carry. Flag operationally.",
+      "registerStablecoin zeroes cap then setMaxMintPerDay restores — is there a window mid-tx where cap is 0? (single atomic broadcast, so no — but confirm registerStablecoin doesn't also reset other safety fields beyond the 3 documented).",
+      "withdrawAsOwner below-par recovered < p is logged not reverted — re-seeds V2 with the SHORTFALL amount; does that leave the minter's V2 principal under-collateralized vs its phUSD liability? (NatSpec frames shortfall as pre-existing, not migration-caused.)",
+      "noMintDeposit re-seed: confirm it credits via the same convertToAssets path (vault@0110ce4) so re-seed principal accounting matches."
+    ]
+  },
+
+  "submoduleBumps": {
+    "vault 0110ce4": {
+      "delta": "ERC4626YieldStrategy._acquireShares credits vault.convertToAssets(sharesReceived) (line 115) — was previewRedeem at ad12cb1 (run-12 baseline). previewRedeem(uint256) external view retained (line 83) but unused internally. Source comment lines 112-114 explicitly: 'Use convertToAssets (NOT previewRedeem) ... previewRedeem ... revert with StateChangeDuringStaticCall when called as an external view.'",
+      "affects": ["deploy (deploys ysDolaV2/ysUsdcV2 from this build)", "reset (setYieldStrategy idle-sweep credits via convertToAssets)", "PhusdMinterRepoint (noMintDeposit re-seed credits via convertToAssets)"],
+      "resolvesRun12Note": "run-12 YS-01 flagged the script used previewRedeem while intent doc prescribed convertToAssets — now aligned."
+    },
+    "stable-staker 212a6d2": { "delta": "bumped from c3ec65b (run-12). getStakersRange semantics unchanged (half-open [start,end), StableStaker.sol:666-678). No change to migration hooks relevant to the suite's call surface (re-verify in script-auditor if 212a6d2 touched batchMigrate/initiateMigration)." },
+    "phUSD-stable-minter d6ed115": { "delta": "newly pulled into scope by story-064 PhusdMinterRepoint heavy-import. registerStablecoin/approveYS/setMaxMintPerDay/noMintDeposit/withdrawAsOwner/stablecoinConfigs/getStablecoinConfig are the touched surface." }
+  },
+
+  "ys04_offByOne": {
+    "fingerprint": "8168c808 (run-12 YS-04)",
+    "status": "STILL LIVE — gather-migration-inputs.js UNCHANGED since story-060 (last touched 23a24c6; zero diff b27c6ac..e935a05).",
+    "mechanism": "on-chain getStakersRange(token,start,end) is half-open [start,end) (iterates i=start; i<end; clamps end to len; NatSpec StableStaker.sol:663). JS caller [gather lines 271-284]: end = Math.min(start+PAGE_SIZE, countNum) - 1; getStakersRange(token, start, end); start = end + 1. The JS treats end as INCLUSIVE while the contract treats it as EXCLUSIVE, so each page fetches indices [start..end-1] (DROPS index `end`) and then start jumps to end+1, permanently skipping index `end`. The final boundary also drops the last staker (end clamps, last index never read).",
+    "selfDefenseInteraction": "gather writes JSON .count = allStakers.length (the UNDERCOUNT). forge leg1/leg2 preflight requires JSON .count == on-chain stakerCount(token). On any drop, JSON.count < on-chain count => preflight REVERTS ('stale ... staker count - re-run gather'). So at e935a05 the bug surfaces as a HARD preflight DoS / unbreakable re-run loop for any non-empty pool (single page <= 200: last staker always dropped), NOT silent staker loss. script-auditor: re-confirm severity under this gating (availability/DoS, not value-loss / not partial migration)."
+  }
+}

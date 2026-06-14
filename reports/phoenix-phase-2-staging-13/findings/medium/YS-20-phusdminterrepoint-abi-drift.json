@@ -1,0 +1,52 @@
+{
+  "id": "YS-20",
+  "project": "phoenix-phase-2-staging",
+  "status": "open",
+  "severity": "medium",
+  "title": "PhusdMinterRepoint incompatible with the LIVE 4-field phUSD minter (7-field decode + setMaxMintPerDay absent) — preview reverts before any mutation; YS-12 remediation cannot complete",
+  "contract": "script/PhusdMinterRepoint.s.sol",
+  "sourceContract": "lib/phUSD-stable-minter/src/PhusdStableMinter.sol (d6ed115) — declares 7-field StablecoinConfig + setMaxMintPerDay; live 0x435B0A1884bd0fb5667677C9eb0e59425b1477E5 is an OLDER 4-field build",
+  "function": "_logLiveConfig / _phaseAToken / _phaseA setMaxMintPerDay",
+  "line": 174,
+  "lineStart": 174,
+  "lineEnd": 229,
+  "entryPoint": "PhusdMinterRepoint",
+  "entryPointNote": "UNWIRED — this script has NO npm/package.json key. NatSpec still prescribes a manual --skip-simulation hand-broadcast. It is not part of the automated preview-gated ys-swap suite.",
+  "fingerprint": "6fd3eddc",
+  "fingerprintFull": "sha256(script/PhusdMinterRepoint.s.sol:_logLiveConfig / _phaseAToken / _phaseA setMaxMintPerDay:ScriptVsLiveAbiMismatch:PhusdMinterRepoint (unwired))",
+  "rootCauseClass": "ScriptVsLiveAbiMismatch",
+  "origin": "new",
+  "footgun": true,
+  "faithfulness": false,
+  "candidateSeverity": "high",
+  "severityNote": "Downgraded from candidate HIGH to MEDIUM. No valid no-hypothetical asset-theft/loss path: the phUSD minter is architecturally immune to the over-credit bug (run-12 633f3485 scoped analysis — mint() never reads principalOf, no redemption path), so the minter cannot mint unbacked phUSD or lose funds via this script. Default failure = clean preview revert before any mutation = STATUS QUO (minter left on old strategies), already classified LOW in run-12. The genuinely-new harm (half-broadcast mint-DoS) requires an off-script manual hand-broadcast (external requirement) and is an availability/function impact, not theft → Medium ceiling.",
+  "description": "The story-064 minter-repoint script (YS-12 remediation) was authored against PhusdStableMinter@d6ed115, whose StablecoinConfig is {yieldStrategy, exchangeRate, decimals, enabled, maxMintPerDay, mintedToday, lastMintTimestamp} (7 fields) and which exposes setMaxMintPerDay. The phUSD minter actually deployed at 0x435B0A1884bd0fb5667677C9eb0e59425b1477E5 is an EARLIER version: stablecoinConfigs(token) returns only 4 words {yieldStrategy, exchangeRate(1e18), decimals(18/6), enabled(true)} for both DOLA and USDC (verified by raw cast call: 4x32 bytes), and setMaxMintPerDay(address,uint256) reverts with empty returndata (selector absent). Consequences on a real run: (1) PREFLIGHT reverts — _logLiveConfig (lines 176-183) and _phaseAToken (lines 209-216) destructure a 7-tuple from a 4-word return, so the ABI decoder aborts with empty-data Revert. (2) Even with a tolerant read, setMaxMintPerDay(token, savedCap) at line 229 reverts (function does not exist). Because the script is UNWIRED and its NatSpec still prescribes --skip-simulation, an operator who hand-broadcasts it tx-by-tx would land setClient + registerStablecoin(token,V2,...) (both selectors exist on the live minter) and then revert on setMaxMintPerDay — leaving the minter mid-repoint, OR if the preflight decode is reached first, broadcast nothing.",
+  "impact": "YS-12 (repointing the phUSD minter off the evacuated old strategies onto the new V2 strategies) cannot complete against live mainnet state. Default path: clean preview revert in the 7-tuple decode of a 4-word return -> NOTHING mutates -> minter stays pointed at the evacuated old strategies = STATUS QUO already classified LOW in run-12 (633f3485). Worse path: operator HAND-BROADCASTs the unwired script tx-by-tx (NatSpec still says --skip-simulation): setClient + registerStablecoin land, then setMaxMintPerDay reverts (selector absent) -> minter left half-repointed with the per-day cap potentially stuck at 0 -> mint DoS for DOLA/USDC phUSD. No asset theft or loss path: the minter is immune to the story-060 over-credit bug (mint() = amount x exchangeRate x decimalAdjust; never reads principalOf/totalBalanceOf; no redemption/burn path). The worst residual is a stale principalOf on the evacuated old strategy (~13,817 DOLA / ~11k USDC) that is the minter's own position, not stolen.",
+  "attackPath": [
+    "Not an external-attacker path. Operator-facing Law-3 non-obvious footgun.",
+    "1. Operator runs the YS-12 remediation per its NatSpec (which prescribes --skip-simulation, unwired, not in the automated suite).",
+    "2. Against the live minter 0x435B..77E5 (older 4-field StablecoinConfig, no setMaxMintPerDay) the preflight 7-tuple decode reverts with empty data BEFORE any mutation (fork-confirmed). Default: nothing changes, status quo preserved.",
+    "3. If instead the operator hand-broadcasts tx-by-tx past the preflight, setClient(V2)+registerStablecoin(token,V2,...) land (selectors present), then setMaxMintPerDay reverts (selector absent), leaving the minter config moved to V2 but the per-day cap not restored (possibly 0) = half-repointed + mint DoS."
+  ],
+  "forkEvidence": "fork (block 25305669-25305686, shared anvil mainnet fork): raw stablecoinConfigs(DOLA)=0x...90ce274b.. + 1e18 + 0x12 + 0x01 (4 words); stablecoinConfigs(USDC)=0x...90af002E.. + 1e18 + 0x06 + 0x01 (4 words). setMaxMintPerDay(DOLA,0) -> execution reverted data 0x (selector absent). registerStablecoin(...) -> 0x118cdaa7 (auth revert; selector PRESENT). PREVIEW_MODE forge preview -> [Revert] EvmError immediately after PhusdStableMinter::stablecoinConfigs(DOLA). Live minter codesize 9980, not a proxy.",
+  "recommendation": "Before running YS-12, reconcile the script against the ACTUAL deployed minter ABI: either (a) read the 4-field config the live minter exposes and drop the maxMintPerDay save/restore + setMaxMintPerDay calls entirely (the live minter has no per-day cap, so there is nothing to preserve), or (b) if a cap is desired, first upgrade/redeploy the minter to the d6ed115 build, then run a script matching that build. Add a preflight that probes the live config word-count / a try-decode and aborts with a clear 'minter ABI mismatch — wrong minter version' message instead of a bare decode revert. Wire it as an npm key so it inherits the story-062 preview hard-gate, and remove --skip-simulation from the NatSpec.",
+  "relatedFindings": ["633f3485 (run-12 YS-12 referral, classified Low — this remediation cannot complete, so that Low residual persists)"],
+  "poc": {
+    "file": "workspace/phoenix-phase-2-staging/test/PoC_YS20_MinterRepointAbiDrift.t.sol",
+    "status": "passing",
+    "validation": "VALIDATED",
+    "result": "3/3 pass",
+    "forkBlock": 25305686,
+    "runCommand": "forge test --fork-url \"$RPC_MAINNET\" --fork-block-number 25305686 --match-contract PoC_YS20_MinterRepointAbiDrift -vvv",
+    "proves": "The live phUSD minter's StablecoinConfig is 4 words (128 bytes), not the script's 7-field assumption; and the half-broadcast hazard (registerStablecoin succeeds, setMaxMintPerDay reverts with empty returndata — selector absent).",
+    "lastRun": "2026-06-13T00:00:00Z"
+  },
+  "metadata": {
+    "createdAt": "2026-06-13T00:00:00Z",
+    "updatedAt": "2026-06-13T05:35:00Z",
+    "scanOrigin": "phoenix-phase-2-staging-13 script-audit (story-064 / YS-swap suite follow-up)",
+    "classificationOrigin": "CLASS-13-001",
+    "submoduleHead": "e935a05",
+    "baseline": "b27c6ac"
+  }
+}
