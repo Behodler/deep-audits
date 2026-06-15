@@ -1,0 +1,115 @@
+{
+  "sanitizationReport": {
+    "timestamp": "2026-06-15T00:00:00Z",
+    "project": "phoenix-phase-2-staging",
+    "entryPoint": "migrate:saga2.2-migrate",
+    "inputFindings": 4,
+    "removedFindings": 0,
+    "passedFindings": 4,
+    "flaggedForReview": 0,
+    "knownIssuesSource": "registered-projects.json projects['phoenix-phase-2-staging'].knownIssues (11 entries). lib/phoenix-phase-2-staging/known-issues.md does NOT exist; knownIssuesPath/knownIssuesSource are null. Relevant entries judged: KI[8] 'External vault/yield strategy behavior (out of scope)', KI[9] 'Admin trust assumptions for registering stablecoins, setting rates, etc. (operational risk)'.",
+    "removals": [],
+    "flagged": [],
+    "ledgerReconciliation": {
+      "ledger": "reports/ledgers/phoenix-phase-2-staging.json",
+      "entryPointBaseline": "NONE — no prior findings carry entryPoint=migrate:saga2.2-migrate (confirmed: 20 distinct entryPoints in ledger, saga2.2-migrate absent). No MigrateSaga2Migrate.s.sol contract appears anywhere in the ledger.",
+      "result": "All 4 surviving findings are NEW. Zero regressions (no fixed entry reappeared). Fingerprint folds entryPoint=migrate:saga2.2-migrate, so even findings sharing contract/function with saga2.1-deploy's run() cannot collide.",
+      "stillOpenCarryover": [],
+      "suppressedByHumanStatus": [],
+      "crossEntryRelationships": [
+        {
+          "findingTitle": "2.2 migrateIn bricks mid-migration ... when the 2.1 in-place allotment is zero or under-sized",
+          "rootCauseClass": "AllotmentSufficiencyNotGuaranteed",
+          "relatedTo": "stable-staker ledger — InPlaceMigrator._reinjectWithTopup / migrateIn re-injection-haircut family",
+          "relatedLedgerEntries": [
+            {"project": "stable-staker", "label": "M-01", "fingerprint": "970d7307328df6b8", "status": "fixed", "title": "In-place migration re-injection silently underpays stakers when the new yield strategy haircuts (ss12m1 vector)"},
+            {"project": "stable-staker", "label": "L-01", "fingerprint": "f0cb5f7cdddeea0a", "status": "open", "title": "InPlaceMigrator.migrateIn surplus-underfunding batch revert + no cross-slice surplus reserve"},
+            {"project": "stable-staker", "label": "L-03", "fingerprint": "bf5018deab63bb51", "status": "open", "title": "InPlaceMigrator._reinjectWithTopup small-principal top-up truncation reverts the migrateIn"}
+          ],
+          "relationship": "cross-entry-related (NOT a duplicate to suppress). The underlying mechanism is the InPlaceMigrator gross-up/top-up funded from migrator surplus that stable-staker M-01 (ss12m1, now FIXED in stable-staker) and L-01/L-03 cover at the contract level. The stable-staker fix gross-ups to par WHEN surplus is sufficient; this saga2.2 finding is the OPERATIONAL exposure of that same surplus-sufficiency requirement on the saga2.2 migrateIn leg — 2.1 sets the allotment that funds the top-up to a token >0 value passing only a require(>0) tripwire, with no in-script sufficiency check, so 2.2 can brick AFTER terminal drain. The exposure is NEW at this entry point (different fingerprint via entryPoint fold; lives in a different project's script flow). Report it as a saga2.2 finding and cite the stable-staker lineage; do not re-report the stable-staker contract-level findings here.",
+          "action": "keep-and-annotate"
+        }
+      ]
+    },
+    "scopeGuardrailNotes": "saga 2.1 (migrate:saga2.1-deploy) already audited + fixed (M-01/M-02/L-01 fixed; M-03/L-02/L-03 wont-fix) — none of the 4 saga2.2 findings re-flag a 2.1 item; finding #4's non-idempotency is explicitly noted as a 2.2-distinct hazard 'related but distinct' from 2.1 L-03 (7dbab788), same root-cause CLASS but different script/entryPoint, correctly NOT suppressed. No 2.3-scope-only finding present in the input.",
+    "threeLawApplication": "All 4 findings are operator/footgun-shaped and were each run through the Law-3 surprise test ('would a competent, non-malicious owner be surprised by this consequence?') rather than blanket-suppressed under KI[9] admin-trust/operational-risk. All 4 PASS the test (non-obvious consequences that unknowingly enable a Law-1 strand/loss or break the time-critical 2.2 migration), so none qualify as trusted-owner suppressions. KI[9] is scoped to registering stablecoins / setting rates — not to script-level missing assertions, sequencing, sufficiency, or idempotency, which are the root causes here. KI[8] external-vault is NOT applied to finding #2 per the migrator-own-logic determination."
+  },
+  "survivingFindings": [
+    {
+      "title": "2.2 omits the totalWithdrawal-window assertion: if the window has lapsed, the minter-drain re-initiates (recovers 0), leaving minter funds stranded and the staker terminally-migrated mid-broadcast",
+      "severity": "medium",
+      "contract": "lib/phoenix-phase-2-staging/script/MigrateSaga2Migrate.s.sol",
+      "function": "_executeMinterWithdrawal",
+      "lineStart": 155,
+      "lineEnd": 161,
+      "entryPoint": "migrate:saga2.2-migrate",
+      "rootCauseClass": "MissingWindowAssertion",
+      "category": "intent-mismatch",
+      "description": "The entire 2.2 leg is documented as time-critical and 'must run inside the [init+24h, init+72h] Executable window' (plan §4, script header), yet the script never asserts the window. `_executeMinterWithdrawal` blindly calls `oldYS.totalWithdrawal(token, MINTER_V1)`. If the in-flight phase-1 has lapsed (lazy-expiry: status only flips to Expired on the next call, plan §4), `totalWithdrawal` takes the None/Expired branch in AYieldStrategy and RE-INITIATES a fresh phase-1 instead of executing — recovering 0. `recovered=0` then makes `_seedV2` a no-op (line 164 early return) and, crucially, the minter's principal is NOT drained. The preflight only smoke-reads `principalOf(...) >= 0` (line 207, always true) — it does NOT check the withdrawal status is Executable. Fork-confirmed both windows ARE open at block 25322425 (DOLA initiatedAt=1781371715, USDC=1781371739; block ts 1781520779 within [init+86400, init+259200]), so the happy path works today; but nothing in the script guarantees that on the live broadcast, and the window is the sole timing constraint the runbook is built around.",
+      "impact": "Run outside the window: the staker is paused (step1), skimmed (step2), TERMINALLY migrated and drained (step4, no resume path), and rewired (step6) BEFORE the minter-drain at step5. The minter-drain recovers 0, V2 seed is skipped, and `_postAssert`'s `principalOf(token,MINTER_V1)==0` (lines 219-220) fails. Without --skip-simulation forge aborts the whole broadcast on a deterministic simulation failure (no half-commit there); but the staker has already drained at par into the migrator on the EARLIER successful txs in any live-divergent run, and the minter ends up with a freshly re-armed 24h phase-1 it must wait out — a wasted, irreversible terminal-migration session. The minter's ~13816 DOLA + ~11934 USDC stay on the retired old strategy.",
+      "evidence": "side-effects.json scenarioD / preconditionResults['totalWithdrawal ... Executable window']; AYieldStrategy.totalWithdrawal lines 417-445 (None/Expired -> _initiateWithdrawal); script preflight lines 191-210 has no status check. Window-expiry could not be fork-demonstrated by warp (external ERC4626 vault returns InvalidDataReturned() under +72h warp — a fork artifact), but the missing-assertion code path is unambiguous from source.",
+      "recommendation": "Before step5, read `oldYS.withdrawalStates(token, MINTER_V1)` and assert status==Executable AND `block.timestamp <= initiatedAt + TOTAL_DURATION` for BOTH tokens, reverting in preflight (before pause/drain) with the exact `executableAt`/`expiresAt` so the operator aborts cheaply instead of mid-migration. Optionally assert `recovered > 0` right after each `_executeMinterWithdrawal` so a silent re-initiate fails loudly before the rewire rather than at `_postAssert`.",
+      "verified": true,
+      "origin": "new"
+    },
+    {
+      "title": "2.2 migrateIn bricks mid-migration (after TERMINAL drain + pause) when the 2.1 in-place allotment is zero or under-sized — the 2.1 `require(>0)` tripwire is necessary but does not guarantee sufficiency",
+      "severity": "medium",
+      "contract": "lib/stable-staker/src/InPlaceMigrator.sol",
+      "function": "_reinjectWithTopup",
+      "lineStart": 262,
+      "lineEnd": 294,
+      "entryPoint": "migrate:saga2.2-migrate",
+      "rootCauseClass": "AllotmentSufficiencyNotGuaranteed",
+      "category": "cluster-interaction",
+      "description": "Step6 `migrateIn(DOLA/USDC, 0, max)` re-credits each parked staker via `depositFor(amt)`, which credits only the strategy's haircut-reduced return. The ERC4626 redeem-then-deposit round-trip realizes a small migration slippage EVEN ON SOLVENT POOLS (totalBalance > principal on the fork), so `credited < amt` for every staker and the gross-up top-up path fires. The top-up is funded from the migrator's surplus (`balance - totalParked`), which is exactly the DOLA_ALLOTMENT/USDC_ALLOTMENT transferred in 2.1. If that surplus is insufficient, `_reinjectWithTopup` reverts 'top-up surplus exhausted' (line 282) and the whole batch reverts. 2.1 hardcodes both allotments to 0 with a `require(>0)` tripwire — but the tripwire only proves non-zero, not sufficiency, and it lives in the PREDECESSOR script; the operator who sets 2.1's allotments has no in-script signal of the per-staker shortfall 2.2 will actually need.",
+      "impact": "Fork-confirmed: with ZERO allotment migrateIn(DOLA) reverts at step6 — AFTER pause (step1), skim (step2), `initiateMigration`+`migrateOut` (step4, TERMINAL — the staker pool can never resume healthy operation per stable-staker CLAUDE.md), and `finalizeAndReset`+`setYieldStrategy` (step6 rewire). The staker is left paused, terminally migrating, with ALL stakers' principal parked in the migrator and recoverable only via `claimTimedOut` after the 14-day timeout (principal-only, no further phUSD). This is a worse-than-paused brick on the time-critical leg. Measured minimum allotment at block 25322425: ~0.0149 DOLA (3 stakers) + ~0.198 USDC (6 stakers); 1 wei is insufficient. Absolute cost is sub-dollar, but the failure mode if mis-set is catastrophic and irreversible for 14 days.",
+      "evidence": "side-effects.json scenarioB (zero) + scenarioC (1 wei) both revert 'InPlaceMigrator: top-up surplus exhausted' at migrateIn; scenarioD measured 14898868155834087 DOLA / 197719 USDC consumed; scenarioA (1000e18/1000e6) completes. Harness test/AuditSaga2_2Migrate.t.sol.",
+      "recommendation": "Add a 2.2 preflight assertion (before pause/drain) that the migrator holds a surplus >= a conservative bound on the per-staker gross-up shortfall (e.g. estimate via `previewRedeem`/`convertToAssets` round-trip on the new strategy for each token's parked principal), so an under-sized allotment aborts BEFORE engaging terminal migration. At minimum, document in 2.1 the empirically-measured shortfall (~0.015 DOLA / ~0.2 USDC at current pool sizes, scaling with staker count and pool drift) so the allotment is sized with margin, not just set to a token >0 value that passes the tripwire.",
+      "verified": true,
+      "origin": "new",
+      "crossEntryRelated": {
+        "note": "Root cause is the InPlaceMigrator surplus-funded gross-up that stable-staker M-01 (ss12m1, fingerprint 970d7307328df6b8, status FIXED) and L-01/L-03 (f0cb5f7cdddeea0a / bf5018deab63bb51, open) cover at the contract level. This is the OPERATIONAL re-exposure of that surplus-sufficiency requirement on the saga2.2 migrateIn leg — NEW at this entry point (entryPoint fold makes the fingerprint distinct), not a duplicate. Keep as a saga2.2 finding; cite the stable-staker lineage; do not re-report the stable-staker contract findings here.",
+        "relatedLedgerFingerprints": ["970d7307328df6b8", "f0cb5f7cdddeea0a", "bf5018deab63bb51"]
+      }
+    },
+    {
+      "title": "A mid-broadcast revert after step4 (initiateMigration) strands the live StableStaker terminally-migrating AND paused, with recovery limited to the 14-day claimTimedOut hatch",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/MigrateSaga2Migrate.s.sol",
+      "function": "run",
+      "lineStart": 84,
+      "lineEnd": 144,
+      "entryPoint": "migrate:saga2.2-migrate",
+      "rootCauseClass": "TerminalMigrationStrandRisk",
+      "category": "cluster-interaction",
+      "description": "Steps 1-9 run as a single atomic broadcast under simulation, but the broadcast variant uses `--slow` (one tx at a time against the live chain) and `&&`-chains a separate preview as the only gate. Any tx that succeeds in simulation but reverts live due to state divergence between preview and broadcast (window edge, pool drift changing the migrateIn shortfall, MEV/front-run on the skim or external vault) lands mid-sequence. Because `initiateMigration` (step4) is TERMINAL on the staker (no resume path; stake/withdraw/emergencyWithdraw all blocked while active) and the staker is paused (step1), a revert after step4 leaves the live staker in a state with NO clean recovery script — only `UnpauseStakerBreakGlass`/`ResumeStableStakerMigration` (cluster evidence siblings, which exist precisely because migrations here have stalled before) and, for users, `claimTimedOut` after 14 days.",
+      "impact": "Operational availability + user-funds-locked-up-to-14-days hazard on a non-idempotent, time-critical, terminal sequence. Not a theft vector (parked principal can only ever return to the original user — InPlaceMigrator invariant C), so impact is bounded to a stalled migration and a 14-day worst-case principal lockup. The existence of break-glass siblings confirms this is a real, recurring operational footgun rather than theoretical.",
+      "evidence": "closure-manifest cluster (ResumeStableStakerMigration, UnpauseStakerBreakGlass evidence siblings); stable-staker CLAUDE.md 'migration is terminal: once engaged a token's pool can never resume healthy operation'; InPlaceMigrator claimTimedOut lines 306-323 (principal-only, after migrationTimeout). side-effects.json scenarioB shows the strand state reached when migrateIn reverts.",
+      "recommendation": "Front-load all non-terminal, reversible operations and assert ALL go/no-go conditions (window Executable for both tokens, sufficient migrator allotment, owner authorizations) in `_preflight` BEFORE step1 pause and step4 initiateMigration, so the only thing left after the irreversible point is deterministic bookkeeping. Document the break-glass recovery runbook (UnpauseStakerBreakGlass + re-run path) as the explicit fallback for a mid-broadcast strand.",
+      "verified": true,
+      "origin": "new"
+    },
+    {
+      "title": "2.2 is non-idempotent: a partial-failure re-run inside the time-critical window cannot cleanly resume (skim returns 0 OK, but initiateMigration / setYieldStrategy / pause double-calls revert)",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/MigrateSaga2Migrate.s.sol",
+      "function": "run",
+      "lineStart": 84,
+      "lineEnd": 144,
+      "entryPoint": "migrate:saga2.2-migrate",
+      "rootCauseClass": "NonIdempotentScript",
+      "category": "drift",
+      "description": "The script is a single linear sequence with no step-completion checkpoints (unlike the project's documented progress.<chainId>.json pattern). If it reverts partway and is re-run: step1 `pause()` on an already-paused staker reverts; step4 `initiateMigration` on an already-migrating token reverts (active==true); step6 `finalizeAndReset`/`setYieldStrategy` are empty-pool-only and revert once the pool is already reset/rewired; `migrateOut`/`migrateIn` ARE idempotent (zeroed source returns 0, parked==0 skipped). So there is no clean re-entry point — a re-run would have to be hand-edited to skip already-done steps, under window time-pressure. 2.1 had a documented split-brain (L-03); 2.2 inherits a related but distinct non-idempotency hazard.",
+      "impact": "Recovery friction on the time-critical leg: after any partial failure the operator must surgically determine which steps committed and manually skip them, racing the totalWithdrawal window. Increases the chance of a mistaken re-broadcast that reverts or compounds the strand in finding #3. No direct fund-loss vector.",
+      "evidence": "StableStaker setYieldStrategy 'pool not empty' (empty-pool-only) and terminal-migration 'active' guards (stable-staker CLAUDE.md); InPlaceMigrator migrateOut/migrateIn idempotency (lines 158-160, 233-235 comments). No checkpoint file written by 2.2 (entry-manifest jsChain empty; offChainState read-only).",
+      "recommendation": "Either guard each step with an idempotent precheck (e.g. `if (!paused) pause()`, `if (yieldStrategy(token)!=ysV2) {...}`, skip initiateMigration if already active) so a re-run resumes cleanly, or document an explicit per-step resume map so a partial failure has a known re-entry procedure within the window.",
+      "verified": true,
+      "origin": "new",
+      "crossEntryRelated": {
+        "note": "Same root-cause CLASS (NonIdempotentScript) as saga2.1 L-03 (ledger fingerprint 7dbab7885c0d9960, status wont-fix) but a DISTINCT entry point (migrate:saga2.2-migrate vs migrate:saga2.1-deploy) and a distinct script flow. Fingerprint differs via the entryPoint fold; correctly NOT suppressed as a 2.1 re-flag.",
+        "relatedLedgerFingerprints": ["7dbab7885c0d9960"]
+      }
+    }
+  ]
+}

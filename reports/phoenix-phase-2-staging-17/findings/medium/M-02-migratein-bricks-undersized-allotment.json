@@ -1,0 +1,56 @@
+{
+  "id": "M-02",
+  "project": "phoenix-phase-2-staging",
+  "status": "wont-fix",
+  "triageNote": "Owner-acknowledged 2026-06-15: valid operational footguns, accepted as operator responsibility (correct allotment sizing + executing inside the totalWithdrawal Executable window) rather than expanding script/code scope. Not a code fix; do NOT auto-flip to fixed and do NOT re-escalate on future regression runs unless the script's preconditions change.",
+  "triagedAt": "2026-06-15",
+  "severity": "medium",
+  "title": "2.2 migrateIn bricks ALL stakers mid-migration after the terminal drain when the 2.1 in-place allotment is zero or under-sized — the 2.1 require(>0) tripwire is necessary but does not guarantee sufficiency",
+  "contract": "lib/stable-staker/src/InPlaceMigrator.sol",
+  "function": "_reinjectWithTopup",
+  "line": 262,
+  "lineStart": 262,
+  "lineEnd": 294,
+  "entryPoint": "migrate:saga2.2-migrate",
+  "fingerprint": "97e987d078343efe4159ff24abc3954265fea7dc8be192faee57361c965cc42b",
+  "origin": "new",
+  "faithfulness": false,
+  "footgun": true,
+  "rootCauseClass": "AllotmentSufficiencyNotGuaranteed",
+  "description": "Step6 `migrateIn(DOLA/USDC, 0, max)` re-credits each parked staker via `depositFor(amt)`, which credits only the strategy's haircut-reduced return. The ERC4626 redeem-then-deposit round-trip realizes a small migration slippage EVEN ON SOLVENT POOLS (totalBalance > principal on the fork), so `credited < amt` for every staker and the surplus-funded gross-up top-up path fires. The top-up is funded from the migrator's surplus (`balance - totalParked`), which is exactly the DOLA_ALLOTMENT/USDC_ALLOTMENT transferred in 2.1. If that surplus is insufficient, `_reinjectWithTopup` reverts 'top-up surplus exhausted' (line 282) and the whole batch reverts. 2.1 hardcodes both allotments to 0 with a `require(>0)` tripwire — but the tripwire only proves non-zero, not sufficiency, and it lives in the PREDECESSOR script; the operator who sets 2.1's allotments has no in-script signal of the per-staker shortfall 2.2 will actually need.",
+  "impact": "No theft — InPlaceMigrator invariant C (source-verified at lines 244, 320, 337-339) guarantees parked principal can only return to its original owner; `claimTimedOut` (lines 306-323) is a permissionless, self-only, principal-returning escape hatch any parked user can call unilaterally after the 14-day migrationTimeout. The lock is total but TEMPORARY, attacker-free, and SELF-CURING, so High (assets stolen/lost/compromised) is excluded. Impact is availability + a bounded value-leak: fork-confirmed, with ZERO allotment migrateIn(DOLA) reverts at step6 — AFTER pause (step1), skim (step2), `initiateMigration`+`migrateOut` (step4, TERMINAL — the staker pool can never resume healthy operation per stable-staker CLAUDE.md), and `finalizeAndReset`+`setYieldStrategy` (step6 rewire). The staker is left paused, terminally migrating, with ALL stakers' principal parked in the migrator and recoverable only via `claimTimedOut` after the 14-day timeout (principal-only, no further phUSD). The realized leak is the forgone phUSD/yield and the time-value of the 14-day lockup — in-motion/unmatured yield, independently capping this at Medium. Measured minimum allotment at block 25322425: ~0.0149 DOLA (3 stakers) + ~0.198 USDC (6 stakers); 1 wei is insufficient. Absolute cost is sub-dollar, but because 2.1 hardcodes both allotments to 0, the brick is the DEFAULT path absent a manual fix.",
+  "attackPath": [
+    "1. 2.1 sets DOLA/USDC allotment to a token >0 value that passes the require(>0) tripwire but is below the per-staker gross-up shortfall (fork floor ~0.0149 DOLA / ~0.198 USDC; 1 wei is insufficient).",
+    "2. 2.2 step1 pauses, step2 skims, step4 initiateMigration + migrateOut TERMINALLY drains the staker, step6 finalizeAndReset + setYieldStrategy rewires.",
+    "3. Step6 migrateIn re-credits each staker via depositFor; the ERC4626 redeem-then-deposit round-trip realizes a per-staker haircut even on solvent pools, so credited < amt and the surplus-funded gross-up fires.",
+    "4. Migrator surplus (== the 2.1 allotment) is exhausted; _reinjectWithTopup reverts 'top-up surplus exhausted'; the whole batch reverts.",
+    "5. Staker is left paused + terminally migrating with all principal parked; users wait 14 days for claimTimedOut (principal-only, no further phUSD)."
+  ],
+  "recommendation": "Add a 2.2 preflight assertion (before pause/drain) that the migrator holds a surplus >= a conservative bound on the per-staker gross-up shortfall (e.g. estimate via `previewRedeem`/`convertToAssets` round-trip on the new strategy for each token's parked principal), so an under-sized allotment aborts BEFORE engaging terminal migration. At minimum, document in 2.1 the empirically-measured shortfall (~0.015 DOLA / ~0.2 USDC at current pool sizes, scaling with staker count and pool drift) so the allotment is sized with margin, not just set to a token >0 value that passes the tripwire.",
+  "poc": {
+    "file": "workspace/phoenix-phase-2-staging/test/PoC_Saga22_M02_AllotmentBrick.t.sol",
+    "status": "passing",
+    "validated": true,
+    "passing": "6/6 (suite), 4 tests in this file",
+    "forkBlock": 25322425,
+    "lastRun": "2026-06-15T11:40:22Z",
+    "note": "VALIDATED VALID, fork block 25322425, canonical PoC PoC_Saga22_M02_AllotmentBrick.t.sol (4 tests). Demonstrates the EXACT revert 'InPlaceMigrator: top-up surplus exhausted' at step6 migrateIn AFTER the terminal drain; strand-state asserted before the revert. Contrasting sufficient-allotment test (10x measured floor) completes migrateIn and clears parked stakers. Measured floor: 14898868155834087 DOLA (~0.0149) / 197719 USDC (~0.198); 1 wei passes the 2.1 require(>0) tripwire but still bricks. Supersedes the earlier harness AuditSaga2_2Migrate.t.sol.",
+    "supersedes": "workspace/phoenix-phase-2-staging/test/AuditSaga2_2Migrate.t.sol"
+  },
+  "evidence": "side-effects.json scenarioB (zero) + scenarioC (1 wei) both revert 'InPlaceMigrator: top-up surplus exhausted' at migrateIn; scenarioD measured 14898868155834087 DOLA / 197719 USDC consumed; scenarioA (1000e18/1000e6) completes. Harness test/AuditSaga2_2Migrate.t.sol.",
+  "crossEntryRelated": {
+    "note": "Operational re-exposure of the InPlaceMigrator surplus-funded gross-up that stable-staker M-01 (ss12m1, fingerprint 970d7307328df6b8, status FIXED) and L-01/L-03 (f0cb5f7cdddeea0a / bf5018deab63bb51, open) cover at the contract level. The stable-staker fix gross-ups to par WHEN surplus is sufficient; this saga2.2 finding is the OPERATIONAL exposure of that same surplus-sufficiency requirement on the saga2.2 migrateIn leg. NEW at this entry point via the entryPoint fold — distinct fingerprint, distinct project's script flow — NOT a duplicate. Cite the stable-staker lineage; do not re-report the stable-staker contract-level findings here.",
+    "relatedProject": "stable-staker",
+    "relatedLabel": "M-01 (ss12m1)",
+    "relatedStatus": "fixed",
+    "relatedLedgerFingerprints": ["970d7307328df6b8", "f0cb5f7cdddeea0a", "bf5018deab63bb51"]
+  },
+  "metadata": {
+    "createdAt": "2026-06-15T00:00:00Z",
+    "updatedAt": "2026-06-15",
+    "scanOrigin": "audit-script:migrate:saga2.2-migrate",
+    "classificationOrigin": "CLASS-002",
+    "severityValidated": "Medium (severity-auditor UPHELD, high confidence)",
+    "run": "phoenix-phase-2-staging-17"
+  }
+}

@@ -1,0 +1,154 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-06-15T00:00:00Z",
+    "project": "phoenix-phase-2-staging",
+    "entryPoint": "migrate:saga2.2-migrate",
+    "classifier": "severity-classifier",
+    "inputFindings": 4,
+    "classifiedFindings": 4,
+    "severityCounts": { "high": 0, "medium": 2, "low": 2 },
+    "labelScope": "Labels (M-01, M-02, L-01, L-02) are scoped to this entry point (migrate:saga2.2-migrate). They do not collide with contract-scan or sibling-entry labels in the project run dir.",
+    "methodology": "C4 criteria per CLAUDE.md. High requires assets stolen/lost/compromised via a valid path with no hypotheticals. Medium = no direct asset risk but protocol function/availability impacted, OR value leak with stated assumptions + external requirements. Low/QA = state handling, spec deviation, sequencing, idempotency. Three-Law: each precondition tested for owner-surprise (Law 3) — all four are non-obvious footguns (in scope as operational hazards), none are obvious-misuse/malicious-owner vectors.",
+    "convergenceNote": "Findings #1, #2 and #3 converge on the same worst-case (live USDe/DOLA staker pool stranded paused+terminally-migrating, principal locked behind the 14-day claimTimedOut hatch, migration DOA mid-flight) but via distinct preconditions. To avoid double-counting the same impact at Medium, only the two findings with a distinct, concretely-reachable precondition that drives availability/value impact are rated Medium (#1 window-lapse, #2 under-sized allotment — the latter fork-verified). #3 is the structural sequencing observation underlying both and is rated Low to prevent severity inflation of one shared worst-case across three labels. No theft path exists in any of the four: InPlaceMigrator invariant guarantees parked principal can only return to its original owner, so the ceiling for the cluster is Medium (availability + bounded value-leak), never High.",
+    "lossOfYieldNote": "Worst-case principal is recoverable (14-day claimTimedOut, principal-only); the genuine value-leak is the forgone phUSD/yield and the time-value of the lockup over the strand window — in-motion / unmatured yield, which per the loss-of-yield rule is capped at Medium. This is consistent with the Medium ceiling reached from the availability angle."
+  },
+  "classifiedFindings": [
+    {
+      "id": "CLASS-001",
+      "label": "M-01",
+      "originalTitle": "2.2 omits the totalWithdrawal-window assertion: if the window has lapsed, the minter-drain re-initiates (recovers 0), leaving minter funds stranded and the staker terminally-migrated mid-broadcast",
+      "originalSeverity": "medium",
+      "severity": "medium",
+      "plausibility": null,
+      "regression": false,
+      "faithfulness": true,
+      "footgun": true,
+      "rootCauseClass": "MissingWindowAssertion",
+      "contract": "lib/phoenix-phase-2-staging/script/MigrateSaga2Migrate.s.sol",
+      "function": "_executeMinterWithdrawal",
+      "lineStart": 155,
+      "lineEnd": 161,
+      "entryPoint": "migrate:saga2.2-migrate",
+      "classification": {
+        "assetImpact": "No direct theft. Minter principal (~13816 DOLA + ~11934 USDC) stranded on the retired old strategy when totalWithdrawal lazily re-initiates instead of executing; recovery requires waiting out a freshly re-armed 24h phase-1. In a live-divergent run (preview/broadcast state divergence or --skip-simulation) the staker can drain at par into the migrator on earlier successful txs before _postAssert fails, wasting an irreversible terminal-migration session.",
+        "attackPath": [
+          "1. Operator broadcasts 2.2 after the [init+24h, init+72h] Executable window has lapsed (lazy-expiry — status only flips to Expired on the next call).",
+          "2. Steps 1-2 pause + skim the live staker; step4 terminally migrates + drains it; step6 rewires.",
+          "3. Step5 _executeMinterWithdrawal calls oldYS.totalWithdrawal, which takes the None/Expired branch and re-initiates a fresh phase-1, recovering 0.",
+          "4. recovered==0 makes _seedV2 a no-op; minter principal is NOT drained; _postAssert principalOf==0 fails.",
+          "5. Under simulation the broadcast aborts atomically (no half-commit); in a live-divergent run the staker has already drained and the minter is left with a re-armed 24h window."
+        ],
+        "likelihood": "Conditional on the operator broadcasting outside the timing window the entire runbook is built around. Non-obvious (no in-script signal of window status; preflight only smoke-reads principalOf>=0). Window-expiry could not be warp-PoC'd (external ERC4626 vault returns InvalidDataReturned under +72h — a fork artifact), so the half-commit branch is reasoned-from-source, not demonstrated; the missing-assertion code path itself is unambiguous and fork-confirmed present.",
+        "assumptions": "Operator executes after the window lapses, OR preview/broadcast diverge across the window edge so a live tx reverts mid-sequence.",
+        "externalRequirements": "External minter totalWithdrawal window state (lazy-expiry behaviour of AYieldStrategy); operator timing of the broadcast relative to the in-flight phase-1."
+      },
+      "severityRationale": "Medium. No assets are stolen and no direct theft path exists, so High is excluded. The impact is a protocol-availability/function hazard: an off-window broadcast wastes an irreversible terminal-migration session, strands minter principal behind a re-armed 24h phase-1, and (in a live-divergent run) drains the live staker before the post-assert catches the failure — exactly the 'function/availability impacted, value leak with stated assumptions and external requirements' Medium band. The precondition (operating outside the window) is a non-obvious footgun, not an obvious misconfig: the script gives the operator no status signal and the happy path works today, so a competent non-malicious owner would be surprised — it stays in scope under Law 3 rather than being suppressed as admin operational risk. PoC strength is tempered (the half-commit branch is source-reasoned, not warped), but the missing assertion is unambiguous, so Medium is held rather than upgraded to a plausibility-graded High. Tagged faithfulness:true — the script deviates from its own documented time-critical-window intent — and routed to spec-conformance as well as carried at honest Medium for its availability impact (Law 1 keeps the real severity).",
+        "verified": true,
+        "origin": "new"
+    },
+    {
+      "id": "CLASS-002",
+      "label": "M-02",
+      "originalTitle": "2.2 migrateIn bricks mid-migration (after TERMINAL drain + pause) when the 2.1 in-place allotment is zero or under-sized — the 2.1 require(>0) tripwire is necessary but does not guarantee sufficiency",
+      "originalSeverity": "medium",
+      "severity": "medium",
+      "plausibility": null,
+      "regression": false,
+      "faithfulness": false,
+      "footgun": true,
+      "rootCauseClass": "AllotmentSufficiencyNotGuaranteed",
+      "contract": "lib/stable-staker/src/InPlaceMigrator.sol",
+      "function": "_reinjectWithTopup",
+      "lineStart": 262,
+      "lineEnd": 294,
+      "entryPoint": "migrate:saga2.2-migrate",
+      "crossEntryRelated": {
+        "note": "Operational re-exposure of the InPlaceMigrator surplus-funded gross-up covered at contract level by stable-staker M-01 (ss12m1, 970d7307328df6b8, FIXED) and L-01/L-03 (open). NEW at this entry point via the entryPoint fold; not a duplicate. Cite lineage; do not re-report the stable-staker contract findings here.",
+        "relatedLedgerFingerprints": ["970d7307328df6b8", "f0cb5f7cdddeea0a", "bf5018deab63bb51"]
+      },
+      "classification": {
+        "assetImpact": "No theft — InPlaceMigrator invariant C guarantees parked principal can only return to its original owner. Impact is availability + a bounded value-leak: ALL stakers' principal is locked in the migrator, recoverable only via claimTimedOut after the 14-day timeout (principal-only, no further phUSD), and the staker pool is bricked paused+terminally-migrating. Forgone phUSD/yield over the strand window is the realized leak.",
+        "attackPath": [
+          "1. 2.1 sets DOLA/USDC allotment to a token >0 value that passes the require(>0) tripwire but is below the per-staker gross-up shortfall (fork floor ~0.0149 DOLA / ~0.198 USDC; 1 wei is insufficient).",
+          "2. 2.2 step1 pauses, step2 skims, step4 initiateMigration + migrateOut TERMINALLY drains the staker, step6 finalizeAndReset + setYieldStrategy rewires.",
+          "3. Step6 migrateIn re-credits each staker via depositFor; the ERC4626 redeem-then-deposit round-trip realizes a per-staker haircut even on solvent pools, so credited < amt and the surplus-funded gross-up fires.",
+          "4. Migrator surplus (== the 2.1 allotment) is exhausted; _reinjectWithTopup reverts 'top-up surplus exhausted'; the whole batch reverts.",
+          "5. Staker is left paused + terminally migrating with all principal parked; users wait 14 days for claimTimedOut."
+        ],
+        "likelihood": "Fork-verified at block 25322425: both zero-allotment (scenarioB) and 1-wei (scenarioC) revert at migrateIn; scenarioA (1000e18/1000e6) completes. The hazard triggers whenever 2.1's allotment is set below the empirical shortfall — and 2.1 currently hardcodes both to 0, so absent a manual fix the brick is the default path. Non-obvious: the require(>0) tripwire signals 'set' but not 'sufficient', and the sizing decision lives in the predecessor script with no in-script sufficiency check.",
+        "assumptions": "2.1 allotment under-sized relative to the realized per-staker round-trip haircut (true by default at allotment==0).",
+        "externalRequirements": "ERC4626 new-strategy redeem/deposit slippage; staker count and pool drift at broadcast time (shortfall scales with these); operator's 2.1 allotment sizing."
+      },
+      "severityRationale": "Medium. The strongest-evidenced of the cluster (fork-verified revert in two scenarios) but still no theft path — invariant C caps the outcome at a stalled migration plus a 14-day principal lockup, so High is excluded. It squarely hits the Medium band on both prongs: protocol function/availability is impacted (the live USDe staker pool is bricked mid-migration on the time-critical leg) AND there is a value-leak (forgone phUSD/yield and the time-value of locked principal over the 14-day window) with stated assumptions (under-sized allotment) and a documented external requirement (the per-staker ERC4626 round-trip haircut, sized in the predecessor 2.1 script). The precondition is a genuine non-obvious footgun: a competent non-malicious owner who sees the require(>0) tripwire pass would reasonably believe the allotment is adequate, so it survives Law 3 rather than being suppressed as admin operational risk. Loss-of-yield is in-motion/unmatured, independently capping this at Medium. Cross-entry lineage to the FIXED stable-staker ss12m1 is annotated, not double-reported — this is the operational re-exposure on the saga2.2 migrateIn leg.",
+        "verified": true,
+        "origin": "new"
+    },
+    {
+      "id": "CLASS-003",
+      "label": "L-01",
+      "originalTitle": "A mid-broadcast revert after step4 (initiateMigration) strands the live StableStaker terminally-migrating AND paused, with recovery limited to the 14-day claimTimedOut hatch",
+      "originalSeverity": "low",
+      "severity": "low",
+      "plausibility": null,
+      "regression": false,
+      "faithfulness": false,
+      "footgun": true,
+      "rootCauseClass": "TerminalMigrationStrandRisk",
+      "contract": "lib/phoenix-phase-2-staging/script/MigrateSaga2Migrate.s.sol",
+      "function": "run",
+      "lineStart": 84,
+      "lineEnd": 144,
+      "entryPoint": "migrate:saga2.2-migrate",
+      "classification": {
+        "assetImpact": "No theft (invariant C). Bounded availability hazard: a stalled migration and a worst-case 14-day principal lockup if any tx reverts after the step4 terminal point.",
+        "attackPath": [
+          "1. A tx that succeeds in preview reverts live due to state divergence (window edge, pool-drift shortfall, MEV/front-run on skim or external vault) after step4 initiateMigration.",
+          "2. Staker is already paused (step1) and terminally migrating (step4) — no clean recovery script.",
+          "3. Recovery limited to break-glass siblings (UnpauseStakerBreakGlass / ResumeStableStakerMigration) and, for users, claimTimedOut after 14 days."
+        ],
+        "likelihood": "Structural sequencing observation: irreversible ops are sequenced before all go/no-go checks. The concrete reachable instances of this strand are already captured by M-01 (window) and the fork-verified M-02 (allotment); standalone, this is the generic sequencing hazard. Existence of break-glass siblings confirms it is a real recurring operational pattern, and also provides a recovery path.",
+        "assumptions": "A live tx reverts after the terminal point due to preview/broadcast divergence.",
+        "externalRequirements": "Live-chain state divergence between the preview gate and the --slow broadcast."
+      },
+      "severityRationale": "Low. This is the structural sequencing root cause shared by M-01 and M-02 — irreversible pause/initiateMigration ordered ahead of the go/no-go checks. Its two concretely-reachable, impact-driving instances are already carried at Medium (M-01, M-02); rating this umbrella observation Medium as well would triple-count one shared worst-case and inflate the report, which the no-overstatement rule forbids. On its own merits it is a sequencing/recovery-friction hazard with no direct fund-loss vector (invariant C bounds it to a stalled migration plus a recoverable 14-day lockup) and a documented break-glass mitigation already in the cluster, which places it in the QA/Low band (state/sequence handling, operational hazard). Kept as a distinct Low because the front-load-reversible-ops recommendation is the generic fix that closes both Mediums at the structural level. Non-obvious footgun, in scope under Law 3; surfaced with safe-sequencing guidance.",
+        "verified": true,
+        "origin": "new"
+    },
+    {
+      "id": "CLASS-004",
+      "label": "L-02",
+      "originalTitle": "2.2 is non-idempotent: a partial-failure re-run inside the time-critical window cannot cleanly resume (skim returns 0 OK, but initiateMigration / setYieldStrategy / pause double-calls revert)",
+      "originalSeverity": "low",
+      "severity": "low",
+      "plausibility": null,
+      "regression": false,
+      "faithfulness": false,
+      "footgun": true,
+      "rootCauseClass": "NonIdempotentScript",
+      "contract": "lib/phoenix-phase-2-staging/script/MigrateSaga2Migrate.s.sol",
+      "function": "run",
+      "lineStart": 84,
+      "lineEnd": 144,
+      "entryPoint": "migrate:saga2.2-migrate",
+      "crossEntryRelated": {
+        "note": "Same root-cause CLASS as saga2.1 L-03 (7dbab7885c0d9960, wont-fix) but a distinct entry point and script flow. Fingerprint differs via the entryPoint fold; correctly NOT suppressed as a 2.1 re-flag.",
+        "relatedLedgerFingerprints": ["7dbab7885c0d9960"]
+      },
+      "classification": {
+        "assetImpact": "None directly. Recovery friction: no clean re-entry point after a partial failure; a naive re-run double-calls pause / initiateMigration / setYieldStrategy and reverts. Raises the chance of a mistaken re-broadcast that compounds the L-01 strand.",
+        "attackPath": [
+          "1. Script reverts partway through the linear sequence (no step-completion checkpoints).",
+          "2. Operator re-runs under window time-pressure.",
+          "3. pause() on an already-paused staker reverts; initiateMigration on an already-active token reverts; finalizeAndReset/setYieldStrategy on an already-reset pool revert.",
+          "4. No clean resume — the operator must hand-edit to skip already-done steps while racing the totalWithdrawal window."
+        ],
+        "likelihood": "Triggered only after some other partial failure occurs; then it is deterministic. No independent fund-loss vector.",
+        "assumptions": "A prior partial failure has committed some but not all steps.",
+        "externalRequirements": "None beyond a partial-failure state."
+      },
+      "severityRationale": "Low/QA. Pure state-handling / idempotency hazard with no direct fund-loss vector — the missing-checkpoint pattern is a spec deviation from the project's documented progress.<chainId>.json convention, which lands squarely in the QA/Low band. Its harm is recovery friction and an elevated chance of a mistaken re-broadcast that compounds L-01, not a standalone loss. Correctly kept distinct from saga2.1 L-03 (same root-cause class, different entry point / fingerprint) rather than suppressed. Non-obvious footgun (in scope under Law 3): a competent operator would not expect a re-run to brick on double-calls under window time-pressure, so it is surfaced with idempotent-precheck / resume-map guidance.",
+        "verified": true,
+        "origin": "new"
+    }
+  ]
+}

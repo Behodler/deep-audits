@@ -1,0 +1,52 @@
+{
+  "id": "M-01",
+  "project": "phoenix-phase-2-staging",
+  "status": "wont-fix",
+  "triageNote": "Owner-acknowledged 2026-06-15: valid operational footguns, accepted as operator responsibility (correct allotment sizing + executing inside the totalWithdrawal Executable window) rather than expanding script/code scope. Not a code fix; do NOT auto-flip to fixed and do NOT re-escalate on future regression runs unless the script's preconditions change.",
+  "triagedAt": "2026-06-15",
+  "severity": "medium",
+  "title": "2.2 omits the totalWithdrawal Executable-window assertion: an off-window broadcast re-initiates the minter-drain (recovers 0), stranding minter principal and wasting an irreversible terminal-migration session",
+  "contract": "lib/phoenix-phase-2-staging/script/MigrateSaga2Migrate.s.sol",
+  "function": "_executeMinterWithdrawal",
+  "line": 155,
+  "lineStart": 155,
+  "lineEnd": 161,
+  "entryPoint": "migrate:saga2.2-migrate",
+  "fingerprint": "18ca984219947bd19bd70dc2fac880ef36d26cd359c3dba6f8d39f85b07f7279",
+  "origin": "new",
+  "faithfulness": true,
+  "footgun": true,
+  "rootCauseClass": "MissingWindowAssertion",
+  "description": "The entire 2.2 leg is documented as time-critical and 'must run inside the [init+24h, init+72h] Executable window' (intent.md §4, script header), yet the script never asserts the window. `_executeMinterWithdrawal` blindly calls `oldYS.totalWithdrawal(token, MINTER_V1)`. If the in-flight phase-1 has lapsed (lazy-expiry: status only flips to Expired on the next call), `totalWithdrawal` takes the None/Expired branch in AYieldStrategy and RE-INITIATES a fresh phase-1 instead of executing — recovering 0. `recovered=0` then makes `_seedV2` a no-op (line 164 early return) and, crucially, the minter's principal is NOT drained. The preflight only smoke-reads `principalOf(...) >= 0` (line 207, always true) — it does NOT check the withdrawal status is Executable. Fork-confirmed both windows ARE open at block 25322425 (DOLA initiatedAt=1781371715, USDC=1781371739; block ts 1781520779 within [init+86400, init+259200]), so the happy path works today; but nothing in the script guarantees that on the live broadcast, and the window is the sole timing constraint the runbook is built around. This is a faithfulness deviation: the script does not enforce its own documented time-critical-window intent, so it is also routed to spec-conformance.",
+  "impact": "No direct theft — InPlaceMigrator invariant C forecloses any path that sends parked principal anywhere but the original user, so High is excluded. Run outside the window: the staker is paused (step1), skimmed (step2), TERMINALLY migrated and drained (step4, no resume path), and rewired (step6) BEFORE the minter-drain at step5. The minter-drain recovers 0, V2 seed is skipped, and `_postAssert`'s `principalOf(token,MINTER_V1)==0` (lines 219-220) fails. Under ordinary simulation forge aborts the whole broadcast atomically (no half-commit); but in a live-divergent run (preview/broadcast divergence across the window edge, or --skip-simulation) the staker has already drained at par into the migrator on the EARLIER successful txs, and the minter ends up with a freshly re-armed 24h phase-1 it must wait out — a wasted, irreversible terminal-migration session, with the minter's ~13816 DOLA + ~11934 USDC left stranded on the retired old strategy. This is the Medium availability/value-leak band (protocol function/availability impacted, value leak with stated assumptions and external requirements); the minimum-guaranteed harm (wasted terminal session + stranded minter principal behind a re-armed 24h window) clears the Medium bar independent of PoC strength on the worse branch.",
+  "attackPath": [
+    "1. Operator broadcasts 2.2 after the [init+24h, init+72h] Executable window has lapsed (lazy-expiry — status only flips to Expired on the next call).",
+    "2. Steps 1-2 pause + skim the live staker; step4 terminally migrates + drains it; step6 rewires.",
+    "3. Step5 _executeMinterWithdrawal calls oldYS.totalWithdrawal, which takes the None/Expired branch and re-initiates a fresh phase-1, recovering 0.",
+    "4. recovered==0 makes _seedV2 a no-op; minter principal is NOT drained; _postAssert principalOf==0 fails.",
+    "5. Under simulation the broadcast aborts atomically (no half-commit); in a live-divergent run the staker has already drained and the minter is left with a re-armed 24h window."
+  ],
+  "recommendation": "Before step5, read `oldYS.withdrawalStates(token, MINTER_V1)` and assert status==Executable AND `block.timestamp <= initiatedAt + TOTAL_DURATION` for BOTH tokens, reverting in preflight (before pause/drain) with the exact `executableAt`/`expiresAt` so the operator aborts cheaply instead of mid-migration. Optionally assert `recovered > 0` right after each `_executeMinterWithdrawal` so a silent re-initiate fails loudly before the rewire rather than at `_postAssert`.",
+  "poc": {
+    "file": "workspace/phoenix-phase-2-staging/test/PoC_Saga22_M01_WindowAssertion.t.sol",
+    "status": "partial-demonstrated",
+    "validated": true,
+    "passing": "2 tests (part of the 6/6 validated suite)",
+    "forkBlock": 25322425,
+    "lastRun": "2026-06-15T11:40:22Z",
+    "demonstrated": "The recovers-0 / seed-skipped MECHANISM on a non-Executable window is DYNAMICALLY demonstrated on the real ERC4626YieldStrategy + real autoDOLA vault bytecode (test_M01_nonExecutableWindow_recoversZero_seedSkipped): off-window totalWithdrawal recovers 0, so _seedV2 is skipped and minter principal is left undrained. The structural test (test_M01_script_hasNoExecutableWindowAssertion) mirrors script L155-161 / L205-209 VERBATIM, proving no Executable/withdrawalStates guard exists in the helper or preflight.",
+    "documentedOnly": "The catastrophic mid-broadcast HALF-COMMIT branch remains DOCUMENTED-ONLY, NOT demonstrated: window-expiry could not be fork-demonstrated by vm.warp because the external autoDOLA/autoUSDC ERC4626 vault returns InvalidDataReturned() under +72h warp — a fork-warp artifact of stale external vault state, not a property of the script. This caveat is preserved exactly; severity is NOT upgraded on the strength of the un-warpable branch.",
+    "note": "VALIDATED VALID. Mechanism dynamically demonstrated + structural absence pinned; half-commit branch documented-only. The minimum-guaranteed outcome (wasted terminal session + stranded minter principal behind a re-armed window) does NOT depend on the un-warpable branch."
+  },
+  "pocNote": "The missing-assertion code path is unambiguous and fork-confirmed PRESENT (preflight lines 191-210 has no status check; AYieldStrategy.totalWithdrawal lines 417-445 None/Expired -> _initiateWithdrawal). The catastrophic half-commit branch is SOURCE-REASONED, not warp-PoC'd: window-expiry could not be fork-demonstrated by vm.warp because the external autoDOLA/autoUSDC ERC4626 vault returns InvalidDataReturned() under +72h warp — a fork-warp artifact of stale external vault state, not a property of the script. The minimum-guaranteed outcome (wasted terminal session + stranded minter principal behind a re-armed window) does NOT depend on the un-warpable branch.",
+  "evidence": "side-effects.json scenarioD / preconditionResults['totalWithdrawal ... Executable window']; AYieldStrategy.totalWithdrawal lines 417-445 (None/Expired -> _initiateWithdrawal); script preflight lines 191-210 has no status check.",
+  "crossEntryRelated": null,
+  "metadata": {
+    "createdAt": "2026-06-15T00:00:00Z",
+    "updatedAt": "2026-06-15",
+    "scanOrigin": "audit-script:migrate:saga2.2-migrate",
+    "classificationOrigin": "CLASS-001",
+    "severityValidated": "Medium (severity-auditor UPHELD, medium confidence)",
+    "run": "phoenix-phase-2-staging-17"
+  }
+}
