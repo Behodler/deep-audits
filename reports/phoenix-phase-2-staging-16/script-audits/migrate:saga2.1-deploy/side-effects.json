@@ -1,0 +1,71 @@
+{
+  "entryPoint": "migrate:saga2.1-deploy",
+  "mode": "fork-preview",
+  "forkBlock": 25321049,
+  "rpc": "RPC_MAINNET (live; probe returned block 25321049)",
+  "workspaceEdits": {
+    "description": "To get past the SAFE allotment tripwire (DOLA_ALLOTMENT/USDC_ALLOTMENT hardcoded 0 + require(>0)), set both to nonzero values within the live owner's balance. Owner held only 0.65 DOLA and 99 USDC on the fork, so the script's suggested 1000e18/1000e6 would fail _preflight. Used small in-balance values instead of deal().",
+    "edit1": "DOLA_ALLOTMENT 0 -> 5e17 (0.5 DOLA), USDC_ALLOTMENT 0 -> 50e6 (50 USDC). Required to reach run() body.",
+    "edit2_probe_only": "Temporarily replaced `IYS(oldYS).setAsideBufferRecipient()` in _carryBuffer with `recipient = STAKER` to bypass the first revert and confirm the SECOND independent revert in _registerOnV2. This was a diagnostic probe only.",
+    "reverted": true,
+    "revertCommand": "git checkout script/MigrateSaga2Deploy.s.sol — workspace restored to pristine 6d733ab (allotments back to 0)."
+  },
+  "executed": {
+    "variant": "preview",
+    "reverted": true,
+    "revertReason": "EvmError: Revert (empty revert data) — staticcall to old strategy `setAsideBufferRecipient()` (selector 0x88b57777) at 0x90ce274b20A2aF4265152B369d09ce6E6Dc177F9 reverts because the DEPLOYED old-strategy bytecode predates that getter. Forge surfaces it as `script failed: <empty revert data>`. This is the FIRST of two independent fork reverts.",
+    "secondRevertReason": "After bypassing the buffer-recipient call, the script reverts AGAIN in `_registerOnV2(USDE,...)` at `MINTER_V1.stablecoinConfigs(USDE)`: the deployed V1 returns a 4-WORD struct (yieldStrategy, exchangeRate=1e18, decimals=18, enabled=1 — raw 128 bytes), but the script's `IMinterV1` interface declares a 7-VALUE return tuple, so the ABI decoder buffer-overruns (224 bytes expected) and the call reverts with empty data.",
+    "verdict": "AS-SHIPPED-WITH-ALLOTMENTS-SET THE SCRIPT IS UNPREVIEWABLE / UNRUNNABLE AGAINST LIVE MAINNET STATE. Two distinct deployed-ABI-drift reverts, each fatal."
+  },
+  "preconditionResults": [
+    { "check": "block.chainid == 1", "passed": true, "note": "fork is mainnet" },
+    { "check": "DOLA_ALLOTMENT>0 && USDC_ALLOTMENT>0 (tripwire)", "passed": true, "note": "only after the audit-only edit; as-shipped this FAILS by design (SAFE). Cannot be silently satisfied with an unsafe value — owner must edit a `public constant`." },
+    { "check": "DOLA.balanceOf(owner) >= DOLA_ALLOTMENT", "passed": true, "note": "owner DOLA = 0.652829619527448662; allotment 0.5 fit. NOTE: owner is short of the doc-suggested 1000 DOLA." },
+    { "check": "USDC.balanceOf(owner) >= USDC_ALLOTMENT", "passed": true, "note": "owner USDC = 99.075791; allotment 50 fit. Short of the doc-suggested 1000 USDC." },
+    { "check": "staker.owner() == OWNER_ADDRESS", "passed": true, "note": "confirmed 0xCad1...D0B6 on fork" },
+    { "check": "_registerOnV2 rate>0 / _v1Strategy ys!=0", "passed": false, "note": "NEVER REACHED for DOLA/USDC — the USDe _registerOnV2 reverts first on the ABI-drift read. For DOLA the underlying config (ys=0x90ce..., rate=1e18, dec=18, enabled) is readable as a 4-tuple, so the data exists; only the interface shape is wrong." }
+  ],
+  "stateWrites": [
+    { "contract": "InPlaceMigrator (new)", "address": "0x7281310825e455A6aAb709AA5D5809d321B1b071 (preview ephemeral)", "slotDesc": "constructor: staker, migrationTimeout=14d, owner", "from": "n/a", "to": "deployed", "intended": true },
+    { "contract": "DOLA", "address": "0x865377...9ce4", "slotDesc": "owner -> migrator transfer (allotment)", "from": "owner balance", "to": "migrator +0.5 DOLA", "intended": true, "note": "audit-edit value" },
+    { "contract": "USDC", "address": "0xA0b8...eB48", "slotDesc": "owner -> migrator transfer (allotment)", "from": "owner balance", "to": "migrator +50 USDC", "intended": true, "note": "audit-edit value" },
+    { "contract": "ERC4626YieldStrategy ysDolaV2 (new)", "address": "0xd263...DfFfC (preview ephemeral)", "slotDesc": "ctor(owner, DOLA, autoDOLA); approve(autoDOLA, max)", "from": "n/a", "to": "deployed; owner=0xCad1...D0B6; vault=autoDOLA; underlying=DOLA", "intended": true },
+    { "contract": "ERC4626YieldStrategy ysUsdcV2 (new)", "address": "0xf5cB...91656 (preview ephemeral)", "slotDesc": "ctor(owner, USDC, autoUSDC); approve(autoUSDC, max)", "from": "n/a", "to": "deployed; owner=0xCad1...D0B6; vault=autoUSDC; underlying=USDC", "intended": true },
+    { "contract": "PhusdStableMinter minterV2 (new)", "address": "0x68F0...3aa41 (preview ephemeral)", "slotDesc": "ctor(phUSD); Ownable(msg.sender)", "from": "n/a", "to": "deployed; owner = pranked OWNER_ADDRESS; phUSD immutable set", "intended": true, "note": "owner is msg.sender = OWNER under prank; on a real Ledger broadcast owner = the Ledger signer (same EOA) — correct." },
+    { "contract": "ysDolaV2/ysUsdcV2", "address": "new", "slotDesc": "setClient(staker,true); setClient(minterV2,true); setWithdrawer(accumulator,true)", "from": "unset", "to": "authorized", "intended": true },
+    { "contract": "ysDolaV2/ysUsdcV2", "address": "new", "slotDesc": "setSetAsideBufferRecipient + setSetAsideBuffer(staker, 10)", "from": "unset", "to": "recipient=staker, buffer=10", "intended": "PARTIAL", "note": "Reached only with the buffer-recipient bypass. WRITES 10 but live old strategy reports 25 — see drift finding. As-shipped this STEP REVERTS before writing." },
+    { "contract": "USDE_MARKET_YS", "address": "0xaC2e...7f95", "slotDesc": "setClient(minterV2, true)", "from": "not a client", "to": "minterV2 authorized (V1 left authorized)", "intended": true, "note": "Reached only with the bypass; emitted ClientAuthorizationSet successfully. As-shipped never reached." },
+    { "contract": "minterV2 _registerOnV2(USDE)", "address": "new", "slotDesc": "registerStablecoin/approveYS/setMaxMintPerDay for USDe", "from": "n/a", "to": "REVERTED", "intended": true, "note": "Reverts on the V1 stablecoinConfigs ABI-drift read — never written." }
+  ],
+  "events": [
+    "OwnershipTransferred x3 (the two strategies + minterV2 to OWNER_ADDRESS)",
+    "Approval (each strategy approves its vault for type(uint256).max)",
+    "ClientAuthorizationSet (staker, minterV2 on both new strategies; minterV2 on USDE_MARKET_YS)",
+    "WithdrawerAuthorizationSet (accumulator on both new strategies)",
+    "SetAsideBufferRecipientSet + SetAsideBufferSet(staker, 0->10) on both new strategies [bypass run only]"
+  ],
+  "externalCalls": [
+    { "target": "autoDOLA.asset()", "fn": "asset()", "reverted": false, "result": "0x865377...9ce4 == DOLA — ctor pairing CORRECT" },
+    { "target": "autoUSDC.asset()", "fn": "asset()", "reverted": false, "result": "0xA0b8...eB48 == USDC — ctor pairing CORRECT" },
+    { "target": "staker.yieldStrategy(DOLA/USDC)", "fn": "yieldStrategy", "reverted": false, "result": "old DOLA YS 0x90ce..., old USDC YS 0x90af... (migration is in 2.2, so still old — expected)" },
+    { "target": "oldDolaYS.setAsideBufferSize(staker)", "fn": "setAsideBufferSize", "reverted": false, "result": "25 (NOT 10 — drift)" },
+    { "target": "oldUsdcYS.setAsideBufferSize(staker)", "fn": "setAsideBufferSize", "reverted": false, "result": "25 (NOT 10 — drift)" },
+    { "target": "oldDolaYS.setAsideBufferRecipient()", "fn": "setAsideBufferRecipient (0x88b57777)", "reverted": true, "result": "EvmError: Revert — selector absent on deployed bytecode. FATAL revert #1." },
+    { "target": "MINTER_V1.stablecoinConfigs(USDE)", "fn": "stablecoinConfigs(address)", "reverted": true, "result": "Deployed returns 4 words (ys,1e18,18,enabled); script interface decodes 7 -> buffer overrun. FATAL revert #2." },
+    { "target": "MINTER_V1.stablecoinConfigs(DOLA) [audit probe via cast, 4-tuple ABI]", "fn": "stablecoinConfigs", "reverted": false, "result": "(0x90ce... , 1e18, 18, true) — data is fine; only the 7-field interface shape is wrong" }
+  ],
+  "unintendedEffects": [
+    "None beyond stated purpose were observed among the writes that landed. The two failures are intent-NOT-achieved (script aborts), not unintended extra writes. No state outside the manifest's mutated set was touched."
+  ],
+  "postconditionResults": [
+    { "check": "(script declares no post-conditions)", "passed": null, "note": "Fire-and-forget: even if the ABI reverts were fixed, the script asserts nothing about V1-revoke/V2-grant/migrator-set/wiring success." }
+  ],
+  "wiringVerification": {
+    "vaultAssetPairing": "PASS — autoDOLA.asset()==DOLA, autoUSDC.asset()==USDC; ysDolaV2/ysUsdcV2 ctor args correct; owner==OWNER on both (OwnershipTransferred to 0xCad1...D0B6).",
+    "v2ConfigReplicationFidelity": "BLOCKED/FAIL — replication cannot execute on live state: V1 stablecoinConfigs ABI is a 4-field struct, script reads it as 7-field and reverts. Underlying values that WOULD be replicated (DOLA rate=1e18, dec=18) are readable via the correct 4-tuple ABI, so the intent is sound but the interface is drifted.",
+    "phusdMintAuthorityGap": "By design (see freeze-gap finding): V1 revoked in 2.1, V2 granted in 2.1, but V2 has NO registered DOLA/USDC stablecoinConfig that succeeds (registration reverts) and is not seeded until 2.2. In the 2.1->2.2 operational window, V1 cannot mint and V2 cannot usefully mint DOLA/USDC -> phUSD mint availability is interrupted for the gap. USDe registration also reverts. Acceptable ONLY if 2.1->2.2 are back-to-back (docs §4 say single session).",
+    "setMigrator": "NOT REACHED — step 9 is after the reverting _registerOnV2 calls; setMigrator(migrator) never executes against live state. 2.2's preflight requires staker.migrator()==migrator, so until 2.1 is fixed and run, 2.2 cannot proceed.",
+    "usdeCarry": "setClient(minterV2,true) on USDE_MARKET_YS SUCCEEDS (with bypass); V1 left authorized. But the paired _registerOnV2(USDE) reverts, so the USDe carry is left half-done in the bypass run.",
+    "bufferDrift": "CONFIRMED — live old-strategy setAsideBufferSize(staker)==25; script hardcodes 10 and logs (but does not assert) the cross-check. 2.3 asserts ==10, so the new value is internally consistent with the downstream gate but represents a 25->10 reduction of the carried buffer."
+  }
+}

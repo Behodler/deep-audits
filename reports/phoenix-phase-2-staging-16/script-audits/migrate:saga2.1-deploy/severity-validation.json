@@ -1,0 +1,137 @@
+{
+  "severityValidationReport": {
+    "auditor": "severity-auditor",
+    "timestamp": "2026-06-15T00:00:00Z",
+    "project": "phoenix-phase-2-staging",
+    "entryPoint": "migrate:saga2.1-deploy",
+    "inputFile": "findings-classified.json",
+    "method": "Independent C4 re-assessment. Read the script (script/MigrateSaga2Deploy.s.sol), the fork-preview side-effects.json (forkBlock 25321049, both reverts reproduced), intent.md, and the deduped/classified findings. Special focus on the load-bearing High->Medium downgrades and the forge-broadcast atomicity claim.",
+    "overallVerdict": "CONFIRM the distribution 0 High / 3 Medium / 3 Low. No finding is overstated; no Low is secretly a Medium; no finding reaches High. One nuance recorded on CLASS-002 (severity unchanged).",
+    "loadBearingAtomicityAnalysis": {
+      "question": "Could the revert leave a partially-migrated / split-brain on-chain state, defeating the 'atomic, no bad state broadcast' rationale and pushing DEDUP-001/002 toward High?",
+      "scriptOrderingFacts": [
+        "run() opens vm.startBroadcast() at line 106 and closes vm.stopBroadcast() at line 171.",
+        "Revert #1 (_carryBuffer setAsideBufferRecipient, selector 0x88b57777) fires at line 142-143 — INSIDE the broadcast block, before any of the most-consequential authority writes (phUSD setMinter swap line 155-156, setMigrator line 160 come LATER).",
+        "Revert #2 (_registerOnV2 USDe stablecoinConfigs ABI overrun) fires at line 148 — also before the authority swaps.",
+        "The handoff JSON write (_writeDeployments, line 172) and addresses.ts patch happen AFTER vm.stopBroadcast() and are only reached on a clean run, so no stale handoff is persisted on revert."
+      ],
+      "forgeBroadcastSemantics": "forge script with --broadcast (and --slow) uses simulate-then-broadcast: the entire run() body is executed as an in-memory EVM simulation first; transactions are collected and only dispatched to the network AFTER run() returns successfully. A revert during simulation aborts the whole script before the broadcast phase begins — zero transactions are sent on-chain. The reverts here occur in-simulation (a staticcall to an absent getter / an ABI buffer-overrun both revert inside the EVM), so the dispatch phase is never entered. --slow changes inter-tx pacing, NOT the simulate-then-dispatch separation.",
+      "incrementalBroadcastCaveatAddressed": "The prompt's concern (a forge script CAN broadcast txs incrementally) is real only for scripts that interleave vm.broadcast with subsequent dependent external reads that force partial flushing, or multi-run()/resume flows. This script does none of that: a single run(), single broadcast block, no vm.broadcast-then-readback pattern, and the fatal reads are pure view/staticcalls that revert the simulation outright. The fork-preview empirically confirms the script never gets past _carryBuffer / _registerOnV2 — nothing downstream (authority swap, setMigrator) executes even in simulation.",
+      "conclusion": "Atomicity holds. The revert is genuinely all-or-nothing for this entry point: no phUSD mint-authority change, no setMigrator, no handoff JSON, no addresses.ts patch is broadcast. Old strategies and V1 minter retain full principal + mint authority. There is NO asset-loss or split-brain path created by the revert itself. This affirms Medium (availability/function blocker), and refutes any escalation to High."
+    },
+    "findings": [
+      {
+        "id": "CLASS-001",
+        "originalId": "DEDUP-001",
+        "claimedSeverity": "medium",
+        "claimedDowngradeFrom": "high",
+        "assessedSeverity": "medium",
+        "agreement": true,
+        "verdict": "CONFIRM",
+        "confidence": "high",
+        "analysis": {
+          "assetRisk": "None. Fork-confirmed: old DOLA/USDC strategies and V1 minter keep all principal and mint authority. The revert (selector 0x88b57777 absent on deployed bytecode) is a staticcall failure inside _carryBuffer, before any authority mutation.",
+          "attackPath": "Not an attack — a deterministic self-inflicted DOA on owner-operated deployment. No external attacker, no value at risk.",
+          "conditions": "Reverts on every run against live mainnet (deterministic). Owner sees the revert and stops.",
+          "impact": "Entire MigrateSaga2Deploy aborts -> Saga 2 (and time-critical 2.2/2.3) blocked. Classic C4 Medium 'protocol function/availability impacted'.",
+          "atomicity": "Confirmed all-or-nothing per the broadcast analysis above. No bad state broadcast."
+        },
+        "notes": "High->Medium downgrade is CORRECT. C4 High requires assets stolen/lost/compromised or a direct exploit path; a guaranteed fail-loud revert with no broadcast is the inverse. Escalating to High would dilute the report (CRITICAL RULE 1). Time-criticality is an operational aggravator, not asset risk, and is correctly recorded as such. Not Low: it hard-blocks a time-critical migration — well above cosmetic/state-handling."
+      },
+      {
+        "id": "CLASS-002",
+        "originalId": "DEDUP-002",
+        "claimedSeverity": "medium",
+        "claimedDowngradeFrom": "high",
+        "assessedSeverity": "medium",
+        "agreement": true,
+        "verdict": "CONFIRM",
+        "confidence": "high",
+        "analysis": {
+          "assetRisk": "None. The 7-field IMinterV1 decode vs deployed 4-field stablecoinConfigs return -> ABI buffer-overrun revert in _registerOnV2. Pure availability blocker; V1 minter retains authority.",
+          "attackPath": "Self-inflicted deterministic revert; no attacker, no value extraction.",
+          "conditions": "Deterministic against live V1 minter. Independent of CLASS-001 — fork-confirmed via the diagnostic bypass that it reverts even after CLASS-001 is sidestepped.",
+          "impact": "Config replication (the script's stated purpose) cannot execute -> migration aborts. C4 Medium.",
+          "atomicity": "Same broadcast analysis: revert at line 148 is before the authority swaps; nothing broadcast."
+        },
+        "notes": "High->Medium downgrade CORRECT, same reasoning as CLASS-001. Keeping it SEPARATE from CLASS-001 (not collapsed) is the right call (Law 1) — it is a distinct, independently-fatal blocker; merging would hide that fixing 001 alone does not unbrick the migration. Nuance (severity unchanged): the underlying V1 data (rate=1e18, dec=18) IS readable via the correct 4-tuple ABI, so the defect is purely an interface-shape drift in the script, not missing on-chain data — this reinforces 'fixable script bug, no asset risk', consistent with Medium."
+      },
+      {
+        "id": "CLASS-003",
+        "originalId": "DEDUP-003",
+        "claimedSeverity": "medium",
+        "assessedSeverity": "medium",
+        "agreement": true,
+        "verdict": "CONFIRM",
+        "confidence": "medium",
+        "analysis": {
+          "assetRisk": "No direct theft. Value/availability degradation: carried set-aside buffer hardcoded to 10% (SETASIDE_BUFFER_PCT) while live old strategies report 25% (fork-confirmed setAsideBufferSize(staker)==25). A 60% reduction of the below-par staker cushion, only logged (line 195), never asserted.",
+          "attackPath": "Operator trusts the 'carry forward the existing buffer' comment/doc (which wrongly states 10%); under stress the thinner cushion raises withdrawal-shortfall risk for stakers.",
+          "conditions": "External requirement: script must first be unblocked (CLASS-001/002 fixed). Once running, the downgrade is automatic and silent.",
+          "impact": "Value leak with stated assumptions + external requirement = textbook C4 Medium.",
+          "footgun": "Valid non-obvious owner footgun (Law 3): 'carry forward existing' silently more-than-halving the live cushion is surprising. In scope as an operational hazard with safe-config guidance (read+assert live setAsideBuffer instead of hardcoding 10)."
+        },
+        "notes": "Medium HOLDS — not overstated (it is conditional on the script being unblocked, and impact is a degraded protective parameter, not theft) and not understated (it is a genuine value/availability degradation of a staker protection, above Low). Confidence medium because the realized harm is downstream/conditional and capped at cushion-thinning, but the silent 25->10 drift plus the misstated doc justify Medium over Low. Correctly tagged footgun + faithfulness, kept at honest Medium per Law 1."
+      },
+      {
+        "id": "CLASS-004",
+        "originalId": "DEDUP-004",
+        "claimedSeverity": "low",
+        "assessedSeverity": "low",
+        "agreement": true,
+        "verdict": "CONFIRM",
+        "confidence": "high",
+        "analysis": {
+          "assetRisk": "No direct/standalone loss. Net-new ysDolaV2/ysUsdcV2/minterV2 deployed with no pauser -> unpausable. Reduced incident-response (no break-glass) on contracts that WILL hold principal + mint authority.",
+          "attackPath": "Bites only if a SEPARATE future incident requires pausing; no standalone impact.",
+          "conditions": "External requirement: a subsequent incident needing the pause break-glass.",
+          "impact": "Operational-availability / configuration footgun.",
+          "footgun": "Missing runbook step on net-new critical contracts; verified NOT deferred-by-design (2.2/2.3 also never setPauser)."
+        },
+        "notes": "Low HOLDS, not secretly Medium. C4 Medium requires protocol function/availability impacted OR a value leak with stated assumptions; this needs an additional independent future incident before it has ANY effect (conditional-on-conditional). That contingency keeps it Low/QA. Correctly NOT suppressed under the prior batch-minter-migrate carve-out (different entryPoint, net-new contracts). Safe-config guidance (call setPauser post-deploy) appropriate."
+      },
+      {
+        "id": "CLASS-005",
+        "originalId": "DEDUP-005",
+        "claimedSeverity": "low",
+        "assessedSeverity": "low",
+        "agreement": true,
+        "verdict": "CONFIRM",
+        "confidence": "high",
+        "analysis": {
+          "assetRisk": "None standalone. No post-condition asserts on the most consequential writes (phUSD mint-authority swap, setMigrator, wiring) — fire-and-forget. A silent partial/incorrect write could go unnoticed at deploy time.",
+          "attackPath": "No standalone path; amplifies other findings but causes nothing alone.",
+          "conditions": "Requires a separate incorrect write to actually cause harm.",
+          "impact": "Configuration-safety / state-handling gap (missing verification gate)."
+        },
+        "notes": "Low HOLDS. This is a defense-in-depth/state-handling gap with zero standalone impact — quintessential Low/QA per C4. It is made more pointed by the two fork-confirmed ABI drifts on the same script, but the missing-assert issue itself does not steal/lose funds or block availability on its own. Not understated."
+      },
+      {
+        "id": "CLASS-006",
+        "originalId": "DEDUP-006",
+        "claimedSeverity": "low",
+        "assessedSeverity": "low",
+        "agreement": true,
+        "verdict": "CONFIRM",
+        "confidence": "medium",
+        "analysis": {
+          "assetRisk": "No direct loss. Script is non-idempotent with no checkpoint guard: a re-run redeploys everything, re-revokes/re-grants phUSD mint, overwrites the handoff JSON -> a RECOVERABLE split-brain (second minterV2/strategies granted mint while addresses.ts + 2.2/2.3 reference the first).",
+          "attackPath": "Operator re-runs 2.1 -> split-brain across the saga during the fragile window.",
+          "conditions": "Requires an operator re-run during the migration window; departs from the project's own documented checkpoint/resilient-deployment pattern.",
+          "impact": "Operator footgun producing a RECOVERABLE split-brain.",
+          "footgun": "Non-obvious operator footgun (Law 3): a re-run silently creating a split-brain is surprising. Guidance: add an idempotency/checkpoint guard before redeploying or re-granting mint."
+        },
+        "notes": "Low HOLDS, but this is the closest-to-the-line Low (hence medium confidence). It earns Low not Medium because: (a) the split-brain is explicitly RECOVERABLE (no funds lost — orphaned but recoverable mint grant on an unreferenced minterV2), (b) it is contingent on an operator re-run, and (c) the granted-but-orphaned minterV2 holds no user funds and is not wired into the staker. If a re-run could irrecoverably grant mint authority to an attacker-influenced address or strand user funds, this would be Medium — neither is the case here. Per-entryPoint fingerprint correctly prevents suppression by the superseded YS-35 route. CONSIDER for a future re-weigh only if the project's checkpoint pattern is later shown to make re-runs likely/expected in the live runbook."
+      }
+    ],
+    "escalationCheck": {
+      "anyShouldBeHigh": false,
+      "reason": "No finding has an asset-theft/loss/compromise path or a direct exploit. The two fatal reverts are fail-loud, fork-confirmed atomic DOAs; the buffer drift is a conditional cushion degradation; the three Lows are conditional/standalone-impactless operational/state-handling gaps."
+    },
+    "understatementCheck": {
+      "anyLowSecretlyMedium": false,
+      "closestCall": "CLASS-006 (recoverable split-brain on re-run) — held at Low because the split-brain is recoverable, re-run-contingent, and strands no user funds. CLASS-003 sits correctly at Medium (genuine value/availability degradation), not Low."
+    },
+    "recommendation": "Accept the severity-classifier output as-is. 0 High / 3 Medium / 3 Low is correct under C4 and the three-law hierarchy. Do NOT escalate DEDUP-001/002 to High (atomicity + fail-loud confirmed). Do NOT downgrade CLASS-003 to Low. Reconcile findings-classified.json unchanged."
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "entryPoint": "migrate:saga2.1-deploy",
+  "kind": "fork-based recheck",
+  "baselineCommit": "6d733ab",
+  "targetCommit": "21c5917",
+  "fixCommits": [
+    "3078025 — incorrect call to setaside buffer on old yield strategy on saga 2.1 removed (script + migration-plan doc)",
+    "21c5917 — Pauser and ABI fixes in response to audit (script)"
+  ],
+  "changedFiles": ["script/MigrateSaga2Deploy.s.sol", "docs migration-plan (3078025)"],
+  "mode": "fork-preview",
+  "rpc": "RPC_MAINNET (live)",
+  "forkBlockApprox": 25321018,
+  "previewResult": {
+    "variant": "migrate:saga2.1-deploy-preview (PREVIEW_MODE=true, owner-prank, NO broadcast)",
+    "reverted": false,
+    "ranToCompletion": true,
+    "note": "Script now runs end-to-end: 'Script ran successfully'. Reached the final summary ('SAGA 2.1 (deploy & freeze) complete'). Previously aborted on TWO independent deployed-ABI-drift reverts; both are gone.",
+    "workspaceEdits": {
+      "applied": "DOLA_ALLOTMENT 0 -> 5e17, USDC_ALLOTMENT 0 -> 50e6 (audit-only, to clear the SAFE allotment tripwire within the live owner balance: 0.652 DOLA / 99.07 USDC). No deal(); used in-balance values.",
+      "reverted": "git checkout script/MigrateSaga2Deploy.s.sol — workspace restored pristine vs 21c5917. Temp fetch remote removed. PoC test files preserved."
+    },
+    "observedKeyLogs": [
+      "InPlaceMigrator deployed; allotment funded",
+      "ysDolaV2 / ysUsdcV2 / minterV2 deployed",
+      "V2 registered USDe (rate 1e18, dec 18), DOLA (rate 1e18, dec 18), USDC (rate 1e18, dec 6)",
+      "phUSD minter: V1 revoked, V2 granted",
+      "V1 DOLA principal 13816.564..., V1 USDC principal 11935.645684 recorded"
+    ]
+  },
+  "findings": [
+    {
+      "id": "M-01",
+      "dedupId": "DEDUP-001",
+      "fingerprint": "carrybuffer setAsideBufferRecipient ABI drift on old strategy",
+      "priorSeverity": "medium",
+      "verdict": "FIXED",
+      "evidence": {
+        "diff": "Commit 3078025 deleted _carryBuffer() and its IYS getters (setAsideBufferSize/setAsideBufferRecipient). Replaced by _setBuffer(newYS) which writes recipient=STAKER + buffer=10% directly on the NEW strategy only. No staticcall to setAsideBufferRecipient() (selector 0x88b57777) on the deployed old DOLA/USDC strategy remains. The IStaker.yieldStrategy() and IYS.setAsideBuffer* interface declarations were removed.",
+        "fork": "Preview executed past the former revert point at script/MigrateSaga2Deploy.s.sol:138-144 (step 5a) without reverting. No call to the old strategies' setAsideBufferRecipient() in the -vvvv trace. Prior fatal revert #1 (EvmError empty-data at old strategy 0x90ce...) is gone.",
+        "fileLine": "script/MigrateSaga2Deploy.s.sol:138-144 (step 5a), helper _setBuffer at :200-204"
+      },
+      "howFarPreviewGot": "Full completion (previously aborted here)."
+    },
+    {
+      "id": "M-02",
+      "dedupId": "DEDUP-002",
+      "fingerprint": "registerOnV2 stablecoinConfigs 7-field ABI buffer overrun",
+      "priorSeverity": "medium",
+      "verdict": "FIXED",
+      "evidence": {
+        "diff": "Commit 21c5917 changed IMinterV1.stablecoinConfigs return tuple from 7 fields to the deployed 4-field shape (address yieldStrategy, uint256 exchangeRate, uint8 decimals, bool enabled). Both decode sites updated: _registerOnV2 (:191 `(, rate, dec,) = ...`) and _v1Strategy (:207 `(ys,,,) = ...`). An in-code NOTE warns against the 7-field source ABI.",
+        "fork": "_registerOnV2 now decodes and replicates V1 config without reverting for all three tokens: USDe (rate 1e18, dec 18), DOLA (rate 1e18, dec 18), USDC (rate 1e18, dec 6). Prior fatal revert #2 (ABI buffer overrun on stablecoinConfigs(USDE)) is gone. StablecoinRegistered events emitted for all three.",
+        "replicationFidelity": "Replicated values MATCH live V1 4-field reads (cast against MINTER_V1 0x435B...): DOLA -> (0x90ce...,1e18,18,true); USDC -> (0x90af...,1e18,6,true); USDe -> (0xaC2e...,1e18,18,true). The 4-field decode reads the correct rate/decimals — no field-shift. registerStablecoin points DOLA/USDC at the NEW strategies (intended), USDe at the existing market YS (intended).",
+        "fileLine": "script/MigrateSaga2Deploy.s.sol:191, :207, interface at :276-284"
+      },
+      "howFarPreviewGot": "Full completion (previously aborted here when buffer-recipient call was bypassed)."
+    },
+    {
+      "id": "L-01",
+      "dedupId": "DEDUP-004",
+      "fingerprint": "net-new strategies AND minterV2 deployed without setPauser (unpausable)",
+      "priorSeverity": "low",
+      "verdict": "PARTIALLY-FIXED (still-live for minterV2)",
+      "evidence": {
+        "diff": "Commit 21c5917 added step 5b: ysDolaV2.setPauser(PAUSER); ysUsdcV2.setPauser(PAUSER); IPauserAdmin(PAUSER).register(ysDolaV2/ysUsdcV2). Added PAUSER constant (0x7c5A...) and a _preflight require that Pauser.owner()==OWNER_ADDRESS. NO setPauser call was added for minterV2.",
+        "fork": "Both strategies wired correctly: trace shows ERC4626YieldStrategy::setPauser emitting PauserSet(0x0 -> 0x7c5A...) for each, then PAUSER.register() (which staticcalls pauser() and emits ContractRegistered) for each — no reverts. Precondition confirmed live: Pauser.owner()==0xCad1...D0B6==OWNER (register is onlyOwner), Pauser has bytecode. setPauser-before-register ordering is correct (register validates pauser()).",
+        "stillLive": "PhusdStableMinter::setPauser is NEVER called in the trace (0 occurrences). minterV2 deploys with pauser==address(0). PhusdStableMinter.pause() requires msg.sender==pauser, so with pauser==0 the minter can NEVER be paused by anyone — exactly the L-01 condition for the minter half. The original L-01 explicitly covers BOTH strategies AND minterV2; only the strategy half is fixed.",
+        "fileLine": "Fix at script/MigrateSaga2Deploy.s.sol:146-153 (step 5b). Gap: no minterV2.setPauser anywhere in run(); PhusdStableMinter.setPauser exists at lib/phUSD-stable-minter/src/PhusdStableMinter.sol:76 and pause() at :86."
+      },
+      "howFarPreviewGot": "Full completion. The minter pauser gap is a missing step, not a revert.",
+      "recommendation": "Add minterV2.setPauser(PAUSER) in step 5b (and register if the global Pauser supports minter contracts), plus a post-condition assert minterV2.pauser()==PAUSER. The minter holds the active phUSD mint authority and is the most pause-relevant net-new contract."
+    }
+  ],
+  "newIssuesIntroducedByFix": [
+    {
+      "title": "L-01 fix is incomplete: phUSD minter V2 still deployed unpausable (minterV2.setPauser never called)",
+      "severity": "low",
+      "category": "access-control",
+      "rootCauseClass": "missing-pauser-registration",
+      "entryPoint": "migrate:saga2.1-deploy",
+      "contract": "script/MigrateSaga2Deploy.s.sol",
+      "function": "run (step 5b)",
+      "lineStart": 146,
+      "lineEnd": 153,
+      "description": "The Pauser fix wires setPauser+register for ysDolaV2/ysUsdcV2 but omits the same wiring for minterV2. minterV2 carries the active phUSD mint authority (V1 revoked, V2 granted in step 8) and deploys with pauser==address(0); PhusdStableMinter.pause() requires msg.sender==pauser, so it is permanently unpausable. This is the un-remediated half of L-01/DEDUP-004 rather than a wholly new bug — recommend the existing L-01 ledger entry be kept OPEN (status not -> fixed) for the minter, and the strategy portion noted as resolved.",
+      "impact": "No direct asset loss. No break-glass/pause on the net-new contract that holds the live phUSD mint authority; bites only if a future incident needs the minter paused. C4 Low/QA operational-availability footgun.",
+      "evidence": "Fork -vvvv trace: 0 PhusdStableMinter::setPauser calls; strategies get PauserSet(0x0->0x7c5A...) and ContractRegistered, minterV2 does not.",
+      "recommendation": "Add minterV2.setPauser(PAUSER) (+ register if supported) and a pauser()!=0 post-condition assert."
+    }
+  ],
+  "regressionChecks": {
+    "bufferUnset": "NO new problem from removing the old-strategy read. _setBuffer still writes recipient=STAKER + buffer=10% on each NEW strategy (SetAsideBufferRecipientSet + SetAsideBufferSet(staker, 0->10) observed). Buffer is NOT left unset. The 25->10 reduction vs the live old strategy is M-03 (owner won't-fix) and is NOT re-reported; the comment/doc now state 10% as a deliberate set (not a carry-forward), and 2.3 asserts ==10 (internally consistent).",
+    "abiFixFieldShift": "NO field-shift. 4-field decode reads exactly (yieldStrategy, exchangeRate, decimals, enabled); replicated rate/decimals match live V1 for all three tokens. _v1Strategy also updated to the 4-tuple and returns the correct old strategy address for the principal-recording step.",
+    "pauserTarget": "Pauser target valid: 0x7c5A... has bytecode, owner==OWNER (precondition enforced), register() succeeds and validates pauser() on each strategy. No invalid/zero pauser introduced for the strategies.",
+    "doNotReport": "M-03 / L-02 / L-03 are owner won't-fix and were not re-evaluated/re-reported. Deferred-by-design items (buffer-as-idle-balance in 2.2, mint-availability gap closed by back-to-back 2.1->2.2, DOLA/USDC seeding in 2.2) are not reported."
+  },
+  "verdictSummary": {
+    "M-01": "FIXED",
+    "M-02": "FIXED",
+    "L-01": "PARTIALLY-FIXED — strategies fixed, minterV2 still unpausable (STILL-LIVE for the minter half)"
+  },
+  "workspaceState": "pristine at 21c5917 (git status clean for tracked files; audit allotment edits reverted; temp fetch remote removed; PoC test files under test/ preserved).",
+  "recheckedAt": "2026-06-15"
+}
