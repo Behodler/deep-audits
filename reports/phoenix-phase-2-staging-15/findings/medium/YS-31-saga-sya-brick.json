@@ -1,0 +1,56 @@
+{
+  "id": "YS-31",
+  "project": "phoenix-phase-2-staging",
+  "status": "ready",
+  "severity": "medium",
+  "title": "Cleanup tail bricks SYA.claim(): step 11 deregisters the WRONG (decommissioned, empty 0x3bBE) accumulator, so the old DOLA/USDC strategies stay registered on the live production SYA 0x3C69, and step 12 pausing them reverts the default permissionless claim() for all callers",
+  "entryPoint": "migrate:ys-sya-deregister",
+  "secondaryEntryPoint": "migrate:ys-old-strategy-decommission",
+  "contract": "script/DeregisterOldStrategiesFromSYA.s.sol",
+  "secondaryContracts": [
+    "script/DecommissionOldStrategies.s.sol",
+    "script/DeployTempStableStakerAndMigrators.s.sol",
+    "script/PostMigrationCleanup.s.sol",
+    "lib/stable-yield-accumulator/src/StableYieldAccumulator.sol",
+    "lib/vault/src/AYieldStrategy.sol"
+  ],
+  "function": "run",
+  "rootCauseClass": "WrongHardcodedAddress / SplitAccumulatorWiring",
+  "fingerprint": "6f8967179cc30e36b9de22dff05cc6497b8a4161038b979d7e7ee3fcf43d5f07",
+  "origin": "new",
+  "firstSeenRun": "phoenix-phase-2-staging-15",
+  "lastSeenRun": "phoenix-phase-2-staging-15",
+  "firstSeenCommit": "0e190e8",
+  "lastSeenCommit": "0e190e8",
+  "plausibility": "plausible",
+  "footgun": true,
+  "faithfulness": false,
+  "regression": false,
+  "rootCause": "DeregisterOldStrategiesFromSYA.s.sol (step 11) hardcodes LIVE_SYA = 0x3bBE — a decommissioned, EMPTY StableYieldAccumulator instance — instead of the live production accumulator 0x3C69 that step 1 registered the V2 strategies on and step 9 asserts against. Because 0x3bBE's registry is empty, removeYieldStrategy(YS_DOLA_OLD)/removeYieldStrategy(YS_USDC_OLD) are silent no-ops; the owner-equality preflight passes (both SYAs are owner-owned) and the post-asserts pass vacuously (the OLDs are 'absent' from the empty 0x3bBE). The old DOLA/USDC strategies therefore REMAIN registered on the live 0x3C69.",
+  "impact": "No assets stolen or lost. Step 12 (DecommissionOldStrategies) then pauses YS_DOLA_OLD and YS_USDC_OLD while they are still registered on the live 0x3C69. The default permissionless StableYieldAccumulator.claim(i, m, []) — the path the UI and keepers actually call — iterates registered strategies and skips only on tokenConfig.paused; the old DOLA/USDC TOKEN configs are NOT paused (only the strategy contracts are), so claim() calls skimSurplus() on a paused strategy, hits whenNotPaused, and reverts EnforcedPause. The canonical yield-claim path is bricked for ALL callers until owner action. This is an availability / protocol-function DoS on yield consolidation, not a theft.",
+  "attackPath": [
+    "1. Operator runs the documented saga in order; step 1 registers the V2 strategies on the live SYA 0x3C69, step 9 asserts against 0x3C69 (all green).",
+    "2. Step 11 (DeregisterOldStrategiesFromSYA) hardcodes LIVE_SYA = 0x3bBE (decommissioned, empty); removeYieldStrategy is a silent no-op; owner-equality preflight and post-asserts pass vacuously.",
+    "3. The old DOLA/USDC strategies remain registered on the live 0x3C69.",
+    "4. Step 12 (DecommissionOldStrategies) pauses YS_DOLA_OLD and YS_USDC_OLD while still registered on 0x3C69.",
+    "5. Any claim(i, m, []) iterates registered strategies; SYA skips only on tokenConfig.paused (DOLA/USDC token configs are NOT paused), so it calls skimSurplus() on a paused strategy -> whenNotPaused reverts EnforcedPause -> the entire claim() reverts for everyone."
+  ],
+  "recommendation": "Apply BOTH the immediate address fix and the structural guard so the class cannot recur: (1) Point step 11 LIVE_SYA at the production accumulator 0x3C69 (the same instance step 1 registered the V2 strategies on and step 9 asserts against, matching mainnet-addresses.ts). AND/OR (2) make the guard fail loud rather than vacuous: assert the old strategies are PRESENT on the target SYA BEFORE attempting removeYieldStrategy (so a wrong/empty target reverts instead of no-op'ing), and assert they are DEREGISTERED from the live 0x3C69 BEFORE step 12 pauses them (so the pause can never land on a still-registered strategy). Pin the SYA target against mainnet-addresses.ts rather than a bare in-script constant.",
+  "poc": {
+    "file": "workspace/phoenix-phase-2-staging/test/SagaCleanupSYABrick.t.sol",
+    "status": "passing",
+    "result": "4/4 PASS (EnforcedPause confirmed)",
+    "forkBlock": 25313321,
+    "lastRun": "2026-06-14"
+  },
+  "severityRationale": "Medium, not High: no funds are stolen or permanently lost — impact is impaired protocol function / availability (the default permissionless yield-claim path is dead). Bounded below High by the exemptStrategies escape hatch: because the paused olds remain registered they are exempt-eligible, so a caller passing [YS_DOLA_OLD, YS_USDC_OLD] routes around the revert, and the owner can fully remediate (re-point step 11 at 0x3C69 and deregister, or unpause). Not Low because the DEFAULT path the UI and keepers call is bricked for all users until owner action — C4 'protocol function or availability impacted'.",
+  "footgunRationale": "Non-obvious owner footgun (Law 3, in scope): a competent non-malicious operator runs the documented step order and sees a fully green run (owner check + post-asserts all pass) yet has silently bricked the canonical claim path. Surprise => footgun => report; classified by the availability impact, not as malicious-admin. Safe-config guidance: pin step 11 LIVE_SYA to 0x3C69 and assert present-before-remove / deregistered-before-pause (fail loud, not vacuous no-op).",
+  "threeLawFraming": "Law 1 (no exploits) governs: self-inflicted availability DoS of the permissionless yield-claim path, reached deterministically through the documented runbook by a non-malicious operator. Honest severity Medium: protocol function/availability impacted, no asset theft, owner-remediable, escape hatch exists. Not a Law-2 faithfulness deviation (the story intent is correct; the script targets the wrong address).",
+  "relatedNote": "Enabled by the guard-design weakness tracked as YS-33 (WeakPreconditionGuard, Low, same DeregisterOldStrategiesFromSYA.s.sol) — kept separate so the assert-present-before-remove remediation survives even if only the address constant is fixed. Distinct from ledger YS-03/44dc0e3a (SYA-not-repointed-to-V2 on the deploy entry, opposite direction: V2 never added; here olds never removed + wrong instance). Distinct from YS-11/6b3c3b98 and YS-12/633f3485.",
+  "metadata": {
+    "createdAt": "2026-06-14",
+    "updatedAt": "2026-06-14",
+    "scanOrigin": "DEDUP-15-001",
+    "classificationOrigin": "CLASS-001"
+  }
+}

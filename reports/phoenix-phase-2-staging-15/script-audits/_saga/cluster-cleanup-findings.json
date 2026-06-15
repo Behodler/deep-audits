@@ -1,0 +1,93 @@
+{
+  "agent": "script-auditor (cluster-cleanup tail: steps 9, 11, 12, OOB-breakglass)",
+  "saga": "Story 060+065 YS-swap + phUSD-minter migration",
+  "headCommit": "0e190e8",
+  "forkBlock": 25313321,
+  "mode": "fork-preview",
+  "rpcEnv": "RPC_MAINNET",
+  "findings": [
+    {
+      "id": "SAGA-SYA-BRICK",
+      "title": "Cleanup tail bricks SYA.claim(): step 11 deregisters the WRONG (empty) accumulator, leaving the old strategies registered on the live SYA when step 12 pauses them",
+      "severity": "medium",
+      "entryPoint": "migrate:ys-sya-deregister + migrate:ys-old-strategy-decommission",
+      "contract": "lib/phoenix-phase-2-staging/script/DeregisterOldStrategiesFromSYA.s.sol",
+      "secondaryContracts": [
+        "lib/phoenix-phase-2-staging/script/DecommissionOldStrategies.s.sol",
+        "lib/stable-yield-accumulator/src/StableYieldAccumulator.sol",
+        "lib/vault/src/AYieldStrategy.sol"
+      ],
+      "function": "run / removeYieldStrategy (step11); _decommission/pause (step12); StableYieldAccumulator.claim",
+      "lineStart": 48,
+      "lineEnd": 104,
+      "rootCauseClass": "WrongHardcodedAddress",
+      "category": "cluster-interaction",
+      "mergeWith": "peer step-11 SYA-address-inconsistency finding (same root cause; this extends it with the decommission-side claim()-brick mechanism, severity calibration, and a fork PoC)",
+      "description": "DeregisterOldStrategiesFromSYA hardcodes LIVE_SYA = 0x3bBE928340c61a65Cb6C4a87B3fb59B6f3F7606a. Fork reads at block 25313321 show 0x3bBE.getYieldStrategies() == [] (empty) while the production accumulator 0x3C690EC3B2524104dE269bf0F9baa7f045eF8270 (the address in server/deployments/mainnet-addresses.ts:34, the one step 1 registered V2 onto and step 9 asserts against) holds [YS_DOLA_OLD 0x90ce, YS_USDE 0xaC2e, YS_USDC_OLD 0x90af]. server/deployments/progress.replace-sya.1.json is ground truth: {oldSYA: 0x3bBE, newSYA: 0x3C69} -- ReplaceSYAMainnet SUPERSEDED 0x3bBE with 0x3C69. The deregister comment cites RewireSYAToPhlimboV2 (a pre-replacement script), so it targets the dead old SYA. BOTH SYAs are owned by OWNER_ADDRESS, so the script's owner-equality preflight (line 71) does NOT catch the wrong target; the post-asserts (lines 101-104) also pass vacuously on the empty registry. Result: step 11 is a silent no-op on production -- the old DOLA/USDC strategies remain registered on the live SYA 0x3C69.",
+      "impact": "Step 12 (DecommissionOldStrategies) then calls setPauser(OWNER)+pause() on YS_DOLA_OLD and YS_USDC_OLD while they are STILL registered on the live SYA. SYA.claim(nftIndex, minOut, exemptStrategies) iterates yieldStrategies and, for each whose SYA token-config is NOT paused (DOLA/USDC configs are live -- tokenConfigs[token].paused == false on fork), calls IYieldStrategy(strategy).skimSurplus(token, msg.sender) (StableYieldAccumulator.sol:464-484). AYieldStrategy.skimSurplus is whenNotPaused (AYieldStrategy.sol:461-465) -> a paused strategy reverts EnforcedPause. The SYA's per-strategy skip is keyed on the SYA's tokenConfig.paused, NOT the strategy's own pause state, so the paused old strategy is NOT skipped and the whole claim() reverts. The canonical permissionless claim path (empty exemptStrategies -- what the UI/keepers call) is DEAD for ALL claimers: yield can no longer be skimmed from the V2 strategies and routed to Phlimbo. This is a protocol-function/availability DoS (no funds stolen), self-inflicted by the cleanup tail.",
+      "failurePath": "step11 (no-op on 0x3bBE) -> olds stay registered on 0x3C69 -> step12 pause(YS_DOLA_OLD), pause(YS_USDC_OLD) -> any claim(i, m, []) -> loop reaches paused-but-registered old strategy -> tokenConfig not paused so not skipped -> skimSurplus reverts EnforcedPause -> claim() reverts for everyone.",
+      "mitigationExists": "exemptStrategies escape hatch: a claimer can pass [YS_DOLA_OLD, YS_USDC_OLD] in exemptStrategies (they are still registered, so exempt-eligible per StableYieldAccumulator.sol:453-455) to route around the paused strategies. This is OFF the canonical path -- default callers, the UI, and keepers using an empty array all revert -- so it bounds the issue to Medium (function impaired/availability) rather than High, but does not eliminate it: SYA yield consolidation is broken by default until the owner remediates.",
+      "remediation": "Two independent fixes, do either/both: (1) ADDRESS FIX: point step 11 LIVE_SYA at the production accumulator 0x3C69 (matching mainnet-addresses.ts and step1/step9) so the old strategies are actually deregistered before step 12 pauses them. (2) ORDERING/ROBUSTNESS: have step 11 read getYieldStrategies() and assert the old strategies are PRESENT before removing (fail loud on a wrong/empty target instead of vacuous no-op), and/or have step 12 assert the strategies are no longer registered on the live SYA before pausing. The dependency graph already claims this ordering ('old strategies deregistered from SYA before being emergency-swept+paused') -- the wrong address silently violates the stated invariant.",
+      "evidence": "FORK (block 25313321): 0x3bBE.getYieldStrategies()=[]; 0x3C69.getYieldStrategies()=[0x90ce,0xaC2e,0x90af]; both owner==OWNER. SYA-as-withdrawer==true on all three. tokenConfigs[DOLA/USDC/USDe].paused==false. progress.replace-sya.1.json: oldSYA=0x3bBE,newSYA=0x3C69; mainnet-addresses.ts:34=0x3C69. PoC test/SagaCleanupSYABrick.t.sol (4/4 PASS): pre-state skim succeeds; step11 no-op on 0x3C69; post-tail skimSurplus reverts (EnforcedPause); exempt-eligibility holds.",
+      "poc": "workspace/phoenix-phase-2-staging/test/SagaCleanupSYABrick.t.sol",
+      "verification": "empirical-fork"
+    },
+    {
+      "id": "SAGA-DEREGISTER-VACUOUS-GUARD",
+      "title": "DeregisterOldStrategiesFromSYA guards (owner-check + post-asserts) pass vacuously on a wrong-but-owned empty SYA, defeating the script's own drift protection",
+      "severity": "low",
+      "entryPoint": "migrate:ys-sya-deregister",
+      "contract": "lib/phoenix-phase-2-staging/script/DeregisterOldStrategiesFromSYA.s.sol",
+      "function": "run",
+      "lineStart": 69,
+      "lineEnd": 104,
+      "rootCauseClass": "WeakPreconditionGuard",
+      "category": "drift",
+      "description": "The script's docstring asserts it 'fails loud on the owner check' for a wrong address and is 'a clean no-op' for a correct address with nothing to remove. Both claims are false for the actual wrong address: 0x3bBE is owned by the same OWNER (owner check passes), and the post-asserts only check that the OLDs are absent (true on an empty registry) and that the V2 addresses survive removal -- but it never asserts the OLDs were PRESENT before removal, nor that the target SYA is the production one. So the wrong target produces a fully green run with zero effect. This is the enabling weakness behind SAGA-SYA-BRICK; recorded separately as the guard-design Low so the remediation (assert-present-before-remove) is tracked even if the address is fixed.",
+      "impact": "Drift/guard weakness: the script cannot distinguish 'correctly already-clean' from 'pointed at the wrong contract'. No direct loss on its own; it is the silent-failure mechanism that lets the brick reach production.",
+      "remediation": "Assert isRegistered(old) BEFORE removal (or that at least one removal occurred), and pin/verify the target against mainnet-addresses.ts StableYieldAccumulator at runtime.",
+      "evidence": "Same fork evidence as SAGA-SYA-BRICK.",
+      "verification": "empirical-fork"
+    },
+    {
+      "id": "SAGA-STEP9-PARTIAL-BROADCAST",
+      "title": "Step 9 unpauses both stakers BEFORE the YS-22 pauser-recorded require; with --skip-simulation a missing pauser key leaves stakers unpaused but pauser un-restored",
+      "severity": "low",
+      "entryPoint": "migrate:ys-swap-cleanup",
+      "contract": "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol",
+      "function": "run",
+      "lineStart": 357,
+      "lineEnd": 385,
+      "rootCauseClass": "OperationOrderingWithinBroadcast",
+      "category": "intent-mismatch",
+      "description": "Within the single broadcast block, unpause() on both stakers (lines 357-368) executes BEFORE the YS-22 require that the pausers were recorded (lines 371-385). The documented broadcast command uses --skip-simulation (line 51), under which forge sends txs as collected; a revert at the YS-22 require would land AFTER the unpause txs are already broadcast, leaving the live staker unpaused with its pauser NOT restored in the same run. (Without --skip-simulation the whole run is simulated and nothing broadcasts, so this is conditional on the documented flag.) The hazard is bounded: the keys are written by step 1 broadcast, the realistic trigger is a hand-edited JSON, and on resume the unpause is idempotent and the operator re-runs after populating the key; if the live staker's pauser was never changed from 0x7c5A..85a3 there is no exposure. Recorded as Low operational ordering, not a new Medium.",
+      "impact": "Narrow operator-error window: live staker reopened to users while still on a stale/unintended pauser until a corrective re-run. No fund loss; the YS-22 hard-revert still forces eventual correction.",
+      "remediation": "Move the YS-22 pauser-recorded requires ABOVE the unpause() calls (validate-then-mutate), or drop --skip-simulation so a revert rolls back the whole run.",
+      "evidence": "FORK: live staker 0xbce8 paused==false, pauser==0x7c5A8EeF1d836450C019FB036453ac6eC97885a3 (governance pauser, matches decommission comment), owner==OWNER. Static ordering read of PostMigrationCleanup.s.sol:343-403.",
+      "verification": "static + fork-state"
+    }
+  ],
+  "clearedAngles": [
+    {
+      "angle": "Step 9 minter teardown (setMinter(tempStaker,false))",
+      "result": "CLEAN. Only the temp staker authorization is revoked; the step-2 new minter is independently authorized and untouched; no window where the correct minter is left unauthorized.",
+      "verification": "static + fork"
+    },
+    {
+      "angle": "Step 12 emergencyWithdraw residual / revert-on-empty",
+      "result": "CLEAN. emergencyWithdraw is gated by getTotalShares()>0 (DecommissionOldStrategies.s.sol:105-113) so it no-ops rather than reverts when steps 5/6/8/10 have already drained the olds. Fork shows ~1.27e22 residual shares pre-saga (expected; evacuated by earlier steps before step 12)."
+    },
+    {
+      "angle": "Step 12 setClient(false)/setPauser/pause side effects on other live consumers",
+      "result": "Only the SYA consumer is affected (-> SAGA-SYA-BRICK). The live staker points DOLA/USDC at V2 by step 6 (fork: currently still old pre-saga, rewired by step6); USDe strategy is correctly left live and out of step 11/12 scope. OLD_MINTER mint authority already revoked in step 3; its client role revoked here is benign."
+    },
+    {
+      "angle": "Pauser restoration correctness (step 9)",
+      "result": "origPauser gate requires recorded AND non-zero (cannot leave deployer EOA on the live staker). Residual risk is step 1 recording a wrong NON-zero pauser, which YS-22 cannot catch -- folded into SAGA-STEP9 Low family, not a separate Medium."
+    },
+    {
+      "angle": "OOB migrate:ys-swap-breakglass (UnpauseStakerBreakGlass)",
+      "result": "No NEW issue. Standalone owner-gated unpause of the live staker with owner-equality preflight and early-return-if-not-paused. YS-21 fix confirmed by peer agent. No unintended writes beyond unpause()."
+    }
+  ]
+}

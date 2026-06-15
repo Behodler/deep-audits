@@ -1,0 +1,89 @@
+{
+  "project": "phoenix-phase-2-staging",
+  "saga": "Story 060+065 YS-swap + phUSD-minter migration",
+  "headCommit": "0e190e8",
+  "forkBlock": 25313223,
+  "mode": "fork-preview + targeted fork tests + source trace",
+  "rpc": "RPC_MAINNET (Alchemy, live)",
+  "verifiedAt": "2026-06-14",
+  "liveStateReads": {
+    "ORIGINAL_STABLE_STAKER": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A",
+    "owner": "0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6",
+    "paused": false,
+    "pauser": "0x7c5A8EeF1d836450C019FB036453ac6eC97885a3"
+  },
+  "results": [
+    {
+      "finding": "YS-24",
+      "fingerprint": "ba886105",
+      "title": "tempPauser zero-gate in PostMigrationCleanup always reverts on a valid prod run after a clean Step 1",
+      "proposedFix": "story-066 / e5f79ce",
+      "verdict": "FIXED",
+      "entryPoint": "migrate:ys-swap-cleanup",
+      "contract": "script/PostMigrationCleanup.s.sol",
+      "evidence": {
+        "fixLocation": "PostMigrationCleanup.s.sol:382-385 (tempPauser require dropped '&& recordedTempPauser != address(0)')",
+        "origPauserGateUntouched": "PostMigrationCleanup.s.sol:371-374 still requires recorded AND non-zero",
+        "tempPauserIsLegitimatelyZero": "DeployTempStableStakerAndMigrators.s.sol:256 records tempStaker.pauser() BEFORE line 270-271 sets it to OWNER; a freshly-deployed StableStaker leaves pauser==address(0) (StableStaker.sol:55 'address public override pauser;' uninitialized, no ctor assignment), so the recorded value is a legitimate zero, persisted at line 303",
+        "missingKeyStillFailsLoud": "try/catch on vm.parseJsonAddress(.tempPauser) sets tempPauserRecorded=false on a genuinely missing key -> require(tempPauserRecorded) reverts (line 382-385)",
+        "noNewHole": "A recorded zero only flows to setPauser(tempStaker, 0); tempStaker is decommissioned at cleanup so restore-to-zero is a harmless no-op. tempPauser SHOULD be zero (no governance pauser was ever wired on the throwaway temp staker); zero does NOT mask a real misconfiguration. The live staker's origPauser zero-rejection is preserved.",
+        "liveOrigPauserNonZero": "fork read: live staker pauser == 0x7c5A8EeF... (real Pauser contract), so origPauser gate is satisfiable on a real run"
+      }
+    },
+    {
+      "finding": "YS-25",
+      "fingerprint": "75e4305a",
+      "title": "promised 'ultimate gate' zero-haircut assertion absent from post-migration assert",
+      "proposedFix": "story-067 / 17dcfdf",
+      "verdict": "INCOMPLETE-FIX",
+      "entryPoint": "migrate:ys-swap-leg1 (root) / migrate:ys-swap-cleanup (gate site)",
+      "contract": "script/SkimAndLeg1Migration.s.sol (preMigBooked persistence) + script/PostMigrationCleanup.s.sol (floor)",
+      "evidence": {
+        "floorAdded": "PostMigrationCleanup.s.sol:247-256 require(principalOf >= preMigBooked) per token, '>=' floor (correct direction; '==' would falsely revert on legit surplus)",
+        "floorIsSound_whenAnchorCorrect": "On a clean first run the anchor is pinned: SkimAndLeg1 preflight 204-218 requires leg1-stakers.json totalStaked == on-chain poolInfo[3] (gated stakerCount>0). Downstream-only protection is sound IF step9 runs after step8 re-books principal (interStepDependencyGraph CRITICAL ordering).",
+        "subQuestion_a_threadingTamperFree": "preMigBooked is sourced from leg1-stakers.json (vm.toString(parseJsonUint(.totalStaked))) NOT a live read; read back bare in step9 (reverts if missing). Tamper-free across the JSON bus ONLY while leg1-stakers.json is not re-gathered post-drain.",
+        "subQuestion_c_gap_CONFIRMED": "The fix is self-defeating on a resume. SkimAndLeg1 count-staleness preflight (lines 187-194) hard-requires leg1.count == on-chain stakerCount and the error message instructs 're-run gather'. After leg1 drains the pool (stakerCount->0, totalStaked->0) and the broadcast halts BEFORE the preMigBooked persistence block (lines 393-402, the LAST writes in run()), a resume FORCES a re-gather. gather-migration-inputs.js reads totalStaked LIVE from poolInfo[3] (line 257-263) and overwrites leg1-stakers.json with post-drain 0. SkimAndLeg1 re-run then SKIPS the totalStaked==chain preflight (stakerCount==0 gate, line 204) and persists dolaPreMigBooked/usdcPreMigBooked = 0. Step9 floor degrades to require(principalOf >= 0): VACUOUS. The story-067 author's own comment (SkimAndLeg1:388-392) claims a resume 're-persists the IDENTICAL value instead of post-drain 0' - that is FALSE once the forced re-gather rewrites the snapshot.",
+        "combinedWithPhase4UnderDelivery": "_prefundShortfall (SkimAndLeg1:523-528) only WARNS on injected<shortfall, never reverts; ResetAndRewire ceiling is one-sided '<=' (does not catch under-credit). With preMigBooked zeroed, the step9 floor was the SOLE end-to-end zero-haircut protection, so a real staker haircut reaches step9 uncaught.",
+        "poc": "test/PoC_YS25_PreMigBookedResumeZeroing.t.sol - 2 tests PASS: first-run floor catches a 1% haircut; resume re-gather zeroes preMigBooked and the same haircut passes the gate vacuously.",
+        "existingTestsInsufficient": "YsSwapMigrationHardening.t.sol test_zeroHaircutGate_* only unit-test a re-declared copy of the require expression (zeroHaircutGateDola/Usdc) pinning message+direction; they do NOT exercise the preMigBooked JSON-bus threading or the resume re-gather path, so they pass while the gap is live."
+      },
+      "newFinding": "YS-26"
+    },
+    {
+      "finding": "YS-21",
+      "fingerprint": "be9a5a92",
+      "title": "story-062 live-staker pause has no break-glass",
+      "proposedFix": "story-065 / UnpauseStakerBreakGlass.s.sol",
+      "verdict": "FIXED",
+      "entryPoint": "migrate:ys-swap-breakglass",
+      "contract": "script/UnpauseStakerBreakGlass.s.sol",
+      "evidence": {
+        "standalone": "Reads NO ys-swap-deployments.json and NO migration-inputs; only constants + live staker reads. Does not depend on a complete/partial migration artifact.",
+        "accessControl": "StableStaker.unpause() requires msg.sender == owner() || pauser (StableStaker.sol:282). Script uses owner 0xCad1...D0B6 and preflights require(staker.owner()==OWNER). Live fork read confirms owner == 0xCad1...D0B6.",
+        "idempotent": "Early-returns if !paused() (lines 65-68) - safe to run when staker already live.",
+        "forkPreview": "PREVIEW_MODE=true forge script ... ran successfully against fork @25313223; live staker currently unpaused -> 'already unpaused - nothing to do'.",
+        "forkProof": "fork test (transient): forced live staker into deploy-step paused state (setPauser(OWNER)+pause via prank), then owner unpause() succeeded, paused()==false. Confirms it unsticks a mid-suite halt that strands the live USDe pool.",
+        "noStateRequired": "A halted run that paused the staker (deploy step took pauser role + paused) leaves exactly the state breakglass needs: owner unchanged, staker paused. No downstream artifact required."
+      }
+    }
+  ],
+  "candidateFindings": [
+    {
+      "title": "YS-swap zero-haircut floor (story-067) is silently disabled on a leg-1 resume: forced re-gather zeroes preMigBooked",
+      "label": "YS-26",
+      "severity": "medium",
+      "contract": "script/SkimAndLeg1Migration.s.sol",
+      "function": "run / _globalPreflight (preMigBooked persistence + count-staleness preflight)",
+      "lineStart": 187,
+      "lineEnd": 219,
+      "secondarySite": {"contract": "script/PostMigrationCleanup.s.sol", "function": "run (floor gate)", "lineStart": 247, "lineEnd": 256},
+      "entryPoint": "migrate:ys-swap-leg1",
+      "rootCauseClass": "ResumePathInvariantErosion",
+      "category": "cluster-interaction",
+      "description": "story-067 added a zero-haircut FLOOR in PostMigrationCleanup: require(principalOf(token, original) >= preMigBooked). preMigBooked is persisted by SkimAndLeg1Migration from leg1-stakers.json's .totalStaked snapshot. That snapshot is produced by gather-migration-inputs.js, which reads totalStaked LIVE from on-chain poolInfo[3]. SkimAndLeg1's own count-staleness preflight (lines 187-194) hard-reverts with 'stale ... re-run gather' whenever leg1-stakers.json .count != on-chain stakerCount. After leg1 drains the pool (stakerCount->0, totalStaked->0) and the broadcast halts BEFORE the preMigBooked persistence block (lines 393-402, the final writes in run()), a resume FORCES the operator to re-gather. The re-gather overwrites the snapshot's totalStaked with the post-drain value 0. On the SkimAndLeg1 re-run, the totalStaked==on-chain preflight (lines 204-218) is SKIPPED because stakerCount==0, so the script persists preMigBooked = 0. The step-9 floor then degrades to require(principalOf >= 0) - vacuously true. The author's own code comment (lines 388-392) asserts a resume 're-persists the IDENTICAL value instead of the post-drain 0'; the forced re-gather makes that assumption false.",
+      "impact": "The zero-haircut floor is the SOLE end-to-end protection that a two-leg migration never shortchanges a staker: ResetAndRewire's step-6 post-assert is a one-sided '<=' over-credit CEILING (does not catch under-credit), and SkimAndLeg1's Phase-4 _prefundShortfall only WARNs (never reverts) when injected < shortfall. With preMigBooked silently zeroed on the resume path, a real haircut (Phase-4 under-prefund + sub-swept principal) flows through step 9 uncaught and reaches users who then withdraw less than their booked principal. No malice and no concurrency required - it is reachable through the documented resume runbook (the script's own error message directs the operator to re-gather).",
+      "evidence": "SkimAndLeg1Migration.s.sol:187-194 (count preflight forces re-gather), :204-218 (totalStaked preflight skipped when stakerCount==0), :393-402 (persists preMigBooked from snapshot, last writes), :388-392 (false 'identical value' comment); scripts/gather-migration-inputs.js:257-263,326 (totalStaked read live, file overwritten); PostMigrationCleanup.s.sol:247-256 (floor); PoC test/PoC_YS25_PreMigBookedResumeZeroing.t.sol (2 PASS).",
+      "recommendation": "Make preMigBooked write-once / tamper-evident: (1) In SkimAndLeg1, before persisting, read back any existing .dolaPreMigBooked/.usdcPreMigBooked via try/parseJsonUint and refuse to OVERWRITE a previously-recorded non-zero value with a smaller one (idempotent re-persist of the original, not the post-drain 0). (2) OR hard-require preMigBooked > 0 in PostMigrationCleanup (lines 247-256) so a zeroed anchor fails loud instead of passing vacuously - reject the gate value the way YS-22 rejects an unrecorded pauser. (3) OR source preMigBooked from a snapshot file that is NEVER overwritten on resume (e.g. a separate first-run-only premig-booked.json gated on its own absence). (4) Make _prefundShortfall HARD-REVERT on injected < shortfall rather than WARN, removing the reliance on a single downstream gate."
+    }
+  ]
+}

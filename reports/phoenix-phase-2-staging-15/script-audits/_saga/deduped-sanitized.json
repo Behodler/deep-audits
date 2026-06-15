@@ -1,0 +1,223 @@
+{
+  "stage": "deduplicator + sanitizer",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-15",
+  "saga": "Story 060+065 YS-swap + phUSD-minter migration ('ys-swap migration saga')",
+  "headCommit": "0e190e8",
+  "ledger": "reports/ledgers/phoenix-phase-2-staging.json",
+  "ledgerLastAuditedCommit": "00dd45f",
+  "knownIssuesSource": "registered-projects.json -> projects.phoenix-phase-2-staging.knownIssues (11 items); no scope.md / known-issues.md exists in the submodule",
+  "reconciliationMethod": "Per-entryPoint fingerprint folding (sha256(contract:function:rootCauseClass[:entryPoint])). Candidate root-cause classes + entryPoints compared against ledger entries; titles/contracts/line ranges cross-checked. Three-law filter applied (owner non-malicious; obvious misconfig invalid; non-obvious footgun in scope).",
+
+  "mergesPerformed": [
+    {
+      "mergedInto": "SAGA-SYA-BRICK",
+      "sources": [
+        "cluster-legs-findings.json :: 'YS-swap SYA wiring is split across two different StableYieldAccumulator instances' (Medium)",
+        "cluster-cleanup-findings.json :: 'SAGA-SYA-BRICK — Cleanup tail bricks SYA.claim()' (Medium)"
+      ],
+      "reason": "Identical root cause and target contract (DeregisterOldStrategiesFromSYA.s.sol hardcodes the wrong, decommissioned, empty SYA 0x3bBE so the old DOLA/USDC strategies are never removed from the live production accumulator 0x3C69). The cluster-legs framing surfaced the two-instance split; the cluster-cleanup framing extends it with the precise step-12 pause -> claim() brick mechanism (skimSurplus whenNotPaused, SYA per-strategy skip keyed on tokenConfig.paused not strategy pause-state) plus the fork PoC. Kept the cluster-cleanup strongest framing: root cause = step 11 wrong-SYA leaves olds registered on 0x3C69; impact = step 12 pause bricks the default permissionless claim() path. The cluster-minter clusterNote (SYA-MISMATCH-step11) is the same issue deferred to the step-11 agent — folded in, NOT a third instance.",
+      "preservedDetails": "claim()/skimSurplus whenNotPaused mechanism, exemptStrategies escape-hatch bounding to Medium, fork evidence (0x3bBE empty / 0x3C69 holds olds), PoC test/SagaCleanupSYABrick.t.sol (4/4 PASS)."
+    }
+  ],
+
+  "duplicatesDropped": [
+    {
+      "candidate": "cluster-minter-findings.json :: clusterNote 'SYA-MISMATCH-step11'",
+      "disposition": "FOLDED-INTO SAGA-SYA-BRICK",
+      "reason": "Self-described as a pointer for the step-11/12 agent, explicitly 'not double-reported by this sub-saga'. Same root cause as the merged SYA-brick. Not a separate finding."
+    }
+  ],
+
+  "findings": [
+    {
+      "id": "DEDUP-15-001",
+      "title": "Cleanup tail bricks SYA.claim(): step 11 deregisters the WRONG (decommissioned, empty 0x3bBE) accumulator, so the old DOLA/USDC strategies stay registered on the live production SYA 0x3C69, and step 12 pausing them reverts the default permissionless claim() for all callers",
+      "severity": "medium",
+      "entryPoint": "migrate:ys-sya-deregister + migrate:ys-old-strategy-decommission",
+      "contract": "lib/phoenix-phase-2-staging/script/DeregisterOldStrategiesFromSYA.s.sol",
+      "secondaryContracts": [
+        "lib/phoenix-phase-2-staging/script/DecommissionOldStrategies.s.sol",
+        "lib/phoenix-phase-2-staging/script/DeployTempStableStakerAndMigrators.s.sol",
+        "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol",
+        "lib/stable-yield-accumulator/src/StableYieldAccumulator.sol",
+        "lib/vault/src/AYieldStrategy.sol"
+      ],
+      "rootCauseClass": "WrongHardcodedAddress / SplitAccumulatorWiring",
+      "status": "new",
+      "mergedFrom": ["cluster-legs SYA-split (Medium)", "cluster-cleanup SAGA-SYA-BRICK (Medium)", "cluster-minter SYA-MISMATCH-step11 clusterNote"],
+      "reconciliationNote": "NEW. No existing ledger finding covers the wrong-SYA-address brick. Checked: YS-11 (6b3c3b98) is standing-migrator-after-complete (different); YS-12 (633f3485) is the phUSD-minter position left on old strategies (different); YS-03 (44dc0e3a, proposed-fixed) is SYA-not-repointed-to-V2 on the DEPLOY entry (different root cause + different entryPoint + opposite direction: YS-03 = V2 never added; this = olds never removed + wrong instance). New entry points (migrate:ys-sya-deregister, migrate:ys-old-strategy-decommission) have no prior baseline, so this cannot be a regression. Per-entryPoint fingerprint is distinct from all open entries.",
+      "knownIssueSuppressed": "n",
+      "knownIssueAnalysis": "NOT suppressed. Known-issue #9 ('External vault/yield strategy behavior (out of scope)') does NOT apply — the defect is an in-repo migration-SCRIPT wrong-address constant, not behavior internal to the external strategy/accumulator. Known-issue #10 (admin trust for registering strategies) does NOT apply — this is a non-obvious wrong-target footgun, not an owner trust assumption.",
+      "threeLawAnalysis": "IN SCOPE per Law 1/Law 3. A competent non-malicious operator running the documented runbook would be SURPRISED that the cleanup tail silently no-ops on an empty decommissioned SYA (owner-equality preflight + post-asserts all pass green) and then bricks the canonical yield-claim path. Surprise => footgun => report. Self-inflicted availability DoS (no funds stolen).",
+      "poc": "workspace/phoenix-phase-2-staging/test/SagaCleanupSYABrick.t.sol",
+      "verification": "empirical-fork (block 25313321, 4/4 PASS)"
+    },
+    {
+      "id": "DEDUP-15-002",
+      "title": "YS-swap zero-haircut floor (story-067) is silently disabled on a leg-1 resume: the forced re-gather overwrites leg1-stakers.json totalStaked with the post-drain 0, so SkimAndLeg1 persists preMigBooked=0 and the step-9 cleanup floor degrades to require(principalOf >= 0) — vacuous",
+      "severity": "medium",
+      "entryPoint": "migrate:ys-swap-leg1",
+      "secondaryEntryPoint": "migrate:ys-swap-cleanup (floor gate site)",
+      "contract": "script/SkimAndLeg1Migration.s.sol",
+      "secondaryContracts": [
+        "script/PostMigrationCleanup.s.sol",
+        "scripts/gather-migration-inputs.js"
+      ],
+      "rootCauseClass": "ResumePathInvariantErosion",
+      "status": "new",
+      "label": "YS-26 (this run)",
+      "reconciliationNote": "NEW, spawned from the INCOMPLETE fix of YS-25 / 75e4305a. YS-25 (entryPoint migrate:ys-swap-reset) remains OPEN-AND-INCOMPLETELY-FIXED: story-067 added the floor but it is self-defeating on the documented resume path. This finding is a DISTINCT defect at a DIFFERENT entryPoint (migrate:ys-swap-leg1, where preMigBooked is persisted) with a distinct root-cause class (ResumePathInvariantErosion vs YS-25's MissingPostAssert). Per-entryPoint fingerprinting keeps them distinct; do not collapse into 75e4305a. NOTE: the label 'YS-26' was previously used in run-14 for ledger entry 0a2387e6 (new phUSD minter no pauser) — UNRELATED; that label reuse is cosmetic, the fingerprints differ.",
+      "linkedOpenFinding": {
+        "fingerprint": "75e4305a",
+        "label": "YS-25",
+        "status": "open / incomplete-fix",
+        "note": "Keep YS-25 open. story-067 (17dcfdf) added the floor but the resume re-gather path zeroes the anchor. Also relatedTo 88331e64 (YS-30 prefund integer truncation, open Low) — together a systemic silent-haircut path."
+      },
+      "knownIssueSuppressed": "n",
+      "knownIssueAnalysis": "NOT suppressed. Not external strategy behavior (#9) — it is the migration script's own off-chain JSON-bus + gate logic. Not admin trust (#10) — reachable through the script's own error message directing the operator to re-gather.",
+      "threeLawAnalysis": "IN SCOPE per Law 1. Non-obvious footgun: the author's own code comment asserts a resume re-persists the IDENTICAL value, which the forced re-gather makes false. With the sole end-to-end zero-haircut protection vacuous on resume, a real staker haircut (Phase-4 under-prefund only WARNs; ResetAndRewire ceiling is one-sided) reaches users uncaught. Value leak with external/sequence requirement => Medium.",
+      "poc": "test/PoC_YS25_PreMigBookedResumeZeroing.t.sol (2/2 PASS)",
+      "verification": "empirical-fork"
+    },
+    {
+      "id": "DEDUP-15-003",
+      "title": "story-067 zero-haircut FLOOR measures the buffer-inflated strategy principalOf, not user-withdrawable totalStaked, so a genuine per-user haircut passes the gate even on a CLEAN run",
+      "severity": "low",
+      "entryPoint": "migrate:ys-swap-cleanup",
+      "secondaryEntryPoint": "migrate:ys-swap-leg2 (cause)",
+      "contract": "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol",
+      "lineStart": 247,
+      "lineEnd": 256,
+      "rootCauseClass": "WeakGate / WrongComparand",
+      "status": "new",
+      "reconciliationNote": "NEW and KEPT DISTINCT from DEDUP-15-002 (YS-26). Confirmed genuinely different defect: this is the gate measuring the WRONG QUANTITY (principalOf includes the protocol-owned skim buffer, which dwarfs and masks a per-user haircut) and it fails even on a CLEAN run with a correct non-zero anchor; YS-26 is the anchor-ZEROING resume path. Complementary, not duplicate. Also distinct from ledger YS-05/5c9f1cee (leg2 ~0.026% redeposit haircut, open Low) which is the haircut MAGNITUDE; this is the GATE-BLINDNESS to it. Cross-link only.",
+      "knownIssueSuppressed": "n",
+      "threeLawAnalysis": "IN SCOPE as Low. On the ERC4626 autoDOLA/autoUSD strategies the round-trip haircut is bounded to redeem-rounding dust (~0.024%) and the buffer always exceeds it, so impact is Low. Documented amplification risk: a future YS-swap reusing this gate against an AMM/market strategy with real slippage would let a materially larger haircut pass the blind gate. Keep as Low operational/intent-mismatch.",
+      "poc": "test/AuditYsSwapBounceE2E.t.sol (referenced, PASS)",
+      "verification": "empirical-fork"
+    },
+    {
+      "id": "DEDUP-15-004",
+      "title": "DeregisterOldStrategiesFromSYA guards (owner-check + post-asserts) pass vacuously on a wrong-but-owned empty SYA, defeating the script's own drift protection",
+      "severity": "low",
+      "entryPoint": "migrate:ys-sya-deregister",
+      "contract": "lib/phoenix-phase-2-staging/script/DeregisterOldStrategiesFromSYA.s.sol",
+      "lineStart": 69,
+      "lineEnd": 104,
+      "rootCauseClass": "WeakPreconditionGuard",
+      "status": "new",
+      "reconciliationNote": "NEW. Kept SEPARATE from DEDUP-15-001 (the Medium brick) deliberately: this is the guard-DESIGN weakness (no assert-present-before-remove, no target pin against mainnet-addresses.ts) that is the enabling mechanism behind the brick. Tracking it separately ensures the remediation survives even if only the address is fixed. Same fork evidence as DEDUP-15-001. No matching ledger entry.",
+      "knownIssueSuppressed": "n",
+      "threeLawAnalysis": "IN SCOPE as Low (drift/guard weakness; no direct loss on its own).",
+      "poc": null,
+      "verification": "empirical-fork"
+    },
+    {
+      "id": "DEDUP-15-005",
+      "title": "Step 9 unpauses both stakers BEFORE the YS-22 pauser-recorded require; under the documented --skip-simulation a missing pauser key leaves the live staker unpaused but its pauser un-restored",
+      "severity": "low",
+      "entryPoint": "migrate:ys-swap-cleanup",
+      "contract": "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol",
+      "lineStart": 357,
+      "lineEnd": 385,
+      "rootCauseClass": "OperationOrderingWithinBroadcast",
+      "status": "new",
+      "reconciliationNote": "NEW. Distinct from ledger YS-22/10fac478 (proposed-superseded; pauser-restore CATCH-path leaving deployer EOA) and from YS-24/ba886105 (tempPauser zero-gate DoS). This is the validate-AFTER-mutate ORDERING of unpause vs the YS-22 require under --skip-simulation. Bounded operator-error window, no fund loss. Same cleanup script, different root cause/region. Per-entryPoint fingerprint distinct.",
+      "knownIssueSuppressed": "n",
+      "threeLawAnalysis": "IN SCOPE as Low operational ordering. Non-obvious (conditional on the documented --skip-simulation flag + a hand-edited JSON); fail-loud on re-run.",
+      "poc": null,
+      "verification": "static + fork-state"
+    },
+    {
+      "id": "DEDUP-15-006",
+      "title": "phoenix-ui mainnet-addresses.ts repoint is a manual out-of-worktree step; if skipped after the on-chain old-minter revocation, UI users hit revert on the revoked old minter until updated",
+      "severity": "low",
+      "entryPoint": "migrate:phusd-minter-cutover",
+      "contract": "scripts/patch-mainnet-addresses-phusd-minter-replace.js",
+      "secondaryContract": "script/CutoverAndRevokeOldMinter.s.sol",
+      "rootCauseClass": "OffChainReferenceDrift",
+      "status": "duplicate-of-existing",
+      "reconciliationNote": "DUPLICATE-OF-EXISTING. Matches ledger YS-28 / 34335a28 ('UI repoint after cutover is fully off-chain with no on-chain gate or timeout: premature broadcast leaves users on stale UI hitting reverts', open Low, entryPoint migrate:phusd-minter-cutover, same CutoverAndRevokeOldMinter.s.sol). Same root cause (OffChainReferenceDrift), same entryPoint. Do NOT re-report; remains STILL-OPEN under 34335a28.",
+      "knownIssueSuppressed": "n",
+      "threeLawAnalysis": "Already-ledgered Low; kept as operational, not dropped (per task instruction). Maps to existing open finding.",
+      "poc": null,
+      "supersedes": null,
+      "existingFingerprint": "34335a28"
+    },
+    {
+      "id": "DEDUP-15-007",
+      "title": "Step 1 has no 'already deployed' checkpoint; a mid-saga re-run silently redeploys V2/temp/migrators (unconditional `new`) and overwrites the deployments bus",
+      "severity": "low",
+      "entryPoint": "migrate:ys-swap-deploy",
+      "contract": "script/DeployTempStableStakerAndMigrators.s.sol",
+      "lineStart": 178,
+      "lineEnd": 206,
+      "rootCauseClass": "NonIdempotentDeploy",
+      "status": "new",
+      "flaggedForHumanReview": true,
+      "reconciliationNote": "NEW but OVERLAPS the FIXED YS-13 / 86a0f4fd ('deploy + leg2 non-idempotent, no resume', marked fixed at e935a05). story-062 made the WIRING calls idempotent (skip-if-already-target-state); this candidate is a NARROWER residual: the five `new` deployments themselves remain UNCONDITIONAL, so a re-run mints a fresh contract set while live wiring still references the first set. Downstream preflights catch the mismatch and revert (fail-loud, no silent corruption). Flagged for human review: could be argued a partial-regression of YS-13's deploy-idempotency claim, or a distinct never-closed sub-aspect. Recommend tracking as a new Low, cross-linked to 86a0f4fd, NOT a regression flip (YS-13's fixed scope was wiring-resume + --skip-simulation removal, which hold).",
+      "knownIssueSuppressed": "n",
+      "threeLawAnalysis": "IN SCOPE as Low operator footgun (fail-loud via downstream guards; stale bus must be manually restored).",
+      "poc": null,
+      "verification": "static",
+      "crossLink": "86a0f4fd (YS-13, fixed)"
+    }
+  ],
+
+  "droppedAsDuplicateOfLedger": [
+    {
+      "candidate": "cluster-legs-findings.json :: lowsAndNotes 'Skimmed USDe surplus is parked as orphaned idle on the live staker and never recovered by the saga' (Low)",
+      "disposition": "DUPLICATE-OF-EXISTING -> ledger YS-07 / 58911bd3 (open Low)",
+      "reason": "YS-07 ('skim proceeds ... leaving ~13.5 USDe orphaned as idle staker balance') already captures the orphaned-USDe-skim aspect at the same entryPoint (migrate:ys-swap-leg1) and same SkimAndLeg1Migration.s.sol. Same root cause (skim destination / un-rehomed surplus). STILL-OPEN under 58911bd3; not re-reported. The candidate's recommendation (sweep/rescue in cleanup) can be appended to YS-07's remediation by the finding-manager.",
+      "existingFingerprint": "58911bd3",
+      "knownIssueSuppressed": "n"
+    }
+  ],
+
+  "proposedLedgerStatusFlips": [
+    {
+      "fingerprint": "ba886105",
+      "label": "YS-24",
+      "title": "tempPauser zero-gate in PostMigrationCleanup always reverts on a valid prod run after a clean Step 1",
+      "currentStatus": "open",
+      "proposedStatus": "fixed",
+      "proposedFixedAtCommit": "0e190e8 (story-066 / e5f79ce)",
+      "evidence": "Fix-verifier VERDICT=FIXED. PostMigrationCleanup.s.sol:382-385 dropped the spurious '&& recordedTempPauser != address(0)'; a freshly-deployed StableStaker legitimately has pauser==address(0) (StableStaker.sol:55 uninitialized), so the recorded zero is valid and flows to a harmless setPauser(tempStaker,0) no-op on the decommissioned temp staker. Genuinely-missing key still fails loud via require(tempPauserRecorded). origPauser non-zero gate preserved; live staker pauser==0x7c5A... so origPauser gate is satisfiable. No new hole.",
+      "action": "Propose only — finding-manager / user to run `/ledger phoenix-phase-2-staging` to mark YS-24 fixed. Do NOT write."
+    },
+    {
+      "fingerprint": "be9a5a92",
+      "label": "YS-21",
+      "title": "story-062 live-staker pause has no break-glass",
+      "currentStatus": "open",
+      "proposedStatus": "fixed",
+      "proposedFixedAtCommit": "0e190e8 (story-065 / UnpauseStakerBreakGlass.s.sol)",
+      "note": "Ledger already records proposedStatus:fixed from run-14; this run RE-CONFIRMS via standalone fork preview + transient fork test. Re-affirm the flip.",
+      "evidence": "Fix-verifier VERDICT=FIXED. UnpauseStakerBreakGlass.s.sol is standalone (reads no migration artifacts), owner/pauser-gated (StableStaker.unpause requires owner||pauser; live owner==0xCad1...), idempotent (early-return if !paused), fork-preview ran clean, and a transient fork test forced the deploy-step paused state then owner-unpaused successfully. Unsticks a mid-suite halt that strands the live USDe pool.",
+      "action": "Propose only — `/ledger phoenix-phase-2-staging` to mark YS-21 fixed. Do NOT write."
+    }
+  ],
+
+  "ledgerOpenStatusPreserved": [
+    {
+      "fingerprint": "75e4305a",
+      "label": "YS-25",
+      "status": "open",
+      "note": "KEEP OPEN — INCOMPLETE-FIX. story-067 (17dcfdf) added the cleanup floor but it is self-defeating on the documented leg-1 resume (anchor zeroed) and blind to the buffer on a clean run. Attach incomplete-fix info. New finding DEDUP-15-002 (YS-26 this run) is the leg-1 resume manifestation. Do not flip."
+    }
+  ],
+
+  "summary": {
+    "candidatesIn": 11,
+    "finalFindings": 7,
+    "ofWhichNew": 6,
+    "ofWhichMedium": 2,
+    "ofWhichLow": 5,
+    "duplicatesOfLedgerDropped": 2,
+    "intraSagaMerges": 1,
+    "intraSagaPointersFolded": 1,
+    "knownIssueSuppressed": 0,
+    "proposedLedgerFlips": 2
+  }
+}

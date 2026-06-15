@@ -1,0 +1,98 @@
+{
+  "cluster": "DEPLOY + phUSD-MINTER sub-saga (steps 1/2/3/10)",
+  "project": "phoenix-phase-2-staging",
+  "headCommit": "0e190e8",
+  "entryPoints": [
+    "migrate:ys-swap-deploy",
+    "migrate:phusd-minter-deploy",
+    "migrate:phusd-minter-cutover",
+    "migrate:phusd-minter-evacuate"
+  ],
+  "forkBlock": 25313319,
+  "mode": "fork-preview + in-process fork test (persistent state)",
+  "newMediumPlusFindings": [],
+  "summary": "No NEW Medium+ findings. All four hunt targets empirically refuted as correct/benign-by-design on a live mainnet fork. Minter authority transitions never leave phUSD with zero authorized minters (old minter overlaps new through steps 1-2, revoked only in step 3 after new minter is live; the staker reward path is a SEPARATE independent phUSD minter and is never touched). The 4000/day cap governs ONLY user-facing collateral mint() and cannot brick the migration (Phase-4 prefund uses owner-gated withdrawAsOwner, not minting) nor staker rewards (staker mints phUSD directly, uncapped). Evacuate/reseed reads principalOf fresh so it cannot double-count; the round-trip haircut (~2.097 DOLA on a 13816 DOLA position, ~0.015%) is the intended minter shock-absorber. 6fd3eddc/YS PhusdMinterRepoint superseded is CONFIRMED correct: the fresh deploy is the same PhusdStableMinter source whose public ABI is a strict superset of the old build, and there are NO on-chain contract callers (mint() is user-facing only; SYA/Phlimbo do not call the minter), so no ABI drift (YS-20 pattern) is introduced. ys-swap-deployments.json field set written by step 1 covers every downstream read; step 2/5 use key-path merge that preserves step 1 fields.",
+  "empiricalVerifications": [
+    {
+      "id": "VER-1",
+      "claim": "No zero-minter window across steps 1->2->3",
+      "method": "in-process fork test test_audit_minter_authority_window",
+      "result": "PASS",
+      "evidence": "old minter canMint stays true through step1 (temp staker added) and step2 (new minter added, two coexist); revoked only in step3. Staker (0xbce8) authorizedMinters never modified by any of the 4 scripts."
+    },
+    {
+      "id": "VER-2",
+      "claim": "Phase-4 prefund (step5) survives step3 client revocation",
+      "method": "test_audit_phase4_survives_revocation",
+      "result": "PASS",
+      "evidence": "after step3 deauthorizes OLD_MINTER as client on YS_DOLA_OLD, owner-gated withdrawAsOwner still drains it: booked 13816.564 DOLA, recovered 13815.459 DOLA. Mapper's 'Phase-4 survives revocation by design' VERIFIED TRUE; step5 does not brick."
+    },
+    {
+      "id": "VER-3",
+      "claim": "4000/day cap blocks only user mint, not staker rewards / migration",
+      "method": "test_audit_cap_blocks_user_mint_only",
+      "result": "PASS",
+      "evidence": "newMinter.mint(DOLA,5000e18) reverts 'Daily mint limit exceeded'; mint(DOLA,4000e18) succeeds; ORIG staker mints 100000e18 phUSD directly with no cap (staker is its own authorized minter). Migration prefund path (withdrawAsOwner) mints nothing."
+    },
+    {
+      "id": "VER-4",
+      "claim": "Evacuate/reseed (step10) moves residual to V2 under new minter, no double-count",
+      "method": "test_audit_evacuate_reseed",
+      "result": "PASS",
+      "evidence": "reads principalOf(OLD_MINTER) fresh (13816.564 DOLA), withdraws, reseeds 13814.467 DOLA onto ysDolaV2 under newMinter; old minter principal zeroed (post-assert). Round-trip shortfall 2.097 DOLA (~0.015%) = redeem+deposit haircut, intended minter absorption."
+    },
+    {
+      "id": "VER-5",
+      "claim": "Step 1 registers V2 on the LIVE SYA (0x3C69), correct choice",
+      "method": "cast getYieldStrategies on both SYAs + progress.replace-sya.1.json",
+      "result": "PASS",
+      "evidence": "mainnet-addresses.ts StableYieldAccumulator == 0x3C69; progress.replace-sya.1.json {oldSYA:0x3bBE, newSYA:0x3C69}. 0x3C69 holds the live old strategies [0x90ce,0xaC2e,0x90af]; 0x3bBE is EMPTY []. Step 1's SYA=0x3C69 is the live one. (Step 11's SYA=0x3bBE targets the decommissioned SYA - that is a STEP-11 cluster bug, out of this sub-saga's assignment; see clusterNote.)"
+    }
+  ],
+  "lowFindings": [
+    {
+      "title": "phoenix-ui mainnet-addresses.ts repoint is a manual out-of-worktree step; if skipped, UI users hit revert on the revoked old minter until updated",
+      "severity": "low",
+      "entryPoint": "migrate:phusd-minter-cutover",
+      "contract": "scripts/patch-mainnet-addresses-phusd-minter-replace.js",
+      "rootCauseClass": "OffChainReferenceDrift",
+      "category": "cluster-interaction",
+      "description": "Step 3 revokes the old minter's phUSD mint authority on-chain and the post-step JS patches only the IN-REPO server/deployments/mainnet-addresses.ts. The phoenix-ui repo's own mainnet-addresses.ts lives outside this worktree (Q-REFS) and must be hand-edited + redeployed. Until then the UI keeps users pointed at OLD_MINTER, whose mint() now reverts 'phUSD.mint: not authorized'.",
+      "impact": "Temporary user-facing mint outage (no fund loss, fails loud). Recoverable by updating the UI.",
+      "evidence": "CutoverAndRevokeOldMinter.s.sol:142-143 + patch script Q-REFS note; mainnet-addresses.ts:31 still OLD_MINTER pre-patch.",
+      "recommendation": "Add a release-checklist gate (or CI) coupling the on-chain revocation to the phoenix-ui repoint+redeploy so they ship atomically; or stage the UI repoint BEFORE the revoke broadcast."
+    },
+    {
+      "title": "Step 1 has no 'already deployed' checkpoint; a mid-saga re-run silently redeploys V2/temp/migrators and overwrites the deployments bus",
+      "severity": "low",
+      "entryPoint": "migrate:ys-swap-deploy",
+      "contract": "script/DeployTempStableStakerAndMigrators.s.sol",
+      "lineStart": 178,
+      "lineEnd": 206,
+      "rootCauseClass": "NonIdempotentDeploy",
+      "category": "drift",
+      "description": "The five `new` deployments in step 1 are unconditional (only the WIRING is idempotent). Re-running step 1 after steps 2-3 already broadcast against the first deployment produces a NEW V2/tempStaker/migrator set and overwrites ys-swap-deployments.json, while the live phUSD-minter wiring + old-strategy revocation still reference the FIRST set. Downstream preflights (code.length, canMint, config-match) catch most mismatches and revert, so this is largely fail-loud, but the bus now points at un-wired contracts.",
+      "impact": "Operator footgun on re-run; downstream steps revert (no silent corruption thanks to guards). Stale bus must be manually restored.",
+      "evidence": "DeployTempStableStakerAndMigrators.s.sol:180-206 unconditional `new`; vm.writeJson overwrite at 308.",
+      "recommendation": "Gate deployment on a 'deployments JSON already present with live-code addresses' check, or document that step 1 is run exactly once and never re-run after step 2."
+    }
+  ],
+  "clusterNote": {
+    "id": "SYA-MISMATCH-step11",
+    "detail": "INCONSISTENCY-SYA resolved empirically: step 1 (mine) correctly registers V2 on the LIVE SYA 0x3C69. Step 11 DeregisterOldStrategiesFromSYA (NOT in this assignment) targets the DECOMMISSIONED, EMPTY SYA 0x3bBE - its removeYieldStrategy calls no-op (idempotent skip on _isRegistered) and the OLD strategies remain registered on the live 0x3C69 forever. This is a step-11 correctness/intent-mismatch bug (likely Medium: deregistration is a no-op, old strategies never removed from the live SYA strategy list) - flagged here for the agent auditing step 11/12 (DEREGISTER+DECOMMISSION sub-saga), not double-reported by this sub-saga.",
+    "recommendation": "Verify step 11's LIVE_SYA constant against mainnet-addresses.ts at execution; it must be 0x3C69, not 0x3bBE."
+  },
+  "supersededConfirmations": [
+    {
+      "id": "6fd3eddc / YS PhusdMinterRepoint",
+      "verdict": "SUPERSEDED CONFIRMED",
+      "reason": "story-065 fresh deploy (steps 2/3) is the same PhusdStableMinter source (d6ed115) with the 7-field StablecoinConfig (adds maxMintPerDay/mintedToday/lastMintTimestamp). Old live minter 0x435B is the 4-field build (verified on-chain: stablecoinConfigs getter returns 4 fields). Fresh deploy sidesteps the retrofit incompatibility entirely; public ABI is a strict superset; no on-chain callers exist (mint() user-facing only). No new ABI drift."
+    },
+    {
+      "id": "YS-20 minter-repoint ABI-drift",
+      "verdict": "NOT RE-REPORTED (already ledgered); no new instance in this sub-saga",
+      "reason": "no on-chain contract consumes the minter ABI; only off-chain UI via mainnet-addresses.ts, which is repointed by address not ABI."
+    }
+  ],
+  "pocPath": "workspace/phoenix-phase-2-staging/test/SagaMinterClusterAudit.t.sol"
+}

@@ -1,0 +1,58 @@
+{
+  "id": "YS-26",
+  "project": "phoenix-phase-2-staging",
+  "status": "ready",
+  "severity": "medium",
+  "title": "YS-swap zero-haircut floor (story-067) is silently disabled on a leg-1 resume: the forced re-gather overwrites leg1-stakers.json totalStaked with the post-drain 0, so SkimAndLeg1 persists preMigBooked=0 and the step-9 cleanup floor degrades to require(principalOf >= 0) — vacuous",
+  "entryPoint": "migrate:ys-swap-leg1",
+  "secondaryEntryPoint": "migrate:ys-swap-cleanup",
+  "contract": "script/SkimAndLeg1Migration.s.sol",
+  "secondaryContracts": [
+    "script/PostMigrationCleanup.s.sol",
+    "scripts/gather-migration-inputs.js"
+  ],
+  "function": "run",
+  "rootCauseClass": "ResumePathInvariantErosion",
+  "fingerprint": "018c109ec76f4a729f39f8f512e7e3f2d0574349e319cd9b96dfa95d22ddaf19",
+  "origin": "new",
+  "firstSeenRun": "phoenix-phase-2-staging-15",
+  "lastSeenRun": "phoenix-phase-2-staging-15",
+  "firstSeenCommit": "0e190e8",
+  "lastSeenCommit": "0e190e8",
+  "plausibility": "plausible",
+  "footgun": true,
+  "faithfulness": true,
+  "regression": false,
+  "lineStart": 187,
+  "lineEnd": 219,
+  "secondarySite": { "contract": "script/PostMigrationCleanup.s.sol", "function": "run (floor gate)", "lineStart": 247, "lineEnd": 256 },
+  "rootCause": "story-067 added a zero-haircut FLOOR in PostMigrationCleanup: require(principalOf(token, original) >= preMigBooked) per token. preMigBooked is persisted by SkimAndLeg1Migration from leg1-stakers.json's .totalStaked snapshot (SkimAndLeg1:393-402, the final writes in run()). That snapshot is produced by gather-migration-inputs.js, which reads totalStaked LIVE from on-chain poolInfo[3]. SkimAndLeg1's count-staleness preflight (lines 187-194) hard-reverts with 'stale ... re-run gather' whenever leg1-stakers.json .count != on-chain stakerCount. After leg1 drains the pool (stakerCount->0, totalStaked->0) and the broadcast halts BEFORE the preMigBooked persistence block, a resume FORCES the operator to re-gather; the re-gather overwrites the snapshot's totalStaked with the post-drain value 0. On the SkimAndLeg1 re-run, the totalStaked==on-chain preflight (lines 204-218) is SKIPPED because stakerCount==0, so the script persists preMigBooked = 0. The author's own code comment (lines 388-392) asserts a resume 're-persists the IDENTICAL value instead of the post-drain 0' — the forced re-gather makes that assumption false.",
+  "impact": "Value leak to migrated stakers. The story-067 floor is the SOLE end-to-end protection that a two-leg migration never shortchanges a staker: ResetAndRewire's step-6 post-assert is a one-sided '<=' over-credit CEILING (does not catch under-credit), and SkimAndLeg1's Phase-4 _prefundShortfall only WARNs (never reverts) when injected < shortfall. With preMigBooked silently zeroed on the resume path, the step-9 floor degrades to require(principalOf >= 0) — always true — so a real haircut (Phase-4 under-prefund + sub-swept principal) flows through step 9 uncaught and reaches users who withdraw less than their booked principal. No malice and no concurrency required: it is reachable through the documented resume runbook (the script's own error message directs the operator to re-gather). On the CURRENT autoDOLA/autoUSD ERC4626 strategies the realized haircut magnitude is redeem-rounding dust (~0.024% round-trip); the finding's severity is the silent disablement of the protection, not the dust.",
+  "attackPath": [
+    "1. The saga's leg-1 fails or is interrupted (an explicitly supported resume/partial-run path).",
+    "2. The operator follows the script's own error message and re-gathers migration inputs (gather-migration-inputs.js).",
+    "3. The forced re-gather reads the now-drained on-chain state and overwrites leg1-stakers.json totalStaked with the post-drain value 0.",
+    "4. SkimAndLeg1Migration persists preMigBooked = 0 (totalStaked==chain preflight skipped on stakerCount==0).",
+    "5. Step-9 PostMigrationCleanup floor require(ysV2.principalOf >= preMigBooked) becomes require(principalOf >= 0) — always true.",
+    "6. A real staker haircut (Phase-4 under-prefund only WARNs; ResetAndRewire ceiling is one-sided) now passes the gate uncaught and stakers are shorted principal silently."
+  ],
+  "recommendation": "Persist preMigBooked guarded so a resume re-uses the ORIGINAL pre-drain snapshot, not the post-drain 0, OR make the floor read the pre-drain booked value. Concrete options: (1) In SkimAndLeg1, before persisting, read back any existing .dolaPreMigBooked/.usdcPreMigBooked and refuse to OVERWRITE a previously-recorded non-zero value with a smaller one (idempotent re-persist of the original). (2) Hard-require preMigBooked > 0 in PostMigrationCleanup (lines 247-256) so a zeroed anchor fails loud instead of passing vacuously (mirror how YS-22 rejects an unrecorded pauser). (3) Source preMigBooked from a first-run-only snapshot file (premig-booked.json) that is NEVER overwritten on resume, gated on its own absence. (4) Make _prefundShortfall HARD-REVERT on injected < shortfall rather than WARN, removing reliance on the single downstream gate. Also fix the comparand per YS-32 (compare against poolInfo.totalStaked, not buffer-inflated principalOf).",
+  "poc": {
+    "file": "workspace/phoenix-phase-2-staging/test/PoC_YS26_ResumeZeroFloor.t.sol",
+    "status": "passing",
+    "result": "3/3 PASS (fork-grounded)",
+    "lastRun": "2026-06-14",
+    "note": "Anchor-zeroing mechanism corroborated by PoC_YS25_PreMigBookedResumeZeroing.t.sol (2/2 PASS): first-run floor catches a 1% haircut; resume re-gather zeroes preMigBooked and the same haircut passes the gate vacuously."
+  },
+  "severityRationale": "Medium (capped, not High): a value leak with stated assumptions and an external/sequence requirement (the resume path) — the textbook C4 Medium shape. Not High because (a) no direct theft and no attacker — exploitation is a coincidence of a supported operational path with a haircut condition, and (b) on the current autoDOLA/autoUSD ERC4626 strategies the actual haircut magnitude is redeem-rounding dust (~0.024% round-trip). Per the project's in-motion/unmatured user-value guidance, this caps at Medium. Not downgraded to Low because the finding is the silent disablement of the protocol's SOLE end-to-end user-protection invariant on the path most likely to produce a haircut — recall over report-tidiness (Law 1).",
+  "footgunRationale": "Non-obvious footgun: the operator is following the script's OWN re-gather instruction, and the author's OWN comment asserts the re-persist is identical — a competent operator would be surprised the documented resume silently disarms the safety floor. Safe-config / fix guidance: on resume, do not derive preMigBooked from re-gathered post-drain state; persist/preserve the original pre-migration anchor.",
+  "faithfulnessRationale": "Tagged faithfulness:true (Law 2): story-067's stated behaviour is a zero-haircut guarantee for migrated stakers; the resume path silently breaks that guaranteed behaviour. Route to the spec-conformance report as F-XX in ADDITION to its Medium HM listing (Law 1 keeps the real severity — not buried in QA/gas noise).",
+  "threeLawFraming": "Law 1 (security) sets the real severity (Medium value-leak); Law 2 (faithfulness) adds the spec-conformance cross-ref; Law 3 (owner-trust) confirms it is an in-scope non-obvious footgun, not malicious-admin noise.",
+  "relatedNote": "Linked open finding YS-25 / 75e4305a stays OPEN as incomplete-fix (story-067 floor is self-defeating on resume + buffer-blind); YS-26 is the distinct leg-1 resume manifestation at a different entryPoint (ResumePathInvariantErosion vs YS-25 MissingPostAssert). Complementary to YS-32 (WrongComparand on a clean run). Also relatedTo 88331e64 (YS-30 prefund integer truncation) — together a systemic silent-haircut path. NOTE: the label 'YS-26' was previously used in run-14 for unrelated ledger entry 0a2387e6 (new phUSD minter no pauser); fingerprints differ — cosmetic reuse only.",
+  "metadata": {
+    "createdAt": "2026-06-14",
+    "updatedAt": "2026-06-14",
+    "scanOrigin": "DEDUP-15-002",
+    "classificationOrigin": "CLASS-002"
+  }
+}

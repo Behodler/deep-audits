@@ -1,0 +1,73 @@
+{
+  "agent": "script-auditor",
+  "scope": "MIGRATION-LEGS cluster (steps 4-8) + adjacent cluster interactions; NEW Medium+ only. Gate-correctness (YS-24/25/26) owned by fix-verifier and deliberately not re-litigated.",
+  "headCommit": "0e190e8",
+  "forkBlock": 25313222,
+  "mode": "fork-preview + live-cast",
+  "liveStateNote": "Saga NOT yet started on-chain: ORIGINAL_STABLE_STAKER unpaused, migrator unset, still on old strategies. Both old DOLA/USDC strategies are currently ABOVE par (totalBalanceOf > principalOf for both staker and minter), so _prefundShortfall is a no-op at present (verified: dola/usdcPrefunded == 0).",
+  "findings": [
+    {
+      "title": "YS-swap SYA wiring is split across two different StableYieldAccumulator instances: step 1 registers V2 strategies on 0x3C69 while step 11 deregisters the old strategies from a DIFFERENT (empty) SYA 0x3bBE, leaving the live accumulator misconfigured and its permissionless claim() bricked once step 12 pauses the olds",
+      "severity": "medium",
+      "contract": "lib/phoenix-phase-2-staging/script/DeregisterOldStrategiesFromSYA.s.sol",
+      "secondaryContracts": [
+        "lib/phoenix-phase-2-staging/script/DeployTempStableStakerAndMigrators.s.sol (registers V2 on SYA 0x3C69)",
+        "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol (asserts V2 registered on 0x3C69)",
+        "lib/phoenix-phase-2-staging/script/DecommissionOldStrategies.s.sol (pauses olds -> bricks 0x3C69.claim())",
+        "lib/stable-yield-accumulator/src/StableYieldAccumulator.sol (claim loop 464-491)"
+      ],
+      "function": "run / LIVE_SYA constant",
+      "lineStart": 46,
+      "lineEnd": 71,
+      "entryPoint": "migrate:ys-sya-deregister",
+      "rootCauseClass": "WrongTargetAddress / SplitAccumulatorWiring",
+      "category": "cluster-interaction",
+      "description": "The saga touches TWO distinct live StableYieldAccumulator contracts but never on the same one. DeployTempStableStakerAndMigrators (step 1) registers ysDolaV2/ysUsdcV2 onto the SYA constant 0x3C690EC3...8270 (= current production StableYieldAccumulator per server/deployments/mainnet-addresses.ts:34), and PostMigrationCleanup (step 9, lines 296-313) asserts both V2 strategies are registered + the SYA is an authorized withdrawer on 0x3C69. But DeregisterOldStrategiesFromSYA (step 11) hardcodes LIVE_SYA = 0x3bBE9283...606a (= a DIFFERENT accumulator, the one named in mainnet-addresses-post-phlimbo-upgrade.ts and RewireSYAToPhlimboV2.s.sol). The script's own doc-comment flags LIVE_SYA as needing live verification (Q-SYA-SEL) and is idempotent via _isRegistered, so removing strategies that are not registered there is a silent no-op. EMPIRICAL (block 25313222): 0x3C69.getYieldStrategies() == [YS_DOLA_OLD, YS_USDE, YS_USDC_OLD] and 0x3C69 is an authorizedWithdrawer on both old DOLA/USDC strategies; 0x3bBE.getYieldStrategies() == [] (empty). Net result of the saga: the production accumulator 0x3C69 keeps BOTH the old AND the new DOLA/USDC strategies registered (olds never removed), while the go-forward accumulator 0x3bBE gets neither registered nor cleaned.",
+      "impact": "Two concrete harms, both reachable through the documented runbook with a non-malicious operator: (1) AVAILABILITY / DoS of yield distribution: 0x3C69 keeps YS_DOLA_OLD/YS_USDC_OLD registered; DecommissionOldStrategies (step 12) calls pause() on both. StableYieldAccumulator.claim() iterates every registered strategy and calls strategy.skimSurplus() (which is whenNotPaused AND onlyAuthorizedWithdrawer) unless the SYA-side token is paused (DOLA/USDC are NOT token-paused). skimSurplus on a paused old strategy reverts (EnforcedPause), so the default permissionless claim() reverts for everyone. The only workaround is for every claimer to pass the dead strategies in the exemptStrategies[] arg - undocumented operational knowledge. (2) MISCONFIG: if 0x3bBE is actually the intended go-forward accumulator (its presence in mainnet-addresses-post-phlimbo-upgrade.ts and RewireSYAToPhlimboV2 suggests so), then the saga registered the new V2 strategies on the WRONG (legacy) accumulator and the go-forward one is left with zero strategies, so the V2 set-aside buffers (YS-03 consumer) are never skimmed there. Either way, the two-instance split means the accumulator the protocol actually serves ends the migration half-configured.",
+      "evidence": "Live cast @25313222: mainnet-addresses.ts:34 StableYieldAccumulator=0x3C69; mainnet-addresses-post-phlimbo-upgrade.ts:36 =0x3bBE. 0x3C69.getYieldStrategies()=[YS_DOLA_OLD,YS_USDE,YS_USDC_OLD]; 0x3bBE.getYieldStrategies()=[] . Both have phlimbo=0x6084 and rewardToken=USDC. YSD.authorizedWithdrawers(0x3C69)=true, YSU.authorizedWithdrawers(0x3C69)=true. DeregisterOldStrategiesFromSYA.s.sol:48 LIVE_SYA=0x3bBE. DeployTempStableStakerAndMigrators registers V2 on the 0x3C69 SYA constant (manifest onChainMutated step1: addYieldStrategy on SYA 0x3C69). AYieldStrategy.skimSurplus is whenNotPaused+onlyAuthorizedWithdrawer (AYieldStrategy.sol:461-466). StableYieldAccumulator.claim loop only skips on tokenConfigs[token].paused, not on a paused strategy contract (StableYieldAccumulator.sol:464-491).",
+      "recommendation": "Resolve Q-SYA-SEL definitively before broadcasting the saga: (a) decide which SYA (0x3C69 or 0x3bBE) is the single production accumulator the protocol serves; (b) make step 1 register the V2 strategies and step 11 deregister the old strategies on the SAME, verified instance; (c) add a cross-script assertion that the SYA constant used by DeployTempStableStakerAndMigrators / PostMigrationCleanup is byte-identical to DeregisterOldStrategiesFromSYA.LIVE_SYA; (d) before step 12 pauses the old strategies, hard-require that getYieldStrategies() on the live accumulator no longer contains YS_DOLA_OLD/YS_USDC_OLD (fail loud rather than silently bricking claim()).",
+      "empirical": true,
+      "verification": "live-cast (two-SYA divergence + claim() pause-revert path confirmed by source); a fork PoC of claim() reverting on a paused registered strategy is straightforward to add if required."
+    }
+  ],
+  "lowsAndNotes": [
+    {
+      "title": "story-067 zero-haircut FLOOR gate measures the buffer-inflated strategy principalOf, not user-withdrawable totalStaked, so a genuine per-user haircut passes the gate even on a CLEAN run",
+      "severity": "low",
+      "entryPoint": "migrate:ys-swap-cleanup (gate) / migrate:ys-swap-leg2 (cause)",
+      "contract": "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol:247-256",
+      "category": "intent-mismatch / weak-gate",
+      "relatedTo": ["YS-25 75e4305a (INCOMPLETE-FIX)", "YS-26 (resume re-gather zeroes preMigBooked)", "ledger 5c9f1cee (leg2 ~0.026% haircut, open Low)"],
+      "description": "The gate require(ysV2.principalOf(token, original) >= preMigBooked) is intended to prove 'the two-leg bounce never haircut a staker'. But principalOf is the staker's STRATEGY-level principal, which setYieldStrategy inflates by folding the skim surplus + pre-existing idle in as an UNATTRIBUTED buffer (protocol-owned, not credited to any user). User-withdrawable value is the sum of userInfo.amount == poolInfo.totalStaked, which is strictly LESS. EMPIRICAL full-bounce fork run (test/AuditYsSwapBounceE2E.t.sol, PASS): preMigBooked DOLA=1033.8878; after leg2 totalStaked=1033.7231 (users collectively -0.1647 DOLA) yet principalOf=1061.175 so the gate passes comfortably. A real user (1018.3878 DOLA staked) ended with userInfo.amount=1018.2255 and on full withdraw RECEIVED 1018.1447 DOLA (-0.243 DOLA, ~0.024%). The gate cannot see this because the buffer (principalOf - totalStaked = ~27.45 DOLA) masks it. This is complementary to YS-26 (anchor zeroing): even with a correct non-zero anchor, the gate's comparand is the wrong quantity.",
+      "impact": "On these ERC4626 (autoDOLA/autoUSD) strategies the per-leg haircut is bounded to ERC4626 redeem rounding (~0.024% round-trip), so the leak is dust and the buffer always dwarfs it -> LOW. NOTE the amplification risk: if a future YS-swap reuses this gate against a MARKET (AMM) strategy whose deposit/redeem carries real slippage, the same blind spot would let a materially larger user haircut pass the gate while the buffer hides it. The gate should compare against totalStaked, not principalOf.",
+      "recommendation": "Change the floor to require(poolInfo.totalStaked >= preMigBooked) (user-withdrawable), or add it alongside the principalOf check; keep '>=' for legit surplus. This makes the gate actually enforce its stated 'never haircut a staker' invariant.",
+      "empirical": true
+    },
+    {
+      "title": "Skimmed USDe surplus is parked as orphaned idle on the live staker and never recovered by the saga",
+      "severity": "low",
+      "entryPoint": "migrate:ys-swap-leg1",
+      "contract": "lib/phoenix-phase-2-staging/script/SkimAndLeg1Migration.s.sol:275",
+      "category": "unintended-side-effect",
+      "description": "Step 5 skims YS_USDE surplus to the original staker as idle USDe, but the USDe pool is never finalized/reset and never gets a setYieldStrategy (only DOLA/USDC are swapped). So the skimmed USDe idle is never swept into any strategy and sits as orphaned idle on the staker indefinitely (USDe pool users still custody their principal in the untouched YSE strategy). PostMigrationCleanup only sanity-checks balanceOf(USDe) >= usdeSkimmed; nothing re-homes it. Protocol-owned value (not user funds), so LOW.",
+      "impact": "Protocol-owned skim surplus (currently ~tens of USDe) left stranded as idle on the staker; not user-facing, owner-rescuable. Low.",
+      "recommendation": "Either skip the USDe skim entirely (the USDe pool is not part of the swap), or sweep/rescue the skimmed USDe to treasury in PostMigrationCleanup/Decommission.",
+      "empirical": false
+    }
+  ],
+  "reconciledNotNew": {
+    "YS-25_75e4305a": "Still INCOMPLETE per fix-verifier; my buffer-masking Low is the same gate, complementary mechanism - recorded as Low, not re-raised as the Medium.",
+    "YS-26": "Owned by fix-verifier (resume re-gather zeroes preMigBooked). Not re-reported.",
+    "YS-09_55ebe2c0": "ResetAndRewire/leg resume idempotency: I re-checked the resume paths for steps 5/6/8 (skim returns 0 second-time, _prefundShortfall returns 0 once old-strategy principal is realized to 0, setYieldStrategy gated on yieldStrategy!=V2, initiate/finalize gated on poolState, batchMigrate no-op on zeroed positions). Confirmed re-run-safe for the on-chain effects; no new defect.",
+    "YS-01_28d5044e": "previewRedeem->convertToAssets fix confirmed present (ERC4626YieldStrategy.sol:115). Not live.",
+    "leg2_haircut_5c9f1cee": "Pre-existing open Low; my fork run corroborates the magnitude (~0.024% round-trip)."
+  },
+  "areasClearedNoMediumPlus": [
+    "Off-chain JSON bus staleness (leg1/leg2 stakers): leg1 preflight requires count==on-chain (paused before gather) and totalStaked==on-chain (first run); leg2 preflight requires count==temp.stakerCount and post-asserts temp.stakerCount==0, so a stale/incomplete staker list fails loud rather than stranding a user.",
+    "userMigrate during pause window: permissionless self-exit from original (leg1) or temp (leg2) is by design; batchMigrate skips the zeroed position; no loss to others, no accounting break.",
+    "Phase-4 prefund over-delivery: principalToWithdraw is capped at minterBooked and HARD-REVERTs if minterRealizable < shortfall; at current above-par state it is a no-op. No over-mint/over-withdraw path found.",
+    "setYieldStrategy non-empty-pool footgun (stable-staker KI): step 6 finalizeAndReset zeroes totalStaked before setYieldStrategy, and StableStaker.setYieldStrategy hard-requires totalStaked==0 (line 228), so the documented empty-pool precondition is satisfied.",
+    "Idle-sweep crux: setYieldStrategy sweeps the FULL staker token balance into V2 as principal (ERC4626 books convertToAssets(deposit), <= swept by rounding only). Confirmed on fork: sweep credited 27.45 DOLA principal from 27.45 idle. No mis-attribution / stranding of the swept amount (the only residual is the USDe Low above, a token the sweep never touches).",
+    "Sender/auth/chain-guard: all scripts setUp() require chainid==1; all mutating calls are owner/migrator-gated and the migrator is OWNER-owned; broadcast uses the ledger signer."
+  ]
+}

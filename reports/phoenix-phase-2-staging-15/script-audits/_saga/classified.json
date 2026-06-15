@@ -1,0 +1,204 @@
+{
+  "stage": "severity-classifier",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-15",
+  "saga": "Story 060+065 YS-swap + phUSD-minter migration ('ys-swap migration saga')",
+  "headCommit": "0e190e8",
+  "criteria": "C4 (project CLAUDE.md) under the three-law hierarchy (Law 1 security > Law 2 faithfulness > Law 3 owner-trust; non-obvious owner footguns in scope at honest severity).",
+  "inputs": [
+    "_saga/deduped-sanitized.json (7 findings, 1 dup-of-ledger excluded here)",
+    "_saga/cluster-cleanup-findings.json",
+    "_saga/cluster-legs-findings.json",
+    "_saga/cluster-minter-findings.json"
+  ],
+  "excludedFromClassification": [
+    "DEDUP-15-006 (duplicate of open ledger YS-28 / 34335a28 — phUSD-minter UI repoint drift; remains STILL-OPEN under existing fingerprint, not re-classified)",
+    "cluster-legs orphaned-USDe-skim Low (duplicate of open ledger YS-07 / 58911bd3; not re-classified)"
+  ],
+
+  "classifiedFindings": [
+    {
+      "id": "CLASS-001",
+      "originalId": "DEDUP-15-001",
+      "label": "YS-31 (SAGA-SYA-BRICK)",
+      "title": "Cleanup tail bricks SYA.claim(): step 11 deregisters the WRONG (decommissioned, empty 0x3bBE) accumulator, so the old DOLA/USDC strategies stay registered on the live production SYA 0x3C69, and step 12 pausing them reverts the default permissionless claim() for all callers",
+      "severity": "medium",
+      "proposedSeverity": "medium",
+      "plausibility": "plausible",
+      "faithfulness": false,
+      "footgun": true,
+      "regression": false,
+      "classification": {
+        "assetImpact": "No assets stolen or lost. The default permissionless StableYieldAccumulator.claim() (empty exemptStrategies — the path the UI and keepers use) reverts EnforcedPause for ALL callers, so V2-strategy yield can no longer be skimmed and routed to Phlimbo. This is an availability / protocol-function DoS on yield consolidation, not a theft.",
+        "attackPath": [
+          "1. Operator runs the documented saga in order; step 1 registers V2 strategies on the live SYA 0x3C69, step 9 asserts against 0x3C69 (all green).",
+          "2. Step 11 (DeregisterOldStrategiesFromSYA) hardcodes LIVE_SYA = 0x3bBE (a decommissioned, empty accumulator) — removeYieldStrategy is a silent no-op; owner-equality preflight and post-asserts pass vacuously because both SYAs are owner-owned and 0x3bBE's registry is empty.",
+          "3. The old DOLA/USDC strategies therefore remain registered on the live 0x3C69.",
+          "4. Step 12 (DecommissionOldStrategies) pauses YS_DOLA_OLD and YS_USDC_OLD while still registered on 0x3C69.",
+          "5. Any claim(i, m, []) iterates registered strategies; SYA skips only on tokenConfig.paused (DOLA/USDC token configs are NOT paused), so it calls skimSurplus() on a paused strategy → whenNotPaused reverts EnforcedPause → entire claim() reverts for everyone."
+        ],
+        "likelihood": "high — no attacker needed; the brick is reached by a non-malicious operator executing the documented runbook in the documented order. The wrong-address constant is static in the script.",
+        "assumptions": "Operator runs steps 11 then 12 as documented; old DOLA/USDC token configs remain unpaused on the SYA (verified true on fork).",
+        "externalRequirements": "None beyond running the saga. Fork-verified at block 25313321 (SagaCleanupSYABrick.t.sol, 4/4 PASS, EnforcedPause confirmed)."
+      },
+      "severityRationale": "Medium, not High: no funds are stolen or permanently lost — the impact is impaired protocol function / availability (canonical yield-claim path dead by default). Bounded below High by the exemptStrategies escape hatch: because the paused olds remain registered they are exempt-eligible, so a caller passing [YS_DOLA_OLD, YS_USDC_OLD] routes around the revert, and the owner can fully remediate (re-point step 11 at 0x3C69 and deregister, or unpause). Not downgraded to Low because the DEFAULT permissionless path — what the UI and keepers actually call — is bricked for all users until owner action, which is exactly C4 'function of the protocol or its availability could be impacted'.",
+      "footgunRationale": "Non-obvious owner footgun (Law 3, in scope): a competent non-malicious operator runs the documented step order and sees a fully green run (owner check + post-asserts all pass) yet has silently bricked the canonical claim path. Surprise ⇒ footgun ⇒ report; classified by the availability impact it unlocks, not as malicious-admin. Safe-config guidance: pin step 11 LIVE_SYA to the production accumulator 0x3C69 (matching mainnet-addresses.ts / step1 / step9) and assert the old strategies are PRESENT before removal and ABSENT before step 12 pauses them (fail loud, not vacuous no-op).",
+      "justification": "Self-inflicted availability DoS of the permissionless yield-claim path, reached deterministically through the documented runbook by a non-malicious operator, fork-PoC'd. Honest severity is Medium: protocol function/availability impacted, no asset theft, owner-remediable, escape hatch exists."
+    },
+    {
+      "id": "CLASS-002",
+      "originalId": "DEDUP-15-002",
+      "label": "YS-26 (this run)",
+      "title": "YS-swap zero-haircut floor (story-067) is silently disabled on a leg-1 resume: the forced re-gather overwrites leg1-stakers.json totalStaked with the post-drain 0, so SkimAndLeg1 persists preMigBooked=0 and the step-9 cleanup floor degrades to require(principalOf >= 0) — vacuous",
+      "severity": "medium",
+      "proposedSeverity": "medium",
+      "plausibility": "plausible",
+      "faithfulness": true,
+      "footgun": true,
+      "regression": false,
+      "classification": {
+        "assetImpact": "Value leak to migrated stakers: the sole end-to-end zero-haircut protection (story-067 floor) is the invariant that guarantees the two-leg bounce never shorts a staker's principal. On a resume it becomes vacuous (require(principalOf >= 0)), so a genuine per-user principal haircut reaches users WITHOUT the safety revert firing. The leaked value is user principal-in-motion during migration, not protocol funds.",
+        "attackPath": [
+          "1. The saga's leg-1 fails or is interrupted (an explicitly supported resume/partial-run path, per the //ss-migrate-resume precedent).",
+          "2. The operator follows the script's own error message and re-gathers migration inputs (gather-migration-inputs.js).",
+          "3. The forced re-gather reads the now-drained on-chain state and overwrites leg1-stakers.json totalStaked with the post-drain value 0 (the author's own comment wrongly assumes the re-gather re-persists the IDENTICAL value).",
+          "4. SkimAndLeg1Migration persists preMigBooked = 0.",
+          "5. Step-9 PostMigrationCleanup floor require(ysV2.principalOf >= preMigBooked) becomes require(principalOf >= 0) — always true.",
+          "6. A real staker haircut (e.g. Phase-4 under-prefund only WARNs; ResetAndRewire ceiling is one-sided) now passes the gate uncaught and stakers are shorted principal silently."
+        ],
+        "likelihood": "medium — requires the migration to take the resume/partial-run path (a real, supported operational route the saga explicitly accommodates) AND a haircut-producing condition to coincide. Not adversary-driven; sequence-conditional.",
+        "assumptions": "A leg-1 resume occurs and the operator re-gathers as the script directs; a haircut-producing condition (under-prefund / one-sided ceiling / strategy round-trip loss) is present on that run.",
+        "externalRequirements": "Resume path taken + re-gather executed. Fork-corroborated (PoC_YS25_PreMigBookedResumeZeroing.t.sol, 2/2 PASS) for the anchor-zeroing mechanism; the downstream haircut on the current ERC4626 strategies is bounded to dust today (see severityRationale)."
+      },
+      "severityRationale": "Medium (capped at Medium, not High): this is a value leak with stated assumptions and an external/sequence requirement (the resume path), which is the textbook C4 Medium shape. It does NOT reach High because (a) there is no direct theft and no attacker — exploitation is a coincidence of a supported operational path with a haircut condition, and (b) on the CURRENT autoDOLA/autoUSD ERC4626 strategies the actual haircut magnitude is redeem-rounding dust (~0.024% round-trip). Per the project's loss-of-yield/loss-of-capital guidance, in-motion / unmatured user value leak caps at Medium. It is NOT downgraded to Low because the finding is the silent disablement of the protocol's SOLE end-to-end user-protection invariant: the safety revert that is supposed to make any haircut impossible stops firing exactly on the path most likely to produce one, so the protection's recall goes to zero. Recall over report-tidiness (Law 1).",
+      "faithfulnessRationale": "Tagged faithfulness:true (Law 2): story-067's stated behaviour is a zero-haircut guarantee for migrated stakers; the resume path silently breaks that guaranteed behaviour. Route to the spec-conformance report as F-XX in addition to its Medium HM listing (Law 1 keeps the real severity — it is not buried in QA/gas noise). Linked open finding YS-25 / 75e4305a stays OPEN as incomplete-fix; YS-26 is the distinct leg-1 resume manifestation at a different entryPoint.",
+      "footgunRationale": "Non-obvious footgun: the operator is following the script's OWN re-gather instruction, and the author's OWN code comment asserts the re-persist is identical — a competent operator would be surprised the documented resume silently disarms the safety floor. Safe-config / fix guidance: on resume, do not derive preMigBooked from re-gathered post-drain state; persist/preserve the original pre-migration anchor (and compare against poolInfo.totalStaked, per CLASS-003).",
+      "justification": "Silent disablement of the sole zero-haircut user-protection invariant on a supported resume path lets real staker-principal haircuts pass uncaught — a value leak with stated assumptions and an external (resume + re-gather) requirement. Honest severity Medium (capped: in-motion user value, dust on current strategies, no theft/attacker), and a Law-2 faithfulness deviation routed to spec-conformance."
+    },
+    {
+      "id": "CLASS-003",
+      "originalId": "DEDUP-15-003",
+      "label": "YS-32",
+      "title": "story-067 zero-haircut FLOOR measures the buffer-inflated strategy principalOf, not user-withdrawable totalStaked, so a genuine per-user haircut passes the gate even on a CLEAN run",
+      "severity": "low",
+      "proposedSeverity": "low",
+      "plausibility": "plausible",
+      "faithfulness": true,
+      "footgun": false,
+      "regression": false,
+      "classification": {
+        "assetImpact": "Gate-blindness: the floor compares against principalOf (which includes the protocol-owned, unattributed skim+idle buffer folded in by setYieldStrategy) instead of user-withdrawable poolInfo.totalStaked, so the buffer masks a per-user haircut and the gate passes even on a clean run. The leaked value is bounded to ERC4626 redeem-rounding dust (~0.024% round-trip) on the current autoDOLA/autoUSD strategies; the buffer always dwarfs it.",
+        "attackPath": [
+          "1. A normal (clean, non-resume) two-leg bounce runs with a correct non-zero preMigBooked anchor.",
+          "2. Leg-2 redeposit incurs ERC4626 redeem rounding so users collectively lose dust (fork: -0.1647 DOLA on 1033.8 booked; a single user -0.243 DOLA, ~0.024%).",
+          "3. The step-9 floor require(principalOf >= preMigBooked) still passes because principalOf (~1061) exceeds preMigBooked (~1033.9) thanks to the ~27.45 DOLA protocol-owned buffer.",
+          "4. The 'never haircut a staker' invariant the gate is supposed to enforce is not actually enforced; the dust haircut passes silently."
+        ],
+        "likelihood": "high that the gate is blind on every clean run, but the realized loss is dust on current strategies; material loss requires a HYPOTHETICAL future YS-swap reusing this gate against a market/AMM strategy with real slippage.",
+        "assumptions": "Current strategies are ERC4626 (autoDOLA/autoUSD) with rounding-only round-trip loss; buffer present.",
+        "externalRequirements": "Material impact requires future reuse against a high-slippage market strategy (speculative future code)."
+      },
+      "severityRationale": "Low: the gate is genuinely measuring the wrong comparand and fails even on a clean run, but the actual value leak on the in-scope ERC4626 strategies is rounding dust per the project's dust/rounding → QA/Low rule. The amplification scenario (material haircut sliding past the blind gate) depends on a future YS-swap against a high-slippage market strategy — speculation on future code, which the project's known-invalid rules keep at QA/Low absent a demonstrated current root-cause impact. Complementary to CLASS-002, not a duplicate (wrong-quantity vs anchor-zeroing).",
+      "faithfulnessRationale": "Tagged faithfulness:true (Law 2): the gate does not enforce story-067's stated 'never haircut a staker' invariant (wrong comparand). Report as F-XX in spec-conformance even though the security impact is Low — a behavioural deviation is visible to the owner, never dropped into gas noise. Fix: compare against poolInfo.totalStaked (user-withdrawable), keeping '>=' for legit surplus.",
+      "justification": "The floor enforces its invariant against the wrong quantity (buffer-inflated principalOf), so a per-user haircut passes even on a clean run — but bounded to redeem dust on the in-scope ERC4626 strategies, with material impact only under speculative future market-strategy reuse. Honest severity Low; tagged faithfulness for spec-conformance visibility."
+    },
+    {
+      "id": "CLASS-004",
+      "originalId": "DEDUP-15-004",
+      "label": "YS-33",
+      "title": "DeregisterOldStrategiesFromSYA guards (owner-check + post-asserts) pass vacuously on a wrong-but-owned empty SYA, defeating the script's own drift protection",
+      "severity": "low",
+      "proposedSeverity": "low",
+      "plausibility": "plausible",
+      "faithfulness": false,
+      "footgun": true,
+      "regression": false,
+      "classification": {
+        "assetImpact": "No direct loss on its own. This is the guard-design weakness that enables CLASS-001: the script cannot distinguish 'correctly already-clean' from 'pointed at the wrong contract' because the owner-equality preflight passes (both SYAs are owner-owned) and the post-asserts only check OLDs are absent (true on an empty registry) without ever asserting OLDs were PRESENT before removal or pinning the target to mainnet-addresses.ts.",
+        "attackPath": [
+          "1. Step 11 is pointed at a wrong-but-owned empty SYA (0x3bBE).",
+          "2. Owner-equality preflight passes (same owner).",
+          "3. removeYieldStrategy no-ops (idempotent skip on _isRegistered).",
+          "4. Post-asserts pass vacuously (OLDs absent on empty registry; V2 survives).",
+          "5. A fully green run with zero effect — the silent-failure mechanism that lets the CLASS-001 brick reach production."
+        ],
+        "likelihood": "n/a as a standalone loss — it is an enabler; the realized impact is the Medium CLASS-001 brick.",
+        "assumptions": "Wrong-but-owned target supplied (as in the current step-11 constant).",
+        "externalRequirements": "None standalone."
+      },
+      "severityRationale": "Low: a precondition-guard / drift weakness with no direct asset or availability loss on its own — its only consequence flows through CLASS-001 (already classified Medium). Tracked separately so the robustness remediation (assert-present-before-remove, pin target against mainnet-addresses.ts) survives even if only the address constant is fixed. Per C4, weak-guard / state-handling issues without independent impact are Low/QA.",
+      "footgunRationale": "Non-obvious footgun enabler: the script's own docstring claims it 'fails loud on the owner check' for a wrong address — false for the actual wrong-but-owned target. Safe-config guidance recorded with CLASS-001.",
+      "justification": "Guard-design weakness that makes a wrong-but-owned target produce a green no-op; no independent loss (impact realized via the Medium CLASS-001 brick). Honest severity Low, kept distinct so the assert-present-before-remove fix is tracked independently of the address fix."
+    },
+    {
+      "id": "CLASS-005",
+      "originalId": "DEDUP-15-005",
+      "label": "YS-34",
+      "title": "Step 9 unpauses both stakers BEFORE the YS-22 pauser-recorded require; under the documented --skip-simulation a missing pauser key leaves the live staker unpaused but its pauser un-restored",
+      "severity": "low",
+      "proposedSeverity": "low",
+      "plausibility": "plausible",
+      "faithfulness": false,
+      "footgun": true,
+      "regression": false,
+      "classification": {
+        "assetImpact": "No fund loss. Narrow operator-error window: the live staker is reopened to users (unpaused) while its pauser is left on a stale/unintended value, until a corrective re-run. Validate-after-mutate ordering: unpause() executes before the YS-22 pauser-recorded require, and under --skip-simulation a later revert lands after the unpause is already broadcast.",
+        "attackPath": [
+          "1. Operator runs step 9 with the documented --skip-simulation flag.",
+          "2. A pauser key is missing (realistically a hand-edited JSON).",
+          "3. unpause() on both stakers broadcasts first (lines 357-368).",
+          "4. The YS-22 pauser-recorded require reverts (lines 371-385) — but AFTER the unpause txs already landed.",
+          "5. Live staker is unpaused with its pauser not restored until a corrective re-run."
+        ],
+        "likelihood": "low — conditional on the --skip-simulation flag AND a hand-edited/missing pauser key; without --skip-simulation the whole run simulates and nothing broadcasts; on re-run the unpause is idempotent and the operator re-runs after populating the key. If the live staker pauser was never changed from the governance pauser, there is no exposure.",
+        "assumptions": "--skip-simulation used; pauser key missing/hand-edited.",
+        "externalRequirements": "Documented flag + missing key; fail-loud on re-run forces eventual correction."
+      },
+      "severityRationale": "Low: bounded operator-error window with no fund loss and a hard-revert that forces eventual correction; conditional on a flag plus a hand-edited JSON. C4 operational-ordering / state-handling issue → Low. Distinct from ledger YS-22 (pauser-restore catch-path) and YS-24 (tempPauser zero-gate).",
+      "footgunRationale": "Non-obvious ordering footgun: validate-after-mutate under the documented flag. Safe-config guidance: move the YS-22 pauser-recorded requires ABOVE the unpause() calls (validate-then-mutate), or drop --skip-simulation so a revert rolls back the whole run.",
+      "justification": "Validate-after-mutate ordering can leave the live staker unpaused with an unrestored pauser in a narrow, flag-and-handedit-conditional window; fail-loud on re-run, no fund loss. Honest severity Low."
+    },
+    {
+      "id": "CLASS-006",
+      "originalId": "DEDUP-15-007",
+      "label": "YS-35",
+      "title": "Step 1 has no 'already deployed' checkpoint; a mid-saga re-run silently redeploys V2/temp/migrators (unconditional `new`) and overwrites the deployments bus",
+      "severity": "low",
+      "proposedSeverity": "low",
+      "plausibility": "plausible",
+      "faithfulness": false,
+      "footgun": true,
+      "regression": false,
+      "flaggedForHumanReview": true,
+      "classification": {
+        "assetImpact": "No fund loss / no silent corruption. A mid-saga re-run of step 1 mints a fresh V2/tempStaker/migrator set (the five `new` deployments are unconditional) and overwrites ys-swap-deployments.json, while the live phUSD-minter wiring and old-strategy revocation still reference the FIRST set. Downstream preflights (code.length, canMint, config-match) catch the mismatch and revert (fail-loud); the stale bus must be manually restored.",
+        "attackPath": [
+          "1. Steps 1-3 broadcast against the first deployment.",
+          "2. Operator re-runs step 1 mid-saga.",
+          "3. Five unconditional `new` deployments mint a fresh contract set; vm.writeJson overwrites the deployments bus.",
+          "4. Live wiring still references the first set; downstream steps hit the mismatch and revert (no silent corruption).",
+          "5. Operator must manually restore the stale bus."
+        ],
+        "likelihood": "low — requires an operator to re-run a one-shot deploy step mid-saga; downstream guards make it fail-loud.",
+        "assumptions": "Step 1 re-run after steps 2-3 already broadcast.",
+        "externalRequirements": "None beyond the re-run."
+      },
+      "severityRationale": "Low: non-idempotent deploy is an operator footgun whose worst outcome is a stale bus pointing at un-wired contracts, caught fail-loud by downstream guards — no asset loss, no silent corruption. C4 state-handling / drift → Low. Cross-linked to FIXED YS-13 / 86a0f4fd: story-062 made the WIRING idempotent; this is the narrower never-closed residual that the five `new` deployments themselves remain unconditional. Recommend tracking as a new Low cross-linked to 86a0f4fd, NOT a regression flip — YS-13's fixed scope (wiring-resume + --skip-simulation removal) holds. flaggedForHumanReview retained from dedup for the partial-regression judgement call.",
+      "footgunRationale": "Non-obvious re-run footgun. Safe-config guidance: gate deployment on a 'deployments JSON already present with live-code addresses' check, or document that step 1 is run exactly once and never re-run after step 2.",
+      "justification": "Unconditional `new` deployments make step 1 non-idempotent; a mid-saga re-run produces a stale bus but is caught fail-loud by downstream guards with no asset loss or silent corruption. Honest severity Low; cross-linked to fixed YS-13, not a regression."
+    }
+  ],
+
+  "summary": {
+    "classifiedCount": 6,
+    "high": 0,
+    "medium": 2,
+    "low": 5,
+    "note": "5 'Low' = the count in deduped-sanitized excludes DEDUP-15-006 (dup of ledger YS-28) and the orphaned-USDe Low (dup of ledger YS-07); of the 6 NEW findings classified here, 2 are Medium and 4 are Low. The fifth Low (DEDUP-15-006) remains open under existing ledger fingerprint 34335a28 and is not re-classified.",
+    "mediums": ["DEDUP-15-001 (availability/function DoS, footgun)", "DEDUP-15-002 (value-leak, footgun, faithfulness)"],
+    "faithfulnessRouted": ["DEDUP-15-002 (F-XX, also Medium HM)", "DEDUP-15-003 (F-XX, Low)"],
+    "footgunsFlagged": ["DEDUP-15-001", "DEDUP-15-002", "DEDUP-15-004", "DEDUP-15-005", "DEDUP-15-007"],
+    "regressions": [],
+    "noHighFindings": "Confirmed — no asset theft/permanent-loss path. The SYA-brick is owner-remediable with an escape hatch (Medium availability); the haircut leak is in-motion user value bounded to dust on current strategies (Medium-capped)."
+  }
+}
