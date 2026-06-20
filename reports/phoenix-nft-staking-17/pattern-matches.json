@@ -1,0 +1,159 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-06-19T22:09:05Z",
+  "scanType": "pattern-matching",
+  "target": "src/NFTStakerPriceScaled.sol",
+  "submoduleHead": "eee9d3a301bc0a2f9ff5557dd6b9875262152e95",
+  "story": "story-017",
+  "scopeNote": "Matched ONLY against the priceScale delta surface (constructor _priceScale guard/assign at L226-236; latestPrice = latestPrice * priceScale at L435; downstream S/F/newRate/runway at L440/L455/L456/L457). Patterns that match byte-identical baseline NFTStaker code (e.g. REWARD-ACCRUAL-ORDER, REWARD-RUNWAY-DEPLETION, EMISSION-WINDOW-BOUNDARY, BATCH-PAYOUT-FIXED-POT) were intentionally skipped per request because they do not intersect the delta. The profile establishes the solvency ledger (balance == rewardBudget + committedDebt) is structurally insensitive to priceScale, so those host-file patterns carry no new delta-driven risk.",
+  "patternsChecked": 26,
+  "findingsCount": 0,
+  "findings": [],
+  "manualReviewCount": 5,
+  "manualReview": [
+    {
+      "id": "PATTERN-PS-001",
+      "source": "pattern-db",
+      "patternId": "DECIMAL-SCALING-MISMATCH",
+      "patternName": "Token-Decimal Normalization / Wrong Scaling Factor (custom; not in DB v1.0)",
+      "type": "decimal-scaling-mismatch",
+      "category": "arithmetic",
+      "severity": "potential-medium",
+      "contract": "src/NFTStakerPriceScaled.sol",
+      "line": 435,
+      "description": "The entire reason this contract exists is decimal normalization: `latestPrice = latestPrice * priceScale` lifts a prime-token-decimal mint price (e.g. 6dp USDC, priceScale=1e12) into 18dp phUSD reward units so the emission rate is decimal-correct. The constructor validates `_priceScale != 0` only (L230) and CANNOT verify decimal-consistency (it has no view of prime/reward token decimals). A wrong priceScale (e.g. 1e6 vs 1e12, or 1 left over from an 18dp-priced clone retargeted at a 6dp dispatcher) silently mis-sizes the per-second emission rate by orders of magnitude in EITHER direction: too-large over-emits (faster budget drain / higher effective APY than intended), too-small under-emits (stakers paid far below targetAPY). This is precisely the decimal-mismatch failure class the contract was built to fix — applied with the wrong constant it reintroduces it. Direction note: priceScale is the MULTIPLY-UP factor (10**(rewardDecimals - priceDecimals)); inverting the direction (treating it as a divide-down) is the classic wrong-direction scaling bug, here structurally impossible (it is a bare multiply) but a wrong MAGNITUDE is fully possible.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "latestPrice = latestPrice * priceScale",
+        "uint256 priceScale (immutable, line 94)",
+        "require(_priceScale != 0, ...) (line 230) -- non-zero only, no decimal-consistency check"
+      ],
+      "missingMitigations": [
+        "No upper bound on _priceScale",
+        "No on-chain decimal-consistency assertion (priceScale == 10**(rewardDecimals - priceDecimals)); contract cannot read prime-token decimals",
+        "Immutable: a wrong value cannot be corrected post-deploy -- requires redeploy"
+      ],
+      "deltaIntersects": true,
+      "lawAnalysis": "Set once at deploy, immutable, instantly observable on-chain -> a wrong value is a Law-3 owner config-correctness boundary, NOT a contract-local exploit. Borderline footgun: the SURPRISE test (CLAUDE.md Law 3) is plausibly met because the correct value (10**(rewardDecimals - priceDecimals)) is non-obvious and silently mis-sizes emissions rather than reverting -- a competent non-malicious owner could be surprised. Routed to manual review for a human/econ-scanner to adjudicate whether the missing decimal-consistency guard rises to a reportable operational hazard (Low/QA footgun) or stays a documented trust assumption. Confidence is LOW about whether the pattern yields a reportable FINDING, not about the decimal mechanics, which are certain.",
+      "suggestsFinding": "informational-leaning-footgun",
+      "references": [
+        "C4 decimal-handling findings (token decimal assumptions)",
+        "profile reports/phoenix-nft-staking-17/profiles/NFTStakerPriceScaled.md Trust Assumption #2"
+      ]
+    },
+    {
+      "id": "PATTERN-PS-002",
+      "source": "pattern-db",
+      "patternId": "COPY-PASTE-FORK-DRIFT",
+      "patternName": "Hand-Maintained Mirror Silently Diverges / Omits a Fix (custom; not in DB v1.0)",
+      "type": "fork-drift",
+      "category": "maintenance-coupling",
+      "severity": "potential-medium",
+      "contract": "src/NFTStakerPriceScaled.sol",
+      "line": 1,
+      "description": "NFTStakerPriceScaled is, by its own NatSpec (L32-38), a hand-maintained standalone COPY of NFTStaker whose ONLY intended deltas are the contract name, the priceScale immutable + its guard, and the single multiply at L435. Everything else is asserted mirror-identical but is NOT enforced by inheritance, a shared base, or a compile-time check. This is the classic fork-drift hazard: the audited NFTStaker carries fixes M-01 (strip committedDebt from V before budgeting, L447-453) and M-03 (size rate against staked subset S = totalStaked * latestPrice, L437-440). If a future fix lands on NFTStaker and the maintainer forgets to mirror it here (or vice versa), this copy silently diverges and one variant ships an un-fixed bug. The risk is structural/process, not a present-state local bug: at HEAD eee9d3a the M-01 and M-03 fixes ARE present in this copy (verified in profile). The reportable angle is the absence of a drift guard (shared base contract or invariant test asserting byte-equivalence of the non-delta region).",
+      "confidence": "low",
+      "matchedSignatures": [
+        "NatSpec L32-38 declaring this a copy of NFTStaker with enumerated deltas",
+        "M-01 fix mirrored at L447-453 (budget = V > committedDebt ? V - committedDebt : 0)",
+        "M-03 fix mirrored at L437-440 (S = totalStaked * latestPrice)"
+      ],
+      "missingMitigations": [
+        "No shared abstract base / inheritance from NFTStaker -- the two are independent files",
+        "No cross-file equivalence test asserting the non-delta region stays in sync",
+        "Divergence is silent (compiles clean either way)"
+      ],
+      "deltaIntersects": true,
+      "lawAnalysis": "Law 1 recall: must not be silently dropped even though no present-state bug exists -- a future un-mirrored fix is a plausible security regression vector. Routed to manual review (and worth a story-faithfulness / process note) rather than a code finding because the current copy is faithful. Confidence LOW on whether this yields a reportable finding vs a QA/process recommendation.",
+      "suggestsFinding": "informational-process",
+      "references": [
+        "profile Trust Assumption #1 (maintenance coupling)",
+        "NFTStaker audit M-01 / M-03"
+      ]
+    },
+    {
+      "id": "PATTERN-PS-003",
+      "source": "pattern-db",
+      "patternId": "DIVISION-PRECISION",
+      "patternName": "Division Before Multiplication",
+      "type": "precision-loss-then-amplification",
+      "category": "arithmetic",
+      "severity": "potential-low",
+      "contract": "src/NFTStakerPriceScaled.sol",
+      "line": 430,
+      "description": "Floor-rounding division-before-multiply intersecting the delta: `latestPrice = price.mulDiv(APY_PRECISION, r)` (L430) floors FIRST, then `latestPrice = latestPrice * priceScale` (L435) multiplies. The priceScale multiply AMPLIFIES the up-to-1-wei floor truncation by the scale factor: with priceScale=1e12, the worst-case absolute lost magnitude on latestPrice grows from <1 wei to <1e12 wei. The floor happens on the price BEFORE scaling, so the dropped sub-wei fraction of the unscaled price is multiplied up. This is the textbook precision-loss-then-amplification shape (floor before multiply). However the RELATIVE error stays ~1e-21 (latestPrice is ~1e33 after scaling; the amplified absolute error ~1e12 is ~21 orders of magnitude smaller), and the direction is conservative-for-protocol (floor under-promises the rate). No exploit; the amplification is real but economically negligible at intended scales. Would only matter if priceScale were absurdly large (itself an obvious misconfig, Law 3).",
+      "confidence": "low",
+      "matchedSignatures": [
+        "latestPrice = price.mulDiv(APY_PRECISION, r) (L430, floor)",
+        "latestPrice = latestPrice * priceScale (L435, amplifying multiply AFTER the floor)"
+      ],
+      "missingMitigations": [
+        "Floor truncation is taken before the priceScale multiply (amplifies the dropped fraction)"
+      ],
+      "deltaIntersects": true,
+      "lawAnalysis": "The amplified error is conservative-for-protocol (floor under-promises) and economically negligible (~1e-21 relative). Not a Law-1 exploit; not a Law-2 story break (NatSpec L413-419 explicitly mandates floor and forbids ceiling). Informational. Reorder note: multiplying by priceScale BEFORE the mulDiv (i.e. price.mulDiv(APY_PRECISION*priceScale, r) or scaling the numerator) would eliminate the amplification, but the current order is safe-direction so the change is cosmetic, not required.",
+      "suggestsFinding": "informational",
+      "references": [
+        "DIVISION-PRECISION pattern (patterns/vulnerability-patterns.json)",
+        "profile section 3 rounding sites"
+      ]
+    },
+    {
+      "id": "PATTERN-PS-004",
+      "source": "pattern-db",
+      "patternId": "IMMUTABLE-DEPLOY-MISCONFIG",
+      "patternName": "Immutable Set Without Bounds at Deploy (custom; not in DB v1.0)",
+      "type": "immutable-misconfiguration",
+      "category": "configuration",
+      "severity": "potential-low",
+      "contract": "src/NFTStakerPriceScaled.sol",
+      "line": 230,
+      "description": "`priceScale` is `public immutable` (L94), set once in the constructor (L236) behind only `require(_priceScale != 0)` (L230). No upper bound and no semantic validation. Because it is immutable, ANY error -- wrong magnitude (see PS-001), or an absurd value that pushes L435 (latestPrice*priceScale) or L440 (totalStaked*latestPrice) into a checked-arithmetic revert -- can only be remedied by redeploying the contract and re-migrating stakers. An absurd value (>~1e40 combined with large price/supply) bricks _recomputeSchedule via overflow-revert, which would DoS stake/unstake/topUp/setTargetAPY (all call recompute); emergencyWithdraw still escapes principal (it never reads priceScale, L577-600). The DoS is a checked revert, not silent wraparound, and an absurd immutable is an obvious deploy-time misconfig.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "uint256 public immutable priceScale (L94)",
+        "require(_priceScale != 0, ...) (L230) -- only lower-bound guard",
+        "priceScale = _priceScale (L236)"
+      ],
+      "missingMitigations": [
+        "No upper bound on _priceScale at construction",
+        "Immutable -- not correctable post-deploy",
+        "Overflow on absurd value is a recompute DoS (mitigated for principal by emergencyWithdraw)"
+      ],
+      "deltaIntersects": true,
+      "lawAnalysis": "An absurd priceScale is an OBVIOUS owner misconfig observable at deploy (Law 3 -> trusted/suppress for the overflow-DoS angle). The non-obvious magnitude error overlaps PS-001 and is routed there. Listed here for completeness of the immutable-misconfig family; on its own the overflow-DoS angle is suppressed-leaning (obvious + principal escapes). Confidence LOW.",
+      "suggestsFinding": "informational-leaning-suppress",
+      "references": [
+        "profile section 5 (constructor) and overflow assessment"
+      ]
+    },
+    {
+      "id": "PATTERN-PS-005",
+      "source": "pattern-db",
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "patternName": "Reward-Emission Rate Manipulation / Budget Drain (delta-intersection check)",
+      "type": "reward-rate-mis-sizing",
+      "category": "staking-yield",
+      "severity": "potential-medium",
+      "contract": "src/NFTStakerPriceScaled.sol",
+      "line": 435,
+      "description": "Delta-intersection of the reward-emission/budget-drain family: priceScale linearly scales latestPrice -> S -> F -> rewardRate (L435->L440->L455->L456). A priceScale set too LARGE inflates rewardRate, draining the funded reward budget faster than intended (over-emission / shorter runway than the operator believes). This is a rate MIS-SIZING via the immutable scale, NOT a manipulation vector: priceScale is immutable and owner-set, not user/attacker-influenceable, and the solvency clamp still holds (windowEnd shortens as rate rises, _updatePool clamps reward to rewardBudget, _safePay reverts on shortfall) so the protocol never pays MORE than it holds -- it just pays out the held budget faster / over the wrong APY. No insolvency, no double-mint, no attacker path. Collapses into the decimal-correctness footgun PS-001 (same root cause: wrong scale -> wrong rate). Recorded separately to show the budget-drain pattern was checked against the delta and resolves to a config footgun, not an exploit.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "rewardRate, rewardBudget, windowEnd, committedDebt (host-file emission state)",
+        "latestPrice = latestPrice * priceScale propagating into newRate = F / SECONDS_PER_YEAR"
+      ],
+      "missingMitigations": [
+        "No effect: solvency invariant (balance == rewardBudget + committedDebt) and the min(now, windowEnd) clamp bound actual payout regardless of rate (profile invariants #1, #3)",
+        "_safePay reverts on shortfall (no silent over-pay)"
+      ],
+      "deltaIntersects": true,
+      "lawAnalysis": "Not a Law-1 exploit (no attacker-influenceable input; solvency holds). Maps onto the same owner config-correctness boundary as PS-001 (over-emission is the too-large half of the wrong-magnitude footgun). Routed to manual review folded with PS-001; no independent finding.",
+      "suggestsFinding": "informational-dup-of-PS-001",
+      "references": [
+        "REWARD-RUNWAY-DEPLETION / MINT-ON-DEMAND-OVERMINT patterns",
+        "profile invariants #1 and #3 (solvency / clean depletion)"
+      ]
+    }
+  ]
+}
