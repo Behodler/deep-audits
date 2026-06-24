@@ -1,0 +1,109 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-06-24T00:00:00Z",
+  "scanType": "story-faithfulness",
+  "commit": "aa86be6",
+  "mode": "regression",
+  "storiesChecked": ["story-040", "story-041"],
+  "intentResolution": {
+    "story-040": {
+      "source": "git commit cd32e63 body (detailed)",
+      "note": "Full narrative present: donation split + retain, authorized-pooler-gated pool() (swap prime->pair, ~half pair->target, two-sided addLiquidity, LP accrues as POL), copies pooler-auth + rescueERC20 from BalancerPoolerV2 verbatim, minimal UniV2 interfaces, 54-test suite."
+    },
+    "story-041": {
+      "source": "git commit aa86be6 body (subject line ONLY)",
+      "note": "Commit body is a single subject line: 'Add UniboostMintDebtHook with prime-decimals-aware phUSD debt accrual'. No bulleted acceptance criteria. Intent supplemented by: (a) the contract NatSpec, (b) the TDD test suite test/UniboostMintDebtHook.t.sol which is the de-facto acceptance spec in this repo, (c) the sibling NudgeRatchet M-04 fix (story-037) as the established hook-wiring precedent. No docs/ directory exists in this submodule."
+    }
+  },
+  "findings": [
+    {
+      "id": "F-04-041",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-041",
+      "severity": "potential-low",
+      "contract": "src/hooks/UniboostMintDebtHook.sol",
+      "function": "constructor",
+      "line": 81, "lineStart": 81, "lineEnd": 89,
+      "specText": "story-041 (commit aa86be6 subject): \"Add UniboostMintDebtHook with prime-decimals-aware phUSD debt accrual\"; NatSpec @dev line 18-23: \"is prime-decimals-aware: the constructor reads IERC20Metadata(primeToken_).decimals() once and sets the immutable scale = 10 ** (18 - decimals). This makes the hook correct for a 6-decimal prime ...\"",
+      "specSource": "git commit aa86be6 subject + UniboostMintDebtHook.sol NatSpec lines 18-23, 43-47",
+      "actualBehavior": "scale is derived from an INDEPENDENT constructor arg primeToken_ (line 85: IERC20Metadata(primeToken_).decimals()), with NO on-chain tie to the Uniboost dispatcher's actual primeToken(). dispatcher_ and primeToken_ are two separate, unvalidated parameters. The hook is 'aware' of *a* prime's decimals, but nothing binds that prime to the prime the paired dispatcher actually dispatches. If a deployer passes a primeToken_ whose decimals differ from dispatcher.primeToken() (e.g. an 18-dp token while the live Uniboost dispatches 6-dp USDC), scale is wrong and EVERY accrual is mis-scaled by 10^(±k) for the life of the immutable.",
+      "deviation": "The story title's 'prime-decimals-aware' reads as a guarantee that the hook's scale matches the prime it accrues debt against. The implementation only guarantees scale matches whatever decimals() the deploy-time primeToken_ exposes, which is decoupled from the dispatcher. The awareness is of an unbound input, not of the dispatcher's prime. This is the faithfulness mirror of code-scanner LEAD-B: the spec implies binding; the code permits divergence.",
+      "lawImpacted": 2,
+      "confidence": "medium",
+      "remediation": "Either (a) read decimals live from ITokenDispatcherV2(dispatcher).primeToken() in the constructor so the two cannot diverge, or (b) require(primeToken_ == ITokenDispatcherV2(dispatcher_).primeToken()) at construction, or (c) re-derive/re-assert on setDispatcher. At minimum, deploy-wiring (story-040/041 deployment) must assert the equality off-chain.",
+      "crossRef": "code-scanner LEAD-B (deploy-time mis-wire mis-scales all debt). Severity ceiling is governed by Law-3: a non-malicious deployer passing a mismatched primeToken_ is a NON-OBVIOUS footgun (two same-typed address args, silently both valid), so it stays in scope as an operational hazard rather than 'reckless admin'. Mis-scale UNDER-backs or OVER-backs phUSD depending on direction; if under-scaled the protocol mints less debt than collateral (safe); if over-scaled (primeToken_ has fewer decimals than the real prime) it would over-accrue debt -> over-mint phUSD on pull. Code-scanner/econ-scanner own the value-impact severity."
+    },
+    {
+      "id": "F-05-041",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-041",
+      "severity": "potential-low",
+      "contract": "src/hooks/UniboostMintDebtHook.sol",
+      "function": "onDispatch / wiring",
+      "line": 128, "lineStart": 124, "lineEnd": 136,
+      "specText": "story-041 (commit aa86be6 subject): \"... phUSD debt accrual\" — i.e. debt accrues on dispatch routed through the Uniboost dispatcher. Contract NatSpec line 12-13: \"accrues a phUSD mint debt on every dispatch routed through a specific Uniboost dispatcher.\"",
+      "specSource": "git commit aa86be6 subject + UniboostMintDebtHook.sol NatSpec lines 11-17, 124-127",
+      "actualBehavior": "onDispatch is gated to `dispatcher` (prevents external inflation) but there is NO reciprocal guarantee that the Uniboost dispatcher actually calls THIS hook. Uniboost inherits ATokenDispatcherV2 whose hook defaults to a NO-OP DefaultDispatchHook (base ctor line 51) and is only swapped by an owner setHook() call. Unlike NudgeRatchet (story-037 / Audit M-04 fix, NudgeRatchet.sol:86-89 require hookTypeId()==EXPECTED), Uniboost performs NO hookTypeId check, and UniboostMintDebtHook exposes NO hookTypeId() marker at all (neither contract nor IUniboostMintDebtHook declares it). So 'debt accrues on every dispatch' holds ONLY if the owner remembers to call Uniboost.setHook(uniboostMintDebtHook). If skipped, every dispatch buy-and-pools prime while accruing ZERO phUSD debt, and Uniboost's own 54-test suite + the hook's suite both pass in isolation (dispatcher tests use DefaultDispatchHook or a mock; hook tests call onDispatch directly).",
+      "deviation": "The story's accrual guarantee is silently defeatable by a wiring omission that the system does not self-detect. The repo had already established the corrective pattern in story-037 (hookTypeId marker guard) precisely because this exact footgun (M-04) bit the NudgeRatchet line. story-041 re-introduces a hook in the same family WITHOUT carrying that guarantee forward. NOTE: neither story-040 nor story-041 *explicitly text* a hookTypeId requirement, so this is a soft faithfulness gap (under-delivery of the implied 'on every dispatch' guarantee + regression of the M-04 hardening precedent), not a hard contradiction of quoted text.",
+      "lawImpacted": 2,
+      "confidence": "medium",
+      "remediation": "Add a hookTypeId() marker to UniboostMintDebtHook + IUniboostMintDebtHook and enforce it inside Uniboost._dispatch (mirroring NudgeRatchet.sol:86-89), OR have the deployment story assert Uniboost.hook()==uniboostMintDebtHook. Cross-ref code-scanner LEAD-A and prior M-04 (story-037). Law-3: a non-malicious owner who deploys the buy-and-pool dispatcher and forgets the separate setHook step would be SURPRISED that no phUSD debt accrued (the whole point of pairing the hook) -> non-obvious footgun, in scope as operational hazard."
+    }
+  ],
+  "verifiedFaithful": [
+    {
+      "storyTag": "story-040",
+      "claim": "_dispatch carves an optional prime-token donation split to a recipient; retains the rest",
+      "evidence": "Uniboost._dispatch (lines 184-199): donationEnabled = recipient!=0 && donationSplit>0; donationAmount = amount*donationSplit/100; safeTransfer(recipient, donationAmount); remainder stays on contract. setDonationSplit caps <=100 (line 139). Matches test_dispatch_donationEnabled_forwardsSplitAndRetainsRemainder.",
+      "result": "FAITHFUL"
+    },
+    {
+      "storyTag": "story-040",
+      "claim": "authorized-pooler-gated pool() swaps retained prime -> pair, ~half pair -> target, then adds two-sided liquidity (LP accrues on-contract as POL)",
+      "evidence": "pool() onlyAuthorizedPooler (lines 208-252): Step1 swap full prime balance -> pair (minPairOut); Step2 swap pairBal/2 -> target (minTargetOut); Step3 addLiquidity(target, pair, ..., 0, 0, address(this), ...) with post-call require(liquidity>=minLP); LP minted to address(this). Matches test_pool_endToEnd_sequenceAndLPLandsOnDispatcher.",
+      "result": "FAITHFUL"
+    },
+    {
+      "storyTag": "story-040",
+      "claim": "Copies the pooler-auth machinery and rescueERC20 from BalancerPoolerV2 verbatim",
+      "evidence": "authVersion/poolerAuthVersion + setAuthorizedPooler/incrementAuthVersion/onlyAuthorizedPooler (lines 56-72, 254-272) and rescueERC20 (lines 280-283) present and structurally identical to the BalancerPoolerV2 pattern.",
+      "result": "FAITHFUL"
+    },
+    {
+      "storyTag": "story-040",
+      "claim": "Adds minimal IUniswapV2Router02 / IUniswapV2Pair interfaces and a 54-test suite",
+      "evidence": "src/interfaces/uniswap/IUniswapV2Router02.sol (26 LOC) + IUniswapV2Pair.sol (10 LOC) added in the commit; test/Uniboost.t.sol added (671 LOC).",
+      "result": "FAITHFUL"
+    },
+    {
+      "storyTag": "story-040 / story-041",
+      "claim": "Debt accrues on the GROSS dispatched amount even though donationSplit% is forwarded out (donation-on-gross convention)",
+      "evidence": "Uniboost._dispatch NatSpec lines 179-182 explicitly states this and cites it as 'same convention as BalancerPoolerV2'. base ATokenDispatcherV2.dispatch (line 125) passes the original gross `amount` to hook.onDispatch. This is an EXPLICITLY DOCUMENTED, deliberate design (over-backs phUSD relative to retained prime: protocol-favouring), not a deviation. Confirmed against BalancerPoolerMintDebtHook which uses the identical convention.",
+      "result": "FAITHFUL (intended, documented)"
+    },
+    {
+      "storyTag": "story-041",
+      "claim": "prime-decimals scale math is in the correct direction and rejects >18-dp",
+      "evidence": "scale = 10**(18-d) (line 89); added = amount*scale*ratio/100 (line 132), multiply-then-divide floors (dust -> protocol, never over-credits); require(d<=18) (line 86) blocks underflow. Does NOT reproduce the M-03 sign-flip over-mint trap. Verified by test_onDispatch_scales10USDCToFivePhUSDAtDefaultRatio (5e17 per 1 USDC) and test_onDispatch_18dpBehavesLikeBalancerHook.",
+      "result": "FAITHFUL"
+    }
+  ],
+  "law1OverrideCheck": {
+    "result": "NO UNSAFE STORY",
+    "reasoning": [
+      "addLiquidity(...,0,0,...) with zero minAmounts (Uniboost line 245): the story/NatSpec (lines 237-239, 204-207) intends slippage to be bounded by the two upstream swap floors (minPairOut, minTargetOut) chosen by the authorized pooler plus the post-call require(liquidity>=minLP). This is an intended, bounded design, not an unsafe story. (Whether minLP alone is a sufficient sandwich floor is a CODE/ECON question, not a story-intent question; left to those scanners. The STORY itself does not ask for unprotected liquidity adds.)",
+      "Debt-on-gross while forwarding donation: the INTENDED behaviour over-backs phUSD (records debt for prime that was donated away, so the protocol is conservatively over-collateralised). Faithfully implementing it is SAFE (protocol-favouring), so no Law-1 escalation. The only value risk runs the other direction (under-backing) and arises from the F-04-041 mis-scale / F-05-041 unwired-hook footguns, which are faithfulness/operational, not unsafe-intent.",
+      "router deadline = block.timestamp: no story text requests this; it is an implementation choice. Code-scanner territory, not story-unsafe."
+    ]
+  },
+  "notes": [
+    "Tag convention: prior project faithfulness findings use F-NN-0NN keyed to story (e.g. F-02-035). Both new findings key to story-041 (the hook is the locus of both gaps); next free F-prefix in the 040/041 wave is F-04 -> F-04-041, F-05-041.",
+    "No hard text-contradiction findings against story-040: its detailed narrative is implemented clause-for-clause.",
+    "story-041's empty commit body forced reliance on NatSpec + TDD suite as the acceptance spec; both gaps (F-04-041, F-05-041) are flagged at potential-Low from a pure-faithfulness lens and DELIBERATELY defer their security/value severity to code-scanner (LEAD-A/LEAD-B) and econ-scanner, where the over-mint / unbacked-asymmetry impact is priced. Per Law 1, recall is preserved: both are surfaced, not dropped.",
+    "Cosmetic: NatSpec says ratio 'strictly < MAX_RATIO' but setRatio is inclusive (newRatio==50 allowed). Same comment/code mismatch as BalancerPoolerMintDebtHook. QA-bundler territory, not a faithfulness finding."
+  ]
+}

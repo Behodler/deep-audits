@@ -1,0 +1,117 @@
+{
+  "contract": "src/dispatchers/Uniboost.sol",
+  "profileTimestamp": "2026-06-24T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "commit": "aa86be6",
+  "story": "story-040",
+  "inheritanceChain": ["ATokenDispatcherV2", "ITokenDispatcherV2", "Pausable", "Ownable", "ReentrancyGuard"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["dispatch (base, nonReentrant)", "pool (nonReentrant)"],
+    "accessControlled": {
+      "onlyOwner": ["setPool", "setDonationSplit", "setRecipient", "setPrimeToPairPath", "setAuthorizedPooler", "incrementAuthVersion", "rescueERC20", "setMinter (base)", "setHook (base)", "setMetadata (base)"],
+      "onlyMinter": ["dispatch (base entry)", "pause (base)", "unpause (base)"],
+      "onlyAuthorizedPooler": ["pool"]
+    },
+    "initializerProtected": "n/a (constructor-only, not upgradeable)",
+    "pausable": true
+  },
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "dispatch(address minter, uint256 amount, bytes extraData)",
+        "definedIn": "ATokenDispatcherV2 (non-virtual base entry)",
+        "visibility": "external",
+        "accessControl": "onlyMinter + whenNotPaused + nonReentrant",
+        "flow": "calls _dispatch(...) override then hook.onDispatch(minter, amount, extraData)",
+        "stateChanges": ["transfers donation prime out (if enabled)", "ReentrancyGuard"],
+        "externalCalls": ["IERC20(prime).safeTransfer(recipient, donation)", "hook.onDispatch(...)"]
+      },
+      {
+        "function": "pool(uint256 minPairOut, uint256 minTargetOut, uint256 minLP)",
+        "visibility": "external",
+        "accessControl": "onlyAuthorizedPooler + whenNotPaused + nonReentrant",
+        "flow": "swap all prime->pair (router), swap half pair->target, addLiquidity(target,pair). LP accrues here as POL.",
+        "stateChanges": ["token balances (prime->pair->target->LP)"],
+        "externalCalls": [
+          "router.swapExactTokensForTokens (prime->pair, minPairOut)",
+          "router.swapExactTokensForTokens (pair->target, minTargetOut)",
+          "router.addLiquidity(target, pair, ..., 0, 0, this, block.timestamp)",
+          "IUniswapV2Pair(pool).token0()/token1() (read, via setPool only)"
+        ],
+        "valueFlow": "prime in (held balance) -> LP tokens out (held on dispatcher)"
+      },
+      {"function": "setPool(address)", "accessControl": "onlyOwner", "stateChanges": ["_targetPool", "_pairToken"], "externalCalls": ["pair.token0()/token1()"]},
+      {"function": "setDonationSplit(uint256 <=100)", "accessControl": "onlyOwner", "stateChanges": ["donationSplit"]},
+      {"function": "setRecipient(address)", "accessControl": "onlyOwner", "stateChanges": ["recipient"], "note": "zero allowed -> disables donation"},
+      {"function": "setPrimeToPairPath(address[])", "accessControl": "onlyOwner", "stateChanges": ["_primeToPairPath"], "validation": "len>=2, starts at prime, ends at current pairToken"},
+      {"function": "setAuthorizedPooler(address,bool)", "accessControl": "onlyOwner", "stateChanges": ["poolerAuthVersion[pooler]"]},
+      {"function": "incrementAuthVersion()", "accessControl": "onlyOwner", "stateChanges": ["authVersion (mass-revoke)"]},
+      {"function": "rescueERC20(address,address to,uint256)", "accessControl": "onlyOwner", "note": "NOT pause-gated (escape hatch); also LP-withdrawal mechanism", "externalCalls": ["token.safeTransfer"]},
+      {"function": "setHook(IDispatchHook)", "definedIn": "base", "accessControl": "onlyOwner", "note": "rejects zero; NO hook-type validation"},
+      {"function": "primeToken()/router()/targetPool()/pairToken()/primeToPairPath() views", "accessControl": "none"}
+    ],
+
+    "externalCalls": [
+      {"target": "IERC20 _primeToken", "methods": ["safeTransfer", "balanceOf", "forceApprove"], "trustLevel": "semi-trusted", "notes": "assumed standard ERC20; FOT handled upstream by minter (amount is FOT-adjusted)"},
+      {"target": "IUniswapV2Router02 _router (immutable)", "methods": ["swapExactTokensForTokens", "addLiquidity"], "trustLevel": "trusted", "notes": "owner-configured at deploy; deadline=block.timestamp (no real deadline protection)"},
+      {"target": "IUniswapV2Pair _targetPool", "methods": ["token0", "token1"], "trustLevel": "semi-trusted", "notes": "owner-settable via setPool; only read for token derivation"},
+      {"target": "IDispatchHook hook", "methods": ["onDispatch"], "trustLevel": "owner-configured", "notes": "base default is DefaultDispatchHook (NO-OP, zero debt). Uniboost does NOT enforce hookTypeId."},
+      {"target": "address recipient (donation)", "methods": ["safeTransfer"], "trustLevel": "owner-configured"}
+    ],
+
+    "stateVariables": [
+      {"name": "_primeToken", "type": "address immutable"},
+      {"name": "_router", "type": "address immutable"},
+      {"name": "targetToken", "type": "address immutable public"},
+      {"name": "_targetPool", "type": "address", "mutators": ["setPool/_setPool"]},
+      {"name": "_pairToken", "type": "address", "mutators": ["_setPool"]},
+      {"name": "_primeToPairPath", "type": "address[]", "mutators": ["setPrimeToPairPath"]},
+      {"name": "donationSplit", "type": "uint256 public"},
+      {"name": "recipient", "type": "address public"},
+      {"name": "authVersion", "type": "uint256 public"},
+      {"name": "poolerAuthVersion", "type": "mapping(address=>uint256) public"},
+      {"name": "hook", "type": "IDispatchHook public (base)"}
+    ],
+
+    "events": ["PoolerAuthorized", "PoolerDeauthorized", "AuthVersionIncremented", "Pooled", "PoolSet", "DonationSplitSet", "RecipientSet", "PrimeToPairPathSet", "HookUpdated (base)", "MetadataUpdated (base)"],
+    "modifiers": ["onlyAuthorizedPooler (local)", "onlyOwner", "onlyMinter (base)", "whenNotPaused (base)", "nonReentrant (base)"]
+  },
+
+  "localInvariants": [
+    "hook is never zero (base seeds DefaultDispatchHook; setHook rejects zero) -> dispatch is branch-free",
+    "_dispatch must NOT re-declare onlyMinter/whenNotPaused/nonReentrant (they live on base dispatch) - verified compliant",
+    "donationAmount = enabled ? amount*donationSplit/100 : 0; donationSplit<=100 invariant enforced in setter",
+    "pool() carves prime balance entirely; whatever prime remains after dispatch's donation is the pool() basis",
+    "authorized pooler iff poolerAuthVersion[caller]==authVersion (incrementAuthVersion mass-revokes)",
+    "_pairToken is always the pool's non-target token (derived in _setPool; requires targetToken in pool)"
+  ],
+
+  "trustAssumptions": [
+    "Prime token is standard ERC20; FOT adjustment already applied by NFTMinterV2 before passing amount",
+    "Router and pool are honest UniV2 (owner-configured); pool() is permissioned to authorized poolers who choose slippage floors",
+    "Owner is trusted to wire the correct mint-debt hook via setHook (NO on-chain hookTypeId enforcement - see red flags)",
+    "Owner sets donation recipient correctly (intended: BalancerPooler batch-minter)"
+  ],
+
+  "hookWiring": {
+    "invocation": "base ATokenDispatcherV2.dispatch -> hook.onDispatch(minter, amount, extraData) with GROSS amount (pre-donation)",
+    "hookTypeIdEnforcement": "NONE. Uniboost._dispatch performs no hookTypeId()==EXPECTED check, unlike NudgeRatchet (post-M-04, line 86-89).",
+    "defaultHook": "DefaultDispatchHook (NO-OP). If owner never calls setHook to wire UniboostMintDebtHook, every dispatch accrues ZERO phUSD debt and tests of the dispatcher in isolation pass silently.",
+    "donationVsDebt": "Debt accrues on GROSS dispatched amount even though donationSplit% is forwarded to recipient. Same convention as BalancerPoolerV2 (documented). Scanners should confirm the donation forward + debt-on-gross does not double-count/under-back phUSD across the two-leg system."
+  },
+
+  "redFlagsForScanners": [
+    "HOOK-WIRING (echoes prior M-04): Uniboost does NOT enforce hookTypeId on its hook. NudgeRatchet was fixed in story-037 to require INudgeRatchetMintDebtHook(hook).hookTypeId()==EXPECTED_HOOK_TYPE_ID inside _dispatch. Uniboost/UniboostMintDebtHook expose NO hookTypeId at all, so the M-04 unwired/wrong-hook -> zero-debt footgun is structurally re-openable here. Flag for code-scanner/story-faithfulness.",
+    "router deadline = block.timestamp on every swap/addLiquidity = no deadline protection (relies on minPairOut/minTargetOut/minLP floors chosen by pooler).",
+    "addLiquidity called with amountAMin=0, amountBMin=0; slippage relies solely on the two upstream swap floors + post-call minLP require. Confirm minLP alone is sufficient sandwich/JIT protection.",
+    "setPool can be repointed after primeToPairPath was validated against the OLD _pairToken; path is not re-validated on setPool -> stale path could end at wrong token. setPrimeToPairPath validates end==_pairToken at set-time only.",
+    "rescueERC20 is owner escape hatch AND the LP-withdrawal mechanism; not pause-gated by design. (Owner trusted; note for completeness.)",
+    "pool() leaves residual dust (refunded addLiquidity side); swept by next pool(). Benign but note value-accounting."
+  ],
+
+  "complexity": {"loc": 285, "externalFunctions": 17, "externalCalls": 5, "stateVariables": 11}
+}

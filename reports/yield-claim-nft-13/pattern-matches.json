@@ -1,0 +1,159 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-06-24T00:00:00Z",
+  "scanType": "pattern-matching",
+  "commit": "aa86be6",
+  "scope": [
+    "src/dispatchers/Uniboost.sol",
+    "src/hooks/UniboostMintDebtHook.sol"
+  ],
+  "patternsChecked": 27,
+  "findingsCount": 4,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "ledger-recurring + pattern-db",
+      "patternId": "M-04-HOOK-UNWIRED / MINT-ON-DEMAND-OVERMINT",
+      "type": "unwired-or-mismatched-hook-zero-debt",
+      "severity": "potential-medium",
+      "contract": "src/hooks/UniboostMintDebtHook.sol",
+      "secondaryContract": "src/dispatchers/Uniboost.sol",
+      "line": 128,
+      "description": "M-04 condition reborn on the new Uniboost dispatcher/hook pair. The base ATokenDispatcherV2.dispatch() (line 125) calls hook.onDispatch() UNCONDITIONALLY and seeds hook = new DefaultDispatchHook() (no-op) in its constructor (line 51). The NudgeRatchet fix for M-04 (story-037) added a hookTypeId() == EXPECTED_HOOK_TYPE_ID marker guard inside NudgeRatchet._dispatch. Uniboost._dispatch (Uniboost.sol:184-199) has NO such guard, and UniboostMintDebtHook exposes NO hookTypeId() at all (neither IUniboostMintDebtHook nor the impl declares it). Therefore if the owner forgets dispatcher.setHook(uniboostHook), or wires the wrong hook, every dispatch forwards prime with ZERO phUSD mint-debt accrued, no revert, no event. This is the exact M-04 footgun the protocol already paid to fix on the sibling dispatcher, NOT carried over here.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "hook = new DefaultDispatchHook();",
+        "hook.onDispatch(minter, amount, extraData); // unconditional in base",
+        "Uniboost._dispatch has no hookTypeId guard",
+        "UniboostMintDebtHook has no hookTypeId()"
+      ],
+      "missingMitigations": [
+        "No hookTypeId() marker guard in Uniboost._dispatch (present in NudgeRatchet._dispatch after story-037)",
+        "UniboostMintDebtHook does not implement hookTypeId() — guard cannot be added without an interface change",
+        "Q-08 already flagged this asymmetry for BalancerPoolerV2; Uniboost extends the same fail-open surface to a THIRD dispatcher"
+      ],
+      "riskHypothesis": "Unbacked dispatch: prime tokens leave the system (donation + pooled liquidity) with no corresponding phUSD debt recorded, breaking the backing-integrity invariant the hook exists to maintain. Pure value-leak / accounting-failure, no theft. Confirm: does any deploy/wiring story guarantee setHook with the correct Uniboost hook before dispatches open? Refute if a deploy script atomically wires it AND there is operational verification of debt accrual.",
+      "ledgerRef": "M-04 (fingerprint c91bef81), Q-08 (96c60b72), Q-07 regressionWatch:M-04",
+      "references": ["reports/yield-claim-nft-11/submissions/M-04-submission.md"]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE / FLASH-LOAN-PRICE",
+      "type": "univ2-sandwich-mev-on-pool",
+      "severity": "potential-medium",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "line": 208,
+      "description": "pool() executes a classic buy-and-pool zap against a UniV2 pair across THREE manipulable legs: (1) swapExactTokensForTokens prime->pair (line 218) bounded only by caller-supplied minPairOut, (2) swapExactTokensForTokens pair->target (line 231) bounded only by caller-supplied minTargetOut, (3) addLiquidity (line 244) called with amountAMin=0, amountBMin=0 and bounded only by a post-call require(liquidity >= minLP). All three floors are supplied by the (authorized) pooler off-chain; there is NO on-chain oracle/TWAP reference. The buy leg deliberately moves the target token's spot price (the 'boost'), making the addLiquidity ratio a sandwich target. Directly analogous to ledger L-06 (BalancerPoolerV2 single-sided LP-add, off-chain minBPT only, Low).",
+      "confidence": "high",
+      "matchedSignatures": [
+        "swapExactTokensForTokens(amountIn, minPairOut, ...)",
+        "swapExactTokensForTokens(half, minTargetOut, ...)",
+        "addLiquidity(targetToken, _pairToken, targetBal, pairRemaining, 0, 0, ...)",
+        "require(liquidity >= minLP)"
+      ],
+      "missingMitigations": [
+        "addLiquidity min amounts hardcoded to 0 (slippage delegated entirely to upstream swap floors + minLP)",
+        "No on-chain price reference; floors are pooler-trusted inputs"
+      ],
+      "riskHypothesis": "MEV sandwich extracts value from each pool() call by front/back-running the two swaps and skewing the add-liquidity ratio, degrading protocol-owned liquidity received per prime spent. Mitigant: pool() is onlyAuthorizedPooler (not permissionless), so the attacker cannot trigger it — they can only sandwich a pooler's public tx. Likely-Low like L-06 unless a tighter MEV path is shown; downstream econ-scanner to set severity. Refute if poolers submit via private mempool/flashbots per ops guidance.",
+      "ledgerRef": "L-06 (342075df), L-03 (e29ae08e)",
+      "references": ["reports/yield-claim-nft-10/submissions/qa-report.md"]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "ledger-recurring + pattern-db",
+      "patternId": "M-03-DECIMAL-SCALE / DIVISION-PRECISION",
+      "type": "decimal-scaling-mint-debt",
+      "severity": "potential-low",
+      "contract": "src/hooks/UniboostMintDebtHook.sol",
+      "line": 132,
+      "description": "M-03 recurring class check on the new hook's debt math: added = (amount * scale * ratio) / 100, where scale = 10**(18 - primeDecimals) read once from IERC20Metadata(primeToken_).decimals() with a require(d <= 18) constructor guard. This is the CORRECT direction and the RIGHT factor (the exact form the M-03 fix landed as, generalized to dynamic decimals). The sign-flip / over-correction hazard that M-03's fix-watch warned about is NOT present: scale is applied exactly once, multiply-before-divide floors (never over-credits), and d<=18 prevents an inverted/underflowing exponent. Reported as a low-confidence APPLIES match purely so the recurring-class watch is visibly discharged, not dropped.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "scale = 10 ** (18 - d)",
+        "added = (amount * scale * ratio) / 100",
+        "IERC20Metadata(primeToken_).decimals()"
+      ],
+      "missingMitigations": [
+        "none material — d<=18 guard present, scale applied once, floor rounding favors protocol"
+      ],
+      "riskHypothesis": "No under/over-mint expected: math mirrors the cleared M-03 fix. Residual nuances for downstream to confirm/refute, NOT to finalize: (a) scale and ratio are immutable/settable independently of the dispatcher's actual prime token — if setDispatcher repoints to a dispatcher whose prime has DIFFERENT decimals, scale is stale (analogous to ledger L-07 price re-denomination across replaceDispatcher). (b) onDispatch accrues on the GROSS dispatched amount while Uniboost._dispatch donates donationSplit% away — intended per the BalancerPoolerV2 convention, but confirm the gross-vs-net intent holds for backing. (c) silent return on added==0 (zero ratio / dust) re-uses the same no-emit convention.",
+      "ledgerRef": "M-03 (b41dfefd), L-07 (ac91a046)",
+      "references": ["reports/yield-claim-nft-11/submissions/M-03-submission.md"]
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "ledger-recurring",
+      "patternId": "L-08-NO-RESCUE-ASYMMETRY / approval-dust",
+      "type": "approval-and-dust-handling",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "line": 240,
+      "description": "Approval handling and residual-dust review. Approvals are handled cleanly (forceApprove to exact amount then forceApprove(_,0) reset after each router call, lines 217/221, 230/234, 242/243/248/249) — no leftover allowance pattern, matches best practice. HOWEVER: addLiquidity refunds the unused side, leaving residual target/pair dust on the dispatcher (acknowledged in the comment at line 237-239: 'swept by the next pool()'). If pool() is never called again (deauthorized poolers / wind-down), that dust plus any out-of-band tokens is recoverable ONLY via rescueERC20 — which Uniboost DOES provide (line 280), unlike the sibling NudgeRatchet whose absence was ledger L-08. So Uniboost is on the SAFE side of the L-08 asymmetry. Recorded as a discharged check.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "forceApprove(_router, amount) ... forceApprove(_router, 0)",
+        "rescueERC20(address token, address to, uint256 amount)",
+        "residual dust accrues on the dispatcher and is swept by the next pool()"
+      ],
+      "missingMitigations": [
+        "none — approvals reset to 0 after each leg; rescueERC20 present (owner-only, not pause-gated by design)"
+      ],
+      "riskHypothesis": "No allowance-leak or permanently-stranded-dust issue: allowances reset, rescueERC20 recovers everything. Minor footgun nuance for downstream: rescueERC20 can also pull the protocol-owned LP token (the pair ERC20) — documented as the intended LP-withdrawal mechanism (line 274-275), so it is owner-trusted by design, NOT a finding. Confirm no scenario where dust on a deauthorized/paused dispatcher is unrecoverable (it is recoverable via rescueERC20, which is explicitly not pause-gated).",
+      "ledgerRef": "L-08 (0b97f155)",
+      "references": ["reports/yield-claim-nft-11/submissions/qa-report.md"]
+    }
+  ],
+  "manualReviewCount": 3,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "REWARD-ACCRUAL-ORDER / general FOT-balance",
+      "type": "fee-on-transfer-balance-before-after",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "line": 215,
+      "description": "pool() reads amountIn = balanceOf(this) for the prime and pairBal/targetBal via balanceOf after each swap. If prime/pair/target is fee-on-transfer, the router's internal amountOut accounting vs the post-swap balanceOf can diverge, and addLiquidity with measured balances may under/over-add. FOT tokens are a documented known-invalid class for this protocol UNLESS explicitly in scope; flagged for a human to confirm the boost target tokens (e.g. EYE) are non-FOT.",
+      "confidence": "low",
+      "matchedSignatures": ["IERC20(...).balanceOf(address(this))", "swapExactTokensForTokens", "addLiquidity"],
+      "missingMitigations": ["no FOT-aware accounting — but FOT is generally OOS for this protocol"],
+      "riskHypothesis": "Likely OOS (FOT known-invalid). Confirm targetToken/pairToken/primeToken are standard ERC20.",
+      "ledgerRef": null,
+      "references": []
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE / half-split",
+      "type": "univ2-half-split-imbalance-dust-growth",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "line": 225,
+      "description": "Step 2 swaps exactly half (pairBal / 2) of the pairing token to target before two-sided addLiquidity. A naive 50/50 split is the textbook zap approximation that ignores the price-impact of the buy itself, so addLiquidity routinely consumes an imbalanced ratio and refunds the unused side — growing residual dust each call. Not a theft vector; an efficiency/leftover-value nuance. Downstream econ-scanner to judge whether the optimal-swap formula matters here.",
+      "confidence": "low",
+      "matchedSignatures": ["uint256 half = pairBal / 2;", "addLiquidity(... targetBal, pairRemaining, 0, 0 ...)"],
+      "missingMitigations": ["no optimal-swap (Zap) ratio computation; relies on router refund + next-call sweep"],
+      "riskHypothesis": "Sub-optimal capital efficiency + monotonically growing idle dust, recoverable via rescueERC20. Likely QA. Refute if dust is provably bounded.",
+      "ledgerRef": null,
+      "references": []
+    },
+    {
+      "id": "PATTERN-MR-003",
+      "source": "pattern-db",
+      "patternId": "INCORRECT-OPERATOR / L-02-history",
+      "type": "ratio-boundary-off-by-one",
+      "severity": "potential-low",
+      "contract": "src/hooks/UniboostMintDebtHook.sol",
+      "line": 97,
+      "description": "setRatio uses if (newRatio > MAX_RATIO) revert — i.e. it ACCEPTS newRatio == MAX_RATIO (50), while the docstring/NatSpec says 'Must be strictly less than MAX_RATIO'. This is byte-identical to ledger L-02 (BalancerPoolerMintDebtHook.setRatio accepts ratio == MAX_RATIO contradicting documented strict-less-than). The recurring L-02 spec-vs-code boundary deviation is reproduced verbatim in this new hook.",
+      "confidence": "low",
+      "matchedSignatures": ["if (newRatio > MAX_RATIO) revert RatioTooHigh();", "Strictly `< MAX_RATIO`"],
+      "missingMitigations": ["operator is > not >= ; docstring claims strict-less-than"],
+      "riskHypothesis": "Spec/code mismatch only (caps at 50% either way; no asset impact). QA-class, same disposition as L-02. Confirm intended bound (>= vs >).",
+      "ledgerRef": "L-02 (5425119c)",
+      "references": ["reports/yield-claim-nft-08/submissions/qa-report.md"]
+    }
+  ]
+}

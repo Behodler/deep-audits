@@ -1,0 +1,116 @@
+{
+  "severityReview": {
+    "auditor": "severity-auditor",
+    "timestamp": "2026-06-24T00:00:00Z",
+    "project": "yield-claim-nft",
+    "run": "yield-claim-nft-13",
+    "commit": "aa86be6",
+    "criteriaSource": "CLAUDE.md C4 Severity Classifications + Three-Law Hierarchy",
+    "methodology": "Independent re-derivation from source (Uniboost.sol, ATokenDispatcherV2.sol, UniboostMintDebtHook.sol, DefaultDispatchHook.sol) + ledger precedent (M-03/M-04/Q-08/L-02/L-05/L-06) cross-check. Verified: ATokenDispatcherV2.sol:125 calls hook.onDispatch unconditionally (no hookTypeId marker check, unlike the M-04-FIXED NudgeRatchet which added a fail-closed guard via story-037); DefaultDispatchHook.sol:12 onDispatch is an empty no-op; UniboostMintDebtHook.sol:85-89 derives scale from the hook's own ctor primeToken_ with no on-chain tie to Uniboost.primeToken() (Uniboost.sol:89). All source claims CONFIRMED.",
+    "summary": "All 6 classifications CONFIRMED. No overstatement and no understatement found. The two scrutinized borderlines (CLASS-13-001, CLASS-13-002) are correctly held at Low. The decisive C4 differentiator vs the original Medium siblings (M-03, M-04) is the absence of an external/runtime/attacker path AND the absence of a coded exploit PoC in this run (run-13 produced only Tier-3 fuzz harnesses that CONFIRMED no over-mint under correct deploy). Both originals had coded PoCs demonstrating a leak under an attacker-or-default-state trigger; the run-13 mirrors only leak under a one-time owner deploy/wiring error, which is the textbook Law-3 honest-severity footgun, not a Medium."
+  },
+
+  "findings": [
+    {
+      "findingId": "CLASS-13-001",
+      "ledgerLabel": "L-09 (proposed)",
+      "title": "Uniboost no hookTypeId guard -> unwired hook accrues zero phUSD debt",
+      "claimedSeverity": "low",
+      "assessedSeverity": "low",
+      "agreement": true,
+      "confidence": "high",
+      "questionAddressed": "Is Low correct, or UNDER-stated given the sibling M-04 was Medium?",
+      "analysis": {
+        "assetRisk": "No theft, no removal of existing balance. Backing-integrity feature is skipped: Uniboost-routed prime ships with ZERO phUSD mint-debt accrued. phUSD-that-should-have-been-backed is never accrued (not retroactively backfillable), but no asset leaves the system. Verified ATokenDispatcherV2.sol:125 unconditional hook.onDispatch + DefaultDispatchHook.sol:12 no-op.",
+        "attackPath": "NONE. No external/permissionless trigger. Sole actor is the deploying owner who omits setHook (or wires the wrong hook). This is the Law-3 surprise test: a competent owner WOULD be surprised the dispatch silently succeeds with no debt (the project's own M-04-era integration test passed green while omitting setHook), so it is a valid footgun -- but it is owner-config-gated, not an attack.",
+        "conditions": "Owner setup omission only. No market condition, no attacker.",
+        "availability": "No availability break -- dispatch still fully functions; only an optional accounting side-effect is skipped.",
+        "recoverable": "Yes. setHook is correctable at any time; only debt-not-accrued during the unwired window is unrecoverable (no backfill). The prime itself is retained on-chain.",
+        "pocStatus": "No coded exploit PoC in run-13. (Original M-04 carried a passing PoC poc-M02-unwired-zero-debt.t.sol demonstrating the leak.)"
+      },
+      "consistencyWithM04": "This is the SAME fail-open class as M-04, but C4 severity is impact-and-path driven, NOT label-inherited across runs. M-04 earned Medium as a FRESH discovery with (a) a coded PoC and (b) the original surprise (the project's own test masked it). Once M-04 was FIXED on NudgeRatchet (story-037 hookTypeId guard), the IDENTICAL exposure surfacing on the BalancerPoolerV2 sibling was raised as Q-08 and the OWNER ACCEPTED IT WONT-FIX at QA. Q-08 is the controlling precedent for a recurrence of the now-understood pattern on a further contract: the owner has been informed of this exact class and chose not to add the guard sibling-wide. CLASS-13-001 is the THIRD instance (Uniboost) of that understood pattern. Holding it at Low (one notch above the owner's own Q-08 QA, because it is a new contract warranting an explicit fresh decision rather than silent suppression) is internally consistent. Escalating to Medium purely 'for consistency with the original M-04 label' would be the over-statement the auditor exists to catch -- it would value label-symmetry over the actual (no-attacker, recoverable, no-availability-break, owner-informed-precedent) impact.",
+        "verdict": "SEVERITY CONFIRMED (low). NOT under-stated. The Q-08 wont-fix precedent + no-external-attacker + recoverable + no-availability-break justifiably hold it at Low. Consistency with the M-04 *label* does NOT demand Medium; consistency with C4 *impact criteria* and with the owner's own Q-08 adjudication demands Low.",
+      "processNote": "Correctly NOT auto-suppressed under Q-08 (distinct contract -> distinct fingerprint). Routing to owner for an explicit accept/fix decision on the new dispatcher is the right call -- preserves Law-1 recall. Strongly recommend the report narrative cite both M-04 (the Medium origin) and Q-08 (the owner's QA acceptance of the recurrence) so the reader sees the full severity trajectory and is not surprised by the Low."
+    },
+
+    {
+      "findingId": "CLASS-13-002",
+      "ledgerLabel": "L-10 (proposed)",
+      "title": "UniboostMintDebtHook.scale decoupled from dispatcher primeToken -> deploy-time mis-scale; over-scale can mint UNBACKED phUSD",
+      "claimedSeverity": "low",
+      "assessedSeverity": "low",
+      "agreement": true,
+      "confidence": "high",
+      "questionAddressed": "Is the 'can mint unbacked phUSD' impact a latent Medium under the strict C4 Medium bar?",
+      "analysis": {
+        "assetRisk": "Direction-dependent. UNDER-scale (hook primeToken_ has MORE decimals than the real dispatcher prime) -> debt under-stated -> over-backed, fails safe. OVER-scale (hook primeToken_ has FEWER decimals) -> debt over-stated -> a later pull() mints MORE phUSD than ratio*amount warrants -> genuine UNBACKED phUSD over-mint (real value creation). Verified UniboostMintDebtHook.sol:85-89 reads decimals() from the hook's own primeToken_ ctor arg with NO on-chain cross-check against IUniboost(dispatcher_).primeToken() (Uniboost.sol:89). The over-mint tail is real.",
+        "attackPath": "NONE. There is no external actor and no runtime trigger. The only actor is the deploying owner; the trigger is a one-time mismatch of two same-typed address ctor args (dispatcher_ vs primeToken_) in a single atomic deployment. scale is immutable, baked at construction.",
+        "conditions": "Owner passes a primeToken_ whose decimals differ from the dispatcher's actual prime, AND the mismatch is in the over-scale direction (the rarer one -- the expected USDC-6dp deployment under-scales-safe if anything is wrong), AND the mis-scale goes unnoticed through the first DebtAccrued event (off by orders of magnitude, loudly detectable) until a pull() realizes the over-mint.",
+        "externalRequirements": "NONE. This is the crux. C4 Medium for a value leak requires 'value leak with stated assumptions AND external requirements' (CLAUDE.md). Here there is no external requirement of any kind -- no attacker, no oracle state, no market move, no permissionless caller. The chain is owner-deploy-error -> owner-operated pull(). A C4 judge does not grant Medium for a pure single-actor deploy-config mismatch with zero external attack surface.",
+        "recoverable": "Partially. scale is immutable so an over-scaled hook must be replaced (new hook + re-wire). phUSD already over-minted via pull() during the window is the irrecoverable portion -- but reaching that portion requires the mis-scale to survive the loud first-dispatch signal AND an owner-initiated pull().",
+        "pocStatus": "No coded exploit PoC. Tier-3 forge+Medusa CONFIRMED the math cannot over-mint under correct deployment and backing holds >=2:1 -- i.e. the verified result is the ABSENCE of a value-at-risk path under intended config, which actively argues AGAINST Medium."
+      },
+      "strictMediumBarApplication": "Applying the C4 Medium bar strictly, it FAILS on the external-requirement prong, which is mandatory, not optional. Compare the genuine Medium sibling M-03 (decimal under-mint, story-035): M-03 was Medium because the mis-scale was BAKED INTO THE SHIPPED CODE for the deploy-guarded 6-dp USDC token and would mis-mint on EVERY normal dispatch with no owner error required -- it was a faithful-but-unsafe implementation, triggered by intended operation. CLASS-13-002 is the inverse: under intended/correct deployment it is provably safe (Tier-3), and the bad path requires the owner to actively mis-bind two args. M-03 = unsafe-by-default-on-correct-use (Medium); CLASS-13-002 = safe-by-default, unsafe-only-on-owner-deploy-error (Low footgun). The 'mints unbacked phUSD' phrasing is correctly KEPT under Law-1 recall (it is the reason this is reported at all rather than dropped), but the impact phrase alone does not lift severity absent a path.",
+      "verdict": "SEVERITY CONFIRMED (low). The 'can mint unbacked phUSD' impact does NOT clear the strict C4 Medium bar: a pure owner-deploy footgun with no external actor and no runtime trigger fails the mandatory external-requirements prong. It is a latent HAZARD, not a latent Medium. Recommend keeping the borderline note and the remediation (ctor assertion tying scale to IUniboost(dispatcher_).primeToken().decimals()) prominent -- that one assertion collapses the finding entirely.",
+      "humanReviewConcurrence": "Concur with the existing humanReviewFlag: confirm Low; remediation eliminates it. No change."
+    },
+
+    {
+      "findingId": "CLASS-13-003",
+      "ledgerLabel": "Q-10 (proposed)",
+      "title": "setPool repoints _pairToken without re-validating stored custom _primeToPairPath",
+      "claimedSeverity": "qa",
+      "assessedSeverity": "qa",
+      "agreement": true,
+      "confidence": "high",
+      "verdict": "SEVERITY CONFIRMED (qa). State-handling / invariant-self-violation with a LOUD failure mode (next pool() reverts or under-funds against on-chain minPairOut/minTargetOut floors) and sweepable dust via rescueERC20. No silent value leak, no theft. Correctly QA, not Low -- the Low rejection reasoning (revert/under-fund + sweepable dust = state-handling, not value-leak) is sound. No challenge."
+    },
+
+    {
+      "findingId": "CLASS-13-L06",
+      "ledgerLabel": "L-06 (second instance)",
+      "title": "Uniboost pool() buy-and-pool LP-add MEV (off-chain pooler floors only)",
+      "claimedSeverity": "low",
+      "assessedSeverity": "low",
+      "agreement": true,
+      "confidence": "high",
+      "verdict": "SEVERITY CONFIRMED (low). Bounded MEV value-leak on protocol-owned-liquidity only, operator-triggered (permissioned pooler), bounded by caller-supplied minPairOut/minTargetOut + post-call minLP floor. Same root-cause class as OPEN ledger L-06 (BalancerPoolerV2). Consistent with the run-10 adjudication of L-06 (not user funds, permissioned trigger, bounded loss -> Low, not Medium). No challenge. Dedup-reuse of L-06 fingerprint as a second instance is appropriate; severity Low either way."
+    },
+
+    {
+      "findingId": "CLASS-13-L05",
+      "ledgerLabel": "L-05 (second instance)",
+      "title": "Uniboost donationSplit <-> UniboostMintDebtHook.ratio cross-contract decoupling",
+      "claimedSeverity": "low",
+      "assessedSeverity": "low",
+      "agreement": true,
+      "confidence": "high",
+      "verdict": "SEVERITY CONFIRMED (low). No solvency break: ratio is hard-capped at MAX_RATIO=50 (verified UniboostMintDebtHook.sol:31,97), so worst-case accrued debt <=50% of dispatched prime against ~100% retained value -> conservative buffer (Tier-3 confirms >=2:1). Missing cross-contract coupling invariant is a transparency/config footgun, not a value-at-risk path. Same class as OPEN ledger L-05. No challenge. NOTE: this Uniboost surface is even safer than the original BalancerPoolerV2 L-05 because the ratio<=50 hard cap structurally bounds the under-retention; the BalancerPoolerV2 L-05 boundary was donationSize+ratio<=100 (run-10), which could in principle reach the solvency edge -- here the cap alone prevents it. Low is if anything generous-to-safe; do NOT escalate."
+    },
+
+    {
+      "findingId": "CLASS-13-QA-RATIO",
+      "ledgerLabel": "L-02 (recurrence, qa)",
+      "title": "setRatio accepts ratio == MAX_RATIO vs 'strictly <' NatSpec",
+      "claimedSeverity": "qa",
+      "assessedSeverity": "qa",
+      "agreement": true,
+      "confidence": "high",
+      "verdict": "SEVERITY CONFIRMED (qa). Verified UniboostMintDebtHook.sol:97 uses `if (newRatio > MAX_RATIO) revert`, accepting ratio==50, contradicting the 'strictly less than MAX_RATIO' NatSpec (line 30/95). Pure spec-vs-code boundary nit; effective cap 50% vs <50%, both inside the >=2:1 buffer. Byte-identical to OPEN/qa-bundled ledger L-02 (BalancerPoolerMintDebtHook). Correctly tagged faithfulness:true and routed to BOTH spec-conformance (Law-2 surface) and the QA bundle -- this is the right Law-2 handling (surfaced, not buried). No challenge."
+    }
+  ],
+
+  "overstatementCheck": {
+    "result": "NONE FOUND",
+    "detail": "No finding is rated above its demonstrable impact. The two findings whose impact PHRASING (unbacked phUSD over-mint) could tempt an inflated label are held at Low with explicit, correct external-requirement reasoning."
+  },
+  "understatementCheck": {
+    "result": "NONE FOUND",
+    "detail": "Specifically checked CLASS-13-001 against M-04 (Medium) and CLASS-13-002 against M-03 (Medium). Both originals had a coded PoC and a non-owner-error trigger (M-04: default-state masked by the project's own test; M-03: mis-mint on every normal dispatch of the deploy-guarded token). The run-13 mirrors have neither -- they are owner-deploy/wiring footguns with no external/runtime path, and Tier-3 affirmatively proved safety under correct deployment. Low is the honest Law-3 severity. No finding deserves upgrade."
+  },
+  "recommendations": [
+    "Report narrative for CLASS-13-001 should cite BOTH M-04 (Medium origin) and Q-08 (owner-accepted wont-fix QA recurrence) so the Low is contextualized, not surprising.",
+    "Keep CLASS-13-002's one-line ctor-assertion remediation prominent; it fully collapses the finding.",
+    "Confirm both humanReviewFlags as-is: no severity change required on either."
+  ]
+}

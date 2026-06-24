@@ -1,0 +1,218 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-06-24T00:00:00Z",
+    "project": "yield-claim-nft",
+    "run": "yield-claim-nft-13",
+    "commit": "aa86be6",
+    "classifier": "severity-classifier",
+    "criteriaSource": "CLAUDE.md C4 Severity Classifications + Three-Law Hierarchy",
+    "inputFindings": 6,
+    "classifiedFindings": 6,
+    "high": 0,
+    "medium": 0,
+    "low": 4,
+    "qa": 2,
+    "centralization": 0,
+    "tier3Note": "Tier-3 (forge + Medusa) CONFIRMED >=2:1 over-collateralized backing and that decimal math cannot over-mint under correct deployment. No value-at-risk path lifts any finding to Medium. Each finding's worst case is either an owner deploy/wiring footgun (recoverable / detectable / no external attacker) or a transparency/spec nit.",
+    "noInflationStatement": "All 6 sanitizer pre-assessments verified against source (Uniboost.sol, UniboostMintDebtHook.sol, ATokenDispatcherV2.sol, DefaultDispatchHook.sol). None warrants escalation to Medium or High. The one over-mint tail (DEDUP-13-002) is an owner deploy-config footgun with no external/runtime attacker requirement, so it does not satisfy the C4 Medium 'value leak with external requirements via attack path' bar; it remains Low under Law-1 recall-keep."
+  },
+
+  "findings": [
+    {
+      "classifiedFinding": {
+        "id": "CLASS-13-001",
+        "originalId": "DEDUP-13-001",
+        "fingerprint": "563df2e64a72b125fab353630c059e37f9ecddffe229b205d71730c378165854",
+        "title": "Uniboost has no hookTypeId guard: an unwired/wrong dispatch hook silently accrues zero phUSD debt (M-04 fail-open class reborn on a third dispatcher)",
+        "contract": "src/dispatchers/Uniboost.sol (hook invoked by base src/dispatchers/ATokenDispatcherV2.sol:125)",
+        "severity": "low",
+        "plausibility": "n/a (owner-config dependent, not an attacker scenario)",
+        "footgun": true,
+        "faithfulness": false,
+        "regression": false,
+        "classification": {
+          "assetImpact": "No theft and no direct loss of held assets. Impact is a backing-integrity feature failure: if the owner leaves the constructor-default DefaultDispatchHook (onDispatch is an empty no-op, confirmed src/hooks/DefaultDispatchHook.sol:12) or wires a mismatched hook, every Uniboost dispatch forwards prime with ZERO phUSD mint-debt accrued. phUSD that should have been backed by accrued debt simply is never accrued; no existing balance is removed.",
+          "attackPath": [
+            "1. Owner deploys Uniboost; base ATokenDispatcherV2 ctor sets hook = new DefaultDispatchHook() (no-op).",
+            "2. Owner opens dispatches WITHOUT calling setHook(uniboostMintDebtHook) (or sets the wrong hook).",
+            "3. ATokenDispatcherV2._dispatch calls hook.onDispatch unconditionally (no hookTypeId marker check, unlike the M-04-fixed NudgeRatchet) -> no debt accrues, no revert, no event.",
+            "4. Backing accounting for Uniboost-routed prime is silently zero until the owner notices and fixes the wiring."
+          ],
+          "likelihood": "low-to-moderate operational; requires an owner setup omission. No external/permissionless trigger.",
+          "assumptions": "Owner forgets/mis-wires setHook on the new dispatcher. The base contract genuinely lacks a hookTypeId guard on this path (verified).",
+          "externalRequirements": "None beyond the owner config omission; no attacker, no market condition.",
+          "recoverable": "Yes. setHook can be corrected at any time; only debt that should have accrued during the unwired window is lost-not-accrued (no retroactive backfill), but the prime itself is retained on-chain."
+        },
+        "justification": "C4 Low/QA: this is a non-obvious owner operational hazard (Law-3 footgun, NOT obvious misconfig and NOT a malicious-owner vector, so KI#4 does not suppress it). It is the third dispatcher to copy the M-04-vulnerable unconditional-hook pattern and is the dispatcher most analogous to the M-04-FIXED NudgeRatchet. Same fail-open class as owner-accepted wont-fix Q-08 (BalancerPoolerV2), but on a distinct contract/function => distinct fingerprint => NOT auto-suppressed; routed for explicit owner decision. No direct asset risk, no protocol-availability break (dispatch still functions), recoverable => stays Low, NOT Medium.",
+        "borderlineNote": "Considered Medium under 'protocol function impacted' — rejected: the dispatch function still operates; only an optional accounting side-effect is skipped, and it is recoverable and owner-triggered with no external requirement. Medium would overstate it.",
+        "precedent": "Q-08 (96c60b72, owner wont-fix) — same fail-open class on BalancerPoolerV2. Sanitizer proposes wont-fix-per-Q08 (proposal only; not authoritative here)."
+      }
+    },
+
+    {
+      "classifiedFinding": {
+        "id": "CLASS-13-002",
+        "originalId": "DEDUP-13-002",
+        "fingerprint": "e064b2de7a307fceec8b21249bba7805e2c9ee29faf54756620b5a7e13cf6c4a",
+        "title": "UniboostMintDebtHook.scale derived from the hook's own ctor primeToken_ with no on-chain tie to the dispatcher primeToken(); decimals mismatch mis-scales all debt",
+        "contract": "src/hooks/UniboostMintDebtHook.sol:85-89 (scale binding) vs src/dispatchers/Uniboost.sol:89 (_primeToken)",
+        "severity": "low",
+        "plausibility": "n/a (owner deploy-config dependent, not an attacker scenario)",
+        "footgun": true,
+        "faithfulness": false,
+        "regression": false,
+        "classification": {
+          "assetImpact": "Two directions. UNDER-scale (hook primeToken_ has MORE decimals than the real dispatcher prime, e.g. hook=18dp, dispatcher=6dp USDC): scale too small => debt under-stated => fails safe (over-backed, no loss). OVER-scale (hook primeToken_ has FEWER decimals than the real dispatcher prime): scale too large => debt over-stated => a later pull() mints MORE phUSD than ratio*amount warrants => UNBACKED phUSD over-mint. The over-scale direction is the Law-1 tail that mandates keeping this finding even at Low.",
+          "attackPath": [
+            "1. Owner deploys UniboostMintDebtHook passing dispatcher_ and primeToken_ as two separate, same-typed address args.",
+            "2. Owner passes a primeToken_ whose decimals() differ from the dispatcher's actual _primeToken (Uniboost.sol:89) — both args type-check, neither is on-chain cross-validated.",
+            "3. scale = 10**(18 - wrongDecimals) is baked immutable at line 89.",
+            "4. Every onDispatch accrues debt at the wrong scale; if scale is too large, pull() later mints unbacked phUSD."
+          ],
+          "likelihood": "low; requires a deploy-time mismatch of two owner-supplied args in a single atomic deployment. No runtime path, no external attacker, no permissionless trigger. Mis-scale is detectable on the first dispatch (DebtAccrued amounts off by orders of magnitude).",
+          "assumptions": "Owner mis-binds primeToken_ at deploy. Decimal MATH itself is correct and guarded (d<=18, M-03 generalization) and is explicitly NOT re-raised.",
+          "externalRequirements": "None — there is no external/attacker requirement; the only actor is the deploying owner.",
+          "recoverable": "Partially. scale is immutable, so an over-scaled hook must be replaced (deploy a new hook + setDispatcher/setHook re-wire). phUSD already over-minted via pull() during the window is the irrecoverable portion; the mis-scale is detectable before pull() if monitored."
+        },
+        "justification": "LOW, not Medium — explicit C4 reasoning. C4 Medium = 'leak value with a hypothetical attack path with stated assumptions, but external requirements.' Here there is NO external requirement and NO attack path: the sole actor is the deploying owner, and the trigger is a one-time deploy-config mismatch of two args the owner fully controls, detectable on the first dispatch before any pull(). That is the textbook definition of a deploy-config footgun (Law-3, non-obvious because the M-03/M-04 fixes would lead an owner to assume the scale is bound to the dispatcher), not a latent Medium. The unbacked-over-mint tail is real and is why the finding is KEPT under Law-1 recall-beats-tidiness rather than dropped — but the absence of any non-owner/runtime path keeps it below the Medium bar. Tier-3 fuzzing independently confirmed the math cannot over-mint under correct deployment and backing stays >=2:1, removing any value-at-risk path under intended config.",
+        "borderlineNote": "This was the deliberately-scrutinized borderline. Argument FOR Medium: over-scale mints unbacked phUSD (real value leak). Argument FOR Low (adopted): no external requirement, no attacker, no runtime trigger; single atomic owner deploy error; detectable pre-pull; over-scale is the rarer of two directions (the default/expected USDC-6dp deployment under-scales-safe if anything is wrong). A C4 judge would not grant Medium for an owner-only deploy mismatch with no external attack surface. Remediation collapses it entirely: one ctor assertion tying scale to the dispatcher's primeToken().",
+        "remediation": "Add a constructor assertion: require(IERC20Metadata(IUniboost(dispatcher_).primeToken()).decimals() == d) (or derive d directly from the dispatcher's primeToken()), removing the dual-arg ambiguity.",
+        "precedent": "Open ledger L-07 (ac91a046) — same decimal-config family on a different surface (replaceDispatcher stale price). Cross-reference at report time; distinct fingerprint, do not merge."
+      }
+    },
+
+    {
+      "classifiedFinding": {
+        "id": "CLASS-13-003",
+        "originalId": "DEDUP-13-003",
+        "fingerprint": "7c4bcba272c5f22b36cba788b013cdb1582b55f6e6bf1661e8633636574a667d",
+        "title": "setPool repoints _pairToken without re-validating stored custom _primeToPairPath (stale path can route swap to wrong token)",
+        "contract": "src/dispatchers/Uniboost.sol",
+        "severity": "qa",
+        "plausibility": "n/a",
+        "footgun": true,
+        "faithfulness": false,
+        "regression": false,
+        "classification": {
+          "assetImpact": "No theft, no silent value leak. A stored custom _primeToPairPath whose end token no longer matches the repointed _pairToken would route the next pool() swap toward the wrong token — but this is loud: the next pool() reverts or under-funds against its on-chain minPairOut/minTargetOut floors, and any stranded dust is sweepable via rescueERC20.",
+          "attackPath": [
+            "1. Owner sets a custom _primeToPairPath ending at the current pair token.",
+            "2. Owner later calls setPool to repoint _pairToken without clearing/re-asserting the stored path.",
+            "3. The setter silently violates its own advertised invariant (path end == pairToken).",
+            "4. Next pool() routes against the stale path -> reverts/under-funds (loud), no silent loss."
+          ],
+          "likelihood": "low; owner-driven, near the obvious line.",
+          "assumptions": "Owner uses a custom path then repoints the pair without clearing it.",
+          "externalRequirements": "None; owner-only.",
+          "recoverable": "Yes; re-set the path, sweep dust via rescueERC20."
+        },
+        "justification": "C4 QA: incorrect state handling — the setter breaks its own advertised path-end==pairToken invariant across setPool. No asset theft, no silent value leak (failure is loud and recoverable), so QA is correct. Not suppressed under KI#1/KI#4: a non-malicious owner could be surprised the stored path is not re-validated (non-obvious enough to surface), but the impact ceiling is a revert/dust, so it stays a QA-bundle note, not Low/Medium. Remediation: clear or re-assert _primeToPairPath inside _setPool when the pair token changes.",
+        "borderlineNote": "Considered Low — rejected: impact is a revert/under-fund against on-chain floors plus sweepable dust, which is state-handling QA, not a value-leak Low."
+      }
+    },
+
+    {
+      "classifiedFinding": {
+        "id": "CLASS-13-L06",
+        "originalId": "DEDUP-13-L06",
+        "fingerprint": "342075dfba3c8ec7c3bae1ae18c357591c5ea255bf649ee943c6c71f3ddd4c2e",
+        "ledgerLabel": "L-06",
+        "title": "Uniboost pool() buy-and-pool LP-add MEV (off-chain pooler floors only) - Uniboost instance of L-06",
+        "contract": "src/dispatchers/Uniboost.sol",
+        "severity": "low",
+        "plausibility": "n/a (operator-triggered, POL-only)",
+        "footgun": false,
+        "faithfulness": false,
+        "regression": false,
+        "classification": {
+          "assetImpact": "Bounded MEV slippage on protocol-owned-liquidity (POL) LP adds. Worst case is value-leak-to-MEV on the single-sided pool() add, bounded by the keeper-supplied minPairOut/minTargetOut and the post-call minLP floor. Not user funds; POL only; operator-triggered.",
+          "attackPath": [
+            "1. Authorized pooler calls pool() with off-chain-computed min floors.",
+            "2. A sandwicher manipulates the pool around the add within the slack between the off-chain floor and true price (no on-chain oracle/TWAP reference).",
+            "3. The add executes at a worse rate; the delta is captured by the MEV bot, bounded by the supplied floors + minLP."
+          ],
+          "likelihood": "low; bounded by operator-set floors; only the slack between floor and true price is exploitable.",
+          "assumptions": "Operator sets loose floors; mempool is observable.",
+          "externalRequirements": "MEV/sandwich infrastructure; observable pending tx.",
+          "recoverable": "n/a (realized slippage, but bounded and POL-only)."
+        },
+        "justification": "C4 Low: value leak to MEV bounded by on-chain floors (minPairOut/minTargetOut + post-call minLP), POL-only, operator-triggered, not user-facing. Same root-cause class as OPEN ledger L-06 (BalancerPoolerV2.pool off-chain-min-only LP-add MEV). econ-scanner concurs; static-analyzer unused-return/timestamp/zero-min flags fold in as benign-by-design corroboration. L-06 is open (not fixed) => NOT a regression. Stays Low; does not reach Medium because impact is bounded and confined to POL.",
+        "dedupNote": "Same class as open L-06. Reuse L-06 fingerprint (342075df) as a second instance; do not mint a parallel Low. Fall back to a new Low fp cross-referencing L-06 only if finding-manager refuses cross-contract fp reuse. Severity Low either way."
+      }
+    },
+
+    {
+      "classifiedFinding": {
+        "id": "CLASS-13-L05",
+        "originalId": "DEDUP-13-L05",
+        "fingerprint": "e527a712118b9cff5ccda89bd645f68078b0509711781369ef8a09785d954822",
+        "ledgerLabel": "L-05",
+        "title": "Uniboost donationSplit <-> UniboostMintDebtHook.ratio cross-contract decoupling - Uniboost instance of L-05",
+        "contract": "src/dispatchers/Uniboost.sol + src/hooks/UniboostMintDebtHook.sol",
+        "severity": "low",
+        "plausibility": "n/a",
+        "footgun": true,
+        "faithfulness": false,
+        "regression": false,
+        "classification": {
+          "assetImpact": "No solvency break. The donationSplit (Uniboost) and the debt ratio (hook) are set on two different contracts with no on-chain coupling invariant. Edge cases 0%/100% verified SAFE. ratio is hard-capped at MAX_RATIO=50, so worst-case accrued debt is <=50% of dispatched prime while retained value is ~100% at dispatch => backing buffer holds. Impact is a transparency/config-coupling gap, not a value-at-risk path.",
+          "attackPath": [
+            "1. Owner sets donationSplit and hook.ratio independently across two contracts.",
+            "2. No invariant ties them; a mismatched pair is silently accepted.",
+            "3. Worst case: <=50% debt vs ~100% retained value -> still over-backed (no break)."
+          ],
+          "likelihood": "low; owner-config; bounded by the ratio<=50 cap.",
+          "assumptions": "Owner sets the two params inconsistently.",
+          "externalRequirements": "None; owner-only.",
+          "recoverable": "Yes; re-set either param."
+        },
+        "justification": "C4 Low: non-obvious owner transparency/coupling footgun (Law-3), no asset theft and no solvency break — the ratio<=50 hard cap means worst case is <=50% debt against ~100% retained value, leaving a conservative buffer (Tier-3 confirms >=2:1). Same root-cause class as OPEN ledger L-05 (BalancerPoolerV2 batchDonationSize <-> Hook.ratio). Do NOT escalate above Low. L-05 open => no regression.",
+        "dedupNote": "Same class as open L-05. Reuse L-05 fingerprint (e527a712) as a second instance; annotate L-05 with the Uniboost mirror. Fall back to a new Low fp cross-referencing L-05 only if cross-contract reuse is refused. Severity Low either way."
+      }
+    },
+
+    {
+      "classifiedFinding": {
+        "id": "CLASS-13-QA-RATIO",
+        "originalId": "DEDUP-13-QA-RATIO",
+        "fingerprint": "5425119cae0a2f9f6ad13a7f088bbb95839689032afab295eb60c536775d9d43",
+        "ledgerLabel": "L-02",
+        "title": "UniboostMintDebtHook.setRatio accepts ratio == MAX_RATIO vs 'strictly <' NatSpec - recurrence of L-02 class",
+        "contract": "src/hooks/UniboostMintDebtHook.sol:96-101",
+        "severity": "qa",
+        "plausibility": "n/a",
+        "footgun": false,
+        "faithfulness": true,
+        "regression": false,
+        "classification": {
+          "assetImpact": "None. setRatio uses `if (newRatio > MAX_RATIO) revert` (line 97), so ratio == MAX_RATIO (50) is accepted, contradicting the NatSpec 'strictly less than MAX_RATIO' (line 30/95). Caps at 50% debt either way; no asset impact, no solvency change. Pure spec-vs-code boundary nit.",
+          "attackPath": [
+            "1. Owner calls setRatio(50).",
+            "2. Code accepts it (> not >=), NatSpec says it should be strictly <50.",
+            "3. Effective max debt is exactly 50% instead of <50% — still within the safe buffer."
+          ],
+          "likelihood": "n/a; cosmetic spec deviation.",
+          "assumptions": "None.",
+          "externalRequirements": "None.",
+          "recoverable": "n/a."
+        },
+        "justification": "C4 QA: byte-identical spec-vs-code boundary nit to OPEN/qa-bundled ledger L-02 (BalancerPoolerMintDebtHook.setRatio). No asset impact; effective cap is 50% vs <50%, both inside the >=2:1 buffer. Tagged faithfulness:true (a documented-behavior deviation from the NatSpec invariant) and routed to spec-conformance per Law-2, but it ALSO has zero security impact so it sits at QA in the QA bundle as well — it is surfaced (not buried) via its faithfulness tag, satisfying Law-2.",
+        "faithfulnessRouting": "Behavioural deviation from stated NatSpec invariant; surface in spec-conformance report (matches L-02's existing F-tagging family) AND QA bundle. Not dropped into gas noise.",
+        "dedupNote": "Reuse L-02 fingerprint (5425119c) as a same-class QA instance, or a new QA item cross-referencing L-02 if L-02's fp is keyed strictly to BalancerPoolerMintDebtHook. L-02 already qa-bundled => no status change."
+      }
+    }
+  ],
+
+  "humanReviewFlags": [
+    {
+      "findingId": "CLASS-13-002 (DEDUP-13-002)",
+      "reason": "Borderline Low/Medium documented; over-mint tail is real but owner-deploy-only with no external attack path. Confirmed Low. Flagged so a human can confirm the no-external-requirement reasoning if desired.",
+      "recommendation": "Confirm Low; remediation (ctor assertion tying scale to dispatcher.primeToken()) eliminates it entirely."
+    },
+    {
+      "findingId": "CLASS-13-001 (DEDUP-13-001)",
+      "reason": "Owner-triage-decision-required (per sanitizer flaggedForReview). Third dispatcher to copy the M-04 fail-open pattern; precedent Q-08 wont-fix exists but on a different contract. Surface for explicit owner decision; do NOT auto-suppress under Q-08.",
+      "recommendation": "Confirm Low; route to owner for explicit accept/fix decision on the new dispatcher."
+    }
+  ]
+}

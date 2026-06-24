@@ -1,0 +1,111 @@
+{
+  "contract": "src/hooks/UniboostMintDebtHook.sol",
+  "profileTimestamp": "2026-06-24T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "commit": "aa86be6",
+  "story": "story-041",
+  "inheritanceChain": ["IDispatchHook", "IUniboostMintDebtHook", "Ownable", "ReentrancyGuard"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["pull (nonReentrant)"],
+    "accessControlled": {
+      "onlyOwner": ["setRatio", "setRecipient", "setDispatcher"],
+      "onlyDispatcher": ["onDispatch"],
+      "onlyOwnerOrRecipient": ["pull"]
+    },
+    "initializerProtected": "n/a (constructor sets immutables: phUSD, scale)"
+  },
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "onDispatch(address minter, uint256 amount, bytes)",
+        "visibility": "external",
+        "accessControl": "if(msg.sender != dispatcher) revert OnlyDispatcher()",
+        "math": "added = (amount * scale * ratio) / 100",
+        "stateChanges": ["mintDebt += added (when added>0)"],
+        "externalCalls": [],
+        "note": "silent return when added==0 (zero ratio or sub-wei rounding)"
+      },
+      {
+        "function": "pull()",
+        "visibility": "external",
+        "accessControl": "onlyOwnerOrRecipient + nonReentrant",
+        "stateChanges": ["mintDebt = 0"],
+        "externalCalls": ["phUSD.mint(recipient, debt)"],
+        "guards": ["reverts RecipientUnset if recipient==0", "no-op if mintDebt==0"],
+        "valueFlow": "MINTS phUSD (18-dp) to recipient equal to accrued debt"
+      },
+      {"function": "setRatio(uint8)", "accessControl": "onlyOwner", "validation": "newRatio > MAX_RATIO(50) reverts -> 0..50 allowed inclusive", "stateChanges": ["ratio"]},
+      {"function": "setRecipient(address)", "accessControl": "onlyOwner", "stateChanges": ["recipient"], "note": "zero allowed -> re-arms; pull reverts while zero"},
+      {"function": "setDispatcher(address!=0)", "accessControl": "onlyOwner", "stateChanges": ["dispatcher"]},
+      {"function": "mintDebt()/dispatcher()/phUSD()/scale()/recipient()/ratio()/MAX_RATIO()/DEFAULT_RATIO() views", "accessControl": "none"}
+    ],
+
+    "externalCalls": [
+      {"target": "IMintable phUSD (immutable)", "methods": ["mint"], "trustLevel": "trusted", "notes": "protocol's own 18-dp mintable token; hook must hold minter role on phUSD"},
+      {"target": "IERC20Metadata primeToken (constructor only)", "methods": ["decimals"], "trustLevel": "semi-trusted", "notes": "read ONCE at deploy to set scale; require decimals<=18"}
+    ],
+
+    "stateVariables": [
+      {"name": "MAX_RATIO", "type": "uint8 constant = 50"},
+      {"name": "DEFAULT_RATIO", "type": "uint8 constant = 50"},
+      {"name": "dispatcher", "type": "address public", "mutators": ["constructor", "setDispatcher"]},
+      {"name": "phUSD", "type": "IMintable immutable public"},
+      {"name": "scale", "type": "uint256 immutable public", "value": "10 ** (18 - primeDecimals)"},
+      {"name": "recipient", "type": "address public", "mutators": ["setRecipient"]},
+      {"name": "mintDebt", "type": "uint256 public", "mutators": ["onDispatch (+=)", "pull (=0)"]},
+      {"name": "ratio", "type": "uint8 public", "mutators": ["setRatio"]}
+    ],
+
+    "events": ["RatioUpdated", "RecipientUpdated", "DebtAccrued", "DebtPulled", "DispatcherUpdated"],
+    "errors": ["OnlyDispatcher", "OnlyOwnerOrRecipient", "RecipientUnset", "RatioTooHigh"],
+    "modifiers": ["onlyOwnerOrRecipient (local)", "onlyOwner", "nonReentrant"]
+  },
+
+  "decimalHandling": {
+    "what_prime_decimals_aware_means": "Unlike BalancerPoolerMintDebtHook (no scale; assumes 18-dp USDS) and NudgeRatchetMintDebtHook (hard-coded USDC_TO_PHUSD_SCALE=1e12 for fixed 6-dp), Uniboost reads the prime token's decimals() ONCE in the constructor and derives immutable scale = 10**(18 - d), so the same hook code is correct for any prime with decimals <= 18.",
+    "scale_formula": "scale = 10 ** (18 - decimals); 6-dp -> 1e12, 18-dp -> 1 (identical to BalancerPoolerMintDebtHook math)",
+    "debt_formula": "added = (amount * scale * ratio) / 100  (amount in prime-decimals; result in phUSD 18-dp wei)",
+    "rounding": "multiply-then-divide, floors -> sub-wei dust accrues to protocol, never over-credits. Direction matches NudgeRatchet's documented safe direction.",
+    "verified_correct_against_M03_trap": "Scale is in the CORRECT direction (multiply UP by 10**(18-d)), matching NudgeRatchet's 1e12-multiply fix. This does NOT reproduce the M-03 sign-flip over-mint trap (which divided instead of multiplied / used wrong exponent). For 6-dp prime: 1e6 amount @ ratio 50 -> 1e6*1e12*50/100 = 5e17 wei phUSD = 0.5 phUSD per 1 USDC. Correct.",
+    "decimals_gt_18": "require(d <= 18) in constructor blocks the underflow that 18-d would cause for >18-dp tokens. Tokens with d>18 (rare) are rejected at deploy, not mis-scaled.",
+    "potential_concerns_for_scanners": [
+      "scale is fixed at deploy from the prime token passed to the HOOK constructor (primeToken_), NOT read live from the Uniboost dispatcher's primeToken(). If the hook's primeToken_ differs from the dispatcher's actual prime (mis-wiring at deploy), scale is wrong and debt is mis-scaled. No on-chain cross-check ties hook.scale to dispatcher.primeToken(). Flag.",
+      "DEFAULT_RATIO=50 and MAX_RATIO=50: setRatio allows newRatio==50 (only >50 reverts), so 50 is settable; constant comment says 'strictly < MAX_RATIO' but code is inclusive (newRatio > MAX_RATIO reverts). Comment/code mismatch (same as BalancerPoolerMintDebtHook). Cosmetic but note.",
+      "decimals() is read once; if the prime token were an upgradeable/rebasing token that changed decimals later, scale would be stale (standard ERC20 assumption holds, low concern)."
+    ]
+  },
+
+  "hookWiring": {
+    "no_hookTypeId": "UniboostMintDebtHook does NOT expose hookTypeId() and IUniboostMintDebtHook does NOT declare it (contrast: NudgeRatchetMintDebtHook.HOOK_TYPE_ID + hookTypeId(), the M-04 fix). So even if Uniboost wanted to enforce the hook type, this hook provides no identity marker to check against.",
+    "onDispatch_gating": "onDispatch is gated to the seeded/repointable `dispatcher` address (prevents external debt inflation). This is the inflation guard, NOT a wiring guard - it does not ensure the Uniboost dispatcher actually calls THIS hook.",
+    "footgun": "Mirror of M-04: if the owner never wires this hook into Uniboost via setHook, the dispatcher keeps the NO-OP DefaultDispatchHook and accrues ZERO phUSD debt while still buy-and-pooling prime -> unbacked-value asymmetry. Neither contract self-detects the mis-wire."
+  },
+
+  "localInvariants": [
+    "mintDebt only increases via onDispatch(+=added) and is zeroed atomically in pull before the mint (CEI-ordered, nonReentrant)",
+    "onDispatch callable only by current `dispatcher`",
+    "pull callable only by owner or recipient; reverts if recipient==0; no-op if mintDebt==0",
+    "scale immutable, in [1, 1e18], derived from prime decimals in [0,18]",
+    "ratio in [0, 50]"
+  ],
+
+  "trustAssumptions": [
+    "Hook holds minter authorization on phUSD (else pull reverts in phUSD.mint)",
+    "Owner wires the hook into Uniboost and sets recipient before relying on debt accounting",
+    "primeToken_ passed to constructor equals the dispatcher's real prime token (decimals must match for correct scale)",
+    "Owner is fully trusted (per repo Law 3) - repointable dispatcher/recipient add no new trust"
+  ],
+
+  "redFlagsForScanners": [
+    "DECIMAL: scale is correct-direction (multiply by 10**(18-d)); does NOT reproduce M-03 sign-flip over-mint. BUT scale is sourced from hook-ctor primeToken_ with no live tie to dispatcher.primeToken() - deploy-time mis-wire mis-scales all debt. Flag for code-scanner.",
+    "HOOK-WIRING (echoes M-04): no hookTypeId on hook or interface; Uniboost has no hook-type guard. Unwired hook -> DefaultDispatchHook no-op -> zero phUSD debt, dispatcher tests pass silently. Cross-contract: confirm deploy/wiring story-040/041 actually calls Uniboost.setHook(UniboostMintDebtHook) and the address tie is asserted somewhere.",
+    "Comment says ratio 'strictly < MAX_RATIO' but setRatio is inclusive (50 allowed). Cosmetic.",
+    "Debt accrues on GROSS dispatched amount; Uniboost forwards donationSplit% out before pool(). Cross-contract: ensure donation recipient (BalancerPooler batch-minter) is not separately also accruing phUSD debt on the same prime -> potential double-mint across the two dispatchers. Flag for econ-scanner."
+  ],
+
+  "complexity": {"loc": 149, "externalFunctions": 9, "externalCalls": 2, "stateVariables": 8}
+}

@@ -1,0 +1,148 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-06-24T00:00:00Z",
+  "scanType": "code",
+  "commit": "aa86be6",
+  "tier": 2,
+  "regression": true,
+  "scope": [
+    "src/dispatchers/Uniboost.sol",
+    "src/hooks/UniboostMintDebtHook.sol"
+  ],
+  "contractsScanned": 2,
+  "collaboratorsReviewed": [
+    "src/dispatchers/ATokenDispatcherV2.sol",
+    "src/hooks/DefaultDispatchHook.sol",
+    "src/dispatchers/NudgeRatchet.sol",
+    "src/interfaces/IUniboostMintDebtHook.sol"
+  ],
+  "leadDisposition": {
+    "LEAD-A": "CONFIRMED (CODE-001) - footgun, Low (same class/disposition as owner-accepted Q-08, not Medium)",
+    "LEAD-B": "CONFIRMED (CODE-002) - footgun, Low",
+    "LEAD-C": "CONFIRMED-BUT-DOWNGRADED (CODE-003) - Low/QA, recoverable + owner-driven + self-evident next pool()",
+    "LEAD-D": "REFUTED to Low (CODE-004) - onlyAuthorizedPooler gate + minLP, mirrors ledger L-06"
+  },
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "hook-wiring / unbacked-dispatch (M-04 class reborn)",
+      "title": "Uniboost adopts NudgeRatchet's decimal-awareness but not its hookTypeId wiring guard: an unwired/wrong hook silently accrues zero phUSD debt",
+      "severity": "potential-low",
+      "severityRationale": "C4 Low/QA. Same fail-open class as ledger M-04, but the disposition matches the owner-accepted Q-08 (BalancerPoolerV2 lacks the same guard, wont-fix), not M-04's original Medium. No theft and no direct asset loss: the consequence is unbacked-value asymmetry (prime leaves via donation + protocol-owned liquidity while zero phUSD mint-debt is recorded), which is recoverable by wiring the hook (debt only ever accrues on FUTURE dispatches, so the window is bounded by operator attentiveness). It is a NON-OBVIOUS owner footgun (Law 3 in-scope): a competent owner who paid for the M-04 fix on NudgeRatchet would reasonably expect the same loud revert here, and dispatcher-isolation tests pass silently against the default no-op hook (test/Uniboost.t.sol uses MockDispatchHook, never the real UniboostMintDebtHook).",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "function": "_dispatch (and base ATokenDispatcherV2.dispatch)",
+      "line": 184,
+      "lineStart": 184,
+      "lineEnd": 199,
+      "secondaryContract": "src/hooks/UniboostMintDebtHook.sol",
+      "secondaryLine": 128,
+      "evidence": {
+        "base_seeds_noop_hook": "ATokenDispatcherV2.sol:51 `hook = new DefaultDispatchHook();` (no-op onDispatch).",
+        "base_calls_unconditionally": "ATokenDispatcherV2.sol:125 `hook.onDispatch(minter, amount, extraData);` - always invoked, no type check.",
+        "uniboost_has_no_guard": "Uniboost.sol:184-199 _dispatch only carves the donation; no hookTypeId()==EXPECTED check.",
+        "contrast_nudgeratchet_fix": "NudgeRatchet.sol:84-89 `require(INudgeRatchetMintDebtHook(address(hook)).hookTypeId() == EXPECTED_HOOK_TYPE_ID, ...)` (story-037 M-04 fix).",
+        "interface_gap": "IUniboostMintDebtHook.sol declares only mintDebt()/pull(); NO hookTypeId(). UniboostMintDebtHook.sol declares no hookTypeId() either, so even a guard could not be added without an interface change.",
+        "no_deploy_wiring": "This submodule has no script/ directory; setHook(UniboostMintDebtHook) is a purely operational off-chain step with no on-chain atomicity or post-condition assertion.",
+        "tests_pass_silently": "test/Uniboost.t.sol wires a MockDispatchHook (lines 374, 540) and otherwise exercises dispatch against the constructor default no-op hook; the real UniboostMintDebtHook is never wired in the dispatcher test, so a missing-wire regression would not be caught there."
+      },
+      "footgunPath": "Deploy Uniboost + deploy UniboostMintDebtHook -> owner forgets (or fat-fingers) Uniboost.setHook(theHook), OR wires a different IDispatchHook -> dispatcher keeps DefaultDispatchHook (or wrong hook) -> every NFTMinterV2 mint routes prime through dispatch() -> donation forwarded + prime retained for pool() -> hook.onDispatch is the no-op -> mintDebt stays 0 -> protocol-owned liquidity grows with NO corresponding phUSD debt ledgered -> backing-integrity invariant the hook exists to maintain is silently broken until someone notices the missing DebtAccrued events.",
+      "exploitability": "Not an attacker exploit (owner-trusted setup gap). Pure operational hazard / accounting-failure. No reentrancy or external trigger.",
+      "confidence": "high",
+      "intentionalPatternNote": "Identical asymmetry to Q-08 (BalancerPoolerV2 also lacks the guard), which the owner has ACCEPTED as wont-fix. This finding extends the same fail-open surface to a THIRD dispatcher and should be triaged against the Q-08 precedent. If the team is comfortable with Q-08, CODE-001 likely lands wont-fix/acknowledged too. The unique twist worth surfacing: Uniboost is the dispatcher MOST analogous to NudgeRatchet (both need decimal-aware debt), yet it copied only the decimal half of NudgeRatchet's lessons and not the wiring half - making the omission more surprising than the generic Q-08 case.",
+      "pocFeasible": true,
+      "pocSketch": "In workspace/yield-claim-nft, deploy Uniboost without setHook, deploy UniboostMintDebtHook, mock NFTMinterV2.dispatch -> assert uniboost.hook() == default DefaultDispatchHook, call dispatch with prime, assert UniboostMintDebtHook.mintDebt() == 0 and no DebtAccrued emitted while prime balance moved. Demonstrates zero-debt unbacked dispatch. Low marginal value over the existing M-04 PoC since the class is known.",
+      "ledgerRef": ["M-04 (c91bef81)", "Q-08 (96c60b72)", "Q-07 regressionWatch:M-04"]
+    },
+    {
+      "id": "CODE-002",
+      "type": "decimal-scale provenance / deploy-time mis-binding",
+      "title": "UniboostMintDebtHook.scale is derived from the hook's own constructor primeToken_ with no on-chain tie to the Uniboost dispatcher's primeToken(); a decimals mismatch mis-scales all debt",
+      "severity": "potential-low",
+      "severityRationale": "C4 Low/QA. Footgun, not a vuln: the core debt math is correct (multiply-up by 10**(18-d), d<=18 guarded, floors toward protocol - explicitly NOT the M-03 sign-flip, do not re-flag the math). The hazard is purely the binding: scale is fixed at deploy from primeToken_ passed to the HOOK constructor, never read live from dispatcher.primeToken(). If the deployed hook's primeToken_ has different decimals than the dispatcher's actual prime (deploy mis-wire, or a later setDispatcher repoint to a dispatcher with a different-decimals prime), every debt is uniformly under- or over-scaled by 10**(delta-decimals). Owner-driven and silent, but recoverable by redeploying/repointing; mirrors the recurring L-07 cross-dispatcher re-denomination class.",
+      "contract": "src/hooks/UniboostMintDebtHook.sol",
+      "function": "constructor / onDispatch",
+      "line": 81,
+      "lineStart": 81,
+      "lineEnd": 92,
+      "relatedLine": 132,
+      "evidence": {
+        "scale_from_hook_ctor": "UniboostMintDebtHook.sol:85-89 `uint8 d = IERC20Metadata(primeToken_).decimals(); ... scale = 10 ** (18 - d);` - primeToken_ is an independent constructor arg.",
+        "no_live_dispatcher_tie": "scale is immutable; onDispatch (line 132) uses it blindly. dispatcher is repointable via setDispatcher (line 117) but scale cannot follow. There is no require(ITokenDispatcherV2(dispatcher).primeToken() == primeToken_) anywhere, at construction or in setDispatcher.",
+        "math_is_correct": "added = (amount * scale * ratio) / 100 is the cleared M-03 fix generalized; correct direction, d<=18 prevents underflow. Math itself NOT a finding."
+      },
+      "footgunPath": "Deploy hook with primeToken_ = an 18-dp token but the Uniboost dispatcher's real prime is 6-dp USDC -> scale baked as 1 instead of 1e12 -> debt accrues at 1e-12 of intended -> phUSD massively UNDER-minted (protocol under-credited). Reverse mismatch (hook primeToken_ 6-dp, dispatcher prime 18-dp) -> scale 1e12 -> debt OVER-scaled 1e12x -> phUSD OVER-minted/unbacked. Also reachable post-deploy: setDispatcher repoints to a dispatcher whose prime has different decimals, leaving scale stale.",
+      "exploitability": "Owner-trusted deploy/config gap; no attacker trigger. Over-mint direction is the more dangerous (unbacked phUSD) but still requires the owner to mis-bind two independently-supplied addresses.",
+      "confidence": "high",
+      "intentionalPatternNote": "The decimal-aware design is the story-041 intent and is correct; the gap is that decimal-awareness is parameterized off a SEPARATE address from the one whose dispatches it scales. A one-line constructor assertion (require dispatcher_.primeToken() == primeToken_) would close it and is cheap. Recommend as safe-config hardening even if triaged Low.",
+      "pocFeasible": true,
+      "pocSketch": "Deploy UniboostMintDebtHook with dispatcher_ = a Uniboost whose primeToken()=6-dp token, but primeToken_=18-dp token; call onDispatch(amount=1e6) from the dispatcher; assert mintDebt accrued at scale=1 (under-mint) vs expected 1e12. Cheap, deterministic.",
+      "ledgerRef": ["M-03 (b41dfefd)", "L-07 (ac91a046)"]
+    },
+    {
+      "id": "CODE-003",
+      "type": "stale config / routing path not re-validated",
+      "title": "setPool repoints _pairToken without re-validating the custom _primeToPairPath, so a previously-set path can route the prime->pair swap to the wrong token",
+      "severity": "potential-low",
+      "severityRationale": "C4 Low/QA. Owner-driven, recoverable, and self-evident: setPrimeToPairPath validates path end == _pairToken only at SET time; setPool/_setPool later overwrites _pairToken without re-checking the stored _primeToPairPath. If a custom path was active and setPool changes the pair token, pool() swaps prime into the OLD pair token while steps 2/3 measure balances of the NEW _pairToken. The most likely outcome is a reverting or under-funded pool() (new-pair balance ~0 -> half=0 -> addLiquidity with ~0 -> revert/INSUFFICIENT), with the swapped old-pair token stranded as dust recoverable via rescueERC20. No theft, no silent value leak; the next pool() fails loudly. Borderline Law-3 obvious (owner changed the pool and left a stale custom path) but worth a QA note because the validation invariant the setter advertises (path end == pairToken) is silently violated across setPool.",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "function": "_setPool / setPrimeToPairPath / pool",
+      "line": 124,
+      "lineStart": 124,
+      "lineEnd": 133,
+      "relatedLines": [157, 219],
+      "evidence": {
+        "set_time_only_validation": "Uniboost.sol:160 `require(path[path.length - 1] == _pairToken, ...)` validates end against the pairToken at the moment setPrimeToPairPath runs.",
+        "setPool_does_not_revalidate": "_setPool (Uniboost.sol:124-133) writes _pairToken from the new pool's tokens and emits PoolSet but never touches/clears/re-checks _primeToPairPath.",
+        "stale_path_used_in_pool": "pool() (Uniboost.sol:219) uses primeToPairPath() for the prime->pair swap; if a custom path persists, its end token is the OLD pair, not the new _pairToken read at lines 224/241."
+      },
+      "footgunPath": "Owner setPrimeToPairPath([prime, X, oldPair]) -> later setPool(newPool) where newPool's non-target token is newPair != oldPair -> _pairToken = newPair, custom path still ends at oldPair -> pool() swaps prime into oldPair, then reads balanceOf(newPair) ~ 0 -> half=0, addLiquidity(target, newPair, targetBal, ~0, ...) reverts or mints negligible LP; oldPair sits as dust until rescueERC20.",
+      "exploitability": "No attacker path; onlyOwner setPool + onlyAuthorizedPooler pool(). Self-correcting (clear/re-set the path) and dust recoverable.",
+      "confidence": "high",
+      "remediation": "Clear _primeToPairPath (delete) inside _setPool when the pair token changes, or re-assert the stored path end == new _pairToken in _setPool. Either keeps the advertised invariant true across pool repoints.",
+      "pocFeasible": true,
+      "pocSketch": "Set custom path to old pair, setPool to a pool with a different pair token, call pool() -> expect revert / near-zero LP and old-pair dust on the contract. Deterministic in workspace with mock router/pairs.",
+      "ledgerRef": null
+    },
+    {
+      "id": "CODE-004",
+      "type": "MEV / slippage on buy-and-pool",
+      "title": "pool() buy-and-pool zap relies on pooler-supplied swap floors + post-call minLP with addLiquidity amountMin=0 and deadline=block.timestamp; sandwich/JIT exposure is bounded by the onlyAuthorizedPooler gate",
+      "severity": "potential-low",
+      "severityRationale": "C4 Low. Three manipulable legs (prime->pair, pair->target, addLiquidity with amountAMin=amountBMin=0), no on-chain TWAP/oracle, deadline=block.timestamp (no real deadline protection). BUT pool() is onlyAuthorizedPooler, NOT permissionless - an attacker cannot trigger the zap; they can only sandwich an authorized pooler's public-mempool tx, and the pooler chooses minPairOut/minTargetOut/minLP off-chain to bound loss. This is the same disposition as ledger L-06 (BalancerPoolerV2 LP-add MEV stays Low). The buy leg intentionally moves target spot price (the boost), so a too-loose floor degrades LP-per-prime, but value is not stolen from third parties and the floors are the designed defense.",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "function": "pool",
+      "line": 244,
+      "lineStart": 208,
+      "lineEnd": 252,
+      "evidence": {
+        "addLiquidity_zero_mins": "Uniboost.sol:245 `addLiquidity(targetToken, _pairToken, targetBal, pairRemaining, 0, 0, address(this), block.timestamp)` - per-side mins are 0; only the captured liquidity is checked against minLP at line 247.",
+        "swap_floors_caller_supplied": "lines 219/232 pass minPairOut/minTargetOut supplied by the pooler; no oracle.",
+        "deadline_block_timestamp": "all three router calls pass block.timestamp (no stale-tx/deadline protection).",
+        "gate": "modifier onlyAuthorizedPooler (line 69-72) + poolerAuthVersion==authVersion; pool() not reachable by arbitrary callers."
+      },
+      "footgunPath": "Authorized pooler submits pool(minPairOut, minTargetOut, minLP) to public mempool with loose floors -> searcher sandwiches the two swaps and skews the add-liquidity ratio -> dispatcher receives less protocol-owned LP per prime spent. Bounded by the pooler's own floors; tightening floors / private mempool fully mitigates.",
+      "exploitability": "Requires (a) a pooler to broadcast publicly with loose floors. No unauthorized trigger. Degrades POL efficiency, not theft of user funds.",
+      "confidence": "medium",
+      "intentionalPatternNote": "Mirrors L-06 (owner/pooler-trusted, off-chain min only, Low). Recommend ops guidance: poolers submit via private mempool/flashbots and set tight floors. The amountAMin=0 on addLiquidity is acceptable BECAUSE the two upstream swap floors + minLP bound the composite, but a defense-in-depth note: amountAMin/Bmin=0 means the LP step alone has no per-side guard.",
+      "pocFeasible": true,
+      "pocNote": "MEV/economic severity is owned by econ-scanner per scope; this entry documents the code surface only.",
+      "ledgerRef": ["L-06 (342075df)"]
+    }
+  ],
+  "independentChecks": {
+    "reentrancy_ordering_pool": "SAFE. pool() is nonReentrant; all router calls are within the guarded body; forceApprove reset to 0 after each leg. No state mutated after external calls that a reentrant path could exploit (no protocol accounting state in pool other than token balances). Base dispatch() is also nonReentrant, so a reentrant hook cannot re-enter dispatch.",
+    "nonReentrant_placement_P008": "Cosmetic only (already STATIC-PRIMARY-008). pool() modifier order is onlyAuthorizedPooler, whenNotPaused, nonReentrant; pull() is onlyOwnerOrRecipient, nonReentrant. Auth/pause check before the guard is fine (cheaper revert, no reentrancy window opened). Not a new finding.",
+    "CEI_in_pull": "CORRECT. pull() reads debt, sets mintDebt=0 BEFORE phUSD.mint(recipient, debt), and is nonReentrant. Effects-before-interaction; a reentrant mint callback would see mintDebt==0 (no-op). No double-pull.",
+    "authVersion_logic": "SOUND. setAuthorizedPooler stamps poolerAuthVersion[pooler]=authVersion; onlyAuthorizedPooler requires equality; incrementAuthVersion bumps authVersion to mass-revoke all stale stamps in O(1). No pooler can self-authorize (onlyOwner setter). No way to forge equality.",
+    "donationSplit_math": "SAFE. _dispatch computes donationAmount = enabled ? amount*donationSplit/100 : 0 with donationSplit<=100 enforced in setDonationSplit. 0.8.x checked arithmetic; amount*donationSplit cannot overflow for realistic amounts, and /100 floors (dust retained, never over-donated). Debt accrues on GROSS amount (base hook gets pre-donation amount) - documented BalancerPoolerV2 convention; cross-dispatcher double-mint concern deferred to econ-scanner.",
+    "buy_and_pool_dos": "Only the CODE-003 stale-path revert and ordinary slippage-floor reverts. require(amountIn>0) at line 216 means a dispatch-with-zero-retained-prime (e.g. 100% donation) makes pool() revert 'nothing to pool' until more prime arrives - benign. half==0 branch (tiny pair balance) is guarded (line 226). No griefable permanent DoS: rescueERC20 (not pause-gated) is the escape hatch.",
+    "FOT_note": "PATTERN-MR-001 FOT-on-balanceOf surface is OOS per project known-invalid (non-standard tokens) unless boost tokens are FOT; not raised."
+  },
+  "notReRaised": [
+    "Decimal core math (correct, not M-03 sign-flip) - per instructions",
+    "Single-contract reentrancy/arithmetic/access-control within one contract (Tier 1 verified)",
+    "Oracle/flash-loan/economic severity for CODE-004 (econ-scanner scope)",
+    "ratio>MAX_RATIO inclusive-50 cosmetic (PATTERN-MR-003 / L-02 class, QA spec-nit, not interaction-level)",
+    "missing-zero-check on setRecipient (STATIC-PRIMARY-006/007, owner-only QA)"
+  ]
+}
