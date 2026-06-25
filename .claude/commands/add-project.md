@@ -45,12 +45,12 @@ Invoke **project-manager**: "Register project under its repo name"
   ```
 - The `submodule` field is retained for backwards compatibility and MUST equal the key.
 
-## 5. Discover Scope
+## 5. Discover Scope (default-in-scope)
 Invoke **project-manager**: "Discover contracts and scope for project"
-- Find README.md and extract "In Scope" section
-- List all .sol files in src/, contracts/, or root
-- Identify main contracts vs. libraries/interfaces
-- Update registered-projects.json with scope array
+- Scope is a **denylist**: every first-party `.sol` is in scope except the project's nested `lib/**` (see `registered-projects.json` → `scopePolicy`). No allowlist curation is required to start auditing.
+- List all first-party `.sol` (`git -C lib/<name> ls-files '*.sol'` minus `lib/**`) and write it to the `scope` array as a **cached snapshot** (advisory; the live computed set is authoritative).
+- Optionally record README "In Scope" hints into `scopeFocus`, but never use them to *narrow* the gate — README under-scoping must not hide a first-party contract.
+- Leave `outOfScope` empty by default (only `lib/**` is excluded); a human may add extra exclusions later.
 
 ## 6. Extract Known Issues
 Invoke **project-manager**: "Extract known issues from project documentation"
@@ -101,7 +101,7 @@ All file operations, git operations, and data extraction MUST be performed by th
 - **Invalid URL**: Report and ask for correction
 - **Name conflict**: Report the existing registration (do not auto-suffix — a project maps 1:1 to a repo)
 - **Clone failure**: Report git error with suggestions
-- **No scope found**: Warn and default to all .sol files
+- **No README scope section**: not an error — default-in-scope already covers all first-party .sol; record the full list as the snapshot
 - **Non-kebab repo name**: Ask the user to confirm the upstream name rather than inventing an alias
 
 # Examples

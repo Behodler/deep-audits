@@ -25,6 +25,8 @@ Every audit decision — what to scan, what to report, how to rank, what to supp
 
 **Submodules are initialized recursively.** This project audits the *living latest* of each repo **and its nested dependencies** — we are not crystallizing a pinned ABI, we are reviewing the code as it actually is today. Adding (`/add-project`), updating (`/update-lib`), and the SessionStart hook all init `--recursive` by default. Read-only still applies: pull the full nested tree, but never modify it. `/update-lib` accepts `--no-recursive` as an explicit per-run opt-out.
 
+**Scope is default-in-scope — a denylist, not an allowlist (Law 1).** Every first-party `.sol` in a submodule is in scope by default; the only baked-in exclusion is the project's own nested `lib/**` (third-party + forked deps, handled at the findings layer). A **new** first-party contract introduced by a code change — a fresh migrator, a new strategy — is **automatically in scope and scanned**, never silently dropped and never gated behind a "is this in scope?" confirmation. The per-project `scope` array in `registered-projects.json` is an advisory focus hint and cached snapshot, **never** the gate; see `registered-projects.json` → `scopePolicy` for the authoritative semantics. Rationale: recall beats report-tidiness — risking extra tokens on a contract nobody cares about is acceptable; risking a live exploit in a contract that slipped under the radar is not. Cull noise at **triage** (`/ledger`), not by withholding the scan. A project may add *extra* human-chosen exclusions to its `outOfScope`, but under-scoping must never hide a first-party contract.
+
 ## Architecture
 
 ### Directory Structure

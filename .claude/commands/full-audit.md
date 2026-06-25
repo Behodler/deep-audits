@@ -29,11 +29,13 @@ Full Audit: phoenix-nft-staking
 Submodule:   lib/phoenix-nft-staking
 Report dir:  reports/phoenix-nft-staking-12/
 Workspace:   workspace/phoenix-nft-staking/
-Scope:       6 contracts        Known issues: 5
+Scope:       6 contracts (default-in-scope)   Known issues: 5
+New in scope: 1 — src/InPlaceMigrator.sol (auto-included this run)
 Ledger:      3 open · 7 fixed · 2 acknowledged
 Run mode:    REGRESSION (2 files changed) — pass --full for a cold scan
 
 This will: analyze → generate PoCs (High/Medium) → write reports → compile QA → final review.
+New first-party contracts are always scanned — triage away anything you don't care about with /ledger.
 Proceed? (Invoke to continue, or provide feedback)
 ```
 

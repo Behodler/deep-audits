@@ -27,7 +27,8 @@ Invoke **project-manager**: "Create versioned report directory for this audit ru
 ## 2. Get Scope and Known Issues
 Invoke **project-manager**: "Get scope and known issues for project"
 - Retrieve the in-scope contract list and known issues (for sanitization).
-- If a contract-path is given, filter scope to it.
+- **Scope is default-in-scope (denylist):** the in-scope set is every first-party `.sol` minus `lib/**` and any project `outOfScope` globs — computed live, not read from an allowlist. New contracts are automatically in scope (see `registered-projects.json` → `scopePolicy`).
+- If a contract-path is given, filter scope to it (an explicit user-supplied focus, distinct from the default).
 
 ## 3. Load Ledger and Determine Run Mode
 Invoke **project-manager**: "Load the persistent ledger and compute changed files"
@@ -36,6 +37,7 @@ Invoke **project-manager**: "Load the persistent ledger and compute changed file
 - **Run mode:**
   - No ledger, or `--full` → **full scan** (entire scope).
   - Ledger present, no `--full` → **regression scan**: scanners still receive the full scope for context, but focus effort on changed files/functions and on previously-`open` findings.
+- **New-in-scope files always get full attention.** `changed_since` returns a `newInScope` list — first-party contracts that changed and are not in the prior `scope` snapshot (e.g. a new migrator). These are **never** treated as out-of-scope or deferred to a confirmation: they are scanned as if cold, even in regression mode, and named explicitly in the run summary so the user sees them. Surfacing beats tidiness (Law 1).
 - Pass the ledger (open/fixed/acknowledged fingerprints) and the changed-file set to downstream agents.
 - Also invoke **project-manager** `get_story_intent` to resolve the `[story-NNN]` intents for the audited range (+ design docs / `CLAUDE.md` / `designDecisions`) for the **story-faithfulness** scanner (Law 2). Regression mode → the changed-commit range; `--full` → stories touching in-scope files.
 
@@ -45,6 +47,7 @@ Run Mode
 Ledger: reports/ledgers/phoenix-nft-staking.json (12 findings: 3 open, 7 fixed, 2 acknowledged)
 Last audited commit: a1b2c3d
 Changed since: src/Staking.sol, src/RewardVault.sol (2 files)
+NEW in scope: src/InPlaceMigrator.sol (1 file — auto-included, scanned cold)
 Mode: REGRESSION (focus on changed code + open findings) — use --full to force cold scan
 ```
 
