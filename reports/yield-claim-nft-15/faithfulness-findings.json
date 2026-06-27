@@ -1,0 +1,110 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-06-27T00:00:00Z",
+  "scanType": "story-faithfulness",
+  "run": "yield-claim-nft-15",
+  "mode": "regression",
+  "submoduleHEAD": "f46a5cb",
+  "storiesChecked": ["story-043"],
+  "specSourcesResolved": [
+    "git commit f46a5cb body ([story-043] Add NudgeRatchetDelayRelease dispatcher + tests)",
+    "in-code NatSpec of src/dispatchers/NudgeRatchetDelayRelease.sol (project treats contract NatSpec as authoritative spec; no lib/yield-claim-nft/docs/ dir exists)"
+  ],
+  "specResolutionNote": "lib/yield-claim-nft/docs/ does not exist and CLAUDE.md carries no feature spec for story-043. Intent was recovered from the commit message and the detailed NatSpec header (lines 11-36) which enumerates the KNOWN/ACCEPTED design properties. No acceptance criteria were invented.",
+
+  "conformanceVerdict": "FAITHFUL — all six claimed behaviours implemented as stated; no implementation-vs-intent deviation found.",
+
+  "acceptanceCriteria": [
+    {
+      "criterion": "HOLDS USDC on dispatch (no forward to batchMinter)",
+      "specText": "story-043: \"HOLDS USDC on _dispatch (no transfer)\"; NatSpec L142 \"Intentionally NO transfer: USDC is HELD until a releaser calls release(amount).\"",
+      "result": "PASS",
+      "evidence": "_dispatch (L131-143) is `view`, performs only the hookTypeId guard, no safeTransfer / no balanceOf sweep (sibling NudgeRatchet sweeps full balance here). Test test_dispatch_holdsTokenAndDoesNotForward + test_dispatch_accumulatesHeldBalanceAcrossDispatches confirm held balance retained and batchMinter stays 0."
+    },
+    {
+      "criterion": "Releases only via whitelisted releaser calling release(amount)",
+      "specText": "story-043: \"an onlyReleaser-gated release(amount) forwarding held USDC to batchMinter\"",
+      "result": "PASS",
+      "evidence": "release(uint256) (L108-111) is `onlyReleaser nonReentrant`, safeTransfer(batchMinter, amount). Gating via releasers mapping + setReleaser onlyOwner. Tests: revertsForNonReleaser, transfersExactAmount..., revertsWhenAmountExceedsHeldBalance, partialThenSecondRelease_conservesBacking."
+    },
+    {
+      "criterion": "Mint-debt side UNCHANGED from NudgeRatchet (hook.onDispatch accrues against amount)",
+      "specText": "story-043: \"Mint-debt logic unchanged via the base hook.\"; NatSpec L16-18.",
+      "result": "PASS",
+      "evidence": "Base ATokenDispatcherV2.dispatch calls _dispatch THEN hook.onDispatch(minter, amount, extraData) unchanged; this contract does not override dispatch and adds no scaling. mintDebt += amount*1e12 at default ratio confirmed by test_dispatch_stillAccruesMintDebt and integration test (mintDebt == amount*1e12)."
+    },
+    {
+      "criterion": "Owner controls batchMinter + releaser whitelist",
+      "specText": "story-043: \"owner-settable batchMinter\"; \"adds a releasers whitelist (setReleaser)\".",
+      "result": "PASS",
+      "evidence": "setBatchMinter onlyOwner + non-zero guard (L89-94); setReleaser onlyOwner (L97-100). Tests cover update, event, non-owner revert, zero-address revert (batchMinter)."
+    },
+    {
+      "criterion": "USDC 6-decimal deploy guard",
+      "specText": "NatSpec L40 \"Must be USDC (6 decimals)\"; constructor L74-78.",
+      "result": "PASS",
+      "evidence": "constructor requires IERC20Metadata(token_).decimals() == 6. Test test_constructor_revertsWithNon6DecimalToken (Mock18Decimals) + test_constructor_setsTokenAndBatchMinter."
+    },
+    {
+      "criterion": "Hook-type guard preserved (M-04 fix carried)",
+      "specText": "NatSpec L49-52 + L136-141 \"Audit M-04 (story 037): refuse to dispatch through a missing/wrong hook.\"",
+      "result": "PASS",
+      "evidence": "_dispatch requires INudgeRatchetMintDebtHook(hook).hookTypeId() == EXPECTED_HOOK_TYPE_ID (literal keccak256(\"NudgeRatchetMintDebtHook.v1\") identical to hook.HOOK_TYPE_ID). Tests test_dispatch_revertsWithDefaultHook + test_dispatch_revertsWithWrongHook prove loud revert, closing the Q-07/Q-08 silent-skip class."
+    }
+  ],
+
+  "testConformance": {
+    "verdict": "Strong — every claimed behaviour has at least one positive and (where applicable) negative test, including the M-04 default/wrong-hook revert pair that the prior silent-gap lesson demands. The integration test (NFTMinterV2 -> dispatcher held -> release) exercises the full path end-to-end.",
+    "coveredClaims": ["hold-on-dispatch", "accumulation across dispatches", "debt-accrual-at-dispatch", "release gating (non-releaser revert)", "release amount semantics + over-release revert", "backing conservation across partial releases", "hook-type guard (default + wrong hook)", "constructor USDC + zero-batchMinter guards", "owner-only setBatchMinter/setReleaser", "rescueERC20 owner-only + zero-recipient + arbitrary-token recovery", "pause + onlyMinter base modifiers"],
+    "untestedClaims": [
+      {
+        "claim": "rescueERC20 CAN withdraw the held _token (USDC) and 'can leave debt under-backed' (NatSpec L116-117).",
+        "gap": "Every rescueERC20 test uses a stray Mock18Decimals; none rescues the actual _token (USDC). The single most safety-relevant property of rescueERC20 (that it drains live backing) is asserted in NatSpec but never exercised.",
+        "severity": "informational",
+        "isFinding": false,
+        "rationale": "rescueERC20 is a plain safeTransfer that works as described regardless of token; a test would not surface a hidden bug (unlike the M-04 unwired-hook case where the untested path was actually broken). This is an accepted owner power (Law 3), so the gap is a coverage note, not a faithfulness finding."
+      },
+      {
+        "claim": "_dispatch performs NO balance>=amount check; mint-debt accrues against `amount` whether or not USDC was actually deposited (NatSpec L128-130; relies on minter transferFrom-before-dispatch).",
+        "gap": "No test dispatches with amount > actually-deposited USDC to show debt over-accrues against absent backing. All tests pre-mint USDC == amount.",
+        "severity": "informational",
+        "isFinding": false,
+        "rationale": "The omission of the sibling's defensive `bal >= amount` require is INTENTIONAL and faithful (the contract holds rather than sweeps, and trusts NFTMinterV2 to deposit exactly price*qty first). Not a deviation from story-043; flagged only so interaction/econ analysis carries the minter-trust assumption forward."
+      }
+    ]
+  },
+
+  "findings": [
+    {
+      "id": "F-01-043",
+      "faithfulnessTag": "F-01-043",
+      "type": "story-unsafe",
+      "faithfulness": false,
+      "securityEscalation": true,
+      "storyTag": "story-043",
+      "severity": "potential-medium",
+      "contract": "src/dispatchers/NudgeRatchetDelayRelease.sol",
+      "function": "_dispatch / release",
+      "line": 142,
+      "lineStart": 20,
+      "lineEnd": 142,
+      "specText": "story-043 NatSpec L20-31: \"Debt/release timing is DECOUPLED ON PURPOSE. phUSD mint-debt accrues (and the downstream staker may realise phUSD via the hook's pull()) at DISPATCH time, while the USDC backing it can still be sitting on this contract, un-released. There is therefore an intended, admin-controlled window in which phUSD has been realised but the corresponding USDC has NOT yet reached the batchMinter.\" ... \"No unbacked phUSD is created by this. ... release only RELOCATES that existing backing to the batchMinter ... total system backing is conserved at all times.\"",
+      "specSource": "git commit f46a5cb body + NudgeRatchetDelayRelease NatSpec",
+      "actualBehavior": "Implementation faithfully realises the decoupling: debt accrues against `amount` in hook.onDispatch at dispatch, while the backing USDC is held on the dispatcher and can ONLY be moved to the batchMinter sink by a whitelisted releaser calling release(amount) at an admin-controlled rate.",
+      "deviation": "Not an implementation deviation — the code matches the story. This is a LAW-1 escalation of the STORY'S OWN intended design. The NatSpec's safety argument rests on the invariant 'total SYSTEM backing is conserved' (USDC exists somewhere). But the relevant solvency invariant for a realised phUSD holder is 'the SINK against which phUSD redeems is funded when the claim is realised', not 'USDC exists somewhere in the system'. During the intended window, phUSD can be pulled/realised while the batchMinter holds 0 USDC, and the dispatcher-held USDC is unreachable to anyone but the releaser. If phUSD redemption draws on the batchMinter, the story deliberately opens a transient under-funded-sink window whose duration is set by an admin release lever (and is unbounded if releases lag or stop).",
+      "lawImpacted": 1,
+      "confidence": "medium",
+      "routing": "Hand off to econ-scanner for impact classification — this competes for Medium ONLY if econ confirms (a) phUSD realised via hook.pull() redeems/settles specifically against the batchMinter sink's instantaneous USDC balance, and (b) the protocol is not structurally over-backed enough to absorb the release lag.",
+      "mitigatingContext": "Prior Tier-3 work (run-13, memory note yield-claim-nft-run13) proved the NudgeRatchet/hook path runs at >=2:1 over-backing with no over-mint, and double-mint/under-backing was REFUTED. A structurally over-backed system would absorb a transient release-lag window, which would keep this at surface/Low rather than a standalone Medium. econ-scanner should weigh the over-backing context against the unbounded-window concern before classifying.",
+      "notFootgunRationale": "This is NOT merely the rescueERC20 owner-footgun (that is an acknowledged Law-3 owner power and is out of scope as a finding). The window here exists under NORMAL operation of the story's core feature even with a benign releaser, because realisation (dispatch) and sink-funding (release) are separated by design — so it is a story-design Law-1 surface, not an owner-misuse case."
+    }
+  ],
+
+  "summary": {
+    "faithful": true,
+    "deviations": "None. NudgeRatchetDelayRelease is a faithful implementation of story-043 across all six acceptance criteria; the diff vs sibling NudgeRatchet (hold-vs-sweep, release path, releaser whitelist, rescue hatch) matches the commit message and NatSpec exactly.",
+    "untestedClaims": "Two coverage gaps noted (rescueERC20-over-_token, and the intentional absence of a balance>=amount check) — both informational, neither a faithfulness finding: the untested paths behave as described and were deliberately designed that way (unlike the M-04 unwired-hook case where the untested path was actually broken).",
+    "unsafeStoryFlag": "YES — F-01-043: the story's INTENDED decoupling of phUSD-debt-realisation (at dispatch) from USDC-release (later) opens an admin-rate-controlled, potentially unbounded under-funded-sink window. Faithful code, but Law-1 overrides Law-2: surfaced as a securityEscalation for econ-scanner to classify (likely Medium-or-surface depending on whether phUSD redeems against the batchMinter and whether structural over-backing absorbs the lag).",
+    "regressionNote": "M-04 hook-type guard and M-03 1e12 decimal scaling are PRESERVED/UNCHANGED in this sibling (scaling lives in the hook; dispatcher does no arithmetic) — no regression of earlier stories' guarantees."
+  }
+}

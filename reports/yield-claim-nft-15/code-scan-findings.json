@@ -1,0 +1,70 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-06-27T00:00:00Z",
+  "scanType": "code",
+  "run": "yield-claim-nft-15",
+  "submoduleHEAD": "f46a5cb",
+  "story": "story-043",
+  "scope": ["src/dispatchers/NudgeRatchetDelayRelease.sol"],
+  "integrationPointsRead": [
+    "src/NFTMinterV2.sol",
+    "src/dispatchers/ATokenDispatcherV2.sol",
+    "src/dispatchers/NudgeRatchet.sol",
+    "src/hooks/NudgeRatchetMintDebtHook.sol",
+    "src/hooks/DefaultDispatchHook.sol"
+  ],
+  "contractsScanned": 1,
+  "findings": [
+    {
+      "id": "CODE-15-001",
+      "type": "pause-gap / operational-footgun",
+      "severity": "low",
+      "contract": "src/dispatchers/NudgeRatchetDelayRelease.sol",
+      "function": "release / rescueERC20 vs dispatch",
+      "line": 108,
+      "lineStart": 108,
+      "lineEnd": 121,
+      "description": "Pausing the dispatcher does not freeze custody of held USDC. dispatch() is whenNotPaused, but release() (onlyReleaser) and rescueERC20() (onlyOwner) are NOT pause-gated. A pause (triggered by NFTMinterV2.setDispatcherActive -> onlyMinter pause) only halts new mint/debt-accrual; held USDC can still be moved out to batchMinter by any whitelisted releaser while paused.",
+      "attackVector": "An operator who pauses the dispatcher during an incident may assume held USDC is frozen. It is not: a releaser key (or a releaser the operator forgot to revoke) can continue draining held USDC to batchMinter mid-pause. To actually freeze custody the owner must additionally setReleaser(addr,false) for every releaser. Pause semantics here gate the inbound/mint side only, not the outbound/value side.",
+      "rootCause": "Custody-moving functions (release, rescueERC20) lack a whenNotPaused gate while the value-neutral mint entry (dispatch) has one, creating an asymmetric and non-obvious pause surface.",
+      "impact": "No theft and no unbacked phUSD: release only relocates already-held backing to the intended sink (batchMinter), exactly the destination it was headed for, and releasers are an owner-curated trusted set. Impact is limited to a surprising pause semantics (pause is not a custody freeze). rescueERC20 being un-gated during pause is explicitly intended (escape hatch should work while paused) and is correct.",
+      "confidence": "low",
+      "mayBeIntentional": true,
+      "lawNote": "Law 3 footgun (non-obvious pause semantics). Owner/releasers trusted; surfaced as an operational hazard with safe-config guidance (revoke releasers to freeze), not as a vulnerability. Borderline reportable; include with guidance, do not escalate."
+    }
+  ],
+  "refutations": [
+    {
+      "id": "REFUTE-15-A",
+      "question": "Q1 (PRIMARY): Does removing the sibling's `require(bal >= amount)` let a dispatch accrue mint-debt for `amount` while LESS than `amount` USDC actually arrived (under-backing / unbacked phUSD)?",
+      "verdict": "REFUTED — not a bug. The removed check is benign.",
+      "evidence": "NFTMinterV2._executeMint (src/NFTMinterV2.sol:182-191) transfers `price` USDC DIRECTLY to the dispatcher (safeTransferFrom(msg.sender, config.dispatcher, price)) and measures actualReceived = balanceOf(dispatcher)_after - balanceOf(dispatcher)_before (FOT-safe), then calls dispatch(address(this), actualReceived, extraData). dispatch is onlyMinter (ATokenDispatcherV2:121), so NFTMinterV2 is the SOLE caller. Therefore the `amount` against which the hook accrues mint-debt (NudgeRatchetMintDebtHook.onDispatch, amount*1e12*ratio/100) is exactly the USDC that just landed on the dispatcher and is now HELD there. Backing is guaranteed and exact at dispatch time; the transferFrom+balance-delta is atomic within the same tx (USDC has no transfer callback), so no interleave can inflate actualReceived. The sibling NudgeRatchet's bal>=amount require was load-bearing only because it SWEEPS the full balance away in _dispatch; this variant holds, so the deposit that backs the debt provably remains on-contract. No under-backing path exists through the mint flow.",
+      "residualOwnerNote": "The only ways debt could exceed on-contract USDC are owner actions the NatSpec already documents as accepted (rescueERC20 over _token) or owner setting _minter to a non-NFTMinter that calls dispatch without depositing first — both Law-3 trusted/obvious owner actions, suppressed."
+    },
+    {
+      "id": "REFUTE-15-B",
+      "question": "Q2: Can release(amount) cross-contaminate accounting or release USDC backing other still-accruing debt?",
+      "verdict": "No new bug — single commingled pool, intended per NatSpec.",
+      "evidence": "release(amount) (line 108-111) does a single safeTransfer(batchMinter, amount) capped by held balance (SafeERC20 reverts if amount > balance). There is no per-debt earmarking; all dispatched USDC is one pool and all phUSD debt is one ledger (hook.mintDebt). Since every dispatch deposits exactly its debt-basis amount, release only RELOCATES existing backing to the intended sink and conserves total system backing. This is the explicitly-documented debt/release decoupling. No cross-contract over-release possible (cannot release more than held)."
+    },
+    {
+      "id": "REFUTE-15-C",
+      "question": "Q3: Is the hook-type guard fail-closed for DefaultDispatchHook and for a hook with a DIFFERENT hookTypeId? Any bypass?",
+      "verdict": "Fail-closed both ways. No bypass short of a trusted-owner misconfiguration.",
+      "evidence": "_dispatch (line 138-141) requires INudgeRatchetMintDebtHook(hook).hookTypeId() == keccak256('NudgeRatchetMintDebtHook.v1'). DefaultDispatchHook (src/hooks/DefaultDispatchHook.sol) implements ONLY onDispatch and has NO hookTypeId() and NO fallback/receive, so the staticcall hits no selector and reverts -> dispatch reverts (mints blocked until owner setHook()s the real hook). A hook exposing a different hookTypeId returns a non-matching bytes32 -> require fails -> revert. Bypass requires the owner to install a hook that returns the exact expected id (owner trusted, Law 3). EXPECTED_HOOK_TYPE_ID literal matches NudgeRatchetMintDebtHook.HOOK_TYPE_ID exactly. M-04 guard preserved."
+    },
+    {
+      "id": "REFUTE-15-D",
+      "question": "Q5: Reentrancy / rounding / event / zero-check issues with real impact?",
+      "verdict": "None with impact.",
+      "evidence": "dispatch and release carry nonReentrant. rescueERC20 lacks nonReentrant but is owner-only, a single SafeERC20 transfer, and mutates no contract state (reentering it just performs another owner transfer) — not exploitable. No arithmetic in this contract (all scaling is in the hook, M-03 surface unchanged). Missing zero-amount guards on release/rescue are harmless (emit a zero-amount event at most). setReleaser allows zero address (cosmetic, owner-only). No event-ordering issue (Released emitted after transfer)."
+    }
+  ],
+  "intentionalDesignRespected": [
+    "Debt/release timing decoupling (phUSD realisable via hook.pull() while USDC still held) — NatSpec ACCEPTED, not flagged.",
+    "Release rate as a trusted admin lever via releasers whitelist — NatSpec ACCEPTED, not flagged.",
+    "rescueERC20 can withdraw held _token (USDC) and can leave debt under-backed — NatSpec ACCEPTED owner power, not flagged.",
+    "_dispatch is a view no-op with no bal>=amount re-assert — confirmed safe given NFTMinterV2 balance-delta accounting (see REFUTE-15-A)."
+  ],
+  "summary": "NudgeRatchetDelayRelease is clean at the implementation/interaction level. The headline concern (removed `bal >= amount` check enabling under-backed / unbacked phUSD) is REFUTED: NFTMinterV2 deposits USDC directly onto the dispatcher and dispatches the exact balance-delta, so mint-debt always equals the on-contract USDC backing it, and dispatch is onlyMinter. Hook-type guard is fail-closed; release accounting is a conserved commingled relocation. One Low operational footgun: pause does not gate release()/rescueERC20(), so pausing is not a custody freeze — operators must revoke releasers to actually halt outbound USDC."
+}

@@ -1,0 +1,115 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-06-27T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scanMode": "regression",
+  "commit": "4f80541",
+  "story": "story-042 (MultiPooler batch pool() + parameterize Uniboost pool amount)",
+  "scope": [
+    "src/MultiPooler.sol",
+    "src/dispatchers/Uniboost.sol",
+    "src/interfaces/IUniboostPooler.sol"
+  ],
+  "patternsChecked": 27,
+  "findingsCount": 2,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db + ledger-recurring",
+      "patternId": "MISSING-SLIPPAGE / FLASH-LOAN-PRICE",
+      "type": "amm-pool-add-mev-sandwich-keeper-supplied-floor",
+      "severity": "potential-medium",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "line": 247,
+      "description": "Uniboost.pool() executes two UniV2 swaps (prime->pair, ~half pair->target) then addLiquidity, all in one permissionless-mempool tx. addLiquidity is called with minAmounts = (0, 0) (Uniboost.sol:248), so the ONLY slippage protection is the three caller-supplied floors minPairOut / minTargetOut / minLP. There is no on-chain oracle/TWAP reference: if the keeper supplies any floor as 0 (or a loose value), the swaps and the LP-add are fully exposed to sandwich/MEV and pool-ratio (donation-skew) manipulation, and value leaks from protocol-owned liquidity. story-042 makes this materially easier to trip: with MultiPooler the keeper now fills many rows (one minPairOut/minTargetOut/minLP per target) in a single UI form, so a single fat-fingered 0 silently disables protection for that row. This is the same caller-supplied-floor / minAmounts=0 class already tracked as L-06 (BalancerPoolerV2 single-sided add relies solely on off-chain keeper minBPT) and L-03 (donation swap limitRaw=0).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "addLiquidity(targetToken, _pairToken, targetBal, pairRemaining, 0, 0, address(this), block.timestamp)",
+        "swapExactTokensForTokens(amountIn, minPairOut, primeToPairPath(), ...)",
+        "swapExactTokensForTokens(half, minTargetOut, pairToTargetPath, ...)",
+        "require(liquidity >= minLP, ...)"
+      ],
+      "missingMitigations": [
+        "addLiquidity minAmounts hardcoded to 0,0 — no on-chain floor independent of the keeper",
+        "No on-chain spot-vs-oracle/TWAP sanity check before the swaps or the add",
+        "All three floors are caller-supplied; a 0 from the keeper is accepted with no lower bound (block.timestamp deadline gives no MEV protection)"
+      ],
+      "riskHypothesis": "If the authorized pooler/keeper supplies minPairOut/minTargetOut/minLP = 0 (or values too loose), an MEV bot sandwiches the pool() tx: skews the pool, the swaps execute at a bad rate, addLiquidity mints little LP, and the attacker captures the spread. Loss falls on protocol-owned liquidity, not user funds, and requires a keeper misconfig to open — hence Medium-class, not High. Refute if a deploy/keeper story pins non-zero floors derived from an independent price source and forbids 0. NOTE: confidence is about whether the pattern APPLIES given floors exist as params; the impact if a 0 slips through is real value leak.",
+      "ledgerRef": "L-06 (BalancerPoolerV2 keeper minBPT), L-03 (donation swap limitRaw=0)",
+      "references": [
+        "https://blog.openzeppelin.com/a-novel-defense-against-erc4626-inflation-attacks"
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "patternId": "L-09 / M-04 fail-open hook dispatch (CARRYOVER — unchanged by story-042)",
+      "source": "ledger-recurring",
+      "type": "unwired-or-mistyped-hook-zero-mint-debt",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "line": 184,
+      "description": "CARRYOVER, NOT NEW. Uniboost._dispatch still has no hookTypeId() marker guard, so an unwired/wrong dispatch hook silently accrues zero phUSD mint-debt (the M-04 class the protocol fixed on NudgeRatchet via story-037 but did not carry to Uniboost). story-042 did NOT touch _dispatch, the hook, or the mint-debt path — the amountIn parameterization is confined to pool(), which neither mints nor accrues debt. This entry exists only so the regression confirms the pattern still matches the changed file and stays open; it is already tracked as L-09 and the sibling-asymmetry Q-08. Do NOT re-raise as a new finding.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "Uniboost._dispatch has no hookTypeId == EXPECTED guard",
+        "UniboostMintDebtHook exposes no hookTypeId()"
+      ],
+      "missingMitigations": [
+        "Still no marker guard (open as L-09; sibling asymmetry Q-08)"
+      ],
+      "riskHypothesis": "Already adjudicated as Low (L-09); listed here only as regression-watch. story-042 introduces no new mint-debt skew (pool() is post-dispatch, no mint).",
+      "ledgerRef": "L-09 (open), L-10 (open), M-04 (fixed on NudgeRatchet), Q-08 (wont-fix)"
+    }
+  ],
+  "manualReviewCount": 2,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "patternId": "DOS-UNBOUNDED-LOOP + batch all-or-nothing partial-failure",
+      "source": "pattern-db",
+      "type": "unbounded-batch-loop-one-bad-row-bricks-all",
+      "severity": "potential-low",
+      "contract": "src/MultiPooler.sol",
+      "line": 62,
+      "description": "MultiPooler.pool() iterates `for (uint256 i = 0; i < calls.length; i++)` over a caller-supplied calldata array with no length cap and no pagination, forwarding one Uniboost.pool() per row. Two coupled concerns: (1) gas — a large batch can exceed the block gas limit; (2) all-or-nothing partial failure — any single row reverting (target paused via whenNotPaused, deauthorized pooler / bumped authVersion, unmet min-out, amountIn > that target's balance, or a bad/non-Uniboost c.uniboost address) bubbles up and reverts the WHOLE batch (documented behavior, MultiPooler.sol:56-58). Both are bounded by the fact that the loop and array are driven by the single trusted `onlyPooler` keeper, who sizes the batch and can retry after dropping the offending row — griefing is self-inflicted, not third-party. Routed to manual review (not dropped) because batch-loop / one-bad-item-bricks-all is exactly a class the prompt flagged; confidence the pattern rises to a reportable issue is LOW given the trusted-caller mitigation.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "for (uint256 i = 0; i < calls.length; i++)",
+        "IUniboostPooler(c.uniboost).pool(c.amountIn, c.minPairOut, c.minTargetOut, c.minLP);",
+        "All-or-nothing: any single target's revert bubbles up and reverts the entire batch"
+      ],
+      "missingMitigations": [
+        "No max batch length / pagination",
+        "No per-row try/catch to isolate a failing row (intentional all-or-nothing design)"
+      ],
+      "riskHypothesis": "Self-inflicted keeper griefing / failed-batch retry, no fund loss; MultiPooler holds no funds. Confirm intent with the keeper story; likely QA at most."
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "patternId": "REENTRANCY-ERC777 (no guard) + arbitrary external-call target",
+      "source": "pattern-db",
+      "type": "forwarder-no-reentrancy-guard-and-unvalidated-target",
+      "severity": "potential-low",
+      "contract": "src/MultiPooler.sol",
+      "line": 60,
+      "description": "MultiPooler.pool() makes external calls in a loop with no nonReentrant guard, and c.uniboost is an arbitrary pooler-supplied address with no registry/whitelist check (any address implementing IUniboostPooler.pool can be targeted). Exploitability is low: MultiPooler holds no funds and has no mutable accounting to corrupt on re-entry, the entry point is gated by onlyPooler (single trusted keeper), each real Uniboost.pool() is itself nonReentrant, and MultiPooler must be a pre-registered authorized pooler on a target for the forwarded call to do anything. Flagged because the project repeatedly tracks missing-reentrancy-guard hygiene (L-01 NFTMinterV2, Q-05 nonReentrant ordering) and the unvalidated-target forwarder pattern is worth a human glance. Routed to manual review, not dropped.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "IUniboostPooler(c.uniboost).pool(...) — c.uniboost unvalidated, no whitelist",
+        "MultiPooler.pool has no nonReentrant modifier"
+      ],
+      "missingMitigations": [
+        "No nonReentrant on MultiPooler.pool (defense-in-depth, cf. Q-05)",
+        "No on-chain check that c.uniboost is a known/registered Uniboost dispatcher"
+      ],
+      "riskHypothesis": "No state to corrupt and trusted caller => not currently exploitable; consistent with project's reentrancy-hygiene QA class. Confirm no future MultiPooler state is added without a guard."
+    }
+  ],
+  "cleanChecks": [
+    "Approval mismatch: pool() forceApprove(router, amountIn) then forceApprove(router, 0) after each leg — exact-amount approve, no leftover allowance, no approved-vs-pooled mismatch from the new amountIn param. CLEAN.",
+    "Over/under-funding via amountIn: bounded by require(amountIn > 0) and require(amountIn <= balanceOf(this)) — cannot over-spend; amountIn < balance leaves remainder by design. CLEAN.",
+    "Mint-debt / decimal under-mint (M-03) and double-mint (MINT-ON-DEMAND-OVERMINT): pool() neither mints nor accrues debt; mint-debt still accrues once in base _dispatch on the gross dispatched prime. amountIn parameterization introduces no new mint path or decimal skew. CLEAN.",
+    "UNPROTECTED-INIT / proxy: MultiPooler and Uniboost are non-upgradeable, constructor-initialized (Ownable). No initializer. N/A.",
+    "ORACLE-STALE / SIGNATURE-REPLAY: no Chainlink reads, no ecrecover in changed code. N/A."
+  ]
+}

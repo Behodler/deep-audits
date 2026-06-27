@@ -1,0 +1,87 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-06-27T00:00:00Z",
+  "scanType": "economic",
+  "run": "yield-claim-nft-15",
+  "submoduleHEAD": "f46a5cb",
+  "story": "story-043",
+  "regression": true,
+  "auditFocus": "src/dispatchers/NudgeRatchetDelayRelease.sol (new in-scope contract)",
+  "contractsScanned": 4,
+  "contractsConsidered": [
+    "src/dispatchers/NudgeRatchetDelayRelease.sol",
+    "src/dispatchers/NudgeRatchet.sol (sibling, baseline)",
+    "src/hooks/NudgeRatchetMintDebtHook.sol (unchanged mint-debt side)",
+    "src/NFTMinterV2.sol (the configured _minter / value-flow source)"
+  ],
+  "tierNote": "Tier 2 cross-contract economic / value-flow / intent analysis. Local arithmetic is deferred to the Tier-1 profile (this dispatcher performs NO arithmetic). The hook's *1e12 scaling (M-03 class) is unchanged and out of this contract's surface. Findings here concern protocol-wide backing/value-flow only.",
+
+  "findings": [
+    {
+      "id": "ECON-001",
+      "title": "Delay-release variant drops the sibling's documented `bal >= amount` backing tripwire in `_dispatch`, leaving NFTMinterV2's measured `actualReceived` as the SOLE on-chain guarantor that accrued/realisable phUSD debt is fully backed",
+      "contract": "src/dispatchers/NudgeRatchetDelayRelease.sol",
+      "function": "_dispatch",
+      "lineStart": 131,
+      "lineEnd": 143,
+      "severity_estimate": "qa",
+      "confidence": "high",
+      "rootCauseClass": "removed-defense-in-depth / invariant-assertion-dropped",
+      "description": "The sibling `NudgeRatchet._dispatch` deliberately re-asserts `require(bal >= amount, ...)` against the on-contract USDC balance before the hook accrues phUSD mint-debt against `amount`. Its own comment states this is the one direction that matters: 'forwarding LESS than `amount` would be the one direction that mints unbacked phUSD ... documents the invariant at the point it matters.' `NudgeRatchetDelayRelease._dispatch` is a `view` no-op that performs NO balance read and NO `bal >= amount` assertion (it intentionally holds rather than sweeps). The mint-debt side is unchanged: the base still calls `hook.onDispatch(minter, amount)` immediately after `_dispatch`, accruing 18-dp phUSD debt against the 6-dp `amount`, which becomes realisable to a staker via `hook.pull()`. The contract therefore relies ENTIRELY on the off-contract caller passing an `amount` that is genuinely covered by USDC actually delivered to the dispatcher, with no local tripwire if that assumption is ever violated.",
+      "valueFlowMapping": "NFTMinterV2._executeMint (src/NFTMinterV2.sol:182-191) measures `actualReceived = balanceOf(dispatcher)_after - _before` around its `safeTransferFrom(user, dispatcher, price)` and dispatches exactly `actualReceived`. So in the integrated path the held balance ALWAYS covers the accrued amount BY CONSTRUCTION (the accrual basis is a measured delta of USDC that just landed on the dispatcher). The dropped check is thus redundant in the current wiring and there is NO live exploit today.",
+      "economicImpact": "None in the current integrated configuration. The exposure is latent: the only on-chain object asserting 'phUSD debt accrued <= USDC actually delivered' has been removed from this variant, so its backing correctness is now an external invariant (NFTMinterV2's measured-delta semantics) rather than a locally-enforced one. A future `setMinter()` repoint (owner-callable, zero-address-allowed) to any minter that passes a caller-influenced or un-measured `amount` would mint phUSD debt with no held-USDC backing and no revert — whereas the sibling reverts loudly in exactly that case.",
+      "attackScenario": "Not exploitable via the intended NFTMinterV2 path. Latent path: owner repoints `_minter` (or a future minter variant is wired) to a dispatch caller that supplies `amount` larger than the USDC delivered to the dispatcher -> hook accrues over-stated phUSD debt -> staker `pull()`s unbacked phUSD. This requires a minter that does not replicate NFTMinterV2's measured-delta discipline.",
+      "lawT3FootgunFraming": "Borderline footgun, surfaced honestly at QA. A competent owner could reasonably ASSUME this dispatcher self-defends the backing invariant the way its near-identical sibling does, and swap minters / reuse it in a new wiring without realising this one variant uniquely lost the tripwire. That assumption-mismatch is the non-obvious part. It is NOT a malicious-owner vector and NOT a live bug, so it is QA, not Medium.",
+      "affectedParties": "phUSD holders / protocol solvency (only under a non-default minter wiring)",
+      "recommendation": "Cheaply restore parity with the sibling: read `IERC20(_token).balanceOf(address(this))` in `_dispatch` and `require(bal >= amount)` (the variant holds USDC, so the cumulative held balance trivially satisfies this in the honest path and the check stays redundant-but-documenting). This re-localises the 'no unbacked phUSD' invariant inside the contract that mints the debt, independent of which minter is wired. Note: keeping `_dispatch` `view` would have to be relaxed (balanceOf is a view call, so it can stay view).",
+      "intentMismatchNote": "The NatSpec's 'creates no unbacked phUSD' guarantee is asserted at the contract boundary but is enforced one hop away (in NFTMinterV2), unlike the sibling which enforces it in-contract. The claim is true for the shipped wiring; the finding is that the enforcement was relocated off-contract without the NatSpec flagging that the in-contract guard was dropped."
+    }
+  ],
+
+  "analyzedNotReported": [
+    {
+      "ref": "Q1 - 'No unbacked phUSD' system-level claim (USDC held on dispatcher vs. backing-must-live-at-batchMinter/PSM)",
+      "verdict": "NOT A FINDING (claim holds within scope)",
+      "reasoning": "At the on-chain conservation level the NatSpec is correct: USDC delivered to the dispatcher is never destroyed by dispatch/release; `release` only RELOCATES existing USDC from dispatcher to batchMinter (the legitimate sink). Total system USDC is conserved across the hold window; only its location changes. Whether the downstream batchMinter/PSM needs that USDC *synchronously* to honour phUSD redemptions is a property of the EXTERNAL backing model, which prior finding DEDUP-001 ('phUSD unbacked mint, owner-driven, out-of-scope external backing model') already ruled out-of-scope and SUPPRESSED. The batchMinter is an external address (not a first-party contract in this repo) and no in-scope contract reads its balance to gate phUSD minting, so there is no in-scope invariant coupling USDC-at-sink to phUSD-realisation. With ratio=100 the held USDC is 1:1 backing; ratio>100 over-mint is a pre-existing HOOK design (nudge bonus), unchanged here, and is the same external-backing question DEDUP-001 covers. No new Law-1 hole."
+    },
+    {
+      "ref": "Q2 - rescueERC20 over held _token (USDC) can leave already-realised phUSD under-backed",
+      "verdict": "NOT A FINDING (obvious + explicitly documented owner responsibility -> Law 3 suppress; overlaps suppressed DEDUP-001)",
+      "reasoning": "rescueERC20's own NatSpec spells out the exact consequence: 'this CAN withdraw held `_token` (USDC), which is backing for already-accrued mint-debt. Using it on `_token` can leave debt under-backed and is an owner responsibility.' The consequence is therefore obvious to any competent owner reading the function they call (Law 3: surprise=footgun=report; no surprise=trusted=suppress). There is no non-obvious path: rescuing a NON-`_token` asset (the documented intended use) never touches USDC backing. The under-backing outcome is also the same owner-driven external-backing concern already suppressed as DEDUP-001. Suppressed."
+    },
+    {
+      "ref": "Q3 - slow/withheld release starving batchMinter while phUSD circulates (liveness/solvency mismatch)",
+      "verdict": "NOT A FINDING (intended admin lever, documented; Law 3 trusted KNOWING action)",
+      "reasoning": "Rate control over how fast held USDC reaches the batchMinter is the entire purpose of the contract and is explicitly documented as a trusted lever ('Slow/withheld releases are an operational choice, not a liveness bug'). The owner KNOWS that withholding release accumulates USDC on the dispatcher; nothing non-obvious. Any downstream redemption-timing pressure lives in the external backing model (OOS per DEDUP-001). Suppressed."
+    },
+    {
+      "ref": "Q4 - new decimal/scaling or rounding value-leak in the hold/release path (M-03 class)",
+      "verdict": "CONFIRMED CLEAN - no new mismatch",
+      "reasoning": "NudgeRatchetDelayRelease performs ZERO arithmetic and ZERO decimal normalisation. `release(amount)` moves a raw integer USDC amount via SafeERC20.safeTransfer with no scaling, no division, no rounding; SafeERC20 reverts if amount > held balance. The *1e12 USDC->phUSD scaling is entirely in the unchanged NudgeRatchetMintDebtHook (multiply-then-divide, floors, never over-credits). The dispatcher cannot affect scale direction/magnitude. M-03 surface is unchanged and not re-touched. No truncation/rounding leak in the hold/release path."
+    },
+    {
+      "ref": "Q5 - delaying the sweep vs sibling's immediate-sweep: does it break an economic invariant the rest of the system relies on?",
+      "verdict": "NO in-scope invariant broken (one defense-in-depth assertion lost -> folded into ECON-001)",
+      "reasoning": "The sibling's invariant 'USDC reaches batchMinter same-tx as debt accrual' is intentionally replaced by 'USDC held on dispatcher, conserved, released on an admin schedule.' No in-scope contract relies on synchronous USDC-at-batchMinter (the hook's mintDebt and pull() are independent of USDC location; batchMinter is external and only receives tokens with no callback). The ONE substantive economic delta worth surfacing is that the sibling's in-contract `bal >= amount` backing tripwire was dropped (captured as ECON-001 at QA). All other deltas (held custody, release path, releaser whitelist, rescue hatch) are intended and documented."
+    },
+    {
+      "ref": "release() destination / releaser griefing",
+      "verdict": "NOT A FINDING",
+      "reasoning": "release() can only send to the owner-set `batchMinter` (releaser cannot choose destination) and is gated to an owner-curated whitelist (trusted). A malicious releaser cannot redirect funds; withholding release is the intended lever (Q3). nonReentrant present. No value-extraction surface."
+    },
+    {
+      "ref": "rescueERC20 not nonReentrant / not pause-gated",
+      "verdict": "NOT A FINDING",
+      "reasoning": "Single owner-only safeTransfer of a trusted 6-dp USDC (or stray token); no in-scope reentrancy vector and non-pause-gating is explicitly intended per NatSpec ('NOT pause-gated, by design'). Consistent with BalancerPoolerV2/Uniboost rescue pattern."
+    }
+  ],
+
+  "ledgerReconciliation": {
+    "DEDUP-001": "Still the governing precedent: external phUSD backing model is owner-driven and out-of-scope (suppressed). ECON-001 is deliberately scoped NARROWER than DEDUP-001 - it is about an in-contract on-chain assertion that the sibling enforces and this variant drops, NOT about the external backing model. Do not collapse ECON-001 into DEDUP-001's suppression.",
+    "L-08": "Was 'NudgeRatchet has no rescueERC20; out-of-band USDC stranded' (FIXED). This variant ADDS rescueERC20, which structurally resolves the L-08 stranding for the delay-release variant while introducing the (documented, suppressed) Q2 rescue-of-backing consideration. No regression.",
+    "M-03 / M-04": "Both FIXED classes are PRESERVED here: the *1e12 scaling lives in the unchanged hook (M-03 untouched), and the hookTypeId guard is present and identical in this variant's `_dispatch` (M-04 preserved). No regression.",
+    "Q-07 / Q-08": "The duplicated EXPECTED_HOOK_TYPE_ID literal recurs in this variant (Q-07 class) and the guard IS applied here (so no Q-08-style asymmetry for this contract). Both previously triaged wont-fix; no new action."
+  },
+
+  "summary": "story-043's NudgeRatchetDelayRelease introduces an intended, documented debt/USDC decoupling. The NatSpec's economic reassurances ('no unbacked phUSD', 'backing conserved', 'rate control is a trusted lever', 'rescueERC20 is owner responsibility') hold up under scrutiny WITHIN audit scope: USDC is conserved (relocated, not destroyed), the over-mint and external-redemption-timing questions belong to the out-of-scope external backing model already suppressed as DEDUP-001, and the owner powers are documented/obvious (Law 3 trusted). The single net-new economic observation is ECON-001 (QA): unlike its near-identical sibling, this variant drops the in-contract `bal >= amount` tripwire that the sibling deliberately kept as the documented 'one direction that mints unbacked phUSD' guard, relocating that invariant's enforcement off-contract into NFTMinterV2's measured `actualReceived`. Safe in the shipped wiring (actualReceived is a measured balance delta), latent under any non-default minter wiring. No High/Medium, no Law-1 solvency hole introduced by this contract."
+}
