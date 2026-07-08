@@ -1,0 +1,39 @@
+{
+  "id": "UBC-01",
+  "project": "phoenix-phase-2-staging",
+  "status": "open",
+  "origin": "new",
+  "severity": "low",
+  "title": "Uniboost cutover leaves a mid-flight mint-revert window on the swapped index: between replaceDispatcher and setPrice the new USDC-6dp dispatcher is live with the retired burner's 18-dp price",
+  "contract": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol",
+  "function": "_swapBurner",
+  "line": 412,
+  "lineStart": 412,
+  "lineEnd": 436,
+  "entryPoint": "uniboost-cutover",
+  "fingerprint": "c358427cf96b10658184091d879bb13ddaf8f0a6ecf181f1452625dff1590702",
+  "rootCauseClass": "NonAtomicMidFlightWindow",
+  "category": "state-handling",
+  "footgun": true,
+  "faithfulness": false,
+  "regression": false,
+  "description": "On a non-atomic mainnet Ledger broadcast (--slow --skip-simulation, three separate txs per index), _swapBurner lands replaceDispatcher(idx, uniboost) before setPrice(idx, 10e6). In that inter-tx window configs[idx] points at the USDC-6dp Uniboost dispatcher while still carrying the OLD burner's 18-dp target-token price (464.279e18 / 1.737e18 / 22876.13e18) and growth 1000. Read as raw 6-dp USDC, that price makes any mint on the affected index require an astronomically-unaffordable transferFrom, so the mint reverts. _trackConfig (line 435) checkpoints only after all three txs plus post-asserts succeed, so a resume idempotently re-runs the whole block (the second replaceDispatcher is a no-op because dispatcherToIndex[uniboost]==index).",
+  "impact": "Transient, single-index mint-DoS with ZERO asset impact and a fail-safe (deny) direction: the mid-flight state can only make a mint revert on an unaffordable charge, never under-charge, mis-mint, or leak value. Under --slow the window is seconds-to-minutes; the harmful state persists only if the Ledger broadcast aborts (reject / gas spike / RPC failure) precisely between the replaceDispatcher tx and the setPrice tx, in which case that one index stays mint-reverting until the operator re-runs. Resume HEALS it because the checkpoint sits after all three mutations. No protocol-wide availability loss and no value leak keep it well below the Medium bar. A competent, non-malicious operator would be surprised that a partial broadcast leaves the index mint-reverting rather than cleanly disabled (Law-3 footgun test passes).",
+  "attackPath": [
+    "Operator broadcasts the cutover on a Ledger with --slow --skip-simulation (three separate txs per index).",
+    "replaceDispatcher(idx, uniboost) lands: configs[idx] now points at the USDC-6dp Uniboost dispatcher but still carries the OLD burner's 18-dp price and growth 1000.",
+    "A user attempts a mint on idx before setPrice(idx, 10e6) lands -> NFTMinterV2._executeMint requires ~4.6e14..2.3e16 raw USDC -> reverts (fail-safe).",
+    "Happy path: setPrice + setGrowthFactor land seconds later, the window closes, _trackConfig checkpoints.",
+    "Abort path: the broadcast dies between the replace tx and the setPrice tx -> the index persistently mint-reverts until the operator re-runs to completion (resume heals)."
+  ],
+  "recommendation": "Eliminate the inter-tx window: disable the affected index around the reprice, or bundle replaceDispatcher + setPrice + setGrowthFactor into a single multicall so the new USDC-6dp dispatcher is never live with the retired burner's 18-dp price. This ensures a partial broadcast leaves the index cleanly disabled rather than silently mint-reverting.",
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-07-08T00:00:00Z",
+    "updatedAt": "2026-07-08T00:00:00Z",
+    "scanOrigin": "audit-script:uniboost-cutover",
+    "classificationOrigin": "CLASS-001",
+    "targetCommit": "c5956a9",
+    "runLabel": "phoenix-phase-2-staging-20"
+  }
+}

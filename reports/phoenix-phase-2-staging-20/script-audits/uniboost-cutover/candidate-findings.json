@@ -1,0 +1,53 @@
+[
+  {
+    "id": "UBC-01",
+    "title": "Non-atomic Phase-2 cutover: replaceDispatcher(idx) and setPrice(idx,10e6) are separate txs, so indices 1/2/3 mint-revert in the gap and stay stuck on an aborted broadcast",
+    "severity": "low",
+    "severityGuess": "low",
+    "contract": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol",
+    "function": "_swapBurner",
+    "lineStart": 412,
+    "lineEnd": 436,
+    "entryPoint": "uniboost-cutover",
+    "rootCauseClass": "NonAtomicMidFlightWindow",
+    "category": "cluster-interaction",
+    "description": "The broadcast runs with --slow --skip-simulation, so replaceDispatcher(idx,uniboost), setPrice(idx,10e6) and setGrowthFactor(idx,2) inside _swapBurner are THREE separate on-chain txs. Between replaceDispatcher and setPrice, configs[idx] holds the new USDC-6dp Uniboost dispatcher but the OLD burner's 18-dp target-token price (live-read: 464.279e18 / 1.737e18 / 22876.13e18) and growth 1000. NFTMinterV2._executeMint would then require the minter to transferFrom `price` raw USDC units (~4.6e14..2.3e16 USDC) from the caller.",
+    "impact": "A mint on the affected index in that sub-window REVERTS (unaffordable transferFrom) — it FAILS SAFE (no under-charge, no mis-mint, no loss), but it is a live mint-DoS window. Under --slow the window is seconds-to-minutes; if the Ledger broadcast aborts (reject/gas/RPC) between the replace tx and the setPrice tx, that index is left persistently mint-reverting until the operator re-runs to completion. _swapBurner only checkpoints (_trackConfig) AFTER all three txs + post-asserts succeed, so resume correctly re-runs the whole block (idempotent: the second replaceDispatcher is a no-op because dispatcherToIndex[uniboost]==index).",
+    "evidence": "side-effects.json preconditionResults (live prices 464.279e18/1.737e18/22876.13e18, all astronomically unaffordable as 6-dp USDC); NFTMinterV2._executeMint charges configs.price of the dispatcher's primeToken (USDC). Fork preview confirms the intended end-state (10e6/2bps) once both txs land.",
+    "recommendation": "Accept as fail-safe, OR make the window explicit and self-documenting: call setDispatcherDisabled(idx,true) before replaceDispatcher and re-enable after the reprice, or bundle replace+setPrice+setGrowthFactor for an index into a single owner action (multicall). At minimum document that a partial broadcast leaves the index mint-reverting (not cleanly disabled) until resume."
+  },
+  {
+    "id": "UBC-02",
+    "title": "Phase-3 staker deploy and its 5 wiring steps share one checkpoint; a resume after the CREATE but before wiring permanently skips wiring, leaving an unwired staker that _verifyFinalState does not catch",
+    "severity": "low",
+    "severityGuess": "low",
+    "contract": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol",
+    "function": "_finalizeUniboost",
+    "lineStart": 452,
+    "lineEnd": 493,
+    "entryPoint": "uniboost-cutover",
+    "rootCauseClass": "CoarseResumeCheckpointGranularity",
+    "category": "cluster-interaction",
+    "description": "In _finalizeUniboost the staker block is guarded by `if (_isDeployed(stakerName)) return staker;`. Immediately after `new NFTStakerDepletion(...)` the script calls _trackDeployment (sets deployed=true) then _writeProgressFile() (persists deployed=true), and ONLY THEN performs the five wiring txs — s.setDispatcherHook(hook), UniboostMintDebtHook(hook).setRecipient(staker), s.setDepletionWindow(12), s.setPauser(PAUSER), Pauser.register(staker) — with NO per-step _trackConfig/checkpoint. Every other phase (1/2/4) checkpoints each config step individually.",
+    "impact": "If a broadcast lands the staker CREATE but not (all of) the subsequent wiring txs, a resume sees _isDeployed(stakerName)==true and RETURNS EARLY, permanently skipping the wiring. The result is a deployed-but-unwired staker: dispatcherHook==0 (cannot pull() -> accrued phUSD mint-debt is never realized to the staker), the Uniboost hook.recipient != staker (debt not directed to the pool), depletionWindow==0, and the staker not registered with the global Pauser (no pause coverage). _verifyFinalState asserts none of these, so the run still reports success and the misconfiguration is silent. This is the run-19 L-01 non-atomic-resume class, here specific to the Uniboost stakers.",
+    "evidence": "Source _finalizeUniboost (lines 471-492): _isDeployed early-return guards the whole unit; _writeProgressFile persists deployed=true right after the CREATE (line 483) before any wiring; no _trackConfig after wiring. _verifyFinalState (lines 621-641) omits all staker wiring.",
+    "recommendation": "Checkpoint each staker wiring step individually (mirror Phase 1/2/4), OR split the guard so wiring is re-attempted on resume even when the staker is already deployed, AND add the staker wiring invariants (dispatcherHook==hook, hook.recipient==staker, depletionWindowMonths==12, Pauser.registered(staker)) to _verifyFinalState."
+  },
+  {
+    "id": "UBC-03",
+    "title": "_verifyFinalState is a partial post-condition: it omits the phUSD minter grants/revoke, donation config, hook.recipient, pooler-auth, staker wiring, and releaser/minter setup that the script performs",
+    "severity": "low",
+    "severityGuess": "low",
+    "contract": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol",
+    "function": "_verifyFinalState",
+    "lineStart": 621,
+    "lineEnd": 641,
+    "entryPoint": "uniboost-cutover",
+    "rootCauseClass": "IncompletePostConditionVerification",
+    "category": "intent-mismatch",
+    "description": "_verifyFinalState asserts only configs(1/2/3) dispatcher+price+growth, configs(7) dispatcher, and RatchetNFTStaker.dispatcherHook. The script performs ~20 further safety-critical mutations that are NOT re-asserted: (a) the 5 phUSD.setMinter calls (4 new minters granted, OLD_RATCHET_HOOK revoked); (b) the 3 Uniboost setRecipient(BATCH_NFT_MINTER)+setDonationSplit(50); (c) the 3 Uniboost hook.setRecipient(staker); (d) MultiPooler.setPooler + the 3 setAuthorizedPooler(MultiPooler); (e) the 3 staker dispatcherHook/depletionWindow/Pauser registration; (f) NudgeRatchetDelayRelease.setMinter/setReleaser + newRatchetHook.setRecipient(RatchetNFTStaker); (g) OLD_RATCHET_HOOK phUSD-minter revoked.",
+    "impact": "Transparency/assurance gap: a silent mis-wire (including the UBC-02 skipped-wiring case, or a hand-edited progress file) completes with a 'verified' banner while leaving donations mis-routed, a hook unable to realize debt, a staker unprotected by the pauser, or an unintended residual phUSD minter. The steps do all run under guards in a clean full pass (confirmed by the fork preview), so this is assurance-surface, not a live defect on the happy path.",
+    "evidence": "Source _verifyFinalState (lines 621-641) vs the full mutation set in Phases 1-5; fork preview shows all steps execute on a clean run.",
+    "recommendation": "Extend _verifyFinalState to positively assert the full wiring set — most importantly the 4 phUSD minter grants + the 1 revoke, each Uniboost hook.recipient==staker, each Uniboost recipient==BATCH_NFT_MINTER && donationSplit==50, and newRatchetHook.recipient==RatchetNFTStaker — so the post-condition actually proves the intended end state."
+  }
+]

@@ -1,0 +1,73 @@
+{
+  "entryPoint": "uniboost-cutover",
+  "project": "phoenix-phase-2-staging",
+  "submodulePath": "lib/phoenix-phase-2-staging",
+  "submoduleHead": "c5956a9",
+  "storyTag": "Story 071",
+  "intentComment": "Story 071 — mainnet differential deploy promoting Story 070's DeployMocks. One atomic Ledger broadcast: (A) replace the three live BurnerV2 dispatchers at NFTMinterV2 indices 1/2/3 (EYE/SCX/FLX) with Uniboost dispatchers (each backed by a live EYE|SCX|FLX/WETH UniV2 pool) + a UniboostMintDebtHook + an NFTStakerDepletion staker, plus a MultiPooler wired as each Uniboost's sole authorized pooler (deployer = MultiPooler.pooler); MANDATORY setPrice(idx,10e6)+setGrowthFactor(idx,2) after each replaceDispatcher because replaceDispatcher preserves the burners' 18-dp price; (B) swap the index-7 dispatcher to NudgeRatchetDelayRelease (deployer whitelisted releaser) with a fresh NudgeRatchetMintDebtHook, drain-first via RatchetNFTStaker.pullAndRefresh(), repoint the existing RatchetNFTStaker, decommission the old ratchet hook (index-7 price/growth left UNTOUCHED at 70e6/0). :dry runs PREVIEW_MODE (no broadcast, no progress file). :broadcast backs up addresses -> Ledger broadcast -> patch. Does NOT run pool() (thin real USDC pools). Owner 0xCad1..D0B6.",
+  "packageJsonLines": "271-273",
+  "variants": {
+    "dry": {
+      "key": "uniboost-cutover:dry",
+      "command": "PREVIEW_MODE=true forge script script/DeployMainnetUniboostCutover.s.sol:DeployMainnetUniboostCutover --rpc-url $RPC_MAINNET --slow -vvv",
+      "broadcasts": false,
+      "envFlags": ["PREVIEW_MODE=true", "--rpc-url $RPC_MAINNET", "--slow", "-vvv"],
+      "semantics": "PREVIEW_MODE=true: run() reads vm.envOr('PREVIEW_MODE', false)=true, so it vm.startPrank(OWNER_ADDRESS) instead of vm.startBroadcast() (impersonate owner, no signing), and the progress file is NOT written. Phase 0 preconditions + final _verifyFinalState() still execute (read-only). Uses --rpc-url (state read against live mainnet, no fork isolation flag) so this is a live read-only eth_call preview, not a broadcast."
+    },
+    "broadcast": {
+      "key": "uniboost-cutover:broadcast",
+      "command": "node scripts/backup-mainnet-addresses.js && forge script script/DeployMainnetUniboostCutover.s.sol:DeployMainnetUniboostCutover --rpc-url $RPC_MAINNET --broadcast --skip-simulation --slow --ledger --hd-paths \"m/44'/60'/46'/0/0\" -vvv && node scripts/patch-mainnet-addresses-uniboost-cutover.js",
+      "broadcasts": true,
+      "envFlags": ["--broadcast", "--skip-simulation", "--slow", "--ledger", "--hd-paths m/44'/60'/46'/0/0", "-vvv"],
+      "nonAtomic": true,
+      "nonAtomicNote": "This is a NON-ATOMIC multi-transaction sequence, NOT a single atomic on-chain tx. --slow forces forge to submit each broadcast tx and wait for its confirmation before sending the next. --skip-simulation disables the pre-flight simulation (the on-chain state at each step must therefore satisfy the script's own require() guards live). The script writes server/deployments/progress.uniboost-cutover.1.json after every deployment CREATE and every config step so a mid-flight halt (Ledger reject, gas, RPC drop) can be resumed idempotently via the _isDeployed/_isConfigured checkpoint guards. ~12 CREATE txs + ~28 config/mutation txs are broadcast in sequence; a partial run leaves NFTMinterV2 in a mixed state (some indices swapped, some not) until re-run to completion. The docstring's 'one atomic Ledger session' means one signing session, not one transaction."
+    }
+  },
+  "jsChain": {
+    "pre": [
+      {
+        "step": "node scripts/backup-mainnet-addresses.js",
+        "when": "broadcast only (before forge)",
+        "effect": "Copies server/deployments/mainnet-addresses.ts -> server/deployments/mainnet.backup.<ISO-timestamp>.ts (snapshot before mutation). Read-only on the source; write creates a new backup file."
+      }
+    ],
+    "post": [
+      {
+        "step": "node scripts/patch-mainnet-addresses-uniboost-cutover.js",
+        "when": "broadcast only (after forge, && chained so it runs only on forge success)",
+        "effect": "Patches server/deployments/mainnet-addresses.ts in place with the real deployed addresses read from broadcast/DeployMainnetUniboostCutover.s.sol/1/run-latest.json, cross-checked against progress.uniboost-cutover.1.json (deploymentStatus must == 'completed'). Fills 10 zero-address placeholders (update:false, aborts on non-zero collision) and updates 2 live ratchet keys (update:true)."
+      }
+    ]
+  },
+  "forgeTarget": {
+    "file": "script/DeployMainnetUniboostCutover.s.sol",
+    "contract": "DeployMainnetUniboostCutover",
+    "entryFn": "run",
+    "setUp": "require(block.chainid == 1)",
+    "phases": [
+      "setUp: chainid==1 guard",
+      "run: config-safety require() guards (price==10e6, growth==2, donationSplit 1..100, depletionWindow 1..120, core addrs != 0)",
+      "_loadProgressFile (resume support)",
+      "Phase 0: preconditions (owners == OWNER; configs(1/2/3)==live burners; configs(7)==live NudgeRatchet; ratchetSink==BATCH_NFT_MINTER; 3 pools sane)",
+      "Phase 1: deploy+wire Uniboost stack (3x Uniboost+Hook+phUSD.setMinter, MultiPooler, authorize pooler)",
+      "Phase 2: replaceDispatcher(1/2/3)+setPrice(10e6)+setGrowthFactor(2)",
+      "Phase 3: Uniboost donation config (recipient=BatchNFTMinter, split=50) + 3x NFTStakerDepletion deploy/wire (setDispatcherHook, hook.setRecipient, setDepletionWindow=12mo, Pauser.register)",
+      "Phase 4: index-7 ratchet swap drain-first (pullAndRefresh, deploy NudgeRatchetDelayRelease+hook, setMinter/setReleaser/setHook, phUSD.setMinter, replaceDispatcher(7), repoint RatchetNFTStaker, decommission old hook)",
+      "Phase 5: cleanup (BurnRecorder.setBurner(oldBurner,false) x3)",
+      "_verifyFinalState (read-only post-conditions)",
+      "Phase 6: write progress file 'completed' (broadcast only)"
+    ]
+  },
+  "chainId": 1,
+  "ledgerSigner": {
+    "owner": "0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6",
+    "hdPath": "m/44'/60'/46'/0/0"
+  },
+  "forkAvailable": true,
+  "rpcLiveAtBlock": 25485563,
+  "liveProbe": {
+    "NFTMinterV2.owner()": "0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6 (== OWNER_ADDRESS: Phase-0 precondition holds live)",
+    "OLD_NUDGE_RATCHET.batchMinter()": "0x86866e01a115C17892Ed04c548F2e8638851029d (== BATCH_NFT_MINTER: RATCHET_SINK precondition holds live)",
+    "configs(1/2/3/7).dispatcher": "0x13fb51BC.. / 0xA833603f.. / 0xb63b5702.. / 0x7A4eD111.. (== hardcoded BURNER_EYE/SCX/FLX + OLD_NUDGE_RATCHET: all four replace-preconditions hold live)"
+  }
+}

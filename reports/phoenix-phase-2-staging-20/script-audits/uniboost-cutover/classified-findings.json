@@ -1,0 +1,124 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-07-08T00:00:00Z",
+    "project": "phoenix-phase-2-staging",
+    "run": "phoenix-phase-2-staging-20",
+    "entryPoint": "uniboost-cutover",
+    "scriptContract": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol",
+    "story": "story-071 mainnet Uniboost cutover",
+    "framework": "Code4rena severity (self-audit quality spec) + Three-Law hierarchy",
+    "inputFindings": 3,
+    "classifiedFindings": 3,
+    "context": "All three are non-obvious operator footguns (Law 3 in-scope) on a NON-ATOMIC, multi-tx mainnet Ledger broadcast run with `--slow --skip-simulation`. The happy path was fork-previewed clean; every finding is an abort/resume/verification-surface hazard, not a live happy-path defect. None is an external-attacker vector (no adversary — the only actor is the trusted-but-fallible operator), and none involves a malicious or obvious-misuse admin action, so known-issue #10 (admin trust) is correctly NOT applied to swallow them.",
+    "severitySummary": {
+      "high": 0,
+      "medium": 0,
+      "low": 3,
+      "qa": 0
+    },
+    "law2FaithfulnessRouting": "No finding is a behavioural deviation of a shipped [story-071] FEATURE (the deployed contracts behave as specified); these are deployment-orchestration/verification hazards in the cutover SCRIPT. Accordingly none is tagged faithfulness:true / routed to spec-conformance (F-XX). UBC-03 is the closest (an incomplete post-condition vs the script's own stated intent) but is an assurance-surface operational hazard, kept in the QA/Low bundle as an operational footgun, not a story-behaviour F-XX.",
+    "law3FootgunNote": "All three are surfaced as operational hazards with safe-config guidance, at honest severity, per Law 3. Each passes the surprise test: a competent, non-malicious operator would be surprised that (UBC-01) a partial broadcast leaves an index mint-reverting rather than cleanly disabled, that (UBC-02) a resume permanently cements an unwired staker while printing 'verified', and that (UBC-03) the 'verified' banner covers only ~5 of ~25 safety-critical mutations."
+  },
+  "classifiedFindings": [
+    {
+      "id": "CLASS-001",
+      "originalId": "UBC-01",
+      "entryPoint": "uniboost-cutover",
+      "fingerprint": "c358427cf96b10658184091d879bb13ddaf8f0a6ecf181f1452625dff1590702",
+      "fingerprintPreimage": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol:_swapBurner:NonAtomicMidFlightWindow:uniboost-cutover",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol",
+      "function": "_swapBurner",
+      "severity": "low",
+      "plausibility": "n/a (Low — footgun, not an H/M attack)",
+      "footgun": true,
+      "faithfulness": false,
+      "regression": false,
+      "classification": {
+        "assetImpact": "None. No under-charge, no mis-mint, no theft, no loss. The mid-flight slot holds the burner's 18-dp target-token price (464.279e18 / 1.737e18 / 22876.13e18) which, read as raw 6-dp USDC, makes any mint on the affected index charge an astronomically-unaffordable transferFrom — so the mint REVERTS. This is a fail-safe (deny) failure mode, the opposite of a value leak.",
+        "availabilityImpact": "Transient, single-index mint-DoS. Between replaceDispatcher(idx) and setPrice(idx,10e6) the index cannot be minted. Under --slow the window is seconds-to-minutes; if the Ledger broadcast aborts (reject/gas/RPC) in that sub-window the index stays mint-reverting UNTIL the operator re-runs. Resume HEALS it: _trackConfig (line 435) fires only after all three txs + post-asserts succeed, so a resume idempotently re-runs the whole block (second replaceDispatcher is a no-op because dispatcherToIndex[uniboost]==index).",
+        "triggerPath": [
+          "1. Operator broadcasts the cutover on a Ledger with --slow --skip-simulation (three separate txs per index).",
+          "2. replaceDispatcher(idx, uniboost) lands: configs[idx] now points at the USDC-6dp Uniboost dispatcher but still carries the OLD burner's 18-dp price and growth 1000.",
+          "3. A user attempts a mint on idx before setPrice(idx,10e6) lands → NFTMinterV2._executeMint requires ~4.6e14..2.3e16 raw USDC → reverts (fail-safe).",
+          "4a. Happy path: setPrice + setGrowthFactor land seconds later, window closes, _trackConfig checkpoints.",
+          "4b. Abort path: broadcast dies between the replace tx and the setPrice tx → index persistently mint-reverts until the operator re-runs to completion (resume heals)."
+        ],
+        "likelihood": "Low. The harmful state exists only during a narrow inter-tx window of a controlled, operator-initiated one-shot broadcast, and only persists if the broadcast happens to die inside that exact window; the operator is present and re-runs to resolve it.",
+        "assumptions": "A live mint is attempted on the specific index during the sub-window, or the broadcast aborts inside it; operator eventually re-runs to completion.",
+        "externalRequirements": "A broadcast abort (Ledger reject / gas spike / RPC failure) precisely between the replace tx and the reprice tx for the affected index."
+      },
+      "justification": "Low. The failure mode is deny-by-default: a mint in the gap reverts on an unaffordable charge, so there is zero asset loss, zero under-charge and zero mis-mint (Impact-over-intent: what CAN happen is a temporary inability to mint one index, never a value leak). The only harm is a transient, single-index mint-DoS that self-heals on resume because the checkpoint is placed after all three mutations. That combination — no loss, fail-safe direction, self-healing, narrow operator-controlled window — is a textbook state-handling/operational footgun, well below the Medium bar (no protocol-wide availability loss, no value leak). Surfaced as a footgun with safe-config guidance (disable the index around the reprice, or bundle replace+setPrice+setGrowthFactor into one multicall) so the operator is not surprised that a partial broadcast leaves the index mint-reverting rather than cleanly disabled."
+    },
+    {
+      "id": "CLASS-002",
+      "originalId": "UBC-02",
+      "entryPoint": "uniboost-cutover",
+      "fingerprint": "2f8e1ff5e1aed9ffb17444b2ccd3e57b4029363045955aaa412217a4e41facae",
+      "fingerprintPreimage": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol:_finalizeUniboost:CoarseResumeCheckpointGranularity:uniboost-cutover",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol",
+      "function": "_finalizeUniboost",
+      "severity": "low",
+      "plausibility": "n/a (Low — footgun; ceiling-of-Low, borderline-Medium, see medium-vs-low)",
+      "footgun": true,
+      "faithfulness": false,
+      "regression": false,
+      "classSibling": {
+        "ledgerFingerprint": "141aceaae3946026f516a8f74fedf3e067bb80769fc21b6704b31433404d33cc",
+        "ledgerEntryPoint": "deploy:ratchet-mainnet",
+        "run": "phoenix-phase-2-staging-19",
+        "priorSeverity": "low",
+        "relation": "same non-atomic-resume CLASS, distinct instance — the run-19 sibling was classified Low; consistent precedent, but severity re-derived independently below, not inherited."
+      },
+      "classification": {
+        "assetImpact": "No permanent loss. Accrued phUSD mint-debt is NOT burned or stolen — it remains in the Uniboost hook's ledger and is fully recoverable once an owner manually performs the five wiring txs and pull()s. This is unrealized/deferred value routing, not a leak: nothing exits the system to an attacker or to a burn.",
+        "availabilityImpact": "A deployed-but-unwired NFTStakerDepletion: dispatcherHook==0 (staker cannot pull() → accrued debt is never realized to stakers), the Uniboost hook.recipient != staker (donations/debt not directed to the pool), depletionWindow==0, and the staker is NOT registered with the global Pauser (no pause / break-glass coverage). The Uniboost staker feature is non-functional until manually repaired. Aggravator: _verifyFinalState asserts none of this, so the run still prints a success/verified banner and the misconfiguration is SILENT — it can persist in production until someone notices debt is not accruing to stakers.",
+        "triggerPath": [
+          "1. Operator broadcasts the cutover (--slow --skip-simulation, one tx at a time).",
+          "2. `new NFTStakerDepletion(...)` (line 478) lands; _trackDeployment sets deployed=true (482) and _writeProgressFile() PERSISTS deployed=true (483) BEFORE any wiring.",
+          "3. The broadcast aborts after the CREATE tx but before all five wiring txs (487-491) land.",
+          "4. Operator re-runs to resume. `if (_isDeployed(stakerName)) return staker;` (472) sees deployed==true and RETURNS EARLY — the five wiring txs are permanently skipped.",
+          "5. _verifyFinalState (621-641) does not assert any staker wiring invariant → run reports success over a silently-unwired staker.",
+          "6. Recovery requires an owner to notice and manually replay setDispatcherHook / hook.setRecipient / setDepletionWindow / setPauser / Pauser.register, then pull()."
+        ],
+        "likelihood": "Low. Requires a broadcast abort in the specific window between the staker CREATE tx and its wiring txs — a precisely-timed one-shot-deployment event, not a happy-path or attacker-repeatable condition. The happy path fork-previewed clean.",
+        "assumptions": "The broadcast lands the CREATE but not (all of) the wiring, then is resumed; the silent success banner delays detection.",
+        "externalRequirements": "A broadcast interruption (Ledger reject / gas / RPC / manual Ctrl-C per the CLAUDE.md 'manual inspection' resume pattern) at exactly the post-CREATE, pre-wiring boundary."
+      },
+      "mediumVsLow": {
+        "verdict": "Low (ceiling-of-Low; explicitly considered and rejected Medium).",
+        "caseForMedium": "It genuinely impairs a protocol FEATURE's function/availability (an unwired Uniboost staker: no debt realization, mis-routed donations, no pause coverage) — the Medium 'protocol function or availability impacted' bucket. The SILENCE is a real aggravator: _verifyFinalState prints 'verified' over the broken state, so it can persist in production longer than a loud failure would, raising effective impact.",
+        "caseForLow": "Three conservative factors keep it below Medium: (1) NO loss — the mint-debt is parked in the hook ledger and is FULLY recoverable by the owner replaying the wiring + pull(); nothing leaks to an attacker or a burn. (2) The trigger is a precisely-timed abort of a controlled, operator-initiated one-shot broadcast — low likelihood, and there is no external attacker who can induce or repeat it. (3) It is owner-fixable with known, in-script steps. C4 Medium is impact gated by realistic likelihood + external requirements; a low-probability, fully-recoverable, no-loss operator-timing hazard sits in the Low/operational tier.",
+        "decisiveReasoning": "Applying CRITICAL RULES 1 (never overstate) and 4 (be conservative when uncertain): full recoverability + no value leaving the system + a low-likelihood operator-timing trigger + no external-attacker surface outweigh the (real) silent-availability aggravator. The aggravator is a reason to fix BOTH this and UBC-03, not a reason to relabel a recoverable, no-loss, precisely-timed footgun as Medium. This is consistent with the run-19 deploy:ratchet-mainnet class-sibling (141aceaa), which was Low on the same non-atomic-resume logic — but the call is re-derived here on its own facts, not inherited. It is the CEILING of Low, and it is flagged so an owner triaging the ledger can weigh the silent-availability angle deliberately."
+      },
+      "justification": "Low (top of band). A precisely-timed broadcast abort at the post-CREATE / pre-wiring boundary makes a resume permanently skip staker wiring, yielding a silently-unwired staker that _verifyFinalState does not catch — impairing the Uniboost staker feature (unrealized debt, mis-routed donations, no pause coverage). It does not reach Medium because no value is lost or leaked (accrued phUSD mint-debt stays in the hook ledger and is fully recoverable once an owner manually wires + pull()s), the trigger is a low-likelihood operator-timing event on a controlled one-shot broadcast with no external-attacker surface, and recovery uses known in-script steps. Under the conservative-when-uncertain rule that combination is a Low operational hazard, not a Medium availability defect — but it is the ceiling of Low and is surfaced as a footgun (fix: checkpoint each wiring step individually per Phases 1/2/4, or split the guard so wiring re-runs on resume, AND add the staker-wiring invariants to _verifyFinalState) so a competent operator is not surprised that 'resume' cements a broken wiring behind a success banner."
+    },
+    {
+      "id": "CLASS-003",
+      "originalId": "UBC-03",
+      "entryPoint": "uniboost-cutover",
+      "fingerprint": "06028eac813ca90d5dcdecb7956f3b4ac754c8ede28a375bda7cb7863ee9969e",
+      "fingerprintPreimage": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol:_verifyFinalState:IncompletePostConditionVerification:uniboost-cutover",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMainnetUniboostCutover.s.sol",
+      "function": "_verifyFinalState",
+      "severity": "low",
+      "plausibility": "n/a (Low — assurance-surface footgun, not an H/M attack)",
+      "footgun": true,
+      "faithfulness": false,
+      "faithfulnessNote": "Closest of the three to a Law-2 spec deviation (the post-condition does not prove the script's own stated end state), but it is not a behavioural deviation of a shipped [story-071] FEATURE — it is an incomplete safety net in the deployment SCRIPT. Kept as a Low operational footgun in the QA/Low bundle, not routed as F-XX; the owner sees it either way. Flag noted here for transparency (Law 1 recall).",
+      "regression": false,
+      "classification": {
+        "assetImpact": "None directly. No live defect on the happy path — every one of the ~20 unasserted mutations DOES execute under its own guards in a clean full pass (confirmed by the fork preview). The impact is a weakened safety net, not a state change.",
+        "availabilityImpact": "Indirect / latent: _verifyFinalState positively asserts only configs(1/2/3) dispatcher+price+growth, configs(7) dispatcher, and RatchetNFTStaker.dispatcherHook — roughly 5 of ~25 safety-critical mutations. It omits (a) the 4 phUSD minter grants + 1 revoke (incl. OLD_RATCHET_HOOK), (b) the 3 setRecipient(BATCH_NFT_MINTER)+setDonationSplit(50), (c) the 3 Uniboost hook.setRecipient(staker), (d) MultiPooler.setPooler + 3 setAuthorizedPooler, (e) the 3 staker dispatcherHook/depletionWindow/Pauser registrations (the exact UBC-02 case), (f) NudgeRatchetDelayRelease.setMinter/setReleaser + newRatchetHook.setRecipient. A silent mis-wire (UBC-02, or a hand-edited progress file) therefore completes with a 'verified' banner while donations are mis-routed, a hook cannot realize debt, a staker is unprotected by the pauser, or an unintended residual phUSD minter remains.",
+        "triggerPath": [
+          "1. Any mis-wire slips through — e.g. the UBC-02 resume-skip, or a manually edited/corrupted progress.1.json (a workflow the project's CLAUDE.md explicitly documents).",
+          "2. Because _verifyFinalState does not assert the affected mutation, the script's post-condition passes.",
+          "3. The run prints 'verified' / success, and the operator walks away believing the end state is correct."
+        ],
+        "likelihood": "Low as a standalone defect (the happy path is clean and self-consistent). Its real weight is as the missing detection layer that would have converted UBC-02's silent skip into a loud, caught revert.",
+        "assumptions": "Some upstream mis-wire actually occurs (UBC-02, hand-edited progress file, or partial mutation); on a perfectly clean full pass there is no observable harm.",
+        "externalRequirements": "None beyond an upstream mis-wire existing for the incomplete post-condition to fail to catch."
+      },
+      "justification": "Low. On the happy path this is purely assurance-surface: all ~20 omitted mutations execute correctly under guards (fork-preview confirmed), so there is no live defect and no asset impact — this is a completeness gap in the script's own post-condition, i.e. state-handling / verification-coverage, which is the Low/QA tier by definition. It stays at Low rather than dropping to trivial-QA because it is the safety net for a real-money mainnet cutover and is the exact detection layer that would catch UBC-02 and hand-edited-progress-file mis-wires, so its absence has genuine operational weight. It does not rise to Medium: absent an upstream mis-wire there is no impact at all, and it neither loses value nor impairs the protocol on its own. Surfaced as a footgun with guidance to extend _verifyFinalState to positively assert the full wiring set — most importantly the 4 phUSD minter grants + 1 revoke, each hook.recipient==staker, each recipient==BATCH_NFT_MINTER && donationSplit==50, and newRatchetHook.recipient==RatchetNFTStaker — so the 'verified' banner actually proves the intended end state."
+    }
+  ]
+}
