@@ -1,0 +1,72 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-07-09",
+  "scanType": "economic",
+  "commit": "f46a5cb7a90726215d49619ce76cb297f56e290a",
+  "contractsScanned": 14,
+  "summary": "Cold protocol-wide economic scan of the NFT mint/debt dispatcher->hook suite. Four targeted hunts (phUSD >100% over-mint, DelayRelease hold-and-release window, NFTMinterV2 price growth, Uniboost donation+LP MEV) all resolve to owner-knowing configuration or existing-ledger echoes. NO new High/Medium economic vector: no unprivileged actor can extract value, mint unbacked phUSD, or profit from a round-trip. Findings recorded as informational confirmations to preserve recall (Law 1), each tied to its suppression boundary.",
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "over-mint / design-intent-confirmation",
+      "severity": "informational",
+      "isNew": false,
+      "ledgerEcho": "DEDUP-001 (+ profiler A3)",
+      "contract": "src/hooks/NudgeRatchetMintDebtHook.sol",
+      "function": "onDispatch / setRatio",
+      "line": 127,
+      "codeSnippet": "uint256 added = (amount * USDC_TO_PHUSD_SCALE * ratio) / 100;  // MAX_RATIO = 200",
+      "description": "NudgeRatchetMintDebtHook permits ratio up to MAX_RATIO=200, so pull() can mint up to 2x the dispatched USDC (scaled 1e12) as phUSD, versus the 50% cap on UniboostMintDebtHook/BalancerPoolerMintDebtHook. Even in the ideal case where NudgeRatchet sweeps 100% of USDC to the batchMinter, the accrued phUSD can be double the USDC that reached the sink.",
+      "economicImpact": "At ratio>100 the phUSD minted structurally exceeds the USDC forwarded (the 'nudge reward' over-issuance). Whether this is under-backed depends entirely on phUSD's external collateral model, which is out of scope (DEDUP-001).",
+      "whyNotNew": "The ratio is set only by onlyOwner setRatio; default is 100 and MAX_RATIO=200 is documented in NatSpec as the intended inclusive nudge-reward bound. Setting 2x is a knowing, obvious owner action (Law 3 trusted, not a footgun -- the consequence is exactly what the parameter name/NatSpec advertise). The unbacked-mint concern itself is the suppressed DEDUP-001 external-backing boundary. No distinct new over-mint vector arises: the >100% ceiling does not add any unprivileged-actor path beyond DEDUP-001's framing, it only widens an owner-configured knob. Confirmed intended; do not escalate.",
+      "affectedParties": "phUSD backing system (external, OOS)",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-002",
+      "type": "solvency-window / decoupled-backing",
+      "severity": "low",
+      "isNew": false,
+      "ledgerEcho": "F-01-043 + L-12 + Q-11 (+ profiler A4)",
+      "contract": "src/dispatchers/NudgeRatchetDelayRelease.sol",
+      "function": "release / rescueERC20 / _dispatch",
+      "line": 108,
+      "description": "Debt accrues (and phUSD can be pulled/minted) at dispatch while the backing USDC is HELD on the dispatcher, released later by a whitelisted releaser. rescueERC20 can withdraw the held _token (USDC). This creates an intended admin-controlled window in which realised phUSD is not yet backed at the batchMinter sink, and a residual owner path to permanently under-back already-pulled debt.",
+      "economicImpact": "System-level phUSD is transiently under-collateralised at the sink during the hold window (USDC still on the dispatcher, conserved). rescueERC20 on _token after a pull leaves debt permanently under-backed.",
+      "whyNotNew": "Backing is conserved (release only relocates existing USDC); the only ways to move it are onlyReleaser release() and onlyOwner rescueERC20 -- both trusted. No unprivileged actor can create unbacked phUSD. The decoupling is documented accepted design (F-01-043 open informational), the pause-doesn't-freeze-custody angle is L-12, and the dropped bal>=amount tripwire is Q-11. Checked for a distinct new econ angle (e.g. hold-window x ratio>100 compounding): it reduces to the same DEDUP-001 external-backing question, no unprivileged path. No new finding.",
+      "affectedParties": "phUSD holders (during hold window, if peg assumes sink funding)",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-003",
+      "type": "pricing / griefing-check",
+      "severity": "informational",
+      "isNew": false,
+      "ledgerEcho": "known-issue #6 (basis-point compounding, OOS)",
+      "contract": "src/NFTMinterV2.sol",
+      "function": "_executeMint",
+      "line": 188,
+      "codeSnippet": "config.price = price + (price * config.growthBasisPoints) / 10000;",
+      "description": "Ascending primary-sale price: each mint pays the OLD price (transferFrom at `price`, event emits `price`), then price grows monotonically. CEI-correct (price grown before dispatch). Growth floors, rounding the NEXT price marginally in the buyer's favour by dust.",
+      "economicImpact": "None exploitable. Monotonic ascending price with no sell-back / redemption leg -- there is no round-trip to extract from. First mover pays least (expected primary-issuance economics), no last-mover advantage, no sandwich profit (no sell side). Minting to raise a rival's price costs the griefer a full paid mint, so no cheap griefing.",
+      "whyNotNew": "Basis-point growth compounding is known-issue #6 (OOS). The floor-rounding on price growth is negligible dust and cannot be round-tripped (NFTs are not redeemable to USDC in these contracts). The onERC1155Received re-entry on mint just pays the new higher price (no economic gain -- ledger L-01, qa-bundled). mintFor bypasses payment/price but is authorizedMinter-gated (trusted). No new finding.",
+      "affectedParties": "none",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-004",
+      "type": "MEV / value-leak-check",
+      "severity": "low",
+      "isNew": false,
+      "ledgerEcho": "L-06 + L-09 + L-11",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "function": "_dispatch / pool",
+      "line": 193,
+      "description": "Uniboost carves donationSplit% of gross prime to recipient via plain safeTransfer (no swap, MEV-free), retains the rest, and accrues debt on the GROSS amount. Separate keeper-gated pool() swaps retained prime->pair->~half target and addLiquidity with 0/0 min amounts, bounded by keeper-supplied minPairOut/minTargetOut/minLP floors.",
+      "economicImpact": "pool() swaps are sandwich-exposed but bounded by keeper floors (minLP post-check reverts a manipulated add). Debt-on-gross with the 50%-capped hook means phUSD <= 0.5x gross regardless of donation split, so the position stays over-backed. Donation split rounds down (favours retained protocol LP).",
+      "whyNotNew": "The keeper-gated addLiquidity-0/0 sandwich exposure is exactly ledger L-06 (Balancer lineage, stays Low); the missing hookTypeId guard (wrong hook -> zero debt, fail-open UNDER-accrual = over-backed, safe direction) is L-09; the same-pool-in-batch floor staleness via MultiPooler is L-11. No new value-leak beyond these: donation transfer is swap-free, rounding favours the protocol, and no unprivileged actor reaches pool() (onlyAuthorizedPooler trusted keeper). No new finding.",
+      "affectedParties": "protocol-owned liquidity (bounded MEV, keeper-mitigated)",
+      "confidence": "high"
+    }
+  ]
+}

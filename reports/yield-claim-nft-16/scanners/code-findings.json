@@ -1,0 +1,140 @@
+{
+  "project": "yield-claim-nft",
+  "scanTimestamp": "2026-07-09T00:00:00Z",
+  "scanType": "code",
+  "scanMode": "cold-full",
+  "commit": "f46a5cb7a90726215d49619ce76cb297f56e290a",
+  "contractsScanned": 14,
+  "tier": "Tier-2 interaction-level (profile-first)",
+  "summary": "No new High or Medium code-level bugs. Every Tier-1-surfaced hotspot was walked to source and cleared as by-design, tool-noise, or an already-catalogued Low/QA echo. Both carryover regression watches (M-04 keccak literals, M-03 decimal-scale direction) HOLD — no drift. The design is defensively coded: CEI is complete on the mint path, the debt hooks floor (never over-credit), and every unbacked-mint direction fails safe toward over-backing.",
+  "regressionWatches": [
+    {
+      "id": "WATCH-M04-keccak-literals",
+      "status": "HOLDS (no regression)",
+      "detail": "All three literals are byte-identical `keccak256(\"NudgeRatchetMintDebtHook.v1\")`: NudgeRatchetMintDebtHook.sol:31 (HOOK_TYPE_ID), NudgeRatchet.sol:31 (EXPECTED_HOOK_TYPE_ID), NudgeRatchetDelayRelease.sol:52 (EXPECTED_HOOK_TYPE_ID). The fail-CLOSED hook-type guard in both NudgeRatchet variants (_dispatch reverts unless hook.hookTypeId()==literal) is intact. No fourth copy of the literal exists to drift."
+    },
+    {
+      "id": "WATCH-M03-decimal-scale",
+      "status": "HOLDS (correct direction)",
+      "detail": "NudgeRatchetMintDebtHook 1e12 UP-scale (6dp USDC -> 18dp phUSD, ctor-guarded token==6dp); UniboostMintDebtHook dynamic scale=10**(18-d) read from prime decimals (ctor requires d<=18); BalancerPoolerMintDebtHook UNSCALED (USDS is 18dp, prime immutable = sUSDS.asset()). All three multiply-then-divide (floor). No over-mint direction; each matches its dispatcher's guaranteed prime decimals as wired."
+    }
+  ],
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "hook-type-not-enforced / debt-accrual-fail-open",
+      "severity": "low",
+      "newOrEcho": "echo (ledger L-09 / profiler A1 / crossCuttingAnomaly A1-M04-asymmetry)",
+      "contract": "src/dispatchers/Uniboost.sol + src/dispatchers/BalancerPoolerV2.sol",
+      "function": "_dispatch",
+      "line": 184,
+      "lineStart": 184,
+      "lineEnd": 199,
+      "description": "Unlike the two NudgeRatchet variants (which fail-CLOSED via a hookTypeId()==literal require in _dispatch), Uniboost._dispatch and BalancerPoolerV2._dispatch perform NO hook-type validation. If the owner leaves/sets the hook to DefaultDispatchHook or any wrong hook via ATokenDispatcherV2.setHook, dispatch still succeeds and moves value (donation split / sUSDS wrap / PSM donation / POL) while accruing ZERO phUSD debt.",
+      "attackVector": "Reachable ONLY via onlyOwner setHook (or never wiring the real hook). No unprivileged path. UniboostMintDebtHook/BalancerPoolerMintDebtHook expose no hookTypeId(), so the symmetric guard cannot even be added without an interface change.",
+      "impact": "Fail-OPEN to UNDER-accrual: fewer phUSD minted than backing moved => protocol OVER-backed, never unbacked. Safe direction; breaks debt bookkeeping silently. Honest severity Low (owner footgun, non-catastrophic direction).",
+      "confidence": "high",
+      "clearedAs": "known Low; do not escalate — direction is over-backing, and it is owner-configuration-gated"
+    },
+    {
+      "id": "CODE-002",
+      "type": "external-call-in-loop / same-pool floor staleness",
+      "severity": "low",
+      "newOrEcho": "echo (ledger L-11 / STATIC-014 / profiler MultiPooler scannerNotes)",
+      "contract": "src/MultiPooler.sol",
+      "function": "pool",
+      "line": 60,
+      "lineStart": 60,
+      "lineEnd": 67,
+      "description": "pool(PoolCall[]) forwards Uniboost.pool per row in a loop, all-or-nothing, gated onlyPooler (trusted keeper). If two rows target the same Uniboost/pool, row 1's swaps move the AMM reserves so row 2's operator-precomputed minPairOut/minTargetOut floors are stale, allowing worse execution for row 2 (bounded by its own floors). No shared mutable state in MultiPooler (pure forwarder, holds no funds); each Uniboost.pool is individually nonReentrant.",
+      "attackVector": "Keeper self-inflicted / MEV-adjacent; bounded by per-row min-outs. Not reachable by an unprivileged actor (onlyPooler).",
+      "impact": "At worst a self-DoS (batch reverts on unmet floor) or mildly worse LP execution for a duplicated pool. Low.",
+      "confidence": "high",
+      "clearedAs": "known Low (L-11); MultiPooler lacking a nonReentrant guard is immaterial (no funds, no shared state, downstream guards present)"
+    },
+    {
+      "id": "CODE-003",
+      "type": "doc/code mismatch (ratio bound off-by-one)",
+      "severity": "qa",
+      "newOrEcho": "echo (pattern PATTERN-001 / profiler A6 / STATIC-noise)",
+      "contract": "src/hooks/UniboostMintDebtHook.sol + src/hooks/BalancerPoolerMintDebtHook.sol",
+      "function": "setRatio",
+      "line": 97,
+      "lineStart": 96,
+      "lineEnd": 101,
+      "description": "setRatio uses `if (newRatio > MAX_RATIO) revert` with MAX_RATIO=50, so 50 is settable, while NatSpec/const comment says 'strictly < MAX_RATIO' / 'exclusive upper bound, max settable MAX_RATIO-1'. UniboostMintDebtHook:97 and BalancerPoolerMintDebtHook:78. DEFAULT_RATIO is already 50 (== the cap), so the code and default agree; only the doc comment is wrong.",
+      "attackVector": "None. Owner-only setter; the only effect is the debt-ratio ceiling being 50% inclusive rather than 49% inclusive.",
+      "impact": "Cosmetic. Max debt is 50% of dispatched amount either way (well under a 1:1 backing). No security consequence. QA.",
+      "confidence": "high",
+      "clearedAs": "QA doc fix (align comments to inclusive-50 or change guard to >=). Not a security finding."
+    },
+    {
+      "id": "CODE-004",
+      "type": "divide-before-multiply (precision)",
+      "severity": "info",
+      "newOrEcho": "echo (STATIC-006) — CLEARED as by-design",
+      "contract": "src/dispatchers/BalancerPoolerV2.sol",
+      "function": "_psmDonate",
+      "line": 253,
+      "lineStart": 253,
+      "lineEnd": 257,
+      "description": "gemAmt = (usdsAmount*WAD)/(conv*(WAD+tout)) then usdsSpent = gemAmt*conv*(WAD+tout)/WAD. The divide-before-multiply is INTENTIONAL and faithfully mirrors makerdao/dss-lite-psm buyGem math: it computes the max gem (6dp USDC) affordable from the available USDS, then the exact USDS the PSM will pull for that gem. Proof usdsSpent <= usdsAmount always holds (gemAmt is floored), so the forceApprove(usdsSpent) never exceeds balance. Floor sends sub-unit dust to the protocol (never over-credits), require(gemAmt>0) rejects dust rounding-to-zero, and the whole call is try/catch-isolated so any revert just parks the USDS.",
+      "attackVector": "None. Self-gated (msg.sender==address(this)), atomic rollback via try/catch in _dispatch.",
+      "impact": "None. No fund loss, no accounting drift; donation is to an external sink and debt accrues on GROSS amount regardless of donation outcome.",
+      "confidence": "high",
+      "clearedAs": "tool noise / by-design PSM math"
+    },
+    {
+      "id": "CODE-005",
+      "type": "unchecked-return values",
+      "severity": "info",
+      "newOrEcho": "echo (STATIC-007/008/009/010/011/025/027) — CLEARED",
+      "contract": "src/dispatchers/BalancerPoolerV2.sol + src/dispatchers/Uniboost.sol",
+      "function": "_dispatch / _psmDonate / pool / unlockCallback",
+      "line": 218,
+      "lineStart": 202,
+      "lineEnd": 314,
+      "description": "Ignored returns walked to source and cleared: (a) IERC4626.deposit shares (218) — pool() later reads the actual sUSDS balanceOf, so the share count is not needed; (b) ISkyPSM.buyGem (260) — USDC is delivered straight to batchMinter (external sink), no local accounting depends on it; (c) IBalancerVault.unlock (274) — the callback returns \"\" by design; (d) settle (308) — the Balancer V3 transfer->addLiquidity->settle ordering is a valid pay-the-debt pattern and slippage is enforced by params.minBptAmountOut=minBPT inside addLiquidity, with actualInVault measured by balance delta; (e) Uniboost swapExactTokensForTokens (221/234) — amounts-out are re-read via balanceOf for the next leg and each swap has an explicit min-out floor, addLiquidity checks liquidity>=minLP. All value-moving external calls use SafeERC20 (revert-on-false).",
+      "attackVector": "None; POL/donation paths are owner/keeper-gated and each has an independent slippage floor or balance re-read.",
+      "impact": "None. No share-accounting mismatch, no silent shortfall that reaches user funds.",
+      "confidence": "high",
+      "clearedAs": "tool noise; SafeERC20 + balance-delta + min-out floors cover the paths"
+    },
+    {
+      "id": "CODE-006",
+      "type": "ERC1155-receive-hook reentrancy (economic)",
+      "severity": "info",
+      "newOrEcho": "echo (profiler A5 / STATIC-015/016/017) — CLEARED",
+      "contract": "src/NFTMinterV2.sol",
+      "function": "_executeMint / mintFor",
+      "line": 196,
+      "lineStart": 170,
+      "lineEnd": 214,
+      "description": "NFTMinterV2 has no nonReentrant guard and _mint fires onERC1155Received on an attacker-chosen recipient. Walked the CEI ordering: config.price is grown (188) BEFORE dispatch (191), and dispatch(nonReentrant) plus _mint(196) both complete their state effects before/at the callback. A re-entrant mint() from the receiver hook is a fresh, fully-paid mint at the ALREADY-grown price — the attacker gains nothing (no stale-price read, no double-dispatch, no free NFT) and must supply their own approved tokens (safeTransferFrom is from msg.sender). Cross-contract reentry into a DIFFERENT dispatcher during BalancerPoolerV2/PSM/sUSDS external calls also fails: the reentering party (sUSDS/PSM, both trusted) holds no approved prime, so safeTransferFrom reverts. mintFor is authorized-minter-only (trusted).",
+      "attackVector": "No economic reentrancy. Receiver-hook revert only self-DoSes the caller's own chosen recipient.",
+      "impact": "None. Price is monotonically grown pre-callback; no read-only reentrancy surface (NFTMinterV2 exposes no price view consumed as an oracle by another contract).",
+      "confidence": "high",
+      "clearedAs": "CEI complete before hook; benign per full reentrancy-class checklist"
+    }
+  ],
+  "reentrancyChecklist": {
+    "classic-single-fn": "cleared — mint path grows price + completes dispatch (nonReentrant) before _mint callback",
+    "cross-contract A-B-A": "cleared — dispatcher.dispatch is nonReentrant; reentry into NFTMinterV2.mint for another dispatcher needs approved prime the trusted callee (sUSDS/PSM/router) does not hold, so safeTransferFrom reverts",
+    "cross-function sibling": "cleared — NFTMinterV2's only value state (config.price) is CEI-clean; burn/mintFor are access-gated; no shared stale-balance read",
+    "read-only reentrancy": "cleared — no public view of this suite is consumed as a price/exchange-rate oracle by another in-scope contract; getIdealBPT is non-view but not an oracle (staticcall would revert), documented",
+    "ERC721-receive": "n/a — ERC1155 only",
+    "ERC1155-receive": "cleared — CODE-006: state finalized before onERC1155Received; re-entry is a fresh paid mint",
+    "ERC777 hooks": "n/a — primes are USDC/USDS (no tokensReceived hooks); FOT tolerated via balance-delta actualReceived"
+  },
+  "clearedNonFindings": [
+    "getIdealBPT strict-equality (STATIC-012): `sUSDSAmount == 0` guard is correct; balanceOf is exactly 0 or positive.",
+    "nonReentrant-not-first-modifier (STATIC-022): benign — the preceding modifiers (onlyAuthorizedPooler/whenNotPaused/onlyOwnerOrRecipient) are pure access/pause checks with no external calls, so running them outside the lock cannot enable reentrancy.",
+    "constructor state-after-external-call (STATIC-002/003/004/005): constructor context, no deployed code to re-enter; the external reads (asset()/decimals()) are to trusted tokens.",
+    "single-step Ownable (STATIC-024): QA hardening note; owner trusted per Law 3.",
+    "missing-inheritance IUniboostPooler (STATIC-023): interface-drift footgun only; signatures currently match.",
+    "NudgeRatchetDelayRelease rescueERC20 pulling _token (profiler A4): documented accepted owner power; owner-trust (Law 3), non-obvious footgun already catalogued, not a code bug.",
+    "DEDUP-001 phUSD mint authority / ratio>100 over-mint on NudgeRatchet hook: econ-scanner scope, not code-level; direction/backing catalogued."
+  ],
+  "newHighMediumCount": 0,
+  "notes": "Tier-2 conclusion: 0 new H/M from code-level analysis. All hotspots resolve to by-design behaviour or existing Low/QA ledger echoes. Carryover watches both HOLD. Econ-scoped items (phUSD unbacked-mint boundary, ratio>100 nudge over-mint, Uniboost/Balancer MEV on pool()) deferred to econ-scanner per OOS boundary."
+}

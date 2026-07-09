@@ -1,0 +1,153 @@
+{
+  "project": "yield-claim-nft",
+  "commit": "f46a5cb",
+  "scanTimestamp": "2026-07-09T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scanMode": "cold-full",
+  "patternDbVersion": "1.1",
+  "patternsChecked": 35,
+  "scopeContracts": [
+    "src/BurnRecorder.sol",
+    "src/MultiPooler.sol",
+    "src/NFTMinterV2.sol",
+    "src/dispatchers/ATokenDispatcherV2.sol",
+    "src/dispatchers/BalancerPoolerV2.sol",
+    "src/dispatchers/BurnerV2.sol",
+    "src/dispatchers/GatherV2.sol",
+    "src/dispatchers/NudgeRatchet.sol",
+    "src/dispatchers/NudgeRatchetDelayRelease.sol",
+    "src/dispatchers/Uniboost.sol",
+    "src/hooks/BalancerPoolerMintDebtHook.sol",
+    "src/hooks/DefaultDispatchHook.sol",
+    "src/hooks/NudgeRatchetMintDebtHook.sol",
+    "src/hooks/UniboostMintDebtHook.sol"
+  ],
+  "findingsCount": 1,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "INCORRECT-OPERATOR",
+      "type": "boundary-operator / spec-vs-code mismatch",
+      "severity": "potential-low",
+      "contract": "src/hooks/BalancerPoolerMintDebtHook.sol",
+      "line": 78,
+      "function": "setRatio",
+      "description": "Ratio cap is documented as an EXCLUSIVE upper bound ('Exclusive upper bound on ratio. Max settable ratio is MAX_RATIO - 1', line 23; 'Strictly < MAX_RATIO', line 42; '@param newRatio Must be strictly less than MAX_RATIO (50)', line 76), but the guard is `if (newRatio > MAX_RATIO) revert` (line 78), which admits newRatio == 50. DEFAULT_RATIO is also 50 (== MAX_RATIO), so the deployed default already violates the stated 'strictly <' invariant. To honour the documented exclusive bound the guard must be `>=`. Effective behaviour is inclusive-50 while the spec says max 49.",
+      "confidence": "high",
+      "matchedSignatures": ["if (newRatio > MAX_RATIO) revert RatioTooHigh();"],
+      "missingMitigations": ["guard uses > where >= is required for the documented exclusive bound"],
+      "impact": "Owner-set config bound only; ratio can be 50% vs the documented 49% ceiling, and default is already 50%. Owner is trusted (Law 3), so this is a QA/Low spec-deviation, not an exploit. No unbacked mint (debt is still backed by dispatched value). Flagged for report accuracy / doc-code reconciliation.",
+      "note": "Sibling UniboostMintDebtHook.sol:97 has the IDENTICAL mismatch (MAX_RATIO=50, DEFAULT_RATIO=50, '> MAX_RATIO' guard, 'strictly less than' doc). NudgeRatchetMintDebtHook is INCONSISTENT with these two but internally CONSISTENT: it documents an INCLUSIVE [0,200] bound and its guard matches — no bug there. Contrast confirms the Balancer/Uniboost pair is the accidental case.",
+      "relatedContracts": ["src/hooks/UniboostMintDebtHook.sol:97"]
+    }
+  ],
+  "manualReviewCount": 4,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "relatedPatternId": "DEDUP-001 (project known-issue boundary)",
+      "type": "mint-on-demand backing / unbacked-phUSD boundary",
+      "severity": "potential-medium",
+      "contract": "src/hooks/NudgeRatchetMintDebtHook.sol",
+      "line": 136,
+      "function": "pull / onDispatch",
+      "description": "phUSD mint-debt accrues in onDispatch() (gated to dispatcher) and is realised by pull() minting exactly mintDebt to recipient then zeroing. Signatures match (mint(, IMintable, phUSD). Single-writer path, CEI + nonReentrant, ratio-bounded, floor rounding to protocol — structurally the safe shape. Routed for manual/sanitizer reconciliation against DEDUP-001 (unbacked-phUSD) because NudgeRatchetDelayRelease decouples debt-accrual (dispatch time) from USDC custody (held until release()), the documented-but-load-bearing 'backing exists on the contract' assumption. NudgeRatchet.sol:97 now carries the `require(bal >= amount)` tripwire (prior Q-11).",
+      "confidence": "low",
+      "matchedSignatures": ["phUSD.mint(recipient, debt)", "mintDebt += added", "IMintable"],
+      "missingMitigations": ["none code-side; backing-existence is a documented/accepted invariant, not enforced on-chain"],
+      "note": "Applies to all three mint-debt hooks (Balancer/Nudge/Uniboost) + NudgeRatchetDelayRelease custody window. Extensive NatSpec marks the debt/custody decoupling as intended/accepted. Sanitizer to reconcile against DEDUP-001; keep the bal>=amount tripwire (Q-11) SEPARATE and do not escalate as speculation (per memory)."
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC721-RECEIVE",
+      "type": "ERC1155 receive-hook reentrancy (no guard on minter)",
+      "severity": "potential-low",
+      "contract": "src/NFTMinterV2.sol",
+      "line": 196,
+      "function": "_executeMint / mintFor",
+      "description": "_mint(recipient, id, 1, \"\") invokes onERC1155Received on a caller-controlled recipient. NFTMinterV2 has NO nonReentrant guard on the mint path. Signatures match (_mint(, ERC1155, onERC1155Received). However CEI is followed: config.price is bumped and the dispatch (itself nonReentrant on ATokenDispatcherV2) completes BEFORE _mint; _mint is the final state-mutating op and there is no per-wallet/supply cap to violate. A reentrant mint simply performs another fully-paid mint. Routed low-confidence: no broken-accounting path found, but a minting contract with an inbound ERC1155 hook and no reentrancy guard warrants a human second look.",
+      "confidence": "low",
+      "matchedSignatures": ["_mint(recipient, resolvedTokenId, 1, \"\")", "ERC1155Supply"],
+      "missingMitigations": ["no nonReentrant on _executeMint/mintFor (relies on CEI + inner dispatch guard)"],
+      "note": "notVulnerableWhen largely holds (all state written before the safe-mint; no cap checked-before-written). Flag is recall-driven (Law 1), not a demonstrated exploit."
+    },
+    {
+      "id": "PATTERN-MR-003",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE / MISSING-SLIPPAGE",
+      "relatedPatternId": "L-06 (known Low, LP buy-and-pool MEV)",
+      "type": "UniV2 buy-and-pool spot-price / sandwich MEV",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "line": 211,
+      "function": "pool",
+      "description": "pool() executes two spot swaps (prime->pair, ~half pair->target) then addLiquidity on a UniV2 pool — classic sandwichable buy-and-pool. Signatures match (swap*, balanceOf(address(this))). MITIGATED: caller is onlyAuthorizedPooler (keeper), and minPairOut/minTargetOut/minLP are keeper-supplied slippage floors; addLiquidity min amounts are 0 but bounded by the two swap floors + minLP. Deadline is block.timestamp (no forward deadline). Maps to the known L-06 Low; routed for triage, not re-escalation.",
+      "confidence": "low",
+      "matchedSignatures": ["swapExactTokensForTokens", "balanceOf(address(this))", "addLiquidity"],
+      "missingMitigations": ["deadline == block.timestamp (no real deadline); addLiquidity min amounts hardcoded 0 (indirectly bounded by swap floors + minLP)"],
+      "note": "Known L-06 per project ledger/memory (run-13/run-14). amountIn param is MEV-neutral-to-beneficial. Do not re-escalate above Low without a new exploit path."
+    },
+    {
+      "id": "PATTERN-MR-004",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "relatedPatternId": "L-11 (known Low, MultiPooler same-pool in-batch floor staleness)",
+      "type": "batch forwarder loop / in-batch floor staleness",
+      "severity": "potential-low",
+      "contract": "src/MultiPooler.sol",
+      "line": 62,
+      "function": "pool",
+      "description": "pool(PoolCall[] calldata calls) loops forwarding one Uniboost.pool per row. Signature matches the unbounded-loop shape, but the array is supplied by the single onlyPooler keeper (not permissionless) and gas is the caller's own concern, so DoS is self-inflicted (not a finding). The real residual is the known L-11 footgun: batching multiple rows that target the SAME Uniboost lets an early row move the pool so later same-pool rows execute against a stale min-out the keeper computed pre-batch. Routed to L-11.",
+      "confidence": "low",
+      "matchedSignatures": ["for (uint256 i = 0; i < calls.length; i++)", "IUniboostPooler(c.uniboost).pool(...)"],
+      "missingMitigations": ["no in-batch dedup/refresh of per-row min-outs when two rows hit the same Uniboost"],
+      "note": "Known L-11 (run-14, primary self-DoS / keeper footgun). Pattern DB has no precise signature for the staleness class; flagged heuristically so the sanitizer reconciles to L-11 rather than dropping."
+    }
+  ],
+  "patternsSkipped": [
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "reason": "DB note: C4 treats approve front-running as QA/known-issue. `forceApprove` occurrences (Uniboost, BalancerPoolerV2, NFTMinterV2) are internal protocol->router/PSM approvals, immediately zeroed after use — no user-facing approve race. No plausible HM twist; not routed to manualReview."
+    },
+    {
+      "patternId": "CENTRALIZATION-ADMIN",
+      "reason": "DB note: Low/QA unless it enables rug pull. Numerous onlyOwner setters (setRatio/setRecipient/setDispatcher/setBatchMinter/setPool/rescueERC20). Owner is trusted per Law 3; obvious-consequence admin powers are suppressed (not footguns). rescueERC20 pulling held USDC on NudgeRatchetDelayRelease is a documented owner responsibility (accepted, non-surprising)."
+    }
+  ],
+  "regressionAnchorsChecked": [
+    {
+      "anchor": "M-04 hook-type-id keccak literal drift",
+      "result": "PASS",
+      "detail": "Three keccak256(\"NudgeRatchetMintDebtHook.v1\") literals byte-identical: NudgeRatchet.sol:31, NudgeRatchetDelayRelease.sol:52, NudgeRatchetMintDebtHook.sol:31. Both ratchet dispatchers hard-require hook.hookTypeId() == EXPECTED_HOOK_TYPE_ID in _dispatch, reverting on missing/wrong hook. M-04 fail-open dispatch is closed. No drift."
+    },
+    {
+      "anchor": "M-03 decimal scaling (1e12 under-mint / sign-flip over-mint trap)",
+      "result": "PASS",
+      "detail": "NudgeRatchetMintDebtHook USDC_TO_PHUSD_SCALE = 1e12 with (amount * 1e12 * ratio)/100 — correct 6dp->18dp direction, not 1e30. UniboostMintDebtHook scale = 10**(18-decimals) read from primeToken (1e12 for 6dp, 1 for 18dp). BalancerPoolerMintDebtHook applies NO scale — correct, USDS is 18dp. All multiply-then-divide, floor to protocol. No under-mint and no over-mint sign-flip."
+    }
+  ],
+  "checkedNoMatch": [
+    "ERC4626-INFLATION (BalancerPoolerV2 deposits into external Sky sUSDS vault, not a first-party share vault; no first-depositor exchange-rate surface)",
+    "ORACLE-STALE / ORACLE-ROUNDID (no Chainlink / latestRoundData)",
+    "REENTRANCY-ERC777 (dispatch/pull/pool/release all nonReentrant; token set is USDC/USDS/prime, not ERC777)",
+    "SIGNATURE-REPLAY (no ecrecover/ECDSA/permit)",
+    "UNSAFE-DOWNCAST (ratio is uint8 storage set from uint8; no narrowing cast of a larger value)",
+    "DIVISION-PRECISION (all value math is multiply-before-divide: hook accrual and PSM buyGem sizing)",
+    "UNPROTECTED-INIT (constructor-only, no initializer/proxy)",
+    "STORAGE-COLLISION (no delegatecall/proxy)",
+    "RETURN-VALUE-IGNORE (SafeERC20 used for all token transfers)",
+    "SELFDESTRUCT-FORCE-ETH (no address(this).balance logic; contracts hold no ETH)",
+    "DOUBLE-VOTING / CROSS-CHAIN-REPLAY / TIMELOCK-BYPASS / PERMIT-FRONTRUN / FIRST-DEPOSITOR-ATTACK (no governance / bridge / timelock / permit / share-price-vs-supply surface)",
+    "REWARD-ACCRUAL-ORDER / REWARD-RUNWAY-DEPLETION / EMISSION-WINDOW-BOUNDARY / BATCH-PAYOUT-FIXED-POT / YIELD-PRINCIPAL-ACCOUNTING-SKEW / TWO-STEP-COMMIT-WINDOW (this repo is the mint-debt hook side, not a MasterChef accumulator / staker; no accRewardPerShare / rewardDebt / windowEnd / staking principal on these contracts)",
+    "REENTRANCY-READONLY (BalancerPoolerV2.getIdealBPT is a router query, not a value-oracle view consumed by integrators mid-callback)",
+    "REENTRANCY-CROSS-FUNCTION (contract-wide nonReentrant on all value-moving siblings; unlockCallback gated to Balancer vault)",
+    "ROUNDING-DIRECTION (every conversion floors toward the protocol: hook accrual /100, PSM gemAmt floor with dust to protocol)",
+    "WEAK-PRNG (no value-bearing randomness; block.timestamp used only as swap deadline)",
+    "FEE-ON-TRANSFER-ACCOUNTING (NFTMinterV2._executeMint credits measured balanceAfter-balanceBefore = actualReceived; dispatchers forward measured amounts)"
+  ],
+  "errors": []
+}

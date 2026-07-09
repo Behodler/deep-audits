@@ -1,0 +1,158 @@
+{
+  "project": "yield-claim-nft",
+  "commit": "f46a5cb7a90726215d49619ce76cb297f56e290a",
+  "reportDir": "reports/yield-claim-nft-16/",
+  "stage": "deduplication",
+  "scanMode": "cold-full",
+  "timestamp": "2026-07-09T00:00:00Z",
+  "inputs": [
+    "static/static-analysis-findings.json (27)",
+    "patterns/pattern-matches.json (PATTERN-001 + 4 manual-review)",
+    "scanners/code-findings.json (CODE-001..006)",
+    "scanners/econ-findings.json (ECON-001..004)",
+    "scanners/faithfulness-findings.json (F-16-01 + 2 carryover)",
+    "invariant-results.json / symbolic-results.json (Tier-3 corroboration, no new findings)"
+  ],
+  "rawFindingCount": 42,
+  "candidateCount": 7,
+  "clearedCount": 21,
+  "manualReviewCount": 5,
+  "law1Note": "No security-relevant finding was dropped. Every set-aside item is either (a) an exact/near duplicate consolidated below with full originalIds traceability, (b) tool-noise walked-to-source and cleared with rationale in clearedNoFinding, or (c) routed to manual-review.json (visible parked channel). DEDUP-001 and Q-11 are kept SEPARATE. Per-dispatcher fail-open (L-09) kept distinct from Q-08 (BalancerPoolerV2 wont-fix). No new High/Medium surfaced this run; the only NEW item is one QA doc/code deviation (F-16-01).",
+  "candidates": [
+    {
+      "label": "YCN16-C1",
+      "title": "setRatio inclusive-vs-exclusive doc/code deviation (Balancer + Uniboost debt hooks)",
+      "severityGuess": "QA",
+      "isNew": true,
+      "primaryFraming": "faithfulness (doc-vs-code deviation) — F-16-01",
+      "rootCause": "setRatio guards `if (newRatio > MAX_RATIO) revert` (inclusive, admits newRatio==MAX_RATIO=50) while NatSpec/story-030 documents an EXCLUSIVE cap ('strictly < MAX_RATIO', 'max settable MAX_RATIO-1'). DEFAULT_RATIO=50 == MAX_RATIO, so the deployed default already contradicts the stale NatSpec. Commit 924b188 raised DEFAULT_RATIO 30->50 without syncing the guard or the doc, so CODE is authoritative and the NatSpec is stale.",
+      "instances": [
+        {"contract": "src/hooks/BalancerPoolerMintDebtHook.sol", "function": "setRatio", "line": 78},
+        {"contract": "src/hooks/UniboostMintDebtHook.sol", "function": "setRatio", "line": 97}
+      ],
+      "subsumes": ["F-16-01", "PATTERN-001", "CODE-003"],
+      "corroboratedBy": [
+        "symbolic check_setRatioInclusiveBound (Uniboost [0,50] proven exhaustive over uint8)",
+        "profiler A6-ratio-boundary-natspec"
+      ],
+      "impactSummary": "Cosmetic. Ratio ceiling is 50% inclusive vs documented 49%; both far below 100%, protocol heavily over-backed either way. No unbacked mint, no security consequence. Owner-only setter (Law 3 trusted). Fix is doc-align (or change guard to >=). NudgeRatchetMintDebtHook is EXCLUDED — its inclusive [0,200] NatSpec is self-consistent (story-035).",
+      "preservedDetails": "F-16-01 has the fullest spec-source citation and authoritative-source reasoning; keep it as primary.",
+      "keepSeparateNote": "This is the Balancer/Uniboost pair only. NudgeRatchetMintDebtHook ratio>100 over-mint is a DIFFERENT concern (YCN16-C6 / DEDUP-001), not this doc bug."
+    },
+    {
+      "label": "YCN16-C2",
+      "title": "Uniboost/BalancerPoolerV2 _dispatch does not enforce hookTypeId (fail-open to under-accrual)",
+      "severityGuess": "Low",
+      "isNew": false,
+      "ledgerEcho": "L-09",
+      "rootCause": "Unlike the two NudgeRatchet variants (which fail-CLOSED via a hookTypeId()==literal require), Uniboost._dispatch and BalancerPoolerV2._dispatch perform NO hook-type validation. If the owner wires DefaultDispatchHook / a wrong hook (or never wires the real one), dispatch still moves value while accruing ZERO phUSD debt. Symmetric enforcement is not even expressible: the Uniboost/Balancer debt hooks expose no hookTypeId() function.",
+      "instances": [
+        {"contract": "src/dispatchers/Uniboost.sol", "function": "_dispatch", "line": 184},
+        {"contract": "src/dispatchers/BalancerPoolerV2.sol", "function": "_dispatch", "line": 184}
+      ],
+      "subsumes": ["CODE-001"],
+      "corroboratedBy": [
+        "profiler A1 / crossCuttingAnomaly A1-M04-asymmetry",
+        "faithfulness story-037-asymmetry confirmation (INTENTIONAL per stories, not a deviation)",
+        "ECON-004 (L-09 portion)"
+      ],
+      "impactSummary": "Fail-OPEN direction is UNDER-accrual: fewer phUSD minted than backing moved => protocol OVER-backed, never unbacked. Safe direction; breaks debt bookkeeping silently. Owner-configuration-gated footgun, non-catastrophic. Honest severity Low.",
+      "keepSeparateNote": "DISTINCT from Q-08 (BalancerPoolerV2 wont-fix). L-09 is the per-dispatcher missing-hookTypeId-enforcement footgun; do not collapse into Q-08."
+    },
+    {
+      "label": "YCN16-C3",
+      "title": "MultiPooler batch: external-call-in-loop + same-pool in-batch floor staleness",
+      "severityGuess": "Low",
+      "isNew": false,
+      "ledgerEcho": "L-11",
+      "rootCause": "MultiPooler.pool(PoolCall[]) forwards one Uniboost.pool per row in an all-or-nothing loop, gated onlyPooler (trusted keeper). If two rows target the same Uniboost/pool, row 1's swaps move AMM reserves so row 2's operator-precomputed minPairOut/minTargetOut floors are stale (worse execution for row 2, bounded by its own floors). MultiPooler holds no funds and has no shared mutable state; each Uniboost.pool is individually nonReentrant.",
+      "instances": [
+        {"contract": "src/MultiPooler.sol", "function": "pool", "line": 60}
+      ],
+      "subsumes": ["CODE-002", "STATIC-014", "PATTERN-MR-004", "STATIC-021"],
+      "impactSummary": "At worst a self-DoS (batch reverts on unmet floor) or mildly worse LP execution for a duplicated pool. Keeper self-inflicted / MEV-adjacent, not reachable by an unprivileged actor. Low. (STATIC-021 BatchPooled-event-after-loop is benign and folded here.)"
+    },
+    {
+      "label": "YCN16-C4",
+      "title": "Uniboost buy-and-pool spot-swap sandwich MEV (keeper-gated)",
+      "severityGuess": "Low",
+      "isNew": false,
+      "ledgerEcho": "L-06",
+      "rootCause": "Uniboost.pool() executes two spot swaps (prime->pair, ~half pair->target) then addLiquidity on a UniV2 pool with addLiquidity min amounts hardcoded 0 — classic sandwichable buy-and-pool. Mitigated: onlyAuthorizedPooler (keeper), keeper-supplied minPairOut/minTargetOut/minLP slippage floors bound the outcome. Deadline is block.timestamp (no forward deadline, zero MEV/stale-tx protection).",
+      "instances": [
+        {"contract": "src/dispatchers/Uniboost.sol", "function": "pool", "line": 211}
+      ],
+      "subsumes": ["PATTERN-MR-003", "STATIC-013"],
+      "corroboratedBy": ["ECON-004 (L-06 portion)", "STATIC-011 (unchecked swap returns — cleared via CODE-005; amounts re-read by balanceOf + min-out floors)"],
+      "impactSummary": "Sandwich-exposed but bounded by keeper floors; minLP post-check reverts a manipulated add. amountIn param is MEV-neutral-to-beneficial. Do not re-escalate above Low without a new exploit path (memory: run-13/14)."
+    },
+    {
+      "label": "YCN16-C5",
+      "title": "NudgeRatchetDelayRelease pause does not freeze already-held custody",
+      "severityGuess": "Low",
+      "isNew": false,
+      "ledgerEcho": "L-12",
+      "carryover": true,
+      "rootCause": "release() carries only onlyReleaser+nonReentrant and rescueERC20() only onlyOwner — neither has whenNotPaused. Pausing the dispatcher freezes NEW dispatch (inflow) but does NOT freeze custody: a releaser can still move held USDC to batchMinter and the owner can still rescue during a pause. Documented intentional (escape hatch must work during pause).",
+      "instances": [
+        {"contract": "src/dispatchers/NudgeRatchetDelayRelease.sol", "function": "release / rescueERC20", "line": 108}
+      ],
+      "subsumes": ["F-16-L12"],
+      "corroboratedBy": ["ECON-002 (pause-custody portion)"],
+      "impactSummary": "Low operational footgun — a pause invoked to stop backing egress during an incident would not stop release(); trusted releaser/owner only (Law 3)."
+    },
+    {
+      "label": "YCN16-C6",
+      "title": "phUSD debt/backing decoupling + ratio>100 over-mint on NudgeRatchet hook (external-backing boundary)",
+      "severityGuess": "potential-Medium (OOS suppression boundary — DEDUP-001)",
+      "isNew": false,
+      "ledgerEcho": "DEDUP-001",
+      "carryover": true,
+      "rootCause": "Two facets of the same external-backing assumption: (a) NudgeRatchetMintDebtHook permits ratio up to MAX_RATIO=200, so pull() can mint up to 2x the dispatched USDC as phUSD (intended 'nudge reward' over-issuance, owner knob, NatSpec-documented); (b) NudgeRatchetDelayRelease decouples debt-accrual (dispatch time, phUSD realisable via pull()) from USDC custody (held until release()), and rescueERC20 can pull the held _token. Whether phUSD is under-backed depends entirely on phUSD's external collateral model, which is OUT OF SCOPE (DEDUP-001).",
+      "instances": [
+        {"contract": "src/hooks/NudgeRatchetMintDebtHook.sol", "function": "onDispatch / setRatio", "line": 127},
+        {"contract": "src/dispatchers/NudgeRatchetDelayRelease.sol", "function": "_dispatch / release / rescueERC20", "line": 108}
+      ],
+      "subsumes": ["PATTERN-MR-001", "ECON-001", "ECON-002", "F-01-043"],
+      "corroboratedBy": [
+        "symbolic no-over-mint ceiling INCONCLUSIVE (Halmos div-by-100 timeout; overflow reverts under 0.8.20 checked math, manual inspection holds; NOT machine-proven, zero safety weight either way)",
+        "profiler A3-DEDUP-001-mint-authority, A4-ratchet-rescue-underbacking"
+      ],
+      "impactSummary": "Backing is conserved on-chain (release only relocates existing USDC); the only ways to move it are onlyReleaser release() and onlyOwner rescueERC20 — both trusted (Law 3). No unprivileged actor can create unbacked phUSD. Reduces to the DEDUP-001 external-backing question. Routed for sanitizer reconciliation against DEDUP-001; a VISIBLE spec-conformance/carryover record (Law-1 recall), not a silent drop.",
+      "keepSeparateNote": "KEEP SEPARATE from Q-11 (YCN16-C7, the in-contract bal>=amount tripwire). Do NOT collapse the external-backing model into the in-contract tripwire — different root causes, different mitigations."
+    },
+    {
+      "label": "YCN16-C7",
+      "title": "Dropped bal>=amount custody tripwire on NudgeRatchetDelayRelease (in-contract defense-in-depth)",
+      "severityGuess": "QA",
+      "isNew": false,
+      "ledgerEcho": "Q-11",
+      "carryover": true,
+      "rootCause": "NudgeRatchet._dispatch carries a `require(bal >= amount)` defense-in-depth tripwire (story-038, confirmed present at f46a5cb); the DelayRelease sibling's release path was previously noted (run-15) to lack the equivalent in-contract balance assertion. This is the in-contract tripwire concern, distinct from the external-backing model.",
+      "instances": [
+        {"contract": "src/dispatchers/NudgeRatchetDelayRelease.sol", "function": "release", "line": 108}
+      ],
+      "subsumes": [],
+      "referencedBy": ["PATTERN-MR-001 (routes here, keep separate from DEDUP-001)", "ECON-002 (crossRef)"],
+      "impactSummary": "QA carryover. Flagged for finding-manager/ledger reconciliation to confirm current status at f46a5cb (MR-001 states NudgeRatchet.sol:97 now carries the tripwire — verify whether the DelayRelease-variant Q-11 is resolved or still live). Explicitly kept SEPARATE from DEDUP-001 (YCN16-C6) per scope instruction and prior-run memory.",
+      "keepSeparateNote": "Do not merge with YCN16-C6 (DEDUP-001)."
+    }
+  ],
+  "clearedNoFinding": [
+    {"ids": ["STATIC-001"], "class": "abi-encodePacked-hash-collision", "rationale": "False positive — encodePacked feeds string() to build JSON tokenURI metadata, not keccak256/signature input. No hashing occurs."},
+    {"ids": ["STATIC-002", "STATIC-003", "STATIC-004", "STATIC-005"], "class": "reentrancy-state-after-external-call (constructor)", "rationale": "Constructor context, no deployed code to re-enter; external reads (asset()/decimals()) are to trusted tokens. STATIC-005 scale-from-decimals sanity-checked: M-03 regression watch + symbolic scaleRoundTrip PROVE scale=10**(18-d) correct across d in {0,2,6,8,12,18}."},
+    {"ids": ["STATIC-006"], "class": "divide-before-multiply", "rationale": "CODE-004 cleared — intentional, faithfully mirrors makerdao/dss-lite-psm buyGem math (max-gem-then-exact-usds). usdsSpent<=usdsAmount always holds (gemAmt floored); dust to protocol; try/catch-isolated. By-design PSM math."},
+    {"ids": ["STATIC-007", "STATIC-008", "STATIC-009", "STATIC-010", "STATIC-011", "STATIC-025", "STATIC-027"], "class": "unchecked-return", "rationale": "CODE-005 cleared — deposit shares re-read via balanceOf; buyGem delivers USDC to external sink (no local accounting); unlock returns \"\" by design; settle/addLiquidity slippage enforced by minBptAmountOut + balance-delta; swap amounts re-read + explicit min-out floors. All value-moving calls use SafeERC20 (revert-on-false)."},
+    {"ids": ["STATIC-012"], "class": "incorrect-strict-equality", "rationale": "CODE-scanner cleared — `sUSDSAmount == 0` guard is correct; balanceOf is exactly 0 or positive."},
+    {"ids": ["STATIC-015", "STATIC-016", "STATIC-017"], "class": "reentrancy-events (NFTMinterV2 mint/burn)", "rationale": "CODE-006 cleared — CEI complete: config.price grown + dispatch (nonReentrant) finalize before _mint callback; re-entry is a fresh fully-paid mint at the already-grown price, attacker gains nothing. NOTE: the underlying 'no nonReentrant guard on minter' concern is preserved (not dropped) in manual-review.json (MR-002) per Law-1 recall."},
+    {"ids": ["STATIC-018", "STATIC-019", "STATIC-020"], "class": "reentrancy-events (admin/callback/psmDonate)", "rationale": "Benign events-after-external-call. Admin fn (setDispatcherActive) owner-only; unlockCallback gated to Balancer vault; _psmDonate self-gated + try/catch. State effects precede the calls."},
+    {"ids": ["STATIC-022"], "class": "nonreentrant-not-first-modifier", "rationale": "Benign — preceding modifiers (onlyAuthorizedPooler/whenNotPaused/onlyOwnerOrRecipient) are pure access/pause checks with no external calls, so running them outside the lock cannot enable reentrancy."},
+    {"ids": ["ECON-003"], "class": "ascending-price / pricing griefing", "rationale": "Echo of known-issue #6 (basis-point growth compounding, OOS) + L-01 (reentry pays the new higher price, qa-bundled). CEI-correct, monotonic ascending price, no sell-back/redemption leg => no round-trip to extract; griefing costs a full paid mint. mintFor is authorizedMinter-gated. No new finding."},
+    {"ids": ["CODE-004", "CODE-005", "CODE-006"], "class": "code-scanner cleared non-findings", "rationale": "Resolutions folded into the STATIC clears above; CODE-006 residual concern preserved in manual-review.json (MR-002)."}
+  ],
+  "tier3Corroboration": {
+    "invariant": "8/8 forge fuzz properties PASS (5000 runs): debt == floor(amount*scale*ratio/100) exact; INV-2 debt*100 <= exact-real-product, remainder<100 (maximal floor, never over-credit). Absence of evidence, not proof.",
+    "symbolic": "14 PASS / 4 TIMEOUT. PROVEN: setRatio inclusive bound exhaustive over uint8 (Nudge [0,200], Uniboost [0,50]) — corroborates YCN16-C1; scale correctness (no double/missing scale, 10**(18-d) round-trip) — M-03 no drift. INCONCLUSIVE (not a finding): no-over-mint magnitude ceiling (div-by-100 Halmos timeout); overflow reverts under checked arithmetic so silent-wrap over-mint is not a concern — noted on YCN16-C6.",
+    "newFindings": 0
+  }
+}

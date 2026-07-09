@@ -1,0 +1,300 @@
+{
+  "project": "yield-claim-nft",
+  "commit": "f46a5cb7a90726215d49619ce76cb297f56e290a",
+  "profileTimestamp": "2026-07-09",
+  "solidityVersion": "^0.8.20",
+  "scope": "14 first-party contracts (NFT mint/debt suite: 1 minter, 1 forwarder, 1 recorder, 7 dispatchers incl. abstract base, 4 hooks)",
+
+  "sharedAxioms": {
+    "checkedArithmetic": "Solidity 0.8.20 throughout; no unchecked blocks, no assembly.",
+    "ownable": "All stateful contracts are OZ Ownable(initialOwner); owner is trusted per Law 3.",
+    "dispatchModifierChain": "ATokenDispatcherV2.dispatch is the single non-virtual entry: nonReentrant + onlyMinter + whenNotPaused. Concrete dispatchers override only internal _dispatch and MUST NOT redeclare those modifiers (they don't).",
+    "hookNeverZero": "ATokenDispatcherV2.hook is set to a DefaultDispatchHook in ctor and setHook rejects zero, so hook.onDispatch is always callable (branch-free)."
+  },
+
+  "contracts": {
+    "NFTMinterV2.sol": {
+      "purpose": "ERC1155Supply claim-NFT minter. Users call mint(index,recipient) -> pulls `price` of dispatcher.primeToken() from user to dispatcher, grows price, calls dispatcher.dispatch(), mints 1 claim NFT. Registry of dispatchers with per-index price/growth/disabled config.",
+      "inheritance": ["ERC1155Supply", "Ownable", "INFTMinterV2", "IPausable"],
+      "externalEntryPoints": [
+        {"fn": "mint(uint256,address)", "access": "public (payment-gated)", "reentrancyGuard": false, "state": ["config.price", "ERC1155 balances/supply"], "externalCalls": ["dispatcher.primeToken()", "token.balanceOf", "token.safeTransferFrom(user->dispatcher)", "dispatcher.dispatch()", "_mint->onERC1155Received(recipient)"]},
+        {"fn": "mint(uint256,address,bytes)", "access": "public", "note": "overload, same _executeMint path with extraData"},
+        {"fn": "mintFor(uint256,address)", "access": "authorizedMinters", "note": "mints NFT with NO payment, NO dispatch, NO debt accrual, NO price update"},
+        {"fn": "burn(address,uint256,uint256)", "access": "authorizedBurners", "state": ["ERC1155 balances/supply"]},
+        {"fn": "registerDispatcher/replaceDispatcher/setDispatcherDisabled/setPrice/setGrowthFactor/setAuthorizedMinter/setAuthorizedBurner/setPauser/emergencyWithdraw", "access": "onlyOwner"},
+        {"fn": "setDispatcherActive(address,bool)", "access": "onlyOwner", "externalCalls": ["dispatcher.paused()", "dispatcher.pause()/unpause()"], "note": "minter is the dispatcher's _minter, so it can pause/unpause"},
+        {"fn": "pause()/unpause()", "access": "msg.sender==pauser"},
+        {"fn": "uri(uint256)", "access": "view", "externalCalls": ["dispatcher.name()/image()/description()"]}
+      ],
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true, "reentrancyGuarded": [], "accessControlled": ["registerDispatcher","replaceDispatcher","setPrice","setGrowthFactor","mintFor(minter-gated)","burn(burner-gated)","pause(pauser-gated)"], "initializerProtected": "n/a (ctor-only)"},
+      "invariants": [
+        "nextIndex starts at 1 so index 0 is invalid sentinel; dispatcherToIndex==0 means unregistered.",
+        "tokenId == dispatcher index (resolvedTokenId = index).",
+        "H-01 fix: token is fetched from dispatcher.primeToken(), caller cannot spoof token.",
+        "CEI: price grown BEFORE dispatch; FOT-safe via balance-before/after -> actualReceived passed to dispatch."
+      ],
+      "inboundCallbacks": [
+        {"site": "_executeMint _mint(recipient,...)", "hook": "onERC1155Received", "trust": "untrusted", "timing": "AFTER price update + token transfer + dispatch; all state finalized. NFTMinterV2 itself has NO nonReentrant guard, but dispatcher.dispatch already returned (its guard released). Re-entrant mint() would be a full fresh paid mint. SURFACE for interaction scanner."},
+        {"site": "mintFor _mint(recipient,...)", "hook": "onERC1155Received", "trust": "untrusted", "timing": "only reachable by authorized minter"}
+      ],
+      "trustAssumptions": ["prime token is standard-ish ERC20 (FOT tolerated via actualReceived); no ERC777/hook token expected", "authorizedMinters trusted to not mint unbacked NFTs (mintFor bypasses payment+debt)", "pauser trusted"],
+      "localFindings": [],
+      "scannerNotes": ["mintFor mints a claim NFT with zero backing and zero debt accrual by design (batch-minter path) — confirm no path lets a non-authorized caller reach it (guard present).", "No reentrancy guard on the mint path; inbound ERC1155 receive callback on recipient after full state finalization — interaction scanner should confirm no economic reentrancy (price already grown, so re-entry just pays the new higher price)."]
+    },
+
+    "BurnRecorder.sol": {
+      "purpose": "Shared append-only burn ledger. Authorized burners call burn(token,amount) to accumulate totalBurnt and emit tokenBurnt. Owner registers tokens for enumeration.",
+      "inheritance": ["IBurnRecorder", "Ownable"],
+      "externalEntryPoints": [
+        {"fn": "burn(address,uint256)", "access": "onlyBurner", "state": ["totalBurnt[token]"], "note": "accounting only, moves no value"},
+        {"fn": "setBurner(address,bool)/registerToken(address)", "access": "onlyOwner"},
+        {"fn": "getTotalBurnt/getTokenCount/getTokenAtIndex", "access": "view"}
+      ],
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true, "accessControlled": ["burn(burner-gated)","setBurner","registerToken"]},
+      "invariants": ["totalBurnt monotonic increasing; pure bookkeeping, holds no funds, transfers nothing.", "burn(token,amount) trusts caller's reported amount — no reconciliation against actual token burn."],
+      "localFindings": [],
+      "scannerNotes": ["totalBurnt is self-reported by the burner (BurnerV2), not verified against on-chain supply delta. Low materiality (informational metric)."]
+    },
+
+    "MultiPooler.sol": {
+      "purpose": "Stateless batch forwarder: single authorized `pooler` submits an array of PoolCall rows, each forwarding one Uniboost.pool(amountIn,minPairOut,minTargetOut,minLP). All-or-nothing.",
+      "inheritance": ["Ownable"],
+      "externalEntryPoints": [
+        {"fn": "pool(PoolCall[])", "access": "onlyPooler", "loop": "iterates calls[] (caller-supplied length)", "externalCalls": ["IUniboostPooler(c.uniboost).pool(...)"], "state": "none (holds no funds)"},
+        {"fn": "setPooler(address)", "access": "onlyOwner", "note": "address(0) disables batching"}
+      ],
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": "bounded-by-trusted-caller", "accessControlled": ["pool(pooler-gated)","setPooler"]},
+      "invariants": ["Holds no funds — pure forwarder. Each target Uniboost holds/spends its own prime.", "MultiPooler must be registered as authorized pooler on each target Uniboost (setAuthorizedPooler) for forwarded calls to pass."],
+      "localFindings": [],
+      "scannerNotes": ["pool() loops over calldata array; length is attacker-uncontrolled (onlyPooler = trusted keeper). Gas-bounded self-DoS at worst. Prior run L-11: same-pool-in-batch floor staleness — interaction concern, not local.", "c.uniboost address is arbitrary within the batch — a target that isn't actually a Uniboost/hasn't authorized MultiPooler simply reverts the batch (all-or-nothing)."]
+    },
+
+    "dispatchers/ATokenDispatcherV2.sol": {
+      "purpose": "Abstract base for all V2 dispatchers. Template-method dispatch: nonReentrant+onlyMinter+whenNotPaused external `dispatch` -> internal virtual _dispatch -> hook.onDispatch. Owns metadata, minter authorization, pluggable hook, pausability.",
+      "inheritance": ["ITokenDispatcherV2", "Pausable", "Ownable", "ReentrancyGuard"],
+      "externalEntryPoints": [
+        {"fn": "dispatch(address,uint256,bytes)", "access": "onlyMinter + whenNotPaused + nonReentrant", "externalCalls": ["_dispatch (concrete)", "hook.onDispatch"]},
+        {"fn": "pause()/unpause()", "access": "onlyMinter"},
+        {"fn": "setMetadata/setMinter/setHook", "access": "onlyOwner"}
+      ],
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true, "reentrancyGuarded": ["dispatch"], "accessControlled": ["dispatch(minter-gated)","pause/unpause(minter-gated)","setHook","setMinter","setMetadata"]},
+      "invariants": ["hook != address(0) always (ctor DefaultDispatchHook; setHook rejects zero).", "_minter is the pause authority; owner sets it via setMinter.", "A reverting hook reverts the whole dispatch (documented)."],
+      "trustBoundaries": ["_minter (NFTMinterV2) trusted to call dispatch with honest amount and to gate payment.", "hook is owner-configured; a malicious/wrong hook can revert dispatch or (for hooks lacking type-guard enforcement in the concrete dispatcher) silently under-accrue debt."],
+      "localFindings": [],
+      "scannerNotes": ["setHook lets owner swap the debt-accrual hook. Only NudgeRatchet variants re-validate hook type inside _dispatch; base does NOT enforce hook identity. See M-04 asymmetry below."]
+    },
+
+    "dispatchers/BurnerV2.sol": {
+      "purpose": "Dispatcher that burns received token via IBurnable.burn(amount) and records it in BurnRecorder.",
+      "inheritance": ["ATokenDispatcherV2"],
+      "valueFlow": "token arrives on contract via minter transferFrom -> _dispatch burns `amount` -> BurnRecorder.burn(token,amount). Hook: DefaultDispatchHook (no debt) unless owner sets one.",
+      "externalCalls": ["IBurnable(_token).burn(amount)", "_burnRecorder.burn(_token,amount)"],
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true},
+      "invariants": ["_token, _burnRecorder immutable.", "Burns `amount` (FOT-adjusted actualReceived), not full balance."],
+      "trustAssumptions": ["_token implements IBurnable.burn(uint256).", "MUST be registered as authorized burner on BurnRecorder or _dispatch reverts."],
+      "localFindings": [],
+      "scannerNotes": ["Ctor does not zero-check token_/burnRecorder_ (prior Q-09). Low."]
+    },
+
+    "dispatchers/GatherV2.sol": {
+      "purpose": "Dispatcher that forwards received token to an owner-settable recipient via safeTransfer(amount).",
+      "inheritance": ["ATokenDispatcherV2"],
+      "valueFlow": "token on contract -> safeTransfer(recipient, amount). Hook default no-op.",
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true, "accessControlled": ["setRecipient"]},
+      "invariants": ["recipient non-zero (ctor + setter enforce).", "_token immutable.", "forwards `amount`, not full balance."],
+      "localFindings": [],
+      "scannerNotes": []
+    },
+
+    "dispatchers/NudgeRatchet.sol": {
+      "purpose": "USDC dispatcher forwarding full USDC balance to owner-settable batchMinter sink. Debt accrues via NudgeRatchetMintDebtHook on `amount`.",
+      "inheritance": ["ATokenDispatcherV2"],
+      "valueFlow": "USDC on contract -> _dispatch sweeps FULL balance (>= amount) to batchMinter; base then hook.onDispatch(amount) accrues phUSD debt.",
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true, "accessControlled": ["setBatchMinter"]},
+      "invariants": [
+        "Ctor hard-guards token decimals()==6 (USDC).",
+        "_dispatch REQUIRES hook.hookTypeId()==keccak256('NudgeRatchetMintDebtHook.v1') (M-04 fail-CLOSED guard) — reverts on wrong/no-op hook.",
+        "_dispatch re-asserts bal>=amount (defense-in-depth: forwarding < amount would mint unbacked phUSD).",
+        "Sweeps full balance: surplus over `amount` is over-backing (accepted design, DO NOT re-flag)."
+      ],
+      "trustAssumptions": ["batchMinter trusted USDC sink", "no rescueERC20 on this variant — stray USDC self-forwards next dispatch (documented)"],
+      "localFindings": [],
+      "scannerNotes": ["M-04 guard PRESENT here. Debt/transfer decoupling documented as accepted (always over-backs)."]
+    },
+
+    "dispatchers/NudgeRatchetDelayRelease.sol": {
+      "purpose": "USDC dispatcher that HOLDS USDC on dispatch and only releases to batchMinter when a whitelisted releaser calls release(amount). Rate-control lever. Debt side identical to NudgeRatchet.",
+      "inheritance": ["ATokenDispatcherV2"],
+      "valueFlow": "dispatch: USDC held on contract (NO transfer). Debt accrues via hook on `amount` at dispatch time. release(amount): safeTransfer held USDC to batchMinter. rescueERC20: owner can move any token incl. _token.",
+      "externalEntryPoints": [
+        {"fn": "release(uint256)", "access": "onlyReleaser + nonReentrant", "state": "moves held USDC to batchMinter"},
+        {"fn": "setReleaser/setBatchMinter/rescueERC20", "access": "onlyOwner"}
+      ],
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true, "reentrancyGuarded": ["release"], "accessControlled": ["release(releaser-gated)","setReleaser","setBatchMinter","rescueERC20"]},
+      "invariants": [
+        "Ctor hard-guards token decimals()==6 (USDC).",
+        "_dispatch REQUIRES correct hookTypeId (M-04 guard PRESENT); performs NO transfer (view function).",
+        "DECOUPLED debt-vs-backing timing is intentional: phUSD debt may be realised via hook.pull() while USDC still held here (documented accepted).",
+        "release only RELOCATES existing backing; conserves total backing."
+      ],
+      "trustAssumptions": ["releasers trusted", "rescueERC20 CAN pull _token (USDC) leaving accrued debt under-backed — documented owner footgun / responsibility"],
+      "localFindings": [],
+      "scannerNotes": ["DEDUP-001 class: debt accrues at dispatch, USDC backing held here; if rescueERC20 pulls _token OR release lags while pull() mints phUSD, phUSD can be transiently/permanently under-backed. Documented as accepted design + owner power. Interaction/econ scanner should confirm the cross-contract backing invariant is only violable by trusted owner/releaser, not by an unprivileged actor.", "prior L-12: pause does not freeze custody (rescueERC20/release not pause-gated)."]
+    },
+
+    "dispatchers/Uniboost.sol": {
+      "purpose": "USDC(prime) dispatcher: buy-and-pool zap into a UniV2 target pool + optional prime donation split. _dispatch carves donationSplit% to recipient, retains rest; separate pool() (authorized pooler) swaps prime->pair->~half target and addLiquidity, LP accrues as protocol-owned liquidity.",
+      "inheritance": ["ATokenDispatcherV2"],
+      "externalEntryPoints": [
+        {"fn": "pool(uint256,uint256,uint256,uint256)", "access": "onlyAuthorizedPooler + whenNotPaused + nonReentrant", "externalCalls": ["router.swapExactTokensForTokens x2", "router.addLiquidity", "pair.token0/token1 (on setPool)"], "slippage": "minPairOut, minTargetOut, minLP (post-check); addLiquidity min amounts are 0"},
+        {"fn": "setPool/setDonationSplit/setRecipient/setPrimeToPairPath/setAuthorizedPooler/incrementAuthVersion/rescueERC20", "access": "onlyOwner"}
+      ],
+      "valueFlow": "_dispatch: donationSplit% of `amount` -> recipient (safeTransfer prime); remainder retained. Base hook.onDispatch(GROSS amount) accrues debt on full amount. pool(): retained prime -> LP.",
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true, "reentrancyGuarded": ["pool"], "accessControlled": ["pool(pooler-gated)","setPool","setAuthorizedPooler","setDonationSplit","setRecipient","setPrimeToPairPath","rescueERC20"]},
+      "invariants": [
+        "authVersion mechanism: poolerAuthVersion[x]==authVersion => authorized; incrementAuthVersion mass-revokes.",
+        "donationSplit <= 100; donation enabled only if recipient!=0 && split>0.",
+        "targetPool must contain targetToken; _pairToken derived.",
+        "Debt accrues on GROSS amount even though donationSplit% left the contract (same convention as BalancerPoolerV2)."
+      ],
+      "trustBoundaries": ["router (UniV2) semi-trusted; pool() swaps are MEV-exposed but bounded by owner/keeper-supplied min-outs (interaction/econ concern).", "authorized poolers (incl. MultiPooler) trusted keepers."],
+      "localFindings": [],
+      "scannerNotes": [
+        "M-04 ASYMMETRY: Uniboost._dispatch does NOT validate hook type (no hookTypeId guard), unlike NudgeRatchet variants. If owner sets a wrong/no-op hook, dispatch succeeds and accrues ZERO debt (fail-open to UNDER-accrual — protocol over-backed, not unbacked). Prior L-09 flagged exactly this. Surface for scanner; direction is safe (under-mint) but breaks debt bookkeeping.",
+        "pool() executes swaps at block.timestamp deadline with caller-supplied min-outs; sandwich exposure is bounded by min-outs (prior L-06 stays Low). Econ/interaction scope.",
+        "addLiquidity uses 0/0 min amounts, relying on the two swap floors + minLP post-check."
+      ]
+    },
+
+    "dispatchers/BalancerPoolerV2.sol": {
+      "purpose": "USDS(prime) dispatcher: on dispatch wraps pooling portion USDS->sUSDS (ERC4626) and attempts a silent try/catch Sky-PSM donation of remaining USDS->USDC to batchMinter; separate pool(minBPT) (authorized pooler) adds single-sided sUSDS liquidity to Balancer V3 pool via unlock/unlockCallback. Debt accrues via BalancerPoolerMintDebtHook on GROSS amount.",
+      "inheritance": ["ATokenDispatcherV2", "IUnlockCallback"],
+      "externalEntryPoints": [
+        {"fn": "pool(uint256 minBPT)", "access": "onlyAuthorizedPooler + whenNotPaused + nonReentrant", "externalCalls": ["vault.unlock -> unlockCallback"]},
+        {"fn": "unlockCallback(bytes)", "access": "msg.sender==_vault ONLY", "externalCalls": ["sUSDS.safeTransfer(vault)", "vault.addLiquidity", "vault.settle"]},
+        {"fn": "_psmDonate(uint256)", "access": "msg.sender==address(this) ONLY (self)", "externalCalls": ["psm.tout()", "psm.to18ConversionFactor()", "psm.buyGem(batchMinter,gemAmt)"]},
+        {"fn": "getIdealBPT()", "access": "public (non-view, calls router query)"},
+        {"fn": "setPool/setAuthorizedPooler/incrementAuthVersion/setBatchDonationSize/setBatchMinter/setPSM/setMaxTout/withdrawBPT/rescueERC20", "access": "onlyOwner"}
+      ],
+      "valueFlow": "_dispatch: poolingUSDS -> sUSDS (ERC4626 deposit); donationUSDS + any parked USDS -> try _psmDonate (buyGem) -> USDC to batchMinter, or park on catch. Base hook.onDispatch(GROSS amount) accrues phUSD debt. pool(): sUSDS -> Balancer BPT (protocol-owned). withdrawBPT/rescueERC20 owner exits.",
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true, "reentrancyGuarded": ["pool"], "accessControlled": ["pool(pooler-gated)","unlockCallback(vault-gated)","_psmDonate(self-gated)","setPSM","setBatchMinter","setBatchDonationSize","setMaxTout","withdrawBPT","rescueERC20"]},
+      "invariants": [
+        "_primeToken = IERC4626(sUSDS).asset() (USDS, 18-dp).",
+        "donation try/catch isolates PSM failure so mint never reverts; failed donation parks USDS and re-sweeps next dispatch (recovery mechanism).",
+        "_psmDonate floors gemAmt (dust to protocol, never over-credits); tout<=maxTout ceiling.",
+        "unlockCallback only callable by vault; _psmDonate only by self.",
+        "Debt accrues on GROSS amount regardless of donation outcome."
+      ],
+      "trustBoundaries": ["Sky PSM (owner-set psm addr) semi-trusted; wrong psm addr could misroute donation (owner footgun).", "Balancer V3 vault trusted (unlock pattern).", "sUSDS ERC4626 trusted."],
+      "localFindings": [],
+      "scannerNotes": [
+        "M-04 ASYMMETRY: like Uniboost, BalancerPoolerV2._dispatch does NOT validate hook type. Wrong/no-op hook => zero debt accrual (fail-open under-accrual, over-backed). Surface.",
+        "BalancerPoolerMintDebtHook applies NO decimal scale — correct because USDS is 18-dp (scale would be 1). Confirm prime stays 18-dp.",
+        "getIdealBPT is non-view (mutates via router query) — callers must not treat as view in a staticcall context.",
+        "_psmDonate is external+self-gated; correct pattern for atomic try/catch rollback."
+      ]
+    },
+
+    "hooks/DefaultDispatchHook.sol": {
+      "purpose": "Null-object IDispatchHook. onDispatch is a no-op. Deployed by ATokenDispatcherV2 ctor so hook is never zero.",
+      "inheritance": ["IDispatchHook"],
+      "verifiedProperties": {"stateless": true, "noExternalCalls": true},
+      "invariants": ["No state, no funds, no debt. A dispatcher using this hook accrues ZERO debt."],
+      "localFindings": [],
+      "scannerNotes": ["This is the fail-open target: if a debt-bearing dispatcher (Uniboost/BalancerPoolerV2) is left on / reset to DefaultDispatchHook, dispatch succeeds with no debt. NudgeRatchet variants' hookTypeId guard rejects it; Uniboost/Balancer do not."]
+    },
+
+    "hooks/NudgeRatchetMintDebtHook.sol": {
+      "purpose": "phUSD mint-debt accrual for NudgeRatchet(/DelayRelease). onDispatch adds (amount*1e12*ratio)/100 to mintDebt (gated to dispatcher). pull() (owner or recipient) mints accrued phUSD to recipient and zeroes ledger.",
+      "inheritance": ["IDispatchHook", "INudgeRatchetMintDebtHook", "Ownable", "ReentrancyGuard"],
+      "externalEntryPoints": [
+        {"fn": "onDispatch(address,uint256,bytes)", "access": "msg.sender==dispatcher", "state": ["mintDebt"], "math": "(amount * 1e12 * ratio)/100, floors, no-op if added==0"},
+        {"fn": "pull()", "access": "onlyOwnerOrRecipient + nonReentrant", "externalCalls": ["phUSD.mint(recipient, debt)"], "state": ["mintDebt->0"]},
+        {"fn": "setRatio/setRecipient/setDispatcher", "access": "onlyOwner"},
+        {"fn": "hookTypeId()", "access": "pure", "returns": "keccak256('NudgeRatchetMintDebtHook.v1')"}
+      ],
+      "verifiedProperties": {"checkedArithmetic": true, "noUnboundedLoops": true, "reentrancyGuarded": ["pull"], "accessControlled": ["onDispatch(dispatcher-gated)","pull(owner-or-recipient)","setRatio","setRecipient","setDispatcher"]},
+      "invariants": [
+        "USDC_TO_PHUSD_SCALE = 1e12 fixed (USDC 6-dp -> phUSD 18-dp). Correct ONLY because NudgeRatchet ctor hard-guards token==6-dp. (M-03 class — scale matches dispatcher's guaranteed prime decimals.)",
+        "MAX_RATIO=200 (INCLUSIVE) — ratio up to 200% is settable.",
+        "pull mints phUSD == mintDebt with NO on-chain check that backing USDC reached batchMinter (relies on dispatcher forwarding + trust)."
+      ],
+      "trustBoundaries": ["phUSD.mint is an external mint to a protocol token — this hook is a MINT AUTHORITY. Unbacked-mint risk is DEDUP-001 class.", "recipient can call pull()."],
+      "localFindings": [],
+      "scannerNotes": [
+        "M-03 CHECK: 1e12 scale is correct against NudgeRatchet's 6-dp guard. Verify no path wires this hook to a non-6-dp dispatcher (setDispatcher is owner-only; NudgeRatchet's hookTypeId guard binds them mutually).",
+        "DEDUP-001: ratio up to 200% means phUSD minted can be up to 2x the USDC forwarded — by design (nudge reward), but debt can EXCEED backing when ratio>100. Econ scope: confirm the batchMinter/phUSD system intends over-mint at ratio>100 (higher ratio than the 50%-capped Balancer/Uniboost hooks).",
+        "pull()->phUSD.mint external call after mintDebt=0 (CEI correct) + nonReentrant."
+      ]
+    },
+
+    "hooks/UniboostMintDebtHook.sol": {
+      "purpose": "phUSD mint-debt accrual for Uniboost. Prime-decimals-aware: immutable scale=10**(18-decimals) read from prime token in ctor. onDispatch adds (amount*scale*ratio)/100. pull() mints phUSD to recipient.",
+      "inheritance": ["IDispatchHook", "IUniboostMintDebtHook", "Ownable", "ReentrancyGuard"],
+      "externalEntryPoints": [
+        {"fn": "onDispatch", "access": "msg.sender==dispatcher", "math": "(amount*scale*ratio)/100 floored"},
+        {"fn": "pull()", "access": "onlyOwnerOrRecipient + nonReentrant", "externalCalls": ["phUSD.mint"]},
+        {"fn": "setRatio/setRecipient/setDispatcher", "access": "onlyOwner"}
+      ],
+      "verifiedProperties": {"checkedArithmetic": true, "reentrancyGuarded": ["pull"], "accessControlled": ["onDispatch(dispatcher-gated)","pull","setRatio","setRecipient","setDispatcher"]},
+      "invariants": [
+        "scale=10**(18-primeDecimals), ctor requires decimals<=18. Dynamic (correct for 6-dp USDC=1e12 or 18-dp=1).",
+        "MAX_RATIO=50; setRatio checks newRatio > MAX_RATIO reverts (so 50 IS settable despite NatSpec saying 'strictly <'). NatSpec/comment mismatch — minor.",
+        "NO hookTypeId() function — Uniboost does not enforce hook type, so none needed by that dispatcher (but that's the M-04 asymmetry)."
+      ],
+      "trustBoundaries": ["Mint authority on phUSD (DEDUP-001 class)."],
+      "localFindings": [],
+      "scannerNotes": [
+        "M-03: scale read from prime token decimals at deploy — if Uniboost's _primeToken decimals differ from what this hook read, mis-scale. Both take primeToken independently in ctors; deploy wiring must pass the SAME token. Surface for wiring check.",
+        "Comment/guard mismatch: NatSpec says ratio 'strictly < MAX_RATIO' but code allows ==50. QA-level.",
+        "No hookTypeId => Uniboost cannot self-validate this hook (M-04 asymmetry, prior L-09)."
+      ]
+    },
+
+    "hooks/BalancerPoolerMintDebtHook.sol": {
+      "purpose": "phUSD mint-debt accrual for BalancerPoolerV2. onDispatch adds (amount*ratio)/100 (NO decimal scale — USDS is 18-dp). pull() mints phUSD to recipient.",
+      "inheritance": ["IDispatchHook", "IBalancerPoolerMintDebtHook", "Ownable", "ReentrancyGuard"],
+      "externalEntryPoints": [
+        {"fn": "onDispatch", "access": "msg.sender==dispatcher", "math": "(amount*ratio)/100 floored, NO scale"},
+        {"fn": "pull()", "access": "onlyOwnerOrRecipient + nonReentrant", "externalCalls": ["phUSD.mint"]},
+        {"fn": "setRatio/setRecipient/setDispatcher", "access": "onlyOwner"}
+      ],
+      "verifiedProperties": {"checkedArithmetic": true, "reentrancyGuarded": ["pull"], "accessControlled": ["onDispatch(dispatcher-gated)","pull","setRatio","setRecipient","setDispatcher"]},
+      "invariants": [
+        "NO decimal scale: correct because USDS (BalancerPoolerV2 prime) is 18-dp. (M-03 class — matches prime decimals.)",
+        "MAX_RATIO=50 (same == boundary quirk as Uniboost hook).",
+        "No hookTypeId — Balancer dispatcher does not enforce hook type (M-04 asymmetry)."
+      ],
+      "trustBoundaries": ["Mint authority on phUSD (DEDUP-001 class)."],
+      "localFindings": [],
+      "scannerNotes": ["M-03: unscaled math is ONLY correct for an 18-dp prime. If BalancerPoolerV2 is ever repointed to a non-18-dp prime this under/over-scales — but _primeToken is immutable = sUSDS.asset() = USDS. Safe as wired."]
+    }
+  },
+
+  "wiringGraph": {
+    "mintFlow": "User -> NFTMinterV2.mint(index) -> [pull price of dispatcher.primeToken() user->dispatcher] -> dispatcher.dispatch(nftMinter, actualReceived, extraData) -> ATokenDispatcherV2 [nonReentrant/onlyMinter/whenNotPaused] -> concrete _dispatch (value movement) -> hook.onDispatch(nftMinter, amount) [debt accrual] ; then NFTMinterV2 _mint(recipient) [ERC1155, onERC1155Received callback].",
+    "dispatcherToHook": {
+      "BurnerV2": "DefaultDispatchHook (no debt) — burns token + BurnRecorder.burn",
+      "GatherV2": "DefaultDispatchHook (no debt) — forwards to recipient",
+      "NudgeRatchet": "NudgeRatchetMintDebtHook [ENFORCED via hookTypeId guard] — sweeps USDC to batchMinter",
+      "NudgeRatchetDelayRelease": "NudgeRatchetMintDebtHook [ENFORCED via hookTypeId guard] — holds USDC, releaser releases",
+      "Uniboost": "UniboostMintDebtHook [NOT enforced — no type guard] — donation split + LP zap",
+      "BalancerPoolerV2": "BalancerPoolerMintDebtHook [NOT enforced — no type guard] — sUSDS wrap + PSM donation + Balancer LP"
+    },
+    "hookMintAuthority": "All 3 debt hooks call phUSD.mint(recipient, debt) on pull(). phUSD (IMintable) is an out-of-scope external protocol token; these hooks are its mint authorities. This is the DEDUP-001 unbacked-mint boundary.",
+    "poolerGraph": "MultiPooler.pool(PoolCall[]) -> Uniboost.pool(...) for each row. MultiPooler must be an authorized pooler on each Uniboost. Uniboost/BalancerPoolerV2 also directly authorize individual poolers (keepers).",
+    "burnGraph": "BurnerV2._dispatch -> BurnRecorder.burn(token,amount). BurnerV2 must be an authorized burner on BurnRecorder.",
+    "pauseGraph": "NFTMinterV2.setDispatcherActive (owner) -> dispatcher.pause()/unpause() as _minter. NFTMinterV2 itself paused by `pauser` addr."
+  },
+
+  "crossCuttingAnomalies": [
+    {"id": "A1-M04-asymmetry", "severity": "surface-medium", "desc": "Only NudgeRatchet + NudgeRatchetDelayRelease enforce hook identity (hookTypeId==keccak256('NudgeRatchetMintDebtHook.v1')) inside _dispatch. Uniboost and BalancerPoolerV2 do NOT validate their debt hooks. A wrong/no-op hook (incl. DefaultDispatchHook after a setHook mistake) makes those two dispatchers accrue ZERO debt while still moving value — fail-OPEN to UNDER-accrual (protocol over-backed, not unbacked). Direction is safe but silently breaks debt bookkeeping. Matches prior L-09. UniboostMintDebtHook & BalancerPoolerMintDebtHook expose no hookTypeId(), so the guard cannot even be added symmetrically without an interface change."},
+    {"id": "A2-M03-scale-correctness", "severity": "surface-info", "desc": "Three different scaling strategies, each correct against its dispatcher's prime decimals: NudgeRatchet hook fixed 1e12 (USDC 6-dp, ctor-guarded); Uniboost hook dynamic 10**(18-d) read from prime; Balancer hook unscaled (USDS 18-dp, immutable). No mis-scale found AS WIRED. Risk is purely deploy-time wiring: a hook constructed against a different token than its dispatcher's prime would mis-scale. Recommend wiring assertion in deploy scripts."},
+    {"id": "A3-DEDUP-001-mint-authority", "severity": "surface-medium", "desc": "pull() on all 3 debt hooks mints phUSD equal to accrued mintDebt with no on-chain proof the backing token reached its sink. Backing integrity relies on: (a) dispatcher forwarding value (NudgeRatchet sweeps; DelayRelease holds then releases; Uniboost/Balancer convert to POL/donation), and (b) trusted owner/releaser not pulling backing via rescueERC20. NudgeRatchetMintDebtHook allows ratio up to 200% (phUSD minted up to 2x USDC forwarded) vs 50% cap on the other two — econ scanner should confirm >100% over-mint is intended for the nudge-reward design."},
+    {"id": "A4-ratchet-rescue-underbacking", "severity": "surface-low", "desc": "NudgeRatchetDelayRelease.rescueERC20 can withdraw held _token (USDC) that backs already-accrued (possibly already-pulled) phUSD debt, leaving it under-backed. Documented as accepted owner responsibility; owner-trust (Law 3) but a non-obvious footgun since debt already accrued at dispatch."},
+    {"id": "A5-nftminter-no-reentrancy-guard", "severity": "surface-low", "desc": "NFTMinterV2 has no nonReentrant guard; _mint(recipient) fires onERC1155Received AFTER all state finalized (price grown, dispatch done). Re-entry is a fresh fully-paid mint at the new higher price. Surface for interaction scanner to confirm no economic reentrancy."},
+    {"id": "A6-ratio-boundary-natspec", "severity": "surface-qa", "desc": "Uniboost & Balancer debt hooks: NatSpec says ratio 'strictly < MAX_RATIO(50)' but setRatio uses `> MAX_RATIO` so 50 is accepted. Cosmetic doc/code mismatch."}
+  ],
+  "weakRandomness": "None. No block.timestamp/prevrandao/blockhash used for value-bearing outcomes (block.timestamp only used as swap/addLiquidity deadline and burn-event timestamp — non-entropy).",
+  "unboundedLoops": "Only MultiPooler.pool iterates a caller-supplied array, gated to a trusted keeper (onlyPooler), all-or-nothing. No attacker-controlled unbounded loop."
+}
