@@ -1,0 +1,43 @@
+{
+  "contract": "src/BatchNFTMinter.sol",
+  "profileTimestamp": "2026-07-09",
+  "solidityVersion": "^0.8.20",
+  "role": "Helper that loops ITokenMinterV2.mint(dispatcherIndex, recipient) count times, pulling aggregate payment once, with an owner-administered balance-based 'nudge' payout to the recipient when count >= nudgeSize.",
+  "inheritanceChain": ["Ownable", "Pausable", "IPausable"],
+  "verifiedProperties": {
+    "noUnboundedLoops": "batchMint loops `count` (caller-supplied, UNBOUNDED) but caller pays gas + real mint cost per iteration; over-large count self-DoS/reverts",
+    "checkedArithmetic": true,
+    "reentrancyGuarded": [],
+    "accessControlled": {
+      "onlyOwner": ["setTokenMinter","setDispatcherIndex","setNudgeSize","setNudgePaymentToken","setPauser","rescueERC20"],
+      "onlyPauser": ["pause","unpause"],
+      "public": ["batchMint (whenNotPaused)"]
+    }
+  },
+  "localFindings": [
+    {"id":"LOCAL-BM-001","type":"reentrancy-surface","severity":"local-high (surface only - defer exploitability)","function":"batchMint","line":232,"description":"batchMint has NO ReentrancyGuard yet makes external mint() calls in a loop that (via NFTMinterV2._mint) invoke onERC1155Received on the caller-supplied `recipient` (attacker-controlled), while the function holds a payment-token balance AND performs a balance-snapshot-based nudge payout + dust refund. An attacker can set recipient to a malicious contract and re-enter batchMint mid-loop. Naive double-nudge-drain appears to self-revert (outer post-loop safeTransfer of a stale snapshot exceeds the now-reduced balance), but the full cross-contract exploitability depends on NFTMinterV2.mint semantics and cannot be adjudicated in isolation.","recommendation":"Surface to code-scanner (reentrancy checklist) + econ-scanner. Recommend adding ReentrancyGuard to batchMint as defense-in-depth. Note this is the same nudge-pot contract with H-01/M-01 history (see memory: batchminter-nudge)."},
+    {"id":"LOCAL-BM-002","type":"known-footgun","severity":"local-low","function":"batchMint (nudge)","description":"Balance-based nudge is winner-take-all: first qualifying batch takes the entire nudgePaymentToken pot. minReward floor only protects the LOSER from paying mint costs for a sniped reward; it does NOT prevent front-running the pot. Over-funding the pot is an owner footgun. Known (M-01 history), surfaced not new.","recommendation":"documented behaviour; owner funds pot conservatively."}
+  ],
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function":"batchMint(count,recipient,paymentAmount,minReward)","access":"whenNotPaused (public)","stateChanges":["none persistent - transient approval"],"externalCalls":["NFTMinterV2.configs(dispatcherIndex)","dispatcher.primeToken()","paymentToken.safeTransferFrom(msg.sender)","paymentToken.forceApprove(minter, max/0)","tokenMinter.mint() xN (onERC1155Received -> recipient)","nudgeToken.balanceOf","nudgeToken.safeTransfer(recipient)","paymentToken.safeTransfer(msg.sender refund)"],"notes":"minter+dispatcherIndex PINNED to owner state (not caller params) - closes the caller-supplied-minter drain vector. Payment token DERIVED from dispatcher.primeToken(). Nudge snapshot taken BEFORE loop (donate-forward). Nudge token must != payment token (up-front revert)."},
+      {"function":"rescueERC20(token,to,amount)","access":"onlyOwner","notes":"unconditional ERC20 sweep (owner-trusted escape hatch), callable while paused."},
+      {"function":"set{TokenMinter,DispatcherIndex,NudgeSize,NudgePaymentToken,Pauser}","access":"onlyOwner"}
+    ],
+    "externalCalls": [
+      {"target":"ITokenMinterV2 tokenMinter","methods":["mint","configs","primeToken(via dispatcher)"],"trustLevel":"trusted (owner-pinned NFTMinterV2)","notes":"pinned = not caller-controllable"},
+      {"target":"address recipient","methods":["onERC1155Received (inbound via mint)"],"trustLevel":"UNTRUSTED (caller-supplied)","notes":"inbound reentrancy callback, function NOT guarded"},
+      {"target":"IERC20 paymentToken / nudgePaymentToken","methods":["safeTransfer/From","forceApprove","balanceOf"],"trustLevel":"semi-trusted","notes":"paymentToken derived from dispatcher.primeToken()"}
+    ],
+    "valueMath": {
+      "dustRefund":"remaining / DUST_THRESHOLD != 0 (i.e. remaining >= 1e6) triggers refund; else kept to absorb JS rounding",
+      "totalPaid":"paymentAmount - refundedSurplus"
+    }
+  },
+  "trustAssumptions": [
+    "tokenMinter is owner-pinned trusted NFTMinterV2",
+    "nudgePaymentToken != dispatcher primeToken (enforced up-front)",
+    "payment/nudge tokens standard ERC20"
+  ],
+  "complexity": {"loc":307,"externalEntryPoints":8,"stateVariables":5}
+}

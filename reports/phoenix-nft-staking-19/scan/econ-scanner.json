@@ -1,0 +1,93 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-07-09T22:10:00Z",
+  "scanType": "economic",
+  "scanTier": 2,
+  "commit": "321d0a9",
+  "contractsScanned": 7,
+  "summary": {
+    "newHighOrMedium": 0,
+    "verdict": "No new High/Medium economic findings. All four chased leads reconcile to already-tracked ledger classes (Depletion M-01 fixed/accepted, BatchNFTMinter H-01/M-01 fixed, NFTStaker/PriceScaled M-02 wont-fix). Residuals are bounded, solvency-safe, and either owner-accepted design or existing Low footguns. Migration value transfer verified leak-free.",
+    "solvencyInvariant": "balance == rewardBudget + committedDebt confirmed structurally preserved across all three stakers and the migration paths; all rounding floors favour the protocol (no user-favourable leg found)."
+  },
+  "findings": [
+    {
+      "id": "ECON-DEP-01",
+      "type": "griefing / rate-dilution (RECONCILED — owner-accepted design, not re-escalated)",
+      "severity": "informational",
+      "reconcilesToLedger": "M-01 (src/NFTStakerDepletion.sol, fixed @321d0a9, owner-ack 2026-06-25: restart-on-real-inflow is INTENDED)",
+      "contract": "src/NFTStakerDepletion.sol",
+      "function": "_syncBudget / _recomputeSchedule",
+      "line": 431,
+      "lineStart": 423,
+      "lineEnd": 532,
+      "description": "PRIMARY lead. Every hook inflow>0 restarts the full depletion window (windowEnd = now + windowSeconds) and re-derives rewardRate = budget/windowSeconds. A third party CAN force a restart on demand: NFT minting via the yield-claim-nft dispatcher is permissionless, so an attacker mints an NFT (generating mintDebt d), then calls the permissionless claim()/stake()/unstake() to run _syncBudget -> pull() -> inflow d>0 -> _recomputeSchedule. This lowers existing stakers' instantaneous rate (newRate = (remainingBudget + d)/W < oldRate for any elapsed t>0) and defers their runway.",
+      "economicImpact": "Bounded, self-defeating griefing. NOT a value-drain: (1) each restart requires a REAL paid NFT mint (cost P_mint per restart) — a raw phUSD donation does NOT trigger it, because inflow is measured only across the pull() call (a pre-existing donation lands in `pre`, not in `inflow`); (2) the attacker's minted mintDebt d is DONATED into rewardBudget and ultimately paid to stakers, so the griefer burns money to enrich the very victims later; (3) accrual up to `now` is settled at the OLD rate BEFORE the restart (_updatePool runs first inside _syncBudget), so no already-earned reward is lost — only FUTURE per-second rate is suppressed; (4) solvency invariant holds throughout; emissions are deferred, never destroyed.",
+      "attackScenario": "1. Attacker mints 1 NFT via dispatcher, paying the real mint price.\n2. Attacker calls claim() (permissionless) -> _syncBudget pulls the fresh mintDebt as inflow>0 -> _recomputeSchedule restarts windowEnd and lowers rewardRate.\n3. Existing stakers now earn at a lower per-second rate with a re-extended window.\n4. Repeat: each iteration costs another real mint and donates its mintDebt to the budget.",
+      "profitability": "Never profitable to the attacker. Pure cost (P_mint per restart) with the donated budget accruing to the staker set. Rational only as spiteful griefing at unbounded self-cost; deferred rewards are fully recoverable once griefing stops (window elapses, budget depletes to survivors).",
+      "affectedParties": "Existing stakers (temporary rate suppression / reward deferral only). No party suffers permanent loss.",
+      "reconciliation": "This IS the residual the owner explicitly accepted in the M-01 triage: 'a non-zero pull inflow means a new NFT was minted = a genuine budget increase, so RESTARTING the depletion window on a real inflow is INTENDED and is being KEPT.' The M-01 fix (recompute ONLY on inflow>0; stake/unstake carry NO tail recompute) already closed the free/every-interaction re-spread. The requirement that every restart cost a real mint is precisely what makes the residual economically inert. Faithful to story-018/020. NOT re-escalated.",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-BM-01",
+      "type": "MEV / winner-take-all pot + reentrancy (RECONCILED — H-01/M-01 fixed, residuals are existing Lows)",
+      "severity": "informational",
+      "reconcilesToLedger": "H-01 (value-blind nudge gate) fixed; M-01 (MEV front-run of pot) fixed via minReward; L-01 (no nonReentrant) submitted; L-05 (minReward==0 opt-out) wont-fix; LOCAL-BM-002 / batchminter-nudge memory (over-funding footgun)",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 273,
+      "lineStart": 232,
+      "lineEnd": 306,
+      "description": "Confirmed the nudge economics post-fix. The full nudgePaymentToken pot pays to a caller-chosen recipient on a COUNT-only gate (count >= nudgeSize), but the count>=nudgeSize gate now requires genuinely paying for >= nudgeSize REAL mints (payment pulled from msg.sender, forceApprove to the owner-pinned minter, mint loop). The prior H-01 caller-supplied-minter drain (walk off with the pot for zero real mints) is closed because tokenMinter/dispatcherIndex are owner-pinned, not caller params. minReward gives each caller an atomic slippage floor: if the deliverable pot is below minReward the whole batch (mints + payment) reverts, so a front-run loser never eats mint costs.",
+      "economicImpact": "Residual is a bounded MEV race to be first to cross the threshold when pot value > cost of nudgeSize mints — inherent to a winner-take-all incentive and gated behind real mint spend. Over-funding the pot is an owner footgun (LOCAL-BM-002): the owner should fund the pot at roughly the cost of nudgeSize mints, not far above, or the surplus becomes a snipe target. minReward severity is unchanged by the new floor — it only protects the loser from paying, it does not allocate the pot.",
+      "reentrancyAnalysis": "batchMint has no ReentrancyGuard and mint() fires onERC1155Received on the attacker-controlled recipient mid-loop (L-01). Re-entry is NOT economically exploitable for a double-pot-drain: the nudge snapshot is taken before the loop, but (a) an inner call that pays out the pot leaves the OUTER post-loop safeTransfer(recipient, staleSnapshot) exceeding the now-reduced balance -> outer reverts -> inner unwinds; (b) the inner call's forceApprove(minter, 0) at its tail zeroes the allowance so the outer loop's remaining mints revert; (c) topping the pot back up to survive the outer transfer costs the attacker exactly the drained amount (net-zero minus gas). All double-drain paths self-revert atomically. Confirms L-01 is correctly Low / defense-in-depth, not a High.",
+      "profitability": "Nudge claim profitable only when pot > nudgeSize mint cost (intended incentive). Reentrancy drain not profitable (self-reverting).",
+      "affectedParties": "Losing racers (protected by minReward); owner (over-funding footgun).",
+      "reconciliation": "No new severity. H-01/M-01 confirmed fixed; reentrancy confirmed self-reverting (matches ledger L-01 Low). Recommend ReentrancyGuard as defense-in-depth per existing L-01. Not re-inflated.",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-EW-01",
+      "type": "stale-rate over-emission (RECONCILED — M-02 wont-fix; Depletion immunity CONFIRMED)",
+      "severity": "informational",
+      "reconcilesToLedger": "M-02 (emergencyWithdraw stale rewardRate over-emission) wont-fix owner-ack; SUPPRESSED-CONTEXT false-positive on PriceScaled copy",
+      "contract": "src/NFTStaker.sol / src/NFTStakerPriceScaled.sol",
+      "function": "emergencyWithdraw",
+      "line": 538,
+      "lineStart": 538,
+      "lineEnd": 577,
+      "description": "M-02 class (base + PriceScaled): emergencyWithdraw skips _syncBudget/_recomputeSchedule, so after a departure totalStaked drops but rewardRate R = S*APY/YEAR stays sized to the pre-departure notional S. Survivors accrue at the stale-high R until the next recompute-bearing interaction.",
+      "economicImpact": "Over-emission window = from the emergencyWithdraw until the next stake/unstake/claim by ANY user, or owner topUp/pullAndRefresh/setTargetAPY/setter (all of which recompute). During that window the budget drains at the pre-departure R while serving fewer stakers -> per-NFT APY inflated above target and runway erodes faster than policy. Solvency-safe: _updatePool caps reward at rewardBudget and _safePay reverts on shortfall, so no insolvency — only accelerated (bounded) runway consumption, self-correcting at the next recompute.",
+      "depletionImmunity": "CONFIRMED the Depletion copy does NOT inherit M-02. There, rewardRate = budget/windowSeconds is totalStaked-INDEPENDENT: emergencyWithdraw (src/NFTStakerDepletion.sol:622) drops totalStaked but the budget still drains at the same rewardRate, and the departing user's forfeited pending is recycled into rewardBudget WITHOUT a rate bump (rate is only lifted at the next recompute, i.e. conservative/under-emitting until then). Survivors receive a larger accRewardPerShare slice only because a claimant left and forfeited — the standard masterchef forfeit, with NO extra budget drain. Net effect on the budget is protocol-favourable, not over-emitting.",
+      "reconciliation": "M-02 is ledger wont-fix (owner-ack: deployed + no migrate-on-behalf + pullAndRefresh mitigation). Surfaced for reconciliation only; NOT re-escalated. Depletion immunity affirmatively verified against source.",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-MIG-01",
+      "type": "migration value-transfer integrity (VERIFIED SOUND — no finding)",
+      "severity": "informational",
+      "contract": "src/NFTStakerDepletion.sol / src/InPlaceNFTStakerMigrator.sol",
+      "function": "batchMigrate / _exitPosition / depositFor / migrateOut / migrateIn / claimTimedOut",
+      "lineStart": 675,
+      "lineEnd": 768,
+      "description": "Lead 4 check on requested-vs-received ERC1155 and principal accounting across the migration lifecycle. No leak or mismatch found.",
+      "verification": "1. batchMigrate transfers EXACTLY totalAmount = Sum(_exitPosition amounts) of stakedId to the migrator; migrateOut parks per-user the SAME returned amounts[i] and accumulates totalParked identically -> parked-set sum == ERC1155 received (no requested-vs-received drift). 2. Pending phUSD is minted to each user at migrateOut via _safePayTo (frozen snapshot, floored, solvency-decremented) so claimTimedOut correctly returns STAKE ONLY (no double-pay of reward). 3. migrateIn zeroes parked[user]/totalParked BEFORE staker.depositFor (strict CEI under nonReentrant); a mid-batch revert unwinds atomically. 4. rescueERC1155(stakedId) is floor-protected at totalParked (surplus-only), and the immutable source==target staker plus immutable-target migrator remove any owner redirect path for parked principal. 5. depositFor credits the EXACT parked amount (no haircut/top-up — Uniboost staker moves exact ERC1155, no underwater strategy). Rounding across the emission math is uniformly floor (budget/windowSeconds, accRewardPerShare, _safePay dust escape into rewardBudget) — every leg favours the protocol; no user-favourable round-trip leg exists.",
+      "note": "A minor liveness (not value) caveat lives in the interaction lane and is already tracked: the claimTimedOut vs migrateIn race can leave a timed-out user un-rewired (ledger InPlace L-01/L-03 class), and migrateIn's setApprovalForAll(staker,true) scoping is an interaction-scanner concern, not an economic leak.",
+      "confidence": "high"
+    }
+  ],
+  "reconciledLedgerClasses": [
+    "NFTStakerDepletion M-01 (linear-depletion rate-drift) — fixed @321d0a9; restart-on-real-inflow accepted as intended (ECON-DEP-01)",
+    "BatchNFTMinter H-01 (value-blind nudge) — fixed; M-01 (pot front-run) — fixed via minReward (ECON-BM-01)",
+    "BatchNFTMinter L-01 (no nonReentrant) — reentrancy confirmed self-reverting, stays Low DiD (ECON-BM-01)",
+    "BatchNFTMinter L-05 (minReward==0 opt-out) / LOCAL-BM-002 (over-funding footgun) — unchanged (ECON-BM-01)",
+    "NFTStaker/PriceScaled M-02 (emergencyWithdraw over-emission) — wont-fix owner-ack; Depletion immunity confirmed (ECON-EW-01)"
+  ],
+  "notFlagged_intentionalOrOwnerTrusted": [
+    "emergencyWithdraw skip-sync escape hatch (all three copies) — known-intentional, callable while paused (spec item 1/8)",
+    "depletion budget<windowSeconds floor-to-zero — documented protocol-favourable",
+    "depositFor tail _recomputeSchedule window-restart — onlyMigrator, migration-seeding primitive, owner-trusted orchestrator (Law 3, obvious)",
+    "WATCH-17 three-copy hand-maintenance coupling — operational hazard already carried in profiles/_DIVERGENCE_MAP.json; no unmirrored security fix at HEAD"
+  ]
+}

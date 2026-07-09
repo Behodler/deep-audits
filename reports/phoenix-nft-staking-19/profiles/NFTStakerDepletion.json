@@ -1,0 +1,65 @@
+{
+  "contract": "src/NFTStakerDepletion.sol",
+  "profileTimestamp": "2026-07-09",
+  "solidityVersion": "^0.8.20",
+  "role": "COPY #3 of NFTStaker. Replaces APY-target model with owner-set DEPLETION-WINDOW model (rate = budget/windowSeconds, totalStaked-INDEPENDENT). Adds a stable-staker-style migration lifecycle (PoolState Active/Migrating) and rescueERC20. Wired to Uniboost dispatcher (IUniboostMintDebtHook).",
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "ERC1155Holder", "IPausable", "INFTStakerMigratable"],
+  "verifiedProperties": {
+    "noUnboundedLoops": "batchMigrate loops accounts[] but onlyMigrator (owner/orchestrator) and batched off-chain",
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["stake","unstake","claim","emergencyWithdraw","initiateMigration","batchMigrate","userMigrate","depositFor"],
+    "accessControlled": {
+      "onlyOwner": ["setPauser","setMigrator","setDispatcherHook","setStakedId","setDispatcherIndex","setNFTMinter","setDepletionWindow","topUp","pullAndRefresh","rescueERC20","finalizeAndReset"],
+      "onlyPauser": ["pause","unpause"],
+      "onlyMigrator": ["initiateMigration","batchMigrate","depositFor"],
+      "permissionless": ["userMigrate (Migrating only, self)","emergencyWithdraw"]
+    },
+    "emptyPoolGuards": ["setStakedId","setDispatcherIndex","setNFTMinter"],
+    "solvencyInvariant": "balance == rewardBudget + committedDebt (via _updatePool/_safePayTo/_recomputeSchedule/rescueERC20 guard)"
+  },
+  "intendedDeltasVsBase": [
+    "hook typed IUniboostMintDebtHook (surface identical: pull()/mintDebt())",
+    "targetAPY/MAX_TARGET_APY/APY_PRECISION REMOVED; replaced by depletionWindowMonths, SECONDS_PER_MONTH (365d/12), MAX_DEPLETION_MONTHS (120)",
+    "setTargetAPY -> setDepletionWindow(months) [1..120], DepletionWindowChanged event",
+    "_recomputeSchedule rewritten: rate=budget/windowSeconds, windowEnd=now+windowSeconds, lastRewardTime=now; DROPS latestPrice/S/F price math; also SETS lastRewardTime (base does not set it in recompute)",
+    "_syncBudget DIVERGES: recomputes ONLY on inflow>0; no-hook branch just returns (base ALWAYS recomputes)",
+    "stake/unstake have NO tail _recomputeSchedule (rate is totalStaked-independent; base has tail recompute)",
+    "_safePay refactored into _safePay -> _safePayTo(account) (migration needs pay-to-arbitrary-account)",
+    "pendingReward/totalDebt add poolState==Migrating freeze guard",
+    "NEW: PoolState/migrator/migration primitives; rescueERC20 (rewardToken-guarded); Rescued event"
+  ],
+  "localFindings": [
+    {"id":"LOCAL-DEP-NOTE","type":"design-observation","severity":"local-info","function":"_syncBudget/_recomputeSchedule","description":"Every hook inflow>0 RESTARTS the full depletion window (windowEnd = now + windowSeconds) AND resets rate = budget/window. A single late mint resets the drain clock for existing stakers, lowering their per-second rate. Distinct from base (windowEnd naturally shrinks). Design-intended per NatSpec ('new NFT minted -> budget grew -> restart window (intended)') but the fairness/rate-dilution effect is cross-interaction: DEFER to econ-scanner.","recommendation":"econ-scanner: confirm window-restart-on-inflow cannot be griefed by dust mints to dilute existing stakers' emission rate."}
+  ],
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function":"stake/unstake/claim","access":"whenNotPaused nonReentrant","notes":"same accrual machinery as base BUT no tail recompute; _syncBudget recomputes only on inflow."},
+      {"function":"emergencyWithdraw()","access":"nonReentrant, callable while paused","notes":"known-intentional escape hatch, skips sync."},
+      {"function":"initiateMigration()","access":"onlyMigrator nonReentrant","notes":"require Active; _syncBudget (settle+sweep) then flip to Migrating; freezes emissions (_updatePool no-ops while Migrating)."},
+      {"function":"batchMigrate(address[])","access":"onlyMigrator nonReentrant","notes":"require Migrating; per-user _exitPosition (settle frozen pending via _safePayTo, zero position), aggregate ERC1155 safeTransferFrom(this->migrator). Idempotent. Callable while paused."},
+      {"function":"userMigrate()","access":"permissionless, require Migrating & own amount>0, nonReentrant","notes":"self-exit; CEI; returns own stake + settles pending."},
+      {"function":"depositFor(address,uint256)","access":"onlyMigrator nonReentrant","notes":"require Active; credits user, pulls ERC1155 from migrator, tail _recomputeSchedule. Callable while paused (seed fresh target)."},
+      {"function":"finalizeAndReset()","access":"onlyOwner, require Migrating & totalStaked==0","notes":"revive same staker to Active; fast-forwards lastRewardTime (no retro-accrual of frozen gap)."},
+      {"function":"rescueERC20(token,to,amount)","access":"onlyOwner","notes":"if token==rewardToken: _updatePool, transfer, require(balance>=committedDebt), _recomputeSchedule (invariant-safe surplus recovery). Else free transfer. Callable while paused."},
+      {"function":"setDepletionWindow(uint256)","access":"onlyOwner","notes":"months in [1,120]; settles at OLD rate first."},
+      {"function":"userInfo(address)","access":"view (INFTStakerMigratable getter)"}
+    ],
+    "externalCalls": [
+      {"target":"IUniboostMintDebtHook dispatcherHook","methods":["pull()","mintDebt()"],"trustLevel":"semi-trusted","notes":"UniboostMintDebtHook.pull() is onlyOwnerOrRecipient -> this staker MUST be hook.recipient or pull() reverts -> stake/unstake/claim/initiateMigration DoS. emergencyWithdraw+userMigrate escape. WIRING HAZARD - flag to interaction scanner."},
+      {"target":"IERC1155 stakedToken","methods":["safeTransferFrom"],"trustLevel":"semi-trusted","notes":"OUT transfers (unstake/emergency/batchMigrate/userMigrate) callback caller-controlled recipient; all nonReentrant."},
+      {"target":"IERC20 rewardToken (phUSD)","methods":["safeTransfer/From","balanceOf"],"trustLevel":"semi-trusted"}
+    ],
+    "valueMath": {
+      "rewardRate":"budget / windowSeconds (floor, UNSCALED). windowSeconds = depletionWindowMonths * (365d/12).",
+      "floorToZero":"budget < windowSeconds -> rate 0 (documented acceptable, protocol-favourable).",
+      "budget":"V > committedDebt ? V-committedDebt : 0 (M-01 clamp, retained)",
+      "roundingDirection":"floor favours protocol"
+    }
+  },
+  "trustAssumptions": [
+    "this staker is set as dispatcherHook.recipient (else pull()-path DoS)",
+    "migrator is the correct orchestrator (NFTStakerMigrator / InPlaceNFTStakerMigrator)",
+    "owner non-malicious"
+  ],
+  "complexity": {"loc":854,"externalEntryPoints":21,"stateVariables":18}
+}

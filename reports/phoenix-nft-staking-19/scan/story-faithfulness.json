@@ -1,0 +1,78 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-07-09T22:10:00Z",
+  "scanType": "story-faithfulness",
+  "headCommit": "321d0a9",
+  "mode": "full",
+  "storiesChecked": ["story-018", "story-019", "story-020"],
+  "verdicts": {
+    "story-020": "FAITHFUL + COMPLETE + SOLVENCY-SAFE for stake/unstake/claim (the M-01 exploit surface). Residual rate-drift-CLASS behaviour survives only on the onlyMigrator depositFor path (F-01) — trusted, value-conserving, not the permissionless exploit.",
+    "story-018": "FAITHFUL. Depletion-window emission model matches commit + NatSpec (rate = budget/windowSeconds, unscaled, price-math dropped, floor-to-zero documented, solvency preserved).",
+    "story-019": "FAITHFUL. Migration lifecycle (Active/Migrating, initiateMigration settle-and-freeze, batchMigrate/userMigrate exit, depositFor re-seed, finalizeAndReset revive, rescueERC20) matches the stable-staker analogue intent; commit body is terse but code conforms to the profiled design.",
+    "three-copy-parity": "NO unintended drift. story-020 correctly NOT mirrored to NFTStaker/NFTStakerPriceScaled: their APY model sizes rate on totalStaked (M-03), so their stake/unstake tail recompute is REQUIRED, whereas the depletion rate is totalStaked-independent so removing it is correct. All base<->copy deltas map to documented intended-delta lists per _DIVERGENCE_MAP.json."
+  },
+  "findings": [
+    {
+      "id": "F-01",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-020",
+      "severity": "low",
+      "contract": "src/NFTStakerDepletion.sol",
+      "function": "depositFor",
+      "line": 767, "lineStart": 748, "lineEnd": 768,
+      "specText": "story-020 (commit 321d0a9): \"drop the stake/unstake tail recomputes, so a bare stake/unstake/claim no longer resets the deadline or re-derives the budget-derived rate\" — motivated by the \"zero-inflow pull() is a no-op\" design invariant. depositFor NatSpec (line 765-767): \"Tail recompute: rate is budget/windowSeconds, totalStaked-independent, but pin windowEnd for parity with stake.\"",
+      "specSource": "git commit 321d0a9 body + src/NFTStakerDepletion.sol NatSpec L765-767",
+      "actualBehavior": "depositFor retains an unconditional tail `_recomputeSchedule()` (L767) that resets windowEnd = now + windowSeconds and re-derives rewardRate = budget/windowSeconds on every call. Both migrators invoke depositFor in a per-user loop (NFTStakerMigrator L102, InPlaceNFTStakerMigrator L226), so a multi-batch / multi-tx re-seed restarts the depletion window on each call. This is the SAME zero-inflow window-restart class that story-020 removed from stake/unstake — surviving on the migrator path.",
+      "deviation": "story-020 removed stake's tail recompute; depositFor's tail recompute was NOT removed, and its NatSpec still justifies it \"for parity with stake\" — a rationale story-020 invalidated (stake no longer recomputes). The stated parity no longer exists.",
+      "impactAssessment": "NOT a reintroduction of the M-01 exploit. M-01 was exploitable because the window reset was reachable via PERMISSIONLESS stake/unstake/claim. depositFor is onlyMigrator (trusted orchestrator), value-conserving (budget = V - committedDebt, _updatePool settles at old rate first) and solvency-safe (balance == rewardBudget + committedDebt preserved). The residual is a bounded, trusted-path window restart during migration re-seeding. Treat as an operational/faithfulness note, not a security escalation.",
+      "recommendation": "Either (a) drop the depositFor tail recompute to match stake/unstake (a fresh re-seed inherits the pool's existing window; owner re-arms via setDepletionWindow when a fresh window is genuinely intended), or (b) keep it as a deliberate migration-reseed window-restart and correct the NatSpec to say so (remove the now-false 'for parity with stake' justification). Cross-ref econ-scanner window-restart-on-inflow deferral (_DIVERGENCE_MAP deferToInteractionScanners + LOCAL-DEP-NOTE).",
+      "crossRef": "econ-scanner: depletion window-restart rate-dilution deferral",
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "F-02",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-020",
+      "severity": "qa",
+      "contract": "src/NFTStakerDepletion.sol",
+      "function": "_syncBudget",
+      "line": 421, "lineStart": 419, "lineEnd": 435,
+      "specText": "_syncBudget NatSpec (L419-422): \"If the hook is unset, behaves like a pure recompute (still useful after a state-changing config setter).\"",
+      "specSource": "src/NFTStakerDepletion.sol NatSpec L419-422",
+      "actualBehavior": "After story-020 the no-hook branch (L425-426) returns WITHOUT calling _recomputeSchedule — it is a pure _updatePool, not a recompute. The NatSpec description is now stale.",
+      "deviation": "Documentation-vs-code drift introduced by story-020: the docstring still describes the pre-fix behaviour.",
+      "impactAssessment": "No functional impact. Every config setter that needs a recompute (setDispatcherIndex L345, setNFTMinter L355, setDepletionWindow L369, topUp L381, rescueERC20 L408) calls _recomputeSchedule DIRECTLY and does not rely on _syncBudget's no-hook branch. pullAndRefresh with no hook has no budget change to recompute. Documentation-only.",
+      "recommendation": "Update the _syncBudget NatSpec to reflect that the no-hook branch now settles accrual only and does not recompute (config setters recompute directly).",
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "F-03",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-020",
+      "severity": "low",
+      "contract": "src/NFTStakerDepletion.sol",
+      "function": "finalizeAndReset / stake",
+      "line": 781, "lineStart": 778, "lineEnd": 784,
+      "specText": "story-020: bare stake no longer recomputes the schedule. finalizeAndReset NatSpec (L770-777): \"Return a fully-drained Migrating pool to Active so the SAME staker can be revived ... Fast-forwards lastRewardTime.\"",
+      "specSource": "git commit 321d0a9 + src/NFTStakerDepletion.sol L770-784, L539-558",
+      "actualBehavior": "finalizeAndReset revives the pool (poolState=Active, lastRewardTime=now) but does NOT recompute the schedule; windowEnd/rewardRate keep their pre-freeze values, which after a migration freeze are typically stale/in-the-past (currentRewardRate() returns 0 once block.timestamp >= windowEnd). Pre-story-020 the first post-revival stake() would auto-rearm via its tail recompute; post-story-020 stake() no longer recomputes, so a revived pool that resumes ORGANIC staking (no depositFor re-seed) emits nothing until the owner calls setDepletionWindow / topUp / a pull with inflow>0.",
+      "deviation": "Not a violation of any story acceptance criterion — it is the intended consequence of story-020 (stake must not reset the window). Surfaced as an operational hazard: the migration-revive path now requires an explicit owner window re-arm before organic emissions resume, where previously the first stake did it implicitly.",
+      "impactAssessment": "Low / operational. The intended InPlace flow re-seeds via depositFor (which DOES recompute, F-01), so the standard migration path self-heals. Only a revive-then-organic-stake sequence (no depositFor) exhibits the dormant-window; value is never lost (budget conserved), emissions merely pause until re-arm. Would a competent operator be surprised? Marginal — a frozen window is stale after any migration regardless. Footgun-grade.",
+      "recommendation": "Document that finalizeAndReset leaves the depletion window dormant and the owner must re-arm it (setDepletionWindow/topUp) before organic staking resumes emissions; or have finalizeAndReset recompute the schedule on revive.",
+      "lawImpacted": 2,
+      "confidence": "medium"
+    }
+  ],
+  "cleanBill": {
+    "story-020-completeness": "VERIFIED. Bare stake (L539-558), unstake (L560-575), claim (L577-586) now call only _syncBudget at head; _syncBudget (L423-435) does _updatePool (settle, never touches rate/windowEnd) then recomputes ONLY when hook pull() yields inflow>0. With zero inflow, windowEnd and rewardRate are untouched. Restart-on-mint preserved (inflow>0 -> _recomputeSchedule L432). Solvency-safe: skipping recompute cannot break balance==rewardBudget+committedDebt because _updatePool and _safePay each preserve it independently, and inflow==0 implies mintDebt was 0 so rewardBudget already equals balance-committedDebt (no stale re-size needed).",
+    "no-cross-copy-mirroring-needed": "story-020 must NOT be mirrored to NFTStaker/NFTStakerPriceScaled: their rate scales with totalStaked (APY model, M-03) so their stake/unstake tail recompute is load-bearing; removing it there would REINTRODUCE M-03. The divergence is correct and intended (_DIVERGENCE_MAP row: stake/unstake tail _recomputeSchedule = base/PriceScaled YES, depletion NO)."
+  }
+}

@@ -1,0 +1,232 @@
+{
+  "project": "phoenix-nft-staking",
+  "commit": "321d0a9",
+  "scanTimestamp": "2026-07-09T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scanMode": "cold-full",
+  "patternDbVersion": "1.1",
+  "patternsChecked": 35,
+  "scopeContracts": [
+    "src/NFTStaker.sol",
+    "src/BatchNFTMinter.sol",
+    "src/NFTStakerPriceScaled.sol",
+    "src/NFTStakerDepletion.sol",
+    "src/NFTStakerMigrator.sol",
+    "src/InPlaceNFTStakerMigrator.sol",
+    "src/INFTStakerMigratable.sol",
+    "script/DeployBatchNFTMinter.s.sol"
+  ],
+  "findingsCount": 4,
+  "findings": [
+    {
+      "id": "PM-19-001",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "type": "count-gated-pot-frontrun",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 232,
+      "description": "Nudge pot pays the FULL nudgePaymentToken balance to a caller-chosen `recipient` on a count-only gate (`count >= nudgeSize`), decoupled from the value the caller contributed. A permissionless actor who mints >= nudgeSize real mints first sweeps the entire externally-funded USDC pot. The `minReward` slippage floor added in this version only stops the LOSER from paying mint costs for a sniped reward (self-protection); it explicitly does NOT stop the front-run of the pot (see NatSpec lines 224-229). This is the KNOWN H-01/M-01 lineage (story-014 pinned the minter to close the fake-mint drain; the MEV front-run of a legitimately-funded pot + owner over-funding footgun survive per ledger).",
+      "confidence": "high",
+      "matchedSignatures": [
+        "balanceOf(address(this)) [line 274 nudge snapshot]",
+        "count >= _nudgeSize [line 273]",
+        "nudgeSize",
+        "IERC20(_nudgeTokenEntry).safeTransfer(recipient, nudgeAmount) [line 295]"
+      ],
+      "presentMitigations": [
+        "pot snapshotted BEFORE the mint loop (line 271-275) -> donate-forward, no same-tx self-refund (satisfies notVulnerableWhen 'pot snapshotted BEFORE the loop')",
+        "minter pinned to owner-set state (story-014) -> qualifying requires paying for >= nudgeSize real mints",
+        "minReward floor rolls back the whole batch if deliverable reward < floor"
+      ],
+      "missingMitigations": [
+        "recipient is still caller-chosen (vulnerableWhen)",
+        "payout still not bounded by the caller's own contributed value (vulnerableWhen) — whoever clears the count gate first takes the entire balance-based pot"
+      ],
+      "regression": "known-class",
+      "ledgerNote": "Reconcile against BatchNFTMinter nudge ledger entries (H-01 fixed story-014; MEV front-run + over-funding footgun previously accepted). Surfaced for sanitizer adjudication — do NOT auto-suppress; confirm the current minReward addition did not change the accepted boundary.",
+      "references": [
+        "memory: phoenix-nft-staking-batchminter-nudge"
+      ]
+    },
+    {
+      "id": "PM-19-002",
+      "source": "pattern-db",
+      "patternId": "REWARD-RUNWAY-DEPLETION",
+      "secondaryPatternId": "REWARD-ACCRUAL-ORDER",
+      "type": "stale-rewardRate-after-emergencyWithdraw",
+      "severity": "potential-medium",
+      "contract": "src/NFTStaker.sol",
+      "function": "emergencyWithdraw",
+      "line": 538,
+      "description": "emergencyWithdraw decrements `totalStaked` (line 545) but does NOT call `_recomputeSchedule` — unlike `stake`/`unstake` which both re-size the rate against the new pool via a tail recompute (lines 455, 476). In the APY model `rewardRate = S * targetAPY / SECONDS_PER_YEAR` with `S = totalStaked * latestPrice`, so after an emergency exit the rate stays sized for the OLD (larger) pool while `_updatePool` divides `elapsed * rewardRate` by the now-smaller `totalStaked`, over-emitting to the surviving stakers (bounded by rewardBudget) until the next stake/unstake/claim recompute. This is the known M-02 class.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "totalStaked -= amount; [line 545, no following _recomputeSchedule]",
+        "rewardRate",
+        "windowEnd",
+        "committedDebt"
+      ],
+      "presentMitigations": [
+        "any subsequent stake/unstake/claim triggers a recompute that re-sizes the rate",
+        "over-emission is bounded by rewardBudget (cannot exceed funded budget) and _safePay reverts on true shortfall"
+      ],
+      "missingMitigations": [
+        "no recompute at the point totalStaked changes in emergencyWithdraw (accrual settled at OLD rate against NEW smaller pool between exit and next interaction)"
+      ],
+      "regression": "known-class",
+      "ledgerNote": "This is M-02 (run-16), owner-acknowledged WON'T-FIX (deployed + no migrate-on-behalf, pullAndRefresh mitigation). Surfaced explicitly per regression policy; sanitizer/ledger reconciles to won't-fix.",
+      "references": [
+        "memory: phoenix-nft-staking-emergencywithdraw-overemission"
+      ]
+    },
+    {
+      "id": "PM-19-003",
+      "source": "pattern-db",
+      "patternId": "REWARD-RUNWAY-DEPLETION",
+      "secondaryPatternId": "REWARD-ACCRUAL-ORDER",
+      "type": "stale-rewardRate-after-emergencyWithdraw",
+      "severity": "potential-medium",
+      "contract": "src/NFTStakerPriceScaled.sol",
+      "function": "emergencyWithdraw",
+      "line": 577,
+      "description": "Same M-02 class as PM-19-002, present in the HAND-MAINTAINED PriceScaled copy: emergencyWithdraw (line 577) reduces `totalStaked` (line 584) without a tail `_recomputeSchedule`, while stake/unstake carry the tail recompute (lines 494, 515). PriceScaled uses the identical APY rate model (`S = totalStaked * latestPrice * priceScale`), so the stale-rate over-emission window is identical. Flagged separately because the two files are maintained independently (fork-drift watch): a fix to NFTStaker.emergencyWithdraw would NOT auto-propagate here.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "totalStaked -= amount; [line 584, no following _recomputeSchedule]",
+        "rewardRate",
+        "windowEnd"
+      ],
+      "presentMitigations": [
+        "next stake/unstake/claim recompute re-sizes rate",
+        "bounded by rewardBudget; _safePay reverts on shortfall"
+      ],
+      "missingMitigations": [
+        "no recompute at the totalStaked mutation in emergencyWithdraw"
+      ],
+      "regression": "known-class-fork-copy",
+      "ledgerNote": "Same root cause as M-02; PriceScaled is the story-017 clone. Reconcile with M-02 won't-fix but confirm the copy is covered by the same acknowledgement (memory watch-note: NFTStaker fixes must be manually mirrored to PriceScaled + Depletion).",
+      "references": [
+        "memory: phoenix-nft-staking-run17-notes",
+        "memory: phoenix-nft-staking-emergencywithdraw-overemission"
+      ]
+    },
+    {
+      "id": "PM-19-004",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC721-RECEIVE",
+      "type": "unguarded-mint-hook-reentrancy",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 280,
+      "description": "batchMint has NO ReentrancyGuard/nonReentrant (BatchNFTMinter does not inherit ReentrancyGuard) yet its mint loop calls `nftMinter.mint(_dispatcherIndex, recipient)` (line 281), which mints an ERC1155 to a caller-controlled `recipient` and therefore invokes `onERC1155Received` on that recipient MID-LOOP, before the nudge pot is paid (line 295) and before the dust refund (line 299-305). This is the classic inbound-receive-hook reentrancy surface the pattern codifies. The nudge pot is snapshotted BEFORE the loop, and any reentrant batchMint would (a) re-read the snapshot, and (b) execute `forceApprove(nftMinter, 0)` which zeroes the allowance the outer loop still depends on, causing the outer mint to revert — so the current mitigations appear to make reentry self-defeating (revert, no drain). Flagged as a pattern match (confidence that the surface exists is high; confidence that it is EXPLOITABLE is medium/low) — recall over tidiness: manual verification of the nested-approval / nested-pot interaction is warranted before dismissing.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "nftMinter.mint(_dispatcherIndex, recipient) [line 281 — ERC1155 mint to caller-controlled recipient]",
+        "no nonReentrant on batchMint",
+        "nudge pot transfer + dust refund AFTER the mint loop (state/value moves post-hook)"
+      ],
+      "presentMitigations": [
+        "nudge pot snapshotted BEFORE the loop (line 271-275)",
+        "nested forceApprove(nftMinter,0) breaks the outer loop's max allowance -> outer mint reverts on reentry",
+        "final safeTransfer of the pot reverts if balance insufficient (a nested payout would drain balance and revert the outer transfer)"
+      ],
+      "missingMitigations": [
+        "no explicit reentrancy guard — safety relies entirely on the snapshot-before-loop + allowance-revert emergent behaviour, which is fragile to future edits (e.g. moving the approval or making it per-call)"
+      ],
+      "regression": "new-observation",
+      "ledgerNote": "Confirm against prior BatchNFTMinter reviews (H-01 story-014 concerned the caller-supplied minter, a different vector). Recommend adding nonReentrant defensively even if currently non-exploitable.",
+      "references": []
+    }
+  ],
+  "manualReviewCount": 4,
+  "manualReview": [
+    {
+      "id": "PM-19-L1",
+      "source": "pattern-db",
+      "patternId": "UNSAFE-DOWNCAST",
+      "relatedPattern": "config-magnitude-footgun",
+      "type": "priceScale-magnitude-footgun",
+      "severity": "potential-low",
+      "contract": "src/NFTStakerPriceScaled.sol",
+      "function": "_recomputeSchedule / constructor",
+      "line": 435,
+      "description": "Immutable `priceScale` multiplies `latestPrice` (line 435) with no upper bound beyond the constructor `!= 0` guard. A deployer who sets the wrong magnitude (e.g. 1e12 vs 1 for an 18dp dispatcher, or 1e18) swings the emission rate / notional by orders of magnitude, and `totalStaked * latestPrice` overflow is only argued safe for `priceScale <= 1e12` (NatSpec lines 407-411). Non-obvious owner footgun (Law 3 operational hazard). This is the known L-08.",
+      "confidence": "low",
+      "regression": "known-class",
+      "ledgerNote": "Matches L-08 (run-17). Route to triage; do not re-escalate above Low.",
+      "references": ["memory: phoenix-nft-staking-run17-notes"]
+    },
+    {
+      "id": "PM-19-L2",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-READONLY",
+      "type": "stale-rate-view-window-during-erc1155-receive",
+      "severity": "potential-low",
+      "contract": "src/NFTStaker.sol / src/NFTStakerPriceScaled.sol",
+      "function": "unstake",
+      "line": 471,
+      "description": "unstake performs the outbound ERC1155 `safeTransferFrom(this -> msg.sender)` (line 471 / PriceScaled 510) — invoking `onERC1155Received` on a caller-controlled recipient — BEFORE the tail `_recomputeSchedule` (line 476 / 515). During that callback `totalStaked` is already decremented but `rewardRate`/`windowEnd` still reflect the old pool, so value-reporting views (`pendingReward`, `currentRewardRate`, `totalDebt`, `runwaySeconds`) return a transiently inconsistent snapshot. State-changing reentry is blocked by `nonReentrant`; impact requires an external integrator that prices off these views mid-callback — none is known. Surfaced for completeness (Law 1: the victim of read-only reentrancy is the downstream integrator, not this contract).",
+      "confidence": "low",
+      "regression": "new-observation",
+      "ledgerNote": "No known downstream consumer of these views as an oracle. Low/likely-informational; confirm no integrator reads staker views for collateral valuation.",
+      "references": []
+    },
+    {
+      "id": "PM-19-L3",
+      "source": "pattern-db",
+      "patternId": "CENTRALIZATION-ADMIN",
+      "relatedPattern": "deploy-config-footgun",
+      "type": "assumed-dispatcher-index-and-unverified-nudge-token",
+      "severity": "potential-low",
+      "contract": "script/DeployBatchNFTMinter.s.sol",
+      "function": "run",
+      "line": 48,
+      "description": "DISPATCHER_INDEX is hardcoded ASSUMED = 4 (line 48, NatSpec admits the operator must confirm against the live minter) and USDC is hardcoded as the nudge token. The broadcast guards check `USDC != TOKEN_MINTER` and `nudgeSize != 0` but do NOT verify on-chain that the nudge token (USDC) differs from the pinned dispatcher's `primeToken()` — that invariant is only enforced at batchMint runtime (revert), not at deploy. A wrong DISPATCHER_INDEX pins the batcher to the wrong dispatcher / payment asset. Non-obvious operator footgun; the script mitigates by documenting the required manual confirmation and by the runtime guard.",
+      "confidence": "low",
+      "regression": "new-observation",
+      "ledgerNote": "Operational/deploy hazard, not a contract bug. Route to QA/triage.",
+      "references": []
+    },
+    {
+      "id": "PM-19-L4",
+      "source": "pattern-db",
+      "patternId": "REWARD-RUNWAY-DEPLETION",
+      "type": "depositFor-unconditional-window-restart",
+      "severity": "potential-low",
+      "contract": "src/NFTStakerDepletion.sol",
+      "function": "depositFor",
+      "line": 767,
+      "description": "story-020 (@321d0a9) correctly removed the bare stake/unstake tail recomputes and gated `_syncBudget` recompute on `inflow > 0`, closing the M-01 rate-drift in user paths (verified against the fix diff). However `depositFor` (migrator-only, Active-only) RETAINS an unconditional tail `_recomputeSchedule` (line 767) which resets `windowEnd = now + windowSeconds` and re-derives `rate = budget/windowSeconds` on every call. This is NOT the M-01 exploit class (not user-triggerable, not a bare interaction) — it is the intended post-migration window restart — but it is the one surviving unconditional recompute in a non-mint path and is called this cleanly. Flagged as a fork-drift / completeness watch-note, not a live finding.",
+      "confidence": "low",
+      "regression": "fix-verification-residual",
+      "ledgerNote": "M-01 fix confirmed faithful in user paths. depositFor recompute is intended migration semantics; confirm it is not repeatably invocable to grief the window.",
+      "references": []
+    }
+  ],
+  "patternsSkipped": [
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "reason": "note: C4 treats as QA/known-issue. No user-facing approve(non-zero,non-zero) race; BatchNFTMinter uses internal forceApprove(max)->forceApprove(0) around its own mint loop. No HM twist. Skipped as primary finding per SKIP RULE."
+    }
+  ],
+  "patternsCheckedNoMatch": [
+    "ERC4626-INFLATION", "ORACLE-STALE", "ORACLE-ROUNDID", "REENTRANCY-ERC777",
+    "SIGNATURE-REPLAY", "FLASH-LOAN-PRICE", "UNSAFE-DOWNCAST (core paths; see PM-19-L1 for priceScale footgun)",
+    "DIVISION-PRECISION", "UNPROTECTED-INIT", "STORAGE-COLLISION", "MISSING-SLIPPAGE",
+    "RETURN-VALUE-IGNORE (SafeERC20 used throughout)", "SELFDESTRUCT-FORCE-ETH",
+    "DOS-UNBOUNDED-LOOP (batchMint count / batchMigrate / migrateIn slices are caller-batched or paginated; batchMint large-count is self-DoS only)",
+    "DOUBLE-VOTING", "PERMIT-FRONTRUN", "FIRST-DEPOSITOR-ATTACK",
+    "INCORRECT-OPERATOR (claimTimedOut >= and currentRewardRate >= boundaries checked, semantically correct)",
+    "CROSS-CHAIN-REPLAY", "TIMELOCK-BYPASS", "EMISSION-WINDOW-BOUNDARY (elapsed capped at min(now,windowEnd)-lastRewardTime in all three stakers; empty-pool accrues nothing)",
+    "MINT-ON-DEMAND-OVERMINT (single _updatePool writer folds exactly elapsed*rate; _safePay reverts on shortfall; no user-influenced mint amount in staker — mint occurs in dispatcher hook, OOS)",
+    "YIELD-PRINCIPAL-ACCOUNTING-SKEW (no yield strategy; migration moves exact ERC1155 amounts, no requested-vs-received gap — INFTStakerMigratable NatSpec confirms no (R,P) haircut)",
+    "TWO-STEP-COMMIT-WINDOW", "REENTRANCY-CROSS-FUNCTION (single contract-wide nonReentrant covers stake/unstake/claim/emergencyWithdraw/migration primitives in stakers; BatchNFTMinter covered by PM-19-004)",
+    "ROUNDING-DIRECTION (all floor rounding in protocol favour; NatSpec explicitly forbids flipping rate/runway sites to ceiling; dust escape into rewardBudget is protocol-favourable)",
+    "WEAK-PRNG (no randomness / rarity roll in scope)",
+    "FEE-ON-TRANSFER-ACCOUNTING (reward token is phUSD, staked token is ERC1155; no arbitrary-ERC20 deposit accounting; _syncBudget measures balance delta for inflow)"
+  ],
+  "errors": []
+}

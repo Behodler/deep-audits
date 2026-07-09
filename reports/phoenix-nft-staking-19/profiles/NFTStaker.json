@@ -1,0 +1,53 @@
+{
+  "contract": "src/NFTStaker.sol",
+  "profileTimestamp": "2026-07-09",
+  "solidityVersion": "^0.8.20",
+  "role": "BASE reference of the three hand-maintained NFTStaker copies (APY-target emission model). Wired to BalancerPoolerV2 dispatcher via IBalancerPoolerMintDebtHook.",
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "ERC1155Holder", "IPausable"],
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["stake", "unstake", "claim", "emergencyWithdraw"],
+    "accessControlled": {
+      "onlyOwner": ["setPauser","setDispatcherHook","setStakedId","setDispatcherIndex","setNFTMinter","setTargetAPY","topUp","pullAndRefresh"],
+      "onlyPauser": ["pause","unpause"]
+    },
+    "initializerProtected": "N/A (constructor-based, non-upgradeable)",
+    "emptyPoolGuards": ["setStakedId","setDispatcherIndex","setNFTMinter"],
+    "solvencyInvariant": "balance == rewardBudget + committedDebt (maintained by _updatePool/_safePay/_recomputeSchedule/topUp/emergencyWithdraw)"
+  },
+  "localFindings": [],
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function":"stake(uint256)","access":"whenNotPaused nonReentrant","stateChanges":["users","totalStaked","accRewardPerShare","rewardBudget","committedDebt","rewardRate","windowEnd","lastRewardTime"],"externalCalls":["dispatcherHook.pull()","rewardToken.balanceOf","nftMinter.configs","stakedToken.safeTransferFrom(from=user,to=this)","rewardToken.safeTransfer(pending)"],"notes":"head _syncBudget (settle at OLD rate) then tail _recomputeSchedule (resize R vs new totalStaked). ERC1155 transfer INTO this (callback fires on ERC1155Holder self = safe)."},
+      {"function":"unstake(uint256)","access":"whenNotPaused nonReentrant","stateChanges":["users","totalStaked","...schedule"],"externalCalls":["dispatcherHook.pull()","rewardToken.safeTransfer","stakedToken.safeTransferFrom(from=this,to=msg.sender)","_recomputeSchedule reads nftMinter.configs"],"notes":"ERC1155 transfer OUT to msg.sender -> onERC1155Received callback to caller-controlled address, BUT under nonReentrant and tail _recomputeSchedule runs AFTER transfer. Guard blocks reentry."},
+      {"function":"claim()","access":"whenNotPaused nonReentrant","stateChanges":["users.rewardDebt","schedule"],"externalCalls":["dispatcherHook.pull()","rewardToken.safeTransfer"],"notes":"no tail recompute (totalStaked unchanged)."},
+      {"function":"emergencyWithdraw()","access":"nonReentrant (NO whenNotPaused - callable while paused)","stateChanges":["users","totalStaked","committedDebt","rewardBudget"],"externalCalls":["stakedToken.safeTransferFrom(from=this,to=msg.sender)"],"notes":"INTENTIONAL escape hatch: skips _syncBudget/_updatePool, forfeits pending (recycled to rewardBudget). Known-intentional, do NOT flag."},
+      {"function":"topUp(uint256)","access":"onlyOwner","externalCalls":["rewardToken.safeTransferFrom(owner)","_recomputeSchedule"],"notes":"does NOT call _syncBudget (hook-independence). _updatePool then transfer then recompute."},
+      {"function":"pullAndRefresh()","access":"onlyOwner","externalCalls":["dispatcherHook.pull()"]},
+      {"function":"setTargetAPY(uint256)","access":"onlyOwner","notes":"bounded <= MAX_TARGET_APY (0.5e18); 0 allowed (pause-via-APY); settles at OLD rate via _updatePool first."},
+      {"function":"setDispatcherIndex/setNFTMinter/setStakedId","access":"onlyOwner + require(totalStaked==0)","notes":"empty-pool gated (known-intentional)."},
+      {"function":"pendingReward/currentRewardRate/totalDebt/totalBudget/runwaySeconds","access":"view"}
+    ],
+    "externalCalls": [
+      {"target":"IBalancerPoolerMintDebtHook dispatcherHook","methods":["pull()","mintDebt()"],"trustLevel":"semi-trusted (owner-set, sibling yield-claim-nft)","notes":"pull() mints phUSD to this. If hook set but this contract is NOT the hook recipient, pull() may revert -> stake/unstake/claim DoS. emergencyWithdraw escapes. Cross-contract auth = defer to interaction scanner."},
+      {"target":"INFTSupply nftMinter","methods":["configs(dispatcherIndex)"],"trustLevel":"semi-trusted (owner-set = NFTMinterV2)","notes":"returns NEXT mint price; latestPrice = price/r recovered."},
+      {"target":"IERC20 rewardToken (phUSD)","methods":["safeTransfer","safeTransferFrom","balanceOf"],"trustLevel":"semi-trusted","notes":"assumes standard ERC20, no fee-on-transfer."},
+      {"target":"IERC1155 stakedToken","methods":["safeTransferFrom"],"trustLevel":"semi-trusted (NFTMinterV2 ERC1155)","notes":"OUT transfers to users trigger onERC1155Received on caller-controlled address; all under nonReentrant."}
+    ],
+    "valueMath": {
+      "rewardRate":"R = mulDiv(S*targetAPY, 1e18) / SECONDS_PER_YEAR where S = totalStaked*latestPrice (M-03 staked-subset). floor, conservative-for-protocol.",
+      "latestPrice":"price==0 ->0; growthBP==0 -> price; else price.mulDiv(1e18, 1e18+growthBP*1e14)",
+      "budget":"V > committedDebt ? V-committedDebt : 0 (M-01 clamp)",
+      "runway":"budget/newRate (floor); windowEnd = now + runway",
+      "roundingDirection":"all floors favour protocol (documented DO-NOT-flip-to-ceiling)"
+    }
+  },
+  "trustAssumptions": [
+    "dispatcherHook is owner-set and this contract is its pull() recipient",
+    "nftMinter == NFTMinterV2 returning honest configs()",
+    "rewardToken/stakedToken standard (no fee-on-transfer, no rebasing)",
+    "owner non-malicious (Law 3)"
+  ],
+  "complexity": {"loc":621,"externalEntryPoints":13,"stateVariables":15}
+}

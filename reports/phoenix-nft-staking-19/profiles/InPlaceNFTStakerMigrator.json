@@ -1,0 +1,42 @@
+{
+  "contract": "src/InPlaceNFTStakerMigrator.sol",
+  "profileTimestamp": "2026-07-09",
+  "solidityVersion": "^0.8.20",
+  "role": "Rewires dispatcherIndex/hook on a SINGLE live NFTStakerDepletion in place (source == target). Parks ERC1155 in own custody across the empty-pool reset, re-injects into the SAME immutable staker. Timeout escape hatch returns parked stake to user.",
+  "inheritanceChain": ["Ownable", "ReentrancyGuard", "ERC1155Holder"],
+  "verifiedProperties": {
+    "noUnboundedLoops": "migrateOut loops users[] (onlyOwner); migrateIn is PAGINATED via [start,end) with memory-snapshot-first; parkedUsersRange paginated views",
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["migrateOut","migrateIn","claimTimedOut"],
+    "accessControlled": {
+      "onlyOwner": ["initiateMigration","migrateOut","migrateIn","rescueERC20","rescueERC1155"],
+      "permissionless": ["claimTimedOut (self-only, after timeout)"]
+    }
+  },
+  "immutables": ["staker (source==target, immutable = anti-drain)","stakedToken","stakedId","migrationTimeout [1d,30d]"],
+  "invariants": {
+    "totalParked":"Sum(parked[*]); FLOOR that rescueERC1155(stakedId) can never cross (surplus = balance - totalParked)",
+    "parkedSet":"manual swap-remove set (_parkedUsers + 1-based _parkedIndex) - OZ EnumerableSet needs 0.8.24, this targets 0.8.20",
+    "CEI":"migrateIn/claimTimedOut zero parked state BEFORE ERC1155 transfer, under nonReentrant"
+  },
+  "localFindings": [
+    {"id":"LOCAL-IP-NOTE","type":"design-observation","severity":"local-info","function":"migrateIn/claimTimedOut race","description":"Timeout hatch (MIN_TIMEOUT 1d) and operator migrateIn can race: a user whose timeout elapsed can claimTimedOut to pull parked stake back to their wallet before the operator re-injects. This is intended (documented escape hatch) - not a bug, but a parked user reclaiming stops re-injection for that user (they must re-stake manually). Prior-run L-01/UBC-02 class: non-atomic resume can leave a user un-rewired. DEFER cross-run reconciliation.","recommendation":"interaction/script scanner: confirm operator completes migrateIn within timeout window; a claimed-out user is correctly skipped (parked==0 -> continue, no double-pay). Verified: migrateIn skips amt==0 with no revert."}
+  ],
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function":"initiateMigration()","access":"onlyOwner","externalCalls":["staker.initiateMigration()"]},
+      {"function":"migrateOut(address[])","access":"onlyOwner nonReentrant","externalCalls":["staker.batchMigrate(users)"],"stateChanges":["parked","migrationBegin","_parkedUsers","_parkedIndex","totalParked"],"notes":"batchMigrate settles+mints phUSD to users and transfers aggregate ERC1155 to this contract; records per-user park + timeout anchor. Idempotent."},
+      {"function":"migrateIn(start,end)","access":"onlyOwner nonReentrant","externalCalls":["stakedToken.setApprovalForAll(staker,true/false)","staker.depositFor(user,amt) xN"],"notes":"requires staker back in Active (owner ran finalizeAndReset + rewire). Snapshot slice first; CEI per user; skips already-claimed (amt==0). Re-injection ONLY into immutable staker."},
+      {"function":"claimTimedOut()","access":"permissionless self, nonReentrant","notes":"require parked>0 && now >= migrationBegin+timeout; CEI; returns STAKE ONLY (phUSD already minted at migrateOut)."},
+      {"function":"rescueERC20(token,to,amount)","access":"onlyOwner","notes":"unconditional ERC20 sweep - parked principal is ERC1155 so structurally untouchable by ERC20 path."},
+      {"function":"rescueERC1155(id,to,amount)","access":"onlyOwner","notes":"id==stakedId: amount <= balance - totalParked (surplus only, floor-protected); other ids: full balance."},
+      {"function":"parkedUserCount/parkedUsersRange/claimableAt","access":"view"}
+    ],
+    "externalCalls": [
+      {"target":"INFTStakerMigratable staker","methods":["initiateMigration","batchMigrate","depositFor"],"trustLevel":"trusted (immutable, owner-deployed)"},
+      {"target":"IERC1155 stakedToken","methods":["safeTransferFrom","setApprovalForAll","balanceOf"],"trustLevel":"semi-trusted"}
+    ]
+  },
+  "trustAssumptions": ["staker.stakedId matches this.stakedId","operator runs finalizeAndReset + rewire between migrateOut and migrateIn","timeout window sized so operator completes before users claim out"],
+  "complexity": {"loc":322,"externalEntryPoints":8,"stateVariables":7}
+}
