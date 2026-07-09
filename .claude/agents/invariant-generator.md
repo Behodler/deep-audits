@@ -85,6 +85,14 @@ Minimal `workspace/<project>/medusa.json`:
 
 Any failing invariant or assertion (from Foundry **or** Medusa/Echidna) = a HIGH-severity finding carrying the shrunk counterexample sequence. If a tool is unavailable, note it and proceed with the others.
 
+**Honesty rule:** a *passing* invariant campaign is "no counterexample found in N runs" —
+**absence of evidence, not proof of safety**. Record the run depth (`fuzz_runs`, `testLimit`)
+so a clean result is read as "held under M sequences / N calls", never as "proven safe".
+Only Halmos `[PASS]` (symbolic-analyzer) is a proof; fuzzing is bug-finding. Do not let a
+green fuzz run be summarized as "verified safe" in the report — that smuggles false safety.
+An invariant that matters but only fuzzed shallowly is a candidate to hand to the
+symbolic-analyzer for an actual proof.
+
 ## INVARIANT PATTERNS
 
 ### Balance Conservation

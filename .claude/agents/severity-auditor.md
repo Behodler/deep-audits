@@ -169,9 +169,36 @@ mkdir -p reports/<project>
 | Medium | High | Medium | Medium | Low |
 | Low | Medium | Medium | Low | Low |
 
+## SYMMETRY RULE (Law 1 — read before applying the skepticism below)
+
+This is a **self-audit protecting user funds**, not a contest where over-claiming costs
+points. The two errors are **not** equally cheap:
+
+- **Overstating** (Medium dressed as High): costs reviewer time. Annoying, recoverable.
+- **Understating** (real High downgraded to Medium/Low, or a valid finding waved off): can
+  leave a live exploit in production. Under Law 1 this is the **worse** error.
+
+So downgrade pressure is a tool for accuracy, **not** a default. Apply it to remove genuine
+overstatement — never to make a report look calmer. When a downgrade and an as-is call are
+both defensible, **do not downgrade**; keep the higher severity and flag it for human triage
+with your reasoning. A downgrade must be affirmatively justified (missing attack path, real
+external precondition), not chosen because "most findings are Medium." Actively look for
+**understatement** too: a Low that risks assets, a Medium that is actually direct theft, an
+impact the author under-described. Understatement is a finding about the finding — surface it.
+
 ## CRITICAL RULES
-1. **Be skeptical of High claims** - Most findings are Medium or lower
-2. **Check attack path** - Hypotheticals disqualify High
-3. **Verify PoC impact** - Does it match claimed severity?
-4. **External conditions = Medium** - Not High
-5. **Document disagreements** - Clear reasoning required
+1. **Skepticism is a scalpel, not a thumb on the scale** — challenge High claims that lack a
+   concrete attack path, but never downgrade a defensible High just to lower the count.
+   Understating a real High is a Law-1 miss (a possible live exploit), worse than overstating.
+2. **Check attack path** — genuine hand-wavy hypotheticals disqualify High; a concrete,
+   PoC-backed path does not, even if the impact is large.
+3. **Verify PoC impact** — does it match claimed severity? Mismatch cuts **both** ways
+   (too weak → downgrade; understated → upgrade).
+4. **External conditions = Medium** — but only *real, attacker-uncontrolled* preconditions.
+   A condition the attacker can themselves create (flash loan, self-funded, a permissionless
+   call they make) is **not** an external precondition and does not cap severity at Medium.
+5. **Upgrade when warranted** — a Low touching assets, or a Medium that is actually direct
+   theft, must be raised. The upgrade path is first-class, not a footnote.
+6. **When genuinely borderline, keep the higher severity and flag for human triage** — do not
+   silently pick the lower one.
+7. **Document disagreements** — clear reasoning required in both directions.

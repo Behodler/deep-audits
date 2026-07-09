@@ -71,6 +71,29 @@ You receive:
 - **Callback Exploitation**: Malicious callbacks from external contracts
 - **Call Sequence Attacks**: Exploiting ordering between cross-contract calls
 
+### Reentrancy-Class Checklist (MANDATORY — do not skip a row)
+
+A single `nonReentrant` guard does **not** cover all of these. For every value-handling
+or state-mutating external-facing function, walk this table explicitly and record which
+rows you cleared and why. A row you cannot rule out is a finding (or a manual-review
+item), never a silent pass. Per Law 1, an uncleared row is a recall risk.
+
+| Class | What to look for | Why a guard often misses it |
+|---|---|---|
+| **Classic single-fn reentrancy** | `.call{value:}` / external transfer before the function's own state update | (profiler flags local guards; you confirm the callback is exploitable) |
+| **Cross-contract reentrancy** | A→B→A where A's state isn't settled before calling B | B's callback re-enters a *different* A function than the guarded one |
+| **Cross-function reentrancy** | Reentry into a *sibling* function that shares state (e.g. `withdraw` re-enters `transfer`/`claim`) reading stale balances | Per-function guards don't share a lock across the sibling set unless the guard is contract-wide |
+| **Read-only reentrancy** | An external/public **view** (price, share-price, `totalAssets`, exchange rate, collateral value) read by *another* protocol mid-callback while this contract's state is transiently inconsistent | `nonReentrant` guards state-changing fns but almost never the view getters; the victim is a downstream integrator |
+| **ERC721 receive-hook reentrancy** | `_safeMint` / `safeTransferFrom` / `_safeTransfer` invoking `onERC721Received` on an attacker-controlled recipient before mint accounting, supply, or price is finalized | The hook is an *inbound* call the author may not think of as "an external call"; classic NFT-mint reentry and mint-price manipulation |
+| **ERC1155 receive-hook reentrancy** | `_mint`/`_mintBatch`/`safeTransferFrom` invoking `onERC1155Received`/`onERC1155BatchReceived` before accounting settles | same as above, plus batch amplifies impact |
+| **ERC777 tokensReceived / tokensToSend** | value token with ERC777 hooks used in transfer/transferFrom paths | inbound hook fires mid-transfer |
+
+For read-only reentrancy specifically: enumerate this contract's public/external **view**
+functions that other contracts are likely to consume as an oracle/price, and check whether
+any is readable during a window where this contract has made an external call but not yet
+restored its invariant. Flag it even if *this* contract is safe — the exploit lands on the
+integrator, and this is DeFi (Law 1).
+
 ### Multi-Contract State Analysis
 - **State Consistency**: State changes across contracts that should be atomic
 - **Cross-Contract Invariants**: Invariants that span multiple contracts

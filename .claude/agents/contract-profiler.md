@@ -140,6 +140,23 @@ For each contract, verify and report on:
 - [ ] **Access Control**: Modifier coverage on sensitive functions
 - [ ] **Initializer Protection**: For upgradeable contracts
 - [ ] **Pause Mechanism**: Emergency stop capability
+- [ ] **Weak Randomness (local finding)**: any use of `block.timestamp`, `block.prevrandao`,
+      `blockhash`, `block.number`, `block.difficulty`, or `msg.sender`/`nonce` as an entropy
+      source for a value-bearing outcome (NFT trait/rarity roll, mint ordering, winner
+      selection, lottery). This is miner/validator- and same-tx-predictable — flag as a
+      local finding (it is exploitable without cross-contract context). Directly relevant to
+      any minting/staking suite.
+
+### Inbound-Callback Surface (report for downstream interaction analysis)
+- [ ] **ERC721/1155 receive hooks**: does the contract call `_safeMint` / `safeTransferFrom`
+      / `_safeTransfer` (→ `onERC721Received`) or `_mint`/`_mintBatch`/`safeTransferFrom`
+      (→ `onERC1155Received`/`onERC1155BatchReceived`)? These are **inbound external calls
+      to an attacker-controlled recipient** — record each site in `interfaceAbstraction.
+      externalCalls` with `trustLevel: "untrusted"` and note whether mint/supply/price/
+      accounting is finalized **before** the hook fires. Do not adjudicate exploitability
+      (that's code-scanner's reentrancy checklist) — but you MUST surface the site, or the
+      interaction scanner is blind to it.
+- [ ] **ERC777 hooks**: value token with `tokensReceived`/`tokensToSend` in a transfer path.
 
 ### Storage Safety
 - [ ] **Uninitialized Storage**: Dangerous defaults
@@ -154,6 +171,7 @@ Flag issues that are **exploitable without cross-contract interaction**:
 - Unguarded initializers
 - Arithmetic errors in pure calculations
 - Storage collision in single contract
+- Weak randomness driving a value-bearing outcome (block/tx-derived entropy)
 
 ## WHAT TO DEFER TO INTERACTION ANALYSIS
 

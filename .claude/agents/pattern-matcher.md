@@ -85,13 +85,17 @@ Write to: `<reportDir>/pattern-matches.json`
   "project": "phoenix-nft-staking",
   "scanTimestamp": "2026-05-24T10:00:00Z",
   "scanType": "pattern-matching",
-  "patternsChecked": 22,
+  "patternsChecked": 35,
   "findingsCount": 5,
   "findings": [...],
   "manualReviewCount": 3,
   "manualReview": [ /* low-confidence matches, same record shape, confidence:"low" — routed, not dropped */ ]
 }
 ```
+
+> **`patternsChecked` is illustrative — do NOT hardcode it.** Emit the actual number of
+> patterns you loaded from `patterns/vulnerability-patterns.json` this run (the DB grows).
+> Also record `patternsSkipped` with the ids and the reason each was skipped.
 
 ## SEVERITY MAPPING
 
@@ -131,9 +135,51 @@ For each match, also check:
 | UNPROTECTED-INIT | `initialize(` | Look for `initializer` modifier |
 | MISSING-SLIPPAGE | `swap(` | Look for `minAmountOut` param |
 
+## STAKING-YIELD PATTERNS: GENERAL + REGRESSION HOOKS
+
+The 7 `category: "staking-yield"` patterns carry **two kinds of signature**: general
+MasterChef/accumulator identifiers (`accRewardPerShare`, `rewardDebt`, `_updatePool`,
+`rewardRate`) that match any yield-farm fork, **and** Phoenix-specific regression hooks
+(`accPhusdPerShare`, `nudgeSize`, `phusdPerSecond`, `phUSD`) that pin known past findings.
+
+- Run them on **every** staking/yield project — they generalize; the Phoenix identifiers are
+  bonus regression anchors, not the only trigger.
+- A match on a *general* signature in a new/non-Phoenix contract is real discovery — treat it
+  as such, do not dismiss it as "just the Phoenix answer-key".
+- A match on a *Phoenix-specific* signature is a regression check against a known finding —
+  reconcile it against the ledger (the sanitizer does this by fingerprint downstream).
+
+This is a **regression answer-key layered on top of general discovery**, not a substitute for
+it. Do not rely on the pattern DB alone for novel staking bugs — the code-scanner/econ-scanner
+reasoning tiers are the primary discovery path (see their reentrancy / rounding-direction
+checklists).
+
+## SKIP RULE (precise — never a silent drop)
+
+- Skip a pattern **only** when its `note` field explicitly says C4 treats it as QA/known-issue
+  (e.g. `FRONTRUN-APPROVE`). "Skip" means: do not emit it as a primary `findings` entry.
+- If such a pattern nonetheless matches with a **plausible HM twist** (a concrete exploit
+  beyond the generic QA framing), route it to `manualReview`, do not discard it. Confidence ≠
+  severity; Law 1: recall beats tidiness.
+- Record every skipped pattern id in `patternsSkipped` with the reason. A skip is auditable,
+  never invisible.
+
 ## NOTES
 
-- Skip patterns marked with note: "C4 typically considers this QA/known issue"
-- Cross-reference with project's known issues before flagging
-- High-confidence matches should be prioritized for manual review
-- Some patterns may have false positives - include enough context for verification
+- Cross-reference with the project's known issues before flagging (the sanitizer does the
+  authoritative filtering downstream — when unsure, flag and let it decide).
+- High-confidence matches should be prioritized for manual review.
+- Some patterns may have false positives — include enough context for verification.
+
+## ERROR HANDLING
+
+- **Missing / unreadable `patterns/vulnerability-patterns.json`**: hard-fail with a clear
+  message (the pattern tier cannot run); do not silently emit zero findings as if the scan
+  passed clean — that would read as "nothing found" when nothing was *checked*.
+- **DB parse error (malformed JSON)**: report the offending pattern id/line; run the patterns
+  that did parse; list the unparseable ones in `patternsSkipped` so coverage loss is visible.
+- **Empty / missing scope**: warn; fall back to resolving scope from
+  `registered-projects.json`; if still empty, report it (do not scan nothing silently).
+- **Zero grep hits for a pattern**: normal — record it as checked-with-no-match, not an error.
+- **Unreadable contract in scope**: note the file in `errors[]` and continue with the rest;
+  a contract that could not be scanned is a **coverage gap to surface**, never a silent pass.

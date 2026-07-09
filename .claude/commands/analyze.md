@@ -111,12 +111,19 @@ Invoke **symbolic-analyzer**: "Generate and run Halmos symbolic tests"
 - Targets pure arithmetic / share-price / fee functions from profiles.
 - Counterexamples → High-severity findings.
 - Output: `workspace/<project>/test/Symbolic.t.sol`, `<report-dir>/symbolic-results.json`
+- **Honesty rule (do not skip):** only a Halmos `[PASS]` counts as "proven safe", and only
+  over its recorded domain. `[TIMEOUT]`/`[ERROR]` prove nothing — they are recorded as
+  `unverified`, never implied as verified. Timeouts on nonlinear 256-bit arithmetic are
+  common and expected. If symbolic is skipped (no workspace, all-timeout, tool missing), the
+  run **says so explicitly** — a missing `symbolic-results.json` must never be read as
+  "verified clean". A report's safety claim must cite an actual `proofs[]` [PASS] artifact.
 
 ```
 Tier 3 — Verification
 ─────────────────────
 Invariants: 8 generated, 10k fuzz runs — 1 failure: invariant_noShareInflation
-Symbolic:   5 tests — 4 proved, 1 counterexample
+Symbolic:   5 tests — 3 proved (2 unbounded, 1 bounded <2^128), 1 counterexample, 1 TIMEOUT (unverified)
+Note: fuzzing/symbolic did NOT prove the 1 timed-out property safe — carried to manual-review.
 ```
 
 ## 7. Deduplicate Findings

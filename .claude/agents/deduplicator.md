@@ -104,12 +104,30 @@ These are typically noise unless there's a novel exploit path:
 - Consolidate pattern findings
 
 ### Phase 4: Priority Filter
-- Remove findings below quality threshold
-- Flag borderline cases for human review
-- Preserve all high-impact findings regardless
+- **Do NOT silently drop.** A finding below the quality threshold is **routed**, not deleted:
+  append it to `<reportDir>/manual-review.json` (the same Law-1 visible parked channel the
+  pattern-matcher and sanitizer use) with `reason`, `originalId`, and `confidence`. Culling
+  happens at triage (`/ledger`), never by withholding a finding from the run the human reviews.
+- Flag borderline cases for human review (in-band, in `flaggedForReview`).
+- Preserve all high-impact findings regardless — a High/Medium-*potential* finding is **never**
+  quality-filtered here, even at low confidence (confidence ≠ severity; Law 1: recall beats
+  tidiness). Only genuine duplicates (Phase 1) and true tool-noise QA (missing events, style,
+  floating pragma with no version-specific bug) may be removed outright, and even those are
+  logged with a reason.
+
+**The only outright-removal categories** are: (a) exact/near duplicates consolidated in
+Phases 1–2 (traceable via `originalIds`), and (b) pure informational/style noise with no
+security or spec impact. Everything else that you would have "filtered" goes to
+`manual-review.json`. If you are unsure which bucket something is in, it goes to
+`manual-review.json` — never to `/dev/null`.
 
 ## OUTPUT NOTES
 - Always explain why findings were removed/consolidated
 - Preserve original finding IDs for traceability
 - Document consolidation reasoning
 - Flag any findings that might warrant human review
+- **Emit `<reportDir>/manual-review.json`** (create or append) for every finding you would
+  otherwise have dropped for low confidence / below-threshold quality. This is the same
+  Law-1 visible parked channel the pipeline preserves at `/analyze` step 7. A dedup run that
+  removed borderline findings but wrote no `manual-review.json` is a bug — the whole point is
+  that nothing plausibly-security-relevant leaves the run invisibly.

@@ -83,6 +83,42 @@ You receive:
 - **Fee Arbitrage Across Contracts**: Exploiting fee differences between contracts
 - **Cross-Contract Rounding Exploitation**: Combining rounding in A and B for profit
 
+### Rounding-Direction Checklist (MANDATORY for any share/asset/fee/debt conversion)
+
+**Governing invariant: the protocol must NEVER lose value to rounding. Rounding always
+favours the protocol; never the user, and never "symmetric".** This is the single rule; the
+table below is just its per-operation form. Note carefully: "favour the protocol" is **not**
+the same as "always round down" — the *direction* (up vs down) flips by operation, but the
+*beneficiary* never does. Round **down** on what the user *receives* (shares, assets,
+accrual); round **up** on what the user *owes/pays* (redeem-shares-required, fees, debt).
+
+**Symmetric / round-half / banker's rounding is itself a red flag**, not a neutral choice:
+the attacker chooses the inputs, so "neutral on average" becomes "always against the
+protocol" in adversarial hands. Treat any attempt at exact round-trip neutrality as a bug —
+you cannot make a round-trip net-zero without rounding one leg in the user's favour, which
+opens the drain.
+
+The profiler reports a per-function `roundingDirection` where it can. Your job is the
+*system* question: **does every rounding decision favour the protocol (and never the user
+at the protocol's expense), consistently, on both legs of a round-trip?** Div-before-mul
+is only one sub-case; the dangerous class is round-*direction* asymmetry. Walk each row:
+
+| Check | Safe convention | Red flag (report it) |
+|---|---|---|
+| **Mint / deposit → shares** | round **down** (user gets ≤ fair shares) | rounds up → free shares, first-depositor/inflation leverage |
+| **Burn / withdraw → assets** | round **down** (user gets ≤ fair assets) | rounds up → drains vault a wei at a time, repeatable |
+| **Redeem shares needed for X assets** | round **up** (user pays ≥ fair shares) | rounds down → underpays |
+| **Fee / haircut taken** | round **up** in protocol's favour | rounds down → fee leak |
+| **Debt / borrow owed** | round **up** against borrower | rounds down → bad-debt seepage |
+| **Reward-per-share accrual** | round **down** on accrual | rounds up → over-emission (see staking-yield patterns) |
+| **Round-trip (deposit then withdraw same block)** | user ends with ≤ start (never > start) | user ends with **>** start → free value, even 1 wei is a Law-1 finding if repeatable/loopable |
+
+Two rounding-down operations composed can still round *in the user's favour* if the
+directions are on opposite legs — check the composed round-trip, not just each leg. A 1-wei
+error is not "dust to ignore": if it is attacker-repeatable within a profitable gas budget,
+it is a real drain (state the profitability, as elsewhere in this agent). Quote the exact
+`Math.mulDiv(..., Rounding.X)` / `/`-vs-`ceilDiv` site.
+
 ### Oracle & Price Manipulation (Multi-Contract)
 - **Oracle Dependency Chains**: How oracle data flows through contracts
 - **Multi-Block Manipulation**: TWAP manipulation across contract interactions
