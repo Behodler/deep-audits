@@ -1,0 +1,273 @@
+{
+  "project": "phlimbo-ea",
+  "scanTimestamp": "2026-07-15T00:00:00Z",
+  "scanType": "story-faithfulness",
+  "mode": "regression",
+  "commitRange": "7045a96..bf42c12",
+  "head": "bf42c12",
+  "storiesChecked": ["story-024", "story-025"],
+  "specSources": [
+    "git commit d61a7a3 body (story-024 Green)",
+    "git commit 69e2a2d body (story-024 Red)",
+    "git commit ef98cd9 body (story-025 fix)",
+    "git commit 27482c2 body (story-025 tests)",
+    "lib/phlimbo-ea/SolvencyDetermination.md §4-§5",
+    "NatSpec in src/MigratorV2V3.sol + src/interfaces/IMigratorV2V3.sol"
+  ],
+  "specSourceGaps": [
+    "lib/phlimbo-ea/CLAUDE.md is stale (inventory stops at V2, never mentions V3) — not usable as a V3 intent source.",
+    "SolvencyDetermination.md does not mention MigratorV2V3 at ALL (grep for 'Migrator' returns nothing). The migrator's only intent sources are the story commit messages and its own NatSpec. Findings F-08-01/02/03 are therefore anchored on commit text + NatSpec only; no design-doc criteria were invented."
+  ],
+  "storyVerdicts": [
+    {
+      "storyTag": "story-024",
+      "verdict": "FAITHFUL — complete, no deviation, story intent is safe (no Law-1 override)",
+      "commits": ["69e2a2d", "d61a7a3", "09ee051"],
+      "acceptanceCriteria": [
+        {
+          "criterion": "Freeze accPromoPerShare during Flushing at the accrual site",
+          "status": "MET",
+          "evidence": "src/PhlimboV3.sol:757 — `if (address(promoToken) != address(0) && promoPhase != PromoPhase.Flushing)` inside _updatePool. Gate is at the accrual site, not on callers."
+        },
+        {
+          "criterion": "collectReward (permissionless), setDesiredAPY, setDepletionDuration all reach _updatePool while paused — all three must be covered",
+          "status": "MET",
+          "evidence": "All three reach _updatePool (L555 collectReward, L232 setDesiredAPY commit branch, L249 setDepletionDuration) and all three are now gated by the single accrual-site check. Verified by enumerating every _updatePool caller (L232,249,343,368,389,413,555,581,628,675): stake/withdraw/claim/startPromotion are whenNotPaused (unreachable while flushing); topUpPromotion/setPromoDepletionDuration require phase==Active (unreachable while Flushing); beginFlush (L413) calls _updatePool while phase is still Active so its final accrual is preserved. No ungated accrual path remains during Flushing."
+        },
+        {
+          "criterion": "Mirror the gate in pendingPromo so the view cannot over-report mid-rotation",
+          "status": "MET",
+          "evidence": "src/PhlimboV3.sol:884 — same `promoPhase != PromoPhase.Flushing` conjunct in the view. View and accrual agree."
+        },
+        {
+          "criterion": "Correct the three stale invariant comments that attributed the accumulator freeze to pausing",
+          "status": "MET",
+          "evidence": "Exactly three comment blocks corrected: header §2(b) (L32-38), accPromoPerShare state-var docstring (L121-127), beginFlush @dev (L400-409). Each now attributes the freeze to the _updatePool phase gate and explicitly says NOT to the pause. Count matches the story exactly."
+        },
+        {
+          "criterion": "Includes forge fmt normalization of the touched file (declared scope)",
+          "status": "MET — no smuggled logic",
+          "evidence": "`forge fmt --check src/PhlimboV3.sol` exits 0 at HEAD. The formatting churn (constructor, getPromoInfo, getPoolInfo, getPendingAPYInfo, require reflows) is attributable to forge fmt. Full-diff read confirms the ONLY semantic deltas in d61a7a3 are the two `promoPhase != PromoPhase.Flushing` conjuncts (L757, L884). Nothing else changed behaviour."
+        }
+      ],
+      "lifecycleCompositionChecks": [
+        "startPromotion (L335-355) calls _updatePool() BEFORE assigning promoToken, and finalizePromotion zeroes promoToken — so a stale lastRewardTime spanning a flush window can never retro-accrue against the NEXT promo token. The gate composes correctly with the rotation lifecycle; this was the most likely way to reintroduce H-01 and it is closed.",
+        "abortFlush is solvency-neutral as SolvencyDetermination.md §4 claims — retro-accrual on the abort path is capped by promoRewardBalance and balance-conserving. It does, however, introduce a path-dependence the story did not consider — see F-08-03."
+      ],
+      "law1Assessment": "SAFE. The story's intended behaviour (freeze accrual during Flushing) is the correct fix for V3-H-01 and introduces no new exploit. The freeze is enforced at the single accrual site, making it future-proof against new call sites, as the story argues."
+    },
+    {
+      "storyTag": "story-025",
+      "verdict": "SUBSTANTIALLY FAITHFUL with 3 deviations (all Low) — no scope creep; every src change was declared in the commit message. Story intent is NOT unsafe (no Law-1 override), but trade-off (a) is a genuine Law-3 owner footgun.",
+      "commits": ["ef98cd9", "27482c2", "bf42c12"],
+      "acceptanceCriteria": [
+        {
+          "criterion": "Copy house _tryTransfer helper from PhlimboV3",
+          "status": "MET (byte-identical) — but see F-08-01: the copied helper carries an OPEN known defect (V3-L-02)",
+          "evidence": "src/MigratorV2V3.sol:275-278 is identical to src/PhlimboV3.sol:818-820."
+        },
+        {
+          "criterion": "_forward banks failed forwards into per-user unclaimable mapping + emits RewardForwardFailed instead of reverting, so the cursor always advances",
+          "status": "MET for the PoC'd blocklist vector; NOT unconditional — see F-08-01",
+          "evidence": "src/MigratorV2V3.sol:285-290. A blocklisted USDT-style recipient reverts inside the call → callSuccess==false → banks. V3-M-01's PoC'd vector is genuinely closed."
+        },
+        {
+          "criterion": "Permissionless claimUnclaimable pull (CEI)",
+          "status": "MET",
+          "evidence": "src/MigratorV2V3.sol:227-233. Entry zeroed BEFORE safeTransfer; nonReentrant. Reverting safeTransfer on the user-initiated path is correct and deliberate. Arbitrary `token` param is not exploitable — unclaimable[token][msg.sender] can only be non-zero for phUSD/rewardToken/promoToken, and amount==0 reverts."
+        },
+        {
+          "criterion": "withdrawAll extended to sweep live promo token; WithdrawnAll extended with promo amount",
+          "status": "MET (declared scope, not creep) — but see F-08-02 and F-08-04",
+          "evidence": "src/MigratorV2V3.sol:243-265; event widened to (address,uint256,uint256,uint256) in IMigratorV2V3.sol:57-59."
+        },
+        {
+          "criterion": "Recovery-note NatSpec rewritten (audit F-01): drop the unreachable 'exclude from seed list' escape, document the banked-claims trade-off",
+          "status": "MET at the header (L57-68) — but the function-level @dev was left stale, see F-08-02",
+          "evidence": "The false 'operational escape is to exclude such addresses from the seed list' text is gone from the header."
+        }
+      ],
+      "scopeCreepAssessment": "CLEAN. Every src/interface change in ef98cd9 maps to a bullet in its own commit message (helper copy, _forward banking, claimUnclaimable, withdrawAll promo leg, WithdrawnAll widening, NatSpec rewrite). The `unclaimable` public mapping + its interface view are the necessary mechanics of a declared bullet. Test/snapshot commits (27482c2, bf42c12) touch ZERO src files (verified via git log --stat).",
+      "law1Assessment": "Story intent is NOT unsafe. Trade-off (b) is sound (see tradeOffAssessment). Trade-off (a) is a deliberate, documented owner design choice — Law 3 trusts it — but its OBSERVABILITY gap makes it a footgun (F-08-02). Neither warrants a story-unsafe escalation: no unprivileged attacker path, no theft, harm is owner-action-gated and owner-reversible."
+    }
+  ],
+  "tradeOffAssessment": [
+    {
+      "tradeOff": "(a) claimUnclaimable reverts unbacked after a full withdrawAll sweep — commit calls this a 'documented trade-off'",
+      "verdict": "The DESIGN CHOICE is safe and Law-3 trusted; the OBSERVABILITY GAP around it is a genuine footgun → F-08-02 (Low).",
+      "reasoning": [
+        "Not a Law-1 escalation: requires an owner action, no unprivileged attacker path, no theft, harm bounded by banked amounts and reversible by out-of-band reimbursement.",
+        "House precedent makes the choice defensible: PhlimboV3.finalizePromotion ALSO sweeps unclaimablePromo to leftoverRecipient and zeroes it — the house baseline FORFEITS banked failed-transfer claims outright, with no per-user claim at all. MigratorV2V3 is strictly MORE generous (it grants a surviving per-user claim). Law 3: do not report a deliberate, documented design the owner chose.",
+        "BUT the surprise is not the rule — it is the rule's INVISIBILITY. See F-08-02: the owner cannot see the liability they are about to confiscate."
+      ]
+    },
+    {
+      "tradeOff": "(b) _forward banking converts a hard brick into silent per-user debt whose only signal is a RewardForwardFailed event",
+      "verdict": "SAFE — not a finding. The 'silent' framing overstates it.",
+      "reasoning": [
+        "The debt is NOT signal-only: `unclaimable(address,address)` is a public view declared in the interface (IMigratorV2V3.sol:122), so an affected user can read their own balance on-chain without event scraping.",
+        "The debt is backed 1:1 by construction — the failed transfer means the tokens never left the contract.",
+        "Balance-diff bracketing is not corrupted by banked funds: phUSDBefore/stableBefore/promoBefore include previously banked amounts, but every credit is a DELTA (after - before), so banked funds are never re-counted or double-forwarded on a straggler second pass.",
+        "Banked entries are keyed by token ADDRESS, so a promo rotation does not orphan a claim.",
+        "Reentrancy-safe: migrate and claimUnclaimable share the nonReentrant guard; CEI on the claim path.",
+        "Strictly better than the alternative it replaced: reverting bricked EVERYONE (that was V3-M-01); banking localizes harm to the affected user, who retains a claim.",
+        "CAVEAT: (b)'s safety is conditional on (a) not being exercised — the banked debt's only backing is the contract balance that withdrawAll can zero. That composition is exactly what F-08-02 tracks."
+      ]
+    }
+  ],
+  "ledgerReconciliation": [
+    {
+      "fingerprint": "3f241c3a46efc31f5bafd11bad871cb54f1620d9350c08843301560a36f5937c",
+      "label": "V3-F-01",
+      "title": "FAITHFULNESS: MigratorV2V3 documented in-contract recovery path is unreachable while bricked (story-023)",
+      "priorStatus": "open",
+      "verdict": "GENUINELY RESOLVED — propose `fixed` (human applies). This is NOT a comment-only paper-over.",
+      "proposedStatus": "fixed",
+      "proposedFixedAtCommit": "ef98cd9",
+      "reasoning": [
+        "The instruction's trap — 'rewriting a comment is not the same as fixing a code deviation' — was tested explicitly and does NOT apply here. BOTH sides of the deviation moved, not just the doc.",
+        "DOC side: the false promise ('As with MigratorV1V2, the operational escape is to exclude such addresses from the seed list') is deleted from the header (ef98cd9).",
+        "CODE side: F-01's deviation was 'doc promises in-contract recovery the code lacks'. story-025 gave the code REAL in-contract recovery on two axes: (1) _forward banking means a bad recipient no longer pins the cursor, so the straggler-exclusion escape is no longer NEEDED; (2) claimUnclaimable is an actual in-contract recovery path that did not exist before. The doc is now weaker than the code, not stronger.",
+        "The L126 reseed guard (`require(!seeded || migrateIterator == -1, 'Pass in progress')`) is UNCHANGED — but it is no longer load-bearing for F-01, because the pass no longer gets pinned by the recipient class F-01 was about.",
+        "NARROW RESIDUAL, disclosed for honesty (Law 1, recall over tidiness): the abi.decode path in F-08-01 can still pin the cursor mid-pass, and in that state the reseed guard still blocks reseeding AND the rewritten doc no longer mentions any escape at all. That residual is carried by F-08-01 (new entry), NOT by F-01 — F-01's specific cited deviation is closed."
+      ]
+    },
+    {
+      "fingerprint": "6027f2566c95383e6b2e06115eb9b7cf3d69799784a14a764ac64f4c7e5cda7d",
+      "label": "V3-F-02",
+      "title": "FAITHFULNESS: PhlimboV3 'the flush must never brick' invariant undermined by unchecked abi.decode (story-022)",
+      "priorStatus": "open",
+      "verdict": "STILL ACCURATE AND UNCHANGED — premise did NOT shift. Keep `open`. Line numbers shift only.",
+      "proposedStatus": "open (no change)",
+      "lineNumberUpdate": { "was": "816-820", "now": "812-820" },
+      "reasoning": [
+        "Re-read the current code rather than assuming. story-024's three comment rewrites were ALL about the accPromoPerShare freeze (header §2(b), accPromoPerShare state-var docstring, beginFlush @dev). NONE of them touched F-02's premise.",
+        "F-02's cited invariant text is verbatim intact at src/PhlimboV3.sol:427: 'banked into `unclaimablePromo` — the flush must never brick.'",
+        "F-02's cited code is behaviourally identical at src/PhlimboV3.sol:818-820: `return callSuccess && (returndata.length == 0 || abi.decode(returndata, (bool)));` — the unchecked abi.decode with no length check survives. The only delta in the range is forge fmt joining the two-line statement into one.",
+        "The deviation therefore holds exactly as originally described. F-02 remains open; its security twin V3-L-02 (also open) still owns the DoS severity — not double-counted."
+      ]
+    },
+    {
+      "fingerprint": "0b7fa9be868608dd506734b16c50074b4595702df9604f6e3d0841457f44b4d1",
+      "label": "V3-M-01",
+      "title": "MigratorV2V3 reverting/blocklisted reward recipient bricks the V2->V3 migration chunk",
+      "priorStatus": "fix-pending",
+      "verdict": "SUBSTANTIVELY FIXED for the PoC'd vector — but DO NOT auto-flip to `fixed`; a narrow brick path survives (F-08-01).",
+      "proposedStatus": "propose fixed ONLY after PoC replay; residual tracked separately as F-08-01",
+      "reasoning": [
+        "Root cause named in the fingerprint — 'reverting-reward-forward-in-unskippable-loop ... no-in-contract-recovery' — is addressed on both halves: forwarding is now non-reverting (_forward/_tryTransfer) and in-contract recovery now exists (claimUnclaimable).",
+        "The PoC'd vector (blocklisted recipient, workspace/phlimbo-ea/test/poc-m01-migrator-brick.t.sol) is closed: a blocklist revert yields callSuccess==false → banks → cursor advances.",
+        "INCOMPLETE-FIX CAUTION (CLAUDE.md: an incomplete fix reads as done): the loop can STILL revert for the token class in F-08-01/V3-L-02 (transfer returning 1-31 bytes, or a 32-byte non-bool). That class is narrow and token-gated, and I do not rate it as an incomplete fix of M-01's root cause — but the 'pass can brick' OUTCOME is not 100% eliminated, so the residual must stay visible rather than vanish inside an M-01 closure.",
+        "Recommend: /recheck phlimbo-ea V3-M-01 to replay the PoC against bf42c12 before a human flips the status."
+      ]
+    }
+  ],
+  "mechanicalCommitVerification": {
+    "verdict": "CLEAN — both .gas-snapshot regen commits are mechanical only, no smuggled logic",
+    "evidence": [
+      "09ee051 (story-024) and bf42c12 (story-025) touch ONLY .gas-snapshot (git log --stat).",
+      "Filtered every +/- line in `git diff 7045a96..bf42c12 -- .gas-snapshot` against the strict pattern `^[+-][A-Za-z0-9_]+:test[A-Za-z0-9_]*\\(\\) \\(gas: [0-9]+\\)$` — ZERO non-conforming lines. Every changed line is a test-name/gas-number pair. No config, no settings, no prose smuggled in.",
+      "27482c2 (story-025 tests) touches only test/MigratorV2V3Test.t.sol and test/Mocks.sol — zero src changes."
+    ]
+  },
+  "findings": [
+    {
+      "id": "F-08-01",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-025",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "_tryTransfer/_forward/migrate",
+      "line": 277,
+      "lineStart": 275,
+      "lineEnd": 290,
+      "specText": "story-025 (ef98cd9) NatSpec, src/MigratorV2V3.sol:57-61: \"Recovery note: reward forwarding never reverts. Each delta is sent with the non-reverting `_tryTransfer`; if a recipient cannot receive a token (e.g. a blocklisted address), the amount is banked into the per-user `unclaimable` mapping and `RewardForwardFailed` is emitted, so the cursor always advances and a single bad recipient can never brick a pass.\" Also src/MigratorV2V3.sol:270-272: \"Non-reverting ERC20 transfer used by the migration pass: a single blocklisted or otherwise reverting recipient must not brick migrate.\"",
+      "specSource": "git commit ef98cd9 body (\"Copy house _tryTransfer helper from PhlimboV3; add _forward that banks failed forwards ... instead of reverting, so the cursor always advances\") + src/MigratorV2V3.sol header NatSpec",
+      "actualBehavior": "`_tryTransfer` (L275-278) is a byte-identical copy of PhlimboV3's helper, including its unchecked `abi.decode(returndata, (bool))` with no length check. For a token whose `transfer` returns non-empty return-data shorter than 32 bytes (or a 32-byte word that is not a valid bool), `abi.decode` REVERTS inside `_tryTransfer`. The revert propagates through `_forward` → the `migrate` loop → the whole chunk, pinning `migrateIterator`. Forwarding therefore does NOT 'never revert', and such a recipient/token CAN still brick a pass.",
+      "deviation": "The story's claim is UNCONDITIONAL ('never reverts', 'can never brick a pass'); the helper it copied only delivers non-reversion for tokens that revert-or-return-clean. story-025 knowingly copied the 'house' helper while its defect was live and OPEN in the ledger as V3-L-02, and then upgraded the prose to a stronger guarantee than the helper can honour. The exposure is materially worse in the migrator than in PhlimboV3: `promoToken` is an arbitrary owner-selected partner token, and it is the one leg of `_forward` (L203) carrying a non-house token.",
+      "impactNote": "Narrow and token-gated (rules out the primary blocklist vector — USDT-style blocklist reverts return no data and bank correctly). No fund loss; owner-recoverable. Rated Low, consistent with the prior run's rating of the identical class as V3-L-02 (Low).",
+      "recommendation": "Add the length check to BOTH copies: `returndata.length == 0 || (returndata.length >= 32 && abi.decode(returndata, (bool)))`. Fixing the house helper in PhlimboV3 alone will NOT fix the migrator — the code is duplicated, not shared.",
+      "distinctnessNote": "CRITICAL: DISTINCT from V3-L-02 and V3-F-02 (both `src/PhlimboV3.sol:_tryTransfer/batchClaim`). This instance is `src/MigratorV2V3.sol:_tryTransfer/migrate` — different contract, different call site, different blast radius (migration pass vs flush chunk), newly introduced at ef98cd9. Do NOT collapse into V3-L-02/V3-F-02 as a duplicate; it is a replication of the class into a new contract by a fix commit.",
+      "crossRefs": [
+        "V3-L-02 (open) — same root-cause class, PhlimboV3 instance, owns that contract's DoS severity",
+        "V3-F-02 (open) — the faithfulness twin of V3-L-02",
+        "V3-M-01 (fix-pending) — this is the residual brick path that survives story-025's fix"
+      ],
+      "sanitizerNote": "Do NOT auto-suppress under the C4 known-invalid 'non-standard/weird ERC-20 tokens'. The prior run already adjudicated this exact class as in-scope Low (V3-L-02 open, V3-F-02 open) on the grounds that promoToken is an arbitrary owner-selected token the contract does not constrain beyond `!= phUSD && != rewardToken`. Additionally, the deviation here is doc-vs-code and holds regardless of token realism: the NatSpec's guarantee is unconditional.",
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "F-08-02",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-025",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "withdrawAll",
+      "line": 239,
+      "lineStart": 237,
+      "lineEnd": 265,
+      "specText": "CONFLICTING SPEC. (i) src/MigratorV2V3.sol:63-68 (header, rewritten by story-025): \"`withdrawAll` remains a LAST-DITCH escape hatch: it sweeps this contract's ENTIRE phUSD, reward-token and (live) promo-token balances, INCLUDING amounts banked in `unclaimable`, leaving those claims unbacked. Reimbursing affected users after such a sweep is an out-of-band owner obligation.\" (ii) src/MigratorV2V3.sol:239 (function @dev, NOT updated by story-025): \"Pure recovery sweep of stranded balances.\"",
+      "specSource": "git commit ef98cd9 body (\"Rewrite the recovery-note NatSpec (audit F-01): ... document the banked-claims trade-off\") + src/MigratorV2V3.sol header vs function @dev",
+      "actualBehavior": "story-025 rewrote the CONTRACT-LEVEL header and the INTERFACE NatSpec to disclose that withdrawAll confiscates banked user claims, but left withdrawAll's own function-level @dev (L239) reading \"Pure recovery sweep of stranded balances\" — describing the pre-story-025 behaviour, when the contract only ever held rewards transiently within a single tx and a sweep genuinely could not touch user-owed value. The two docs now contradict each other on the single most consequential property of the function, and the stale one sits directly above the code.",
+      "deviation": "The story's own bullet — 'document the banked-claims trade-off' — is only partially executed: the trade-off is documented in two of the three places that describe withdrawAll, and the one left stale is the one an owner reads at the call site. Compounding it, story-025 introduced a new class of contract-held liability (per-user banked `unclaimable`) with NO aggregate accounting: there is no `totalUnclaimable[token]`, no aggregate view, and no enumeration. The owner therefore cannot determine, before or after calling withdrawAll, WHETHER the sweep stranded anything or WHOM to reimburse — the 'out-of-band owner obligation' the NatSpec assigns them is not dischargeable from on-chain state alone (it requires off-chain RewardForwardFailed replay, netted against UnclaimableClaimed).",
+      "law3FootgunAnalysis": "Would a competent, NON-MALICIOUS owner be surprised? The DESIGN CHOICE itself (unconditional sweep) is deliberate, documented, and strictly more generous than the house baseline — PhlimboV3.finalizePromotion likewise sweeps unclaimablePromo to leftoverRecipient and zeroes it, forfeiting banked claims with no per-user claim at all. Law 3 trusts that choice and this finding does NOT contest it. The SURPRISE is the invisibility: PhlimboV3 exposes its banked liability as the aggregate view `unclaimablePromo()` and SolvencyDetermination.md §5 elevates it to a term any observer can check ('promoToken.balanceOf(phlimbo) − promoRewardBalance − Σ pendingPromo − unclaimablePromo >= 0'). The migrator copied the helper but not the liability-accounting discipline, and is absent from the solvency doc entirely. An owner sweeping dust after a completed pass — withdrawAll's original innocuous purpose, still asserted verbatim at L239 — has no on-chain signal that anything is owed, and the resulting failed claim surfaces to the user as a generic ERC20 insufficient-balance revert, not as 'swept'. Surprise ⇒ footgun ⇒ in scope as an operational hazard.",
+      "impactNote": "Low. Owner-action-gated, no unprivileged attacker path, no theft, bounded by banked amounts, reversible by owner reimbursement. NOT a Law-1 story-unsafe escalation.",
+      "recommendation": "(1) Update the L239 @dev to match the header — one line, removes a direct contradiction. (2) Add `mapping(address => uint256) public totalUnclaimable` maintained in _forward/claimUnclaimable, so the liability is visible before a sweep and the out-of-band reimbursement obligation is dischargeable on-chain. Optionally have withdrawAll sweep `balance - totalUnclaimable[token]`, which preserves the hatch while keeping claims backed — but that IS a design change and is the owner's call under Law 3.",
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "F-08-03",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-024",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_updatePool/abortFlush",
+      "line": 757,
+      "lineStart": 495,
+      "lineEnd": 502,
+      "specText": "story-024 (d61a7a3): \"Freeze accPromoPerShare during Flushing at the accrual site\". SolvencyDetermination.md §4: \"`abortFlush` is solvency-neutral: `batchClaim` payments were correct early claims, so returning to Active leaves state consistent.\" src/PhlimboV3.sol:499-500: \"Always safe: batchClaim is just early forced claims with debts correctly aligned, so a partial flush leaves fully consistent state.\"",
+      "specSource": "git commit d61a7a3 body + lib/phlimbo-ea/SolvencyDetermination.md §4 + src/PhlimboV3.sol abortFlush @dev",
+      "actualBehavior": "The gate skips promo accrual during Flushing but `_updatePool` still advances `lastRewardTime = block.timestamp` unconditionally (L768). Neither batchClaim, finalizePromotion, nor abortFlush calls `_updatePool` (verified). So on the abortFlush path, whether stakers are paid for the flush window depends on whether ANYONE happened to call `_updatePool` during it: if nobody did, `lastRewardTime` is still the beginFlush timestamp and the whole window accrues retroactively once the phase returns to Active; if someone did, that elapsed promo time is permanently skipped and its tokens remain in promoRewardBalance, ultimately reaching leftoverRecipient at the eventual finalize. `collectReward` is permissionless and gated only on `amount > 0`, so any third party can force the second outcome for ~1 wei of rewardToken immediately before an abortFlush.",
+      "deviation": "Not a contradiction of any explicit criterion — the story specifies the freeze, not the abort semantics, and solvency-neutrality DOES still hold (retro-accrual is capped by promoRewardBalance and fully balance-conserving; nothing is over-distributed). This is a behavioural side effect the gate INTRODUCED and the story did not consider: pre-gate, promo accrual across a flush window was continuous and path-independent (that was V3-H-01); post-gate, the flush window's promo accrual on the abort path is path-dependent on an unprivileged caller. The documented claim that abortFlush 'leaves fully consistent state' is true for solvency but silent on this distribution non-determinism.",
+      "impactNote": "Low, and I am deliberately not rating it higher. Grief-only with ZERO attacker profit (value moves from stakers to the owner-chosen leftoverRecipient, never to the caller). Bounded by promoRewardPerSecond × flush duration, and flush windows are short owner-driven operations. Affects the abort path ONLY — on the normal finalize path the window is skipped regardless, which is the intended freeze semantic. Surfaced per Law 1 (recall over tidiness) rather than suppressed; flagged for the econ/severity lane to weigh, and I would not object to QA.",
+      "recommendation": "Either call `_updatePool()` inside `abortFlush` before restoring phase Active (making the window deterministically skipped, matching the finalize path), or document that an aborted flush's promo window is intentionally path-dependent. The former is one line and removes the non-determinism entirely.",
+      "lawImpacted": 2,
+      "confidence": "medium"
+    },
+    {
+      "id": "F-08-04",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-025",
+      "severity": "potential-qa",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "withdrawAll",
+      "line": 250,
+      "lineStart": 248,
+      "lineEnd": 262,
+      "specText": "src/MigratorV2V3.sol:63-65 (story-025): \"`withdrawAll` remains a LAST-DITCH escape hatch: it sweeps this contract's ENTIRE phUSD, reward-token and (live) promo-token balances\". Commit ef98cd9: \"Extend withdrawAll to sweep the live promo token\".",
+      "specSource": "git commit ef98cd9 body + src/MigratorV2V3.sol header NatSpec",
+      "actualBehavior": "withdrawAll reads only the LIVE promo slot (`phlimboV3.promoToken()`, L250). A RETIRED promo token — one banked into `unclaimable[tokenA][user]` during promo A, after PhlimboV3.finalizePromotion has zeroed promoToken and promo B has started — is permanently unsweepable by the owner, and is claimable only by the affected user via claimUnclaimable. If that user is permanently blocked, the balance is stranded forever with no recovery path.",
+      "deviation": "Faithful to the letter (the story and NatSpec both say 'live', and the parenthetical is accurate), so this is NOT a story violation. It is a coverage gap in the 'LAST-DITCH escape hatch' narrative: the hatch cannot recover every token the contract can hold. Filed as informational for completeness.",
+      "impactNote": "QA/informational. Narrow reachability (requires a failed forward during promo A plus a rotation to promo B), dust-scale, and the gap is user-protective rather than harmful — it is the mirror image of F-08-02. Explicitly low-value; do not promote.",
+      "lawImpacted": 2,
+      "confidence": "medium"
+    }
+  ],
+  "explicitlyNotFindings": [
+    "story-024 gate composition with startPromotion — VERIFIED SAFE, not a finding. startPromotion calls _updatePool() BEFORE assigning promoToken (and finalize zeroes promoToken), so a stale lastRewardTime spanning a flush window cannot retro-accrue against the NEXT promo token. This was the most plausible way to reintroduce V3-H-01 and it is closed.",
+    "story-025 trade-off (b) (_forward banking) — VERIFIED SAFE, not a finding. See tradeOffAssessment.",
+    "withdrawAll's new external call to phlimboV3.promoToken() coupling the escape hatch to V3's liveness — considered and REJECTED as a finding. phlimboV3 is immutable and set to a real V3 at construction; promoToken() is a plain public getter that cannot realistically revert. Noted only so a future run does not re-derive it.",
+    "WithdrawnAll ABI widening (address,uint256,uint256) → (address,uint256,uint256,uint256) — declared in the story, so NOT scope creep. Flagged only as a cross-repo coordination note: any phoenix-phase-2-staging indexer decoding this event needs the new signature. No evidence of such a consumer was found in this repo; not filed as a finding to avoid speculation.",
+    "claimUnclaimable's arbitrary `token` parameter — considered and REJECTED. unclaimable[token][msg.sender] can only be non-zero for phUSD/rewardToken/promoToken, and amount==0 reverts, so an attacker-supplied token address is inert."
+  ]
+}

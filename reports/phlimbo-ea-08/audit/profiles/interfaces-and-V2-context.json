@@ -1,0 +1,70 @@
+{
+  "profileTimestamp": "2026-07-15T00:00:00Z",
+  "commit": "bf42c12",
+  "scope": "Supporting profile: interface files (no executable code) + PhlimboV2 CONTEXT-ONLY (migration source, deployed, not re-audited).",
+
+  "contracts": [
+    {
+      "contract": "src/interfaces/IPhlimboV3.sol",
+      "loc": 354,
+      "type": "interface (no executable code, no state, no local findings possible)",
+      "changedByStory": "none at this commit (last touched 7045a96/story-023; story-024 did not alter the ABI)",
+      "definesTypes": { "PromoPhase": ["None (0)", "Active (1)", "Flushing (2)"] },
+      "abiConformance": {
+        "verdict": "CONFORMS",
+        "notes": "Every function and event declared in IPhlimboV3 is implemented in PhlimboV3 with a matching signature, including the full promo surface (promoToken/promoRewardBalance/promoDepletionDuration/promoRewardPerSecond/accPromoPerShare/promoPhase/flushCursor/unclaimablePromo) and the enumeration surface (stakerCount/stakerAt) that SolvencyDetermination.md §5 depends on. userInfo(address) is declared returning 4 fields, matching V3's 4-field UserInfo struct (vs V2's 3)."
+      },
+      "consumedBy": ["MigratorV2V3 (promoToken(), stake(), and — if the LOCAL-102 fix is adopted — MINIMUM_STAKE())"],
+      "notes": [
+        "MINIMUM_STAKE is NOT exposed on IPhlimboV3 (PRECISION and SECONDS_PER_YEAR are). This is why MigratorV2V3 cannot currently guard against the sub-minimum-dust revert via the interface without adding the getter — relevant to the LOCAL-102 remediation.",
+        "IPhlimboV3 does NOT declare pause()/unpause()/pauser — those arrive via IPausable. A consumer holding only IPhlimboV3 cannot observe V3's pause state, which is why MigratorV2V3 cannot pre-check the LOCAL-103 liveness coupling."
+      ]
+    },
+    {
+      "contract": "src/interfaces/IMigratorV2V3.sol",
+      "loc": 128,
+      "type": "interface (no executable code, no state, no local findings possible)",
+      "changedByStory": "story-025",
+      "story025Delta": [
+        "ADDED event RewardForwardFailed(address indexed token, address indexed user, uint256 amount)",
+        "ADDED event UnclaimableClaimed(address indexed token, address indexed user, uint256 amount)",
+        "CHANGED event WithdrawnAll — added uint256 promoAmount (BREAKING ABI change to the event signature; any indexer keyed on the old 3-arg topic0 must be updated. Pre-deployment, so informational only.)",
+        "ADDED function claimUnclaimable(address token)",
+        "ADDED function unclaimable(address token, address user) view returns (uint256)",
+        "REWROTE withdrawAll NatSpec to document the LAST-DITCH/unbacked-claims trade-off"
+      ],
+      "abiConformance": {
+        "verdict": "CONFORMS",
+        "notes": "All declared functions/events are implemented in MigratorV2V3 with matching signatures. The public `unclaimable` mapping getter satisfies the declared view function exactly."
+      },
+      "docVsCodeMismatch": {
+        "verdict": "MISMATCH — see MigratorV2V3 profile LOCAL-106",
+        "detail": "The rewritten NatSpec asserts 'reward forwarding never reverts' and 'the cursor always advances'. True for the forwarding legs; false for the unskippable phlimboV2.withdraw / phlimboV3.stake legs (LOCAL-101/102) and for the _tryTransfer decode gap (LOCAL-104). Interface-level documentation therefore overstates the guarantee, which is the same faithfulness complaint as open ledger entry V3-F-01 in a new form."
+      }
+    },
+    {
+      "contract": "src/PhlimboV2.sol",
+      "loc": 593,
+      "status": "CONTEXT ONLY — deployed, not modified by story-024/025, NOT re-audited here. Profiled solely to establish the preconditions MigratorV2V3 inherits.",
+      "factsRelevantToV3Migration": [
+        { "fact": "MINIMUM_STAKE = 1e15 (V2 L100), enforced on stake (V2 L324) — same constant as V3.", "consequence": "Ordinary V2 positions are 0 or >= 1e15." },
+        { "fact": "V2.withdraw has the dust rule: remaining in (0, MINIMUM_STAKE) forces a full exit (V2 L377-382).", "consequence": "The ordinary exit path cannot create sub-minimum dust." },
+        { "fact": "V2.pauseWithdraw (V2 L280-290) has NO dust rule and NO minimum — it accepts any amount > 0 and reduces user.amount directly.", "consequence": "LOAD-BEARING for MigratorV2V3 LOCAL-102: this is the ONLY path that can leave a V2 position at sub-minimum dust, which then reverts phlimboV3.stake with 'Below minimum stake' and pins the migrator's cursor. User-reachable and self-inflictable at 1 wei." },
+        { "fact": "V2.pauseWithdraw does NOT realign phUSDDebt/stableDebt after reducing user.amount — it only writes amount and totalStaked, then transfers.", "consequence": "LOAD-BEARING for MigratorV2V3 LOCAL-101: debts remain computed against the old, larger amount, so V2._claimRewards' `amount * accPhUSDPerShare / PRECISION - phUSDDebt` underflows and reverts for that user forever. V2.withdraw calls _claimRewards unconditionally (V2 L373) BEFORE any of its own logic, so the position is permanently un-withdrawable — including by the migrator. PhlimboV3 L521-525 documents this exact defect by name ('the latent V1/V2 partial-pauseWithdraw brick') and fixes it in V3's own pauseWithdraw; the migrator, however, must still traverse the UNFIXED V2 instances." },
+        { "fact": "V2.userInfo returns 3 fields (amount, phUSDDebt, stableDebt) — no promoDebt (V2 L107-111, IPhlimboV2 L190).", "consequence": "MigratorV2V3's `(uint256 amount,,) = phlimboV2.userInfo(user)` destructuring is correct against V2's 3-field ABI. Verified — a 4-field V3-shaped read here would be a decode error." },
+        { "fact": "V2.withdraw / stake / claim are whenNotPaused; V2's migrator role routes principal AND auto-claimed rewards to msg.sender.", "consequence": "V2 cannot be paused during migration (it would block the migrator itself) — the stated rationale for the migrator's live-read design (MigratorV2V3 L22-24). Also the basis for the reward-delta bracketing: V2's rewards land in the migrator and must be forwarded." },
+        { "fact": "V2 mints pending phUSD rewards itself during withdraw (V2._claimRewards -> phUSD.mint(beneficiary)).", "consequence": "MigratorV2V3 correctly needs NO phUSD mint role (documented at MigratorV2V3 L54-56). Verified." }
+      ],
+      "localFindings": [],
+      "notes": "No findings are raised against PhlimboV2 in this profile. The V2 pauseWithdraw defects above are reported as MigratorV2V3 LOCAL-101/LOCAL-102 because V2 is deployed and unchangeable while the migrator is in-scope and fixable — root cause in V2, remediable impact in the migrator."
+    },
+    {
+      "contract": "src/Phlimbo.sol (V1)",
+      "status": "SKIPPED per task scope — deprecated, fully acknowledged in ledger."
+    }
+  ],
+
+  "crossCuttingHandoff": [
+    "The migration's fragility is an INTERFACE-BOUNDARY problem: MigratorV2V3 trusts two sibling contracts whose failure modes it cannot observe through their interfaces (V3's pause state and MINIMUM_STAKE are not on IPhlimboV3; V2's per-user brick state is not queryable at all — pendingPhUSD would revert rather than report). Any remediation that relies on pre-checking rather than try/catch will need interface changes on the V3 side."
+  ]
+}

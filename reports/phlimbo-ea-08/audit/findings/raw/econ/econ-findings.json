@@ -1,0 +1,147 @@
+{
+  "project": "phlimbo-ea",
+  "commit": "bf42c12",
+  "scanTimestamp": "2026-07-15T00:00:00Z",
+  "scanType": "economic",
+  "contractsScanned": 2,
+  "scopeNote": "PhlimboV3 promo/depletion economics + MigratorV2V3 value flows. V1 skipped. NO Tier-1 profiles existed at reports/phlimbo-ea-08/audit/profiles/ (empty dir) — this scan worked from source directly. Spec basis: SolvencyDetermination.md (V3); lib/phlimbo-ea/CLAUDE.md confirmed STALE (inventory stops at V2, never mentions V3/promo/rotation).",
+  "findings": [
+    {
+      "id": "ECON-08-001",
+      "type": "value-confiscation / banked-liability-swept-as-unencumbered",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "function": "finalizePromotion",
+      "line": 479,
+      "lineStart": 473,
+      "lineEnd": 491,
+      "description": "batchClaim banks a staker's EARNED promo into `unclaimablePromo` when the transfer fails, and aligns their promoDebt to the accumulator (zeroing their pending). finalizePromotion then sweeps the ENTIRE promo balance — explicitly including unclaimablePromo — to leftoverRecipient and zeroes the counter. PhlimboV3 has NO claimUnclaimable equivalent, so the banked value is permanently confiscated with no recovery path. This is the SAME root-cause class that story-025 fixed in MigratorV2V3 (which gained a permissionless `claimUnclaimable` pull); the identical pattern in PhlimboV3 was left unfixed.",
+      "codeSnippet": "// batchClaim (450-457): debt aligned FIRST, then bank on failure\nuserDetails.promoDebt = (userDetails.amount * accPromoPerShare) / PRECISION;\nif (pending > 0) {\n    if (_tryTransfer(promoToken, staker, pending)) { emit PromoClaimed(staker, pending); }\n    else { unclaimablePromo += pending; emit PromoClaimFailed(staker, pending); }\n}\n\n// finalizePromotion (479-487): sweeps EVERYTHING, zeroes the bank\nuint256 leftover = retiredToken.balanceOf(address(this));\nif (leftover > 0) { retiredToken.safeTransfer(leftoverRecipient, leftover); }\nunclaimablePromo = 0;",
+      "economicImpact": "A staker's fully-earned promo is transferred to leftoverRecipient. Verified by PoC: with alice(25%)/bob(75%) staked and 1000e18 promo half-streamed, blocklisting bob banks 375e18 and finalize sends 875e18 to leftoverRecipient (500e18 legitimate remainder + 375e18 of bob's earned promo). Post-finalize, bob unblocked: pendingPromo(bob)==0 and the contract's promo balance is 0 — no recovery path exists. WORST CASE: if the partner token pauses or blocks all transfers during the flush (pausable ERC20s are common), 100% of the funded promo is confiscated — PoC shows leftoverRecipient receiving the full 1000e18 of 1000e18 funded, every staker getting zero.",
+      "attackScenario": "No attacker required — this is a passive value leak triggered by a token-level condition:\n1. Owner runs startPromotion with a partner ERC20 that has a blocklist or global pause (USDT/USDC-style, or any partner token with a guardian).\n2. Stakers accrue promo over the window.\n3. Owner calls beginFlush; batchClaim iterates the frozen staker set.\n4. Any staker whose transfer reverts has their pending banked into unclaimablePromo and their promoDebt aligned — their on-chain claim is now ZERO.\n5. finalizePromotion sweeps the banked amount to leftoverRecipient and zeroes the counter.\n6. The staker unblocks later: no function on PhlimboV3 can return the value.",
+      "profitability": "N/A — not an attacker-profit vector. Value flows from stakers to leftoverRecipient (typically protocol treasury). Loss to affected stakers = 100% of their accrued promo for that promotion.",
+      "affectedParties": "Stakers whose promo transfer fails during the flush (blocklisted addresses, contract stakers, holders of a paused partner token). Beneficiary: leftoverRecipient.",
+      "preconditions": "Promo token can fail a transfer to a staker. This precondition is EXPECTED BY THE TEAM'S OWN CODE: `_tryTransfer` (PhlimboV3.sol:818-821) exists solely to survive 'a single blocklisted or otherwise reverting recipient', and test/Mocks.sol ships a MockBlocklistToken with a 'USDT-style recipient blocklist'. The design anticipates the failure and banks it, then discards the bank.",
+      "specConflict": "SolvencyDetermination.md is INTERNALLY CONTRADICTORY on this point. §4's invariant (lines 78-82) counts `unclaimablePromo` as a LIABILITY the balance must cover: `promoToken.balanceOf(phlimbo) >= promoRewardBalance + Σ pendingPromo + unclaimablePromo`. The Rotation-solvency section (lines 107-111) then declares the same quantity 'unencumbered' and sweeps it: 'the entire remaining balance (undistributed remainder + rounding dust + unclaimablePromo) is unencumbered and is swept to leftoverRecipient'. Both cannot be true. PhlimboV3.sol:141-143 calls the bank 'banked for out-of-band handling', and SolvencyDetermination.md:137-138 calls it 'banked failed-transfer liabilities awaiting the finalize sweep' — but no out-of-band handling mechanism exists in the contract.",
+      "suggestedFix": "Mirror story-025: add a permissionless `claimUnclaimablePromo(address token)` pull keyed per-user-per-token (the bank must become a mapping, not a scalar — the current scalar cannot attribute value to a user), and exclude Σ unclaimable from the finalize sweep. Note the current scalar `unclaimablePromo` LOSES the per-user attribution at bank time, so the PromoClaimFailed events are the only record.",
+      "confidence": "high",
+      "poc": "workspace/phlimbo-ea/test/EconProbe.t.sol::test_probe_B_finalize_confiscates_unclaimable, ::test_probe_B2_all_recipients_blocked (both PASS, values quoted above)"
+    },
+    {
+      "id": "ECON-08-002",
+      "type": "rate-drift / deferred-accrual burst (Linear-Depletion class)",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_updatePool / abortFlush",
+      "line": 757,
+      "lineStart": 707,
+      "lineEnd": 768,
+      "description": "The story-024 Flushing gate skips the promo accrual block but `lastRewardTime = block.timestamp` at line 767 still runs UNCONDITIONALLY — and only if _updatePool is actually CALLED. During a flush, _updatePool is reached only via permissionless collectReward or the owner setters. If none of them fire, lastRewardTime stays pinned at beginFlush time, and the freeze becomes a DEFERRAL rather than a skip: on abortFlush the entire frozen window accrues in a single block. Whether stakers receive the flush window as an instantaneous lump, or it is skipped and re-streamed linearly, is decided by whether an unrelated third party happened to call collectReward mid-flush.",
+      "codeSnippet": "if (address(promoToken) != address(0) && promoPhase != PromoPhase.Flushing) {\n    uint256 potentialPromo = (promoRewardPerSecond * timeElapsed) / PRECISION;\n    uint256 promoToDistribute = potentialPromo > promoRewardBalance ? promoRewardBalance : potentialPromo;\n    ...\n}\nlastRewardTime = block.timestamp;  // <-- advances only if _updatePool is CALLED",
+      "economicImpact": "PoC A1 (no _updatePool during a 10-day flush, then abortFlush): timeElapsed = 864000s makes potentialPromo exceed the remaining balance, so the cap fires and the ENTIRE remaining 500e18 (50% of the funded 1000e18) accrues in ONE block. The promo's linear-depletion schedule collapses to a lump sum and the stream is instantly exhausted/dormant. PoC A2 (identical, but one 1-wei collectReward lands during the flush): burst == 0, promoRewardBalance drained == 0 — the window is skipped and the stream simply extends. Same owner actions, opposite economics, decided by a third party for the cost of gas + 1 wei.",
+      "attackScenario": "Griefing / non-determinism rather than theft:\n1. Owner beginFlush on a promo with balance remaining.\n2. Flush runs long (large staker set, chunked batchClaim).\n3. Owner abortFlush instead of finalize.\n4a. If nobody touched _updatePool: first post-abort _updatePool dumps the whole frozen window (up to the entire remaining balance) at once to the frozen staker set.\n4b. If anyone called collectReward(1 wei) during the flush: no dump; value re-streams linearly.\nA third party thus selects between 4a and 4b at will.",
+      "profitability": "No direct extraction path found — see REFUTATION R-03: a new staker CANNOT capture the burst, because stake() calls _updatePool() BEFORE setting the new promoDebt, and the staker set is frozen by the pause for the whole flush. The residual harm is distributional (pauseWithdraw exiters forfeit; survivors absorb their share of the lump) and schedule-integrity (the partner's Q, funded to incentivize staking across a window D, is paid out instantaneously instead).",
+      "affectedParties": "Stakers who pauseWithdraw during the flush (forfeit their share of the lump); the promo partner (their linear-incentive schedule is voided); stakers present at the abort (over-weighted).",
+      "preconditions": "abortFlush path only (NOT the finalize path — see REFUTATION R-01). Requires a flush window of material duration and no incidental _updatePool call.",
+      "specConflict": "PhlimboV3.sol:496-500 asserts abortFlush is 'Always safe: batchClaim is just early forced claims with debts correctly aligned, so a partial flush leaves fully consistent state', and SolvencyDetermination.md:115-116 says 'abortFlush is solvency-neutral'. Both are true for SOLVENCY (no over-promise) but neither addresses the accrual-schedule distortion, which is the economic property that matters here. The docblock at PhlimboV3.sol:124-126 states accPromoPerShare is 'Frozen while promoPhase == Flushing' — accurate for the phase itself, but it does not disclose that the deferred time is released as a lump on abort.",
+      "suggestedFix": "Advance lastRewardTime at the START of the flush independently of caller activity — e.g. have abortFlush set `lastRewardTime = block.timestamp` before returning to Active (making the freeze a true skip on both exits, matching the finalize path's behaviour and matching outcome 4b deterministically).",
+      "confidence": "high",
+      "poc": "workspace/phlimbo-ea/test/EconProbe.t.sol::test_probe_A1_abort_no_updatePool_during_flush (burst=125000000000000000, 500e18 drained), ::test_probe_A2_abort_with_updatePool_during_flush (burst=0, 0 drained). Both PASS."
+    },
+    {
+      "id": "ECON-08-003",
+      "type": "unsegregated-balance accounting desync / cross-user value reallocation",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "withdrawAll / claimUnclaimable",
+      "line": 243,
+      "lineStart": 227,
+      "lineEnd": 265,
+      "description": "`unclaimable[token][user]` is per-user accounting over a SHARED, unsegregated token balance. withdrawAll sweeps the entire balance while leaving every `unclaimable` entry intact, and — unlike MigratorV1V2 — deliberately does NOT abort the pass, so migration resumes and re-funds the contract with LATER users' banked rewards. Because claimUnclaimable pays first-come-first-served out of the common balance, a user whose claim was already de-funded by the sweep can drain a later user's legitimately-backed rewards. The unbacked-ness migrates by claim ordering rather than staying with the users who were banked at sweep time.",
+      "codeSnippet": "// withdrawAll sweeps everything, unclaimable[][] entries untouched, pass NOT aborted:\nuint256 rewardBal = rewardToken.balanceOf(address(this));\nif (rewardBal > 0) { rewardToken.safeTransfer(ownerAddr, rewardBal); }\n\n// claimUnclaimable pays out of the shared balance, no per-user backing check:\nuint256 amount = unclaimable[token][msg.sender];\nrequire(amount > 0, \"Nothing to claim\");\nunclaimable[token][msg.sender] = 0;\nIERC20(token).safeTransfer(msg.sender, amount);",
+      "economicImpact": "PoC D: alice banks 2500e18 (blocklisted) → owner withdrawAll sweeps to owner, alice's entry still reads 2500e18 → pass resumes, bob banks 2500e18 legitimately (contract balance now 2500e18) → alice unblocks and claims FIRST, receiving 2500e18 that were BOB's → bob's claimUnclaimable REVERTS despite his entry still reading 2500e18. Value is conserved overall (the owner holds the swept funds), so this is a reallocation and an operational-record hazard, not net destruction.",
+      "attackScenario": "1. Owner banks-then-sweeps via the documented last-ditch hatch mid-pass.\n2. Sweep does not abort the pass (by design), so migrate() resumes.\n3. Later blocklisted users bank rewards, re-funding the contract.\n4. Any earlier, already-swept user calls claimUnclaimable first and is paid out of the later users' tokens.\n5. The later user's claim reverts. Critically, the earlier user's mapping entry is now ZEROED — so an owner reconciling from the LIVE mapping sees them as settled and reimburses only the later user (self-correcting), whereas an owner reconciling from the at-sweep RewardForwardFailed event snapshot reimburses the earlier user a SECOND time (double-pay).",
+      "profitability": "Not attacker-funded — requires the owner to have swept. Bounded by banked REWARD amounts only; principal is never at risk (it is withdrawn from V2 and restaked into V3 within a single loop iteration, so the migrator never holds principal across calls).",
+      "affectedParties": "Users banked AFTER a withdrawAll (claim silently reverts); the owner (misleading reimbursement records, possible double-pay).",
+      "preconditions": "Owner calls withdrawAll while `unclaimable` entries are non-zero AND the pass subsequently resumes and banks more. The resume-after-sweep flow is the DESIGNED behaviour (MigratorV2V3.sol:239-242: 'does NOT abort the pass ... migration can resume'), so this composition is expected usage, not an edge case.",
+      "law3Analysis": "FOOTGUN, in scope. The NatSpec (MigratorV2V3.sol:62-68) documents that a sweep leaves 'those claims' unbacked and that reimbursement is an out-of-band owner obligation — that much is obvious and correctly disclosed (see REFUTATION R-02). What is NOT disclosed, and would surprise a competent non-malicious owner, is that (a) the set of users left unbacked is determined by claim ORDER, not by who was banked at sweep time, and (b) the live mapping and the event history disagree about who is owed, so the reimbursement procedure the owner is told to perform can double-pay.",
+      "suggestedFix": "Track `totalUnclaimable[token]` and have withdrawAll sweep only `balanceOf(this) - totalUnclaimable[token]`; or zero the unclaimable entries on sweep so the records match reality; or abort the pass on withdrawAll as MigratorV1V2 does. Minimum: document that reimbursement MUST be reconciled from the live mapping, never the event snapshot.",
+      "confidence": "high",
+      "poc": "workspace/phlimbo-ea/test/EconProbeMigrator.t.sol::test_probe_D_swept_user_drains_later_users_banked_rewards (PASS)"
+    },
+    {
+      "id": "ECON-08-004",
+      "type": "unbounded-growth / spec-conformance",
+      "severity": "potential-qa",
+      "contract": "src/PhlimboV3.sol",
+      "function": "pauseWithdraw",
+      "line": 529,
+      "lineStart": 529,
+      "lineEnd": 544,
+      "description": "pauseWithdraw never removes a user from `_stakers`, even on a full exit, so the set accumulates zombie members (amount == 0) permanently — `withdraw` is the only path that removes. PoC C: after a full pauseWithdraw, alice's userInfo.amount == 0 but stakerCount() remains 2 and stakerAt(0) is still alice. This falsifies the invariant asserted at PhlimboV3.sol:603-604 ('membership in `_stakers` <=> userInfo.amount > 0'); the true relation is a superset.",
+      "economicImpact": "No value leak — the superset direction is safe: zombies are visited by batchClaim with pending == 0 (harmless, as PhlimboV3.sol:526-527 already notes) and SolvencyDetermination.md's Σ-pending enumeration remains exact over a superset. The cost is monotonic gas growth: every future rotation's batchClaim must iterate every address that ever pause-exited, and finalizePromotion requires `flushCursor == _stakers.length()`. Across many pause cycles this raises the floor cost of every rotation and, at the limit, the number of batchClaim chunks needed to complete a flush.",
+      "attackScenario": "Cheap set-stuffing: stake MINIMUM_STAKE (1e15) from N fresh addresses, wait for any pause, pauseWithdraw fully from each. Each address is permanently retained in _stakers. Not profitable for the attacker (pure cost) and gas-bounded by chunking, hence QA rather than a DoS.",
+      "profitability": "Unprofitable — griefing only, attacker pays gas for permanent set growth.",
+      "affectedParties": "Whoever pays for rotations (owner / flush callers).",
+      "confidence": "high",
+      "poc": "workspace/phlimbo-ea/test/EconProbe.t.sol::test_probe_C_zombie_stakers (PASS)"
+    }
+  ],
+  "refutations": [
+    {
+      "id": "REFUT-08-R01",
+      "claim": "The story-024 Flushing freeze leaves a residual burst that carries phantom pending into the NEXT promotion (i.e. audit-07 H-01 incompletely fixed).",
+      "verdict": "REFUTED — H-01 fix is COMPLETE on the finalize path.",
+      "evidence": "finalizePromotion zeroes promoToken (PhlimboV3.sol:484). Thereafter _updatePool's promo block is gated off by `address(promoToken) != address(0)` while lastRewardTime keeps advancing, so the stale gap is consumed harmlessly. startPromotion then calls _updatePool() BEFORE assigning the new token (PhlimboV3.sol:343 precedes 349), so lastRewardTime == now at the moment the new promo slot opens. No deferred accrual can survive a rotation. ECON-08-002's burst exists ONLY on the abortFlush path, where promoToken is retained. Do not re-litigate H-01 as an incomplete fix.",
+      "confidence": "high"
+    },
+    {
+      "id": "REFUT-08-R02",
+      "claim": "MigratorV2V3.withdrawAll stranding the claims that were already banked at sweep time is a reportable owner footgun.",
+      "verdict": "REFUTED for the base case — Law 3 obvious-consequence, suppress. (The ORDERING/resume aspect is NOT covered by this refutation and is reported separately as ECON-08-003.)",
+      "evidence": "The consequence is disclosed verbatim in the NatSpec of the contract the owner deploys (MigratorV2V3.sol:62-68): 'it sweeps this contract's ENTIRE phUSD, reward-token and (live) promo-token balances, INCLUDING amounts banked in `unclaimable`, leaving those claims unbacked. Reimbursing affected users after such a sweep is an out-of-band owner obligation — the accepted trade-off.' It is covered by an explicit test (commit 27482c2: 'full sweep includes banked unclaimable, after which the claim reverts unbacked (documented trade-off)'), the funds go to owner() and are therefore recoverable, and the hatch is labelled LAST-DITCH. A competent non-malicious owner would not be surprised. Law 3 test: obvious => suppress.",
+      "confidence": "high"
+    },
+    {
+      "id": "REFUT-08-R03",
+      "claim": "The abortFlush accrual burst (ECON-08-002) can be captured by an opportunistic staker for profit.",
+      "verdict": "REFUTED — no capture path.",
+      "evidence": "Three independent barriers, all verified against source: (1) the staker set is frozen for the whole flush because _stakers only mutates in whenNotPaused ops, and unpause() reverts while Flushing (PhlimboV3.sol:271); (2) after abortFlush + unpause, the burst fires on the FIRST _updatePool — and stake() calls _updatePool() at line 581 BEFORE setting userDetails.promoDebt at line 599, so a fresh staker's debt is anchored to the POST-burst accumulator and their pending is exactly zero; (3) an existing staker cannot enlarge their position ahead of the burst because they are paused out for the entire flush. The burst therefore accrues only to the frozen set, at their pre-existing weights. Residual harm is distributional, not extractive — which is why ECON-08-002 is Low, not High.",
+      "confidence": "high"
+    },
+    {
+      "id": "REFUT-08-R04",
+      "claim": "The freeze+resume cycle, or MigratorV2V3.withdrawAll's new promo sweep, can break the promo solvency invariant `promoToken.balanceOf(phlimbo) >= promoRewardBalance + Σ pendingPromo + unclaimablePromo` (i.e. total claimable promo exceeds the balance held).",
+      "verdict": "REFUTED — invariant holds on every path examined.",
+      "evidence": "(a) Accrual is capped by promoRewardBalance on both the live path (PhlimboV3.sol:759) and the view (line 890), so the accumulator can never promise unfunded value — the Flushing gate only ever REDUCES accrual, so it cannot break a cap-based invariant. (b) Banked unclaimablePromo tokens never leave the contract, and are excluded from promoRewardBalance, so they are never re-accrued to stakers — no double-spend. (c) unclaimablePromo surviving an abortFlush is stale but benign: the tokens remain present and idle, so the >= still holds. (d) MigratorV2V3.withdrawAll sweeps the MIGRATOR's own balances, not PhlimboV3's, and therefore cannot affect PhlimboV3's invariant at all. Note the failure mode is the OPPOSITE of insolvency: the contract holds MORE than it owes and finalize sweeps the excess (which is precisely ECON-08-001's confiscation).",
+      "confidence": "high"
+    },
+    {
+      "id": "REFUT-08-R05",
+      "claim": "The promo rate recompute drifts (Linear-Depletion V1 rate-reanchoring bug recurring in the promo stream).",
+      "verdict": "REFUTED for the recompute discipline itself.",
+      "evidence": "promoRewardPerSecond is recomputed ONLY in topUpPromotion (line 375), setPromoDepletionDuration (line 393) and startPromotion (line 352) — never inside _updatePool, correctly mirroring the V2 stable-stream fix. The V1 bug (re-anchoring the window on every user interaction) does NOT recur. The window-restart on topUp/setPromoDepletionDuration is the intended canonical-recompute-site design and mirrors collectReward. The genuine drift in this codebase is the deferred-accrual burst (ECON-08-002), which is a lastRewardTime issue, not a rate issue.",
+      "confidence": "high"
+    }
+  ],
+  "dedup04Reconfirmation": {
+    "subject": "DEDUP-04 phUSD uncapped-mint — suppression validity re-check at bf42c12 (V3)",
+    "triggerFired": false,
+    "triggerStatus": "NOT DEFINITIVELY FIRED, BUT THE SUPPRESSION RATIONALE IS MATERIALLY WEAKER FOR V3 THAN THE V1-ERA KI CLAIMS. Escalate to triage rather than silently re-suppress.",
+    "shippedDefault": "desiredAPYBps == 0 at deploy, by construction: PhlimboV3's constructor (lines 200-216) never assigns desiredAPYBps, so it is zero-initialised, and _updatePhUSDEmissionRate then yields phUSDPerSecond == 0, gating the mint at line 736. Reaching a non-zero value needs two owner setDesiredAPY calls within 100 blocks (the two-step preview/commit at lines 223-239). No deployment script exists in the repo (no script/ dir) and no story sets a V3 APY.",
+    "evidenceAgainstSuppression": [
+      "The 'APY should be 0 by default' assertion cited for KI-10 is at test/PhlimboEMATest.t.sol:1543, whose fixture is `PhlimboEA public phlimbo; phlimbo = new PhlimboEA(...)` (lines 24, 44) — it is a V1 test. It is evidence about V1, NOT V3. This is exactly the V1-era-KI-suppressing-a-V3-finding hazard flagged in the task.",
+      "SolvencyDetermination.md — the V3 design doc shipped at this commit — SPECIFIES the non-zero-APY mint path as a supported operating mode, not a disabled one. §2 (lines 32-44) states pending phUSD is 'minted on demand at settlement — there is no pre-funded pool and therefore no balance-style insolvency', gives the live emission formula 'totalStaked * desiredAPYBps / 10000 / SECONDS_PER_YEAR', and reduces phUSD solvency to a single condition: holding an active mint privilege. The V3 spec thus treats unbacked, APY-driven phUSD minting as intended and solvent by design.",
+      "MigratorV2V3's own NatSpec (line 43) frames APY→0 as a WIND-DOWN action for the venue being retired: 'wind V2 down (owner sets APY→0, stop feeding collectReward), then run a second migrator pass'. This implies the LIVE venue carries a non-zero APY and that V3, as V2's successor, inherits that role.",
+      "test/MigratorV2V3Test.t.sol:103-105 seeds the migration's production-representative baseline with `phlimboV2.setDesiredAPY(500)` commented 'Non-zero V2 phUSD APY so phUSD rewards accrue' — i.e. the modelled live V2 runs 5% APY, and the entire point of MigratorV2V3 is to move that user base into V3."
+    ],
+    "assessment": "The literal precondition of the DEDUP-04 suppression (desiredAPYBps == 0) still HOLDS at the deploy instant for V3, so the trigger as written has not fired and I am not re-emitting the High unilaterally. But KI-10's stronger claim — that zero-APY is 'the shipped default AND EXPECTED' — is only supported by V1 evidence, and the V3 artefacts point the other way: the V3 design doc specifies the APY-driven mint as a supported mode with no cap and no backing, and the migration narrative reads as V3 taking over a venue that currently runs 500 bps. Suppression now rests entirely on an operational choice (owner never commits a non-zero APY) that no artefact in the repo actually commits to.",
+    "recommendedAction": "Surface to triage as a live re-emit CANDIDATE, not a silent re-suppression. Ask the owner directly: is a non-zero desiredAPYBps intended for V3 post-migration? If yes, DEDUP-04 reclassifies HIGH immediately per its own trigger. Re-extract the 10 cached known-issues (2026-01-15, V1-era) against V2/V3 before any further KI-based suppression in this project."
+  },
+  "notes": [
+    "TIER-1 GAP: reports/phlimbo-ea-08/audit/profiles/ was EMPTY at scan time — no contract profiles were produced for this run. This scan therefore read src/PhlimboV3.sol and src/MigratorV2V3.sol directly and verified all arithmetic/rounding claims itself rather than trusting profile properties. No profile property was taken as an axiom.",
+    "SPEC BASIS: SolvencyDetermination.md treated as the authoritative V3 design doc. lib/phlimbo-ea/CLAUDE.md CONFIRMED STALE — its contract inventory lists only Phlimbo.sol (V1), PhlimboV2.sol and MigratorV1V2.sol; it has no entry for PhlimboV3.sol or MigratorV2V3.sol and never mentions the promo slot or rotation state machine.",
+    "ROUNDING CHECKLIST: walked per the mandated table. All promo/stable conversions are floor-division in the protocol's favour on both legs (accrual `toDistribute * PRECISION / totalStaked` rounds down; settlement `amount * acc / PRECISION - debt` rounds down), leaving dust in the contract — consistent with SolvencyDetermination.md §3 lines 64-65. No round-trip in the user's favour found; no symmetric/banker's rounding present. Dust accrues to leftoverRecipient at finalize, which is protocol-favouring. No rounding finding.",
+    "All PoCs live in the writable workspace (workspace/phlimbo-ea/test/EconProbe.t.sol, EconProbeMigrator.t.sol) and are self-contained probe suites, not project tests. lib/phlimbo-ea was not modified."
+  ]
+}

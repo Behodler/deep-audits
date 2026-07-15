@@ -1,0 +1,213 @@
+{
+  "contract": "src/MigratorV2V3.sol",
+  "profileTimestamp": "2026-07-15T00:00:00Z",
+  "commit": "bf42c12",
+  "solidityVersion": "^0.8.19",
+  "storiesTouching": ["story-025 (non-reverting forwarding + unclaimable banking, fixes audit-07 V3-M-01)", "story-023 (original live-read chunked migrator)"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {
+      "confidence": "likely",
+      "notes": "migrate's loop is bounded by caller-supplied maxIterations, clamped to users.length. seedUsers' loop is unbounded in _users.length but is onlyOwner and single-tx gas-bounded (owner chunks the seed themselves). No recursion."
+    },
+    "checkedArithmetic": {
+      "confidence": "verified",
+      "notes": "0.8.19, no unchecked blocks, no assembly beyond the raw call in _tryTransfer. Balance-delta subtractions at L192-196 are safe: the after-balance provably >= before-balance for each token in the bracket."
+    },
+    "reentrancyGuarded": ["migrate", "claimUnclaimable"],
+    "reentrancyUnguarded": ["seedUsers", "withdrawAll"],
+    "accessControlled": { "onlyOwner": ["seedUsers", "withdrawAll"], "permissionless": ["migrate", "claimUnclaimable"] },
+    "initializerProtected": { "confidence": "n/a", "notes": "Non-upgradeable, constructor-initialized, all four dependency addresses immutable and zero-checked." },
+    "pauseMechanism": { "confidence": "verified", "notes": "None. The migrator has no pause of its own; it inherits liveness from V2's and V3's pause states (see LOCAL-103)." },
+    "weakRandomness": { "confidence": "verified", "notes": "None — no block/tx-derived entropy anywhere." },
+    "inboundCallbackSurface": { "confidence": "verified", "notes": "No ERC721/1155 hooks. Only inbound surface is a transfer hook in phUSD/rewardToken/promoToken firing on the _forward legs; migrate is nonReentrant." }
+  },
+
+  "cursorStateMachine": {
+    "variables": {
+      "seeded": "bool — true once seedUsers has been called at least once. Never reset.",
+      "migrateIterator": "int256 — 0..users.length during a pass, then -1 on completion. The -1 sentinel mirrors MigratorV1V2's idiom.",
+      "users": "address[] — replaced wholesale on reseed (delete + push loop). Not deduplicated.",
+      "unclaimable": "mapping(token => mapping(user => uint256)) — NEW in story-025. Never reset by reseed or by withdrawAll."
+    },
+    "transitions": [
+      { "from": "unseeded (seeded==false, iterator==0)", "to": "pass-in-progress (iterator==0)", "via": "seedUsers(_users)", "auth": "onlyOwner", "guard": "!seeded || migrateIterator == -1; _users.length > 0" },
+      { "from": "pass-in-progress (0 <= iterator < len)", "to": "pass-in-progress (iterator advanced)", "via": "migrate(maxIterations)", "auth": "PERMISSIONLESS", "guard": "seeded && migrateIterator >= 0 && maxIterations > 0" },
+      { "from": "pass-in-progress", "to": "pass-complete (iterator == -1)", "via": "migrate() reaching i == len", "auth": "PERMISSIONLESS" },
+      { "from": "pass-complete (iterator == -1)", "to": "pass-in-progress (iterator==0)", "via": "seedUsers(stragglerList)", "auth": "onlyOwner", "notes": "THE STRAGGLER SECOND PASS. Reseed is permitted ONLY between passes — the L126 guard `!seeded || migrateIterator == -1` forbids mid-pass reseed." }
+    ],
+    "chunkingProperties": [
+      "Cursor advance is monotone and all-or-nothing per chunk: migrate writes migrateIterator ONCE at L209-213 after the loop. A revert anywhere in the loop reverts the whole chunk and the cursor does not move.",
+      "Skip-on-zero (L173): a user whose LIVE V2 amount is 0 (exited, or already migrated) is passed over and the cursor still advances. Correct and idempotent — a duplicated address in `users` is a no-op on the second visit.",
+      "Coverage is contiguous: end = min(i + maxIterations, len), i starts at the stored cursor.",
+      "Live-read design (L172) means no seeded amounts to go stale, and withdrawAll deliberately does NOT abort the pass (unlike MigratorV1V2) — there are no balance preconditions to break."
+    ],
+    "criticalGap": "The all-or-nothing chunk semantics is the migrator's central fragility: ANY revert at index i pins the cursor at i forever, because the L126 reseed guard forbids skipping past it mid-pass. Story-025 removed the reverting FORWARDING legs but left two reverting legs INSIDE the loop (L182 and L188). See LOCAL-101 / LOCAL-102."
+  },
+
+  "valueFlowPaths": {
+    "perUserHappyPath": [
+      "1. LIVE read (amount,,) = phlimboV2.userInfo(user); skip if 0.",
+      "2. Bracket: snapshot phUSDBefore / stableBefore / promoBefore of THIS contract.",
+      "3. phlimboV2.withdraw(amount, user) — V2's migrator routing sends principal + auto-claimed stable + freshly minted phUSD rewards to THIS contract (msg.sender).",
+      "4. phlimboV3.stake(amount, user) — pulls the principal back out of this contract via safeTransferFrom (max-approved at L156); credits `user`; sets promoDebt against the CURRENT accPromoPerShare so there is no retroactive promo accrual.",
+      "5. Deltas: phUSD delta = (principal_in + V2 phUSD rewards + [2nd pass] V3 phUSD auto-claim) - principal_out = exactly the reward component. Principal nets out by construction.",
+      "6. _forward each non-zero delta to `user`; on transfer failure bank into unclaimable[token][user] and emit RewardForwardFailed."
+    ],
+    "bracketArithmeticVerdict": "SOUND. The bracket is per-user and symmetric, so pre-existing contract balances (including previously-banked `unclaimable` amounts from earlier iterations, and any donated dust) appear in BOTH before and after and cancel exactly. No cross-user contamination of the delta. Confirmed for all three legs.",
+    "strandOrDoubleCountPaths": [
+      { "path": "unclaimable banked, then withdrawAll", "outcome": "STRAND — withdrawAll (L243) sweeps the ENTIRE balance including banked amounts, and does NOT zero the unclaimable entries. Documented as an accepted trade-off in the NatSpec, BUT the stale non-zero entries are beyond what is documented. See LOCAL-105." },
+      { "path": "unclaimable banked, contract later re-funded (e.g. to resume migration)", "outcome": "DOUBLE-COUNT — post-sweep, unclaimable entries survive as unbacked claims. Any later inflow makes them first-come-first-served against funds earmarked for other users' forwards. See LOCAL-105." },
+      { "path": "revert at L182 (phlimboV2.withdraw) or L188 (phlimboV3.stake)", "outcome": "STRAND (whole pass) — cursor pinned, reseed forbidden mid-pass, no in-contract skip. See LOCAL-101/102." },
+      { "path": "_tryTransfer abi.decode revert on short return-data", "outcome": "STRAND (whole pass) — the 'never reverts' guarantee of _forward is not absolute. See LOCAL-104." },
+      { "path": "user re-stakes into V2 AFTER their index was processed", "outcome": "NOT stranded — remains in V2, handled by the operational straggler second pass (wind V2 down, reseed, re-run). Documented and correct." },
+      { "path": "duplicate address in `users`", "outcome": "NOT double-counted — live-read returns 0 on the second visit and the iteration is skipped." },
+      { "path": "V3 auto-claim on a straggler second pass", "outcome": "NOT stranded — the bracket spans the V3 stake, so V3's auto-claimed rewards (which route to msg.sender == this migrator) are captured in the deltas and forwarded. This is the specific reason the bracket wraps the stake and not just the withdraw. Verified correct." },
+      { "path": "standing max phUSD approval to V3 (L156)", "outcome": "NOT exploitable — V3 can only pull via safeTransferFrom where this contract is msg.sender, i.e. only inside phlimboV3.stake called by this contract. V3 is trusted. Noted as a permanent approval surface only." }
+    ]
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-101",
+      "type": "unskippable-revert / DoS",
+      "severity": "local-high",
+      "function": "migrate",
+      "line": 182,
+      "relatedTo": "INCOMPLETE FIX of ledger V3-M-01 (fix-pending)",
+      "description": "phlimboV2.withdraw(amount, user) at L182 is unskippable (no try/catch) and can revert for a user whose V2 position is BRICKED. PhlimboV2.pauseWithdraw (V2 L280-290) reduces user.amount and totalStaked but — unlike PhlimboV3's version — does NOT realign phUSDDebt/stableDebt. A V2 user who partially pauseWithdrew during any V2 pause therefore has debts computed against the old, larger amount, so V2._claimRewards' `userDetails.amount * accPhUSDPerShare / PRECISION - userDetails.phUSDDebt` (V2 L~500) underflows and reverts. V2.withdraw calls _claimRewards unconditionally (V2 L373). PhlimboV3's OWN NatSpec (V3 L521-525) documents this exact defect as 'the latent V1/V2 partial-pauseWithdraw brick' that V3 was written to fix — so the existence of bricked V2 positions is confirmed by the codebase itself, not hypothesised.",
+      "impact": "One such user anywhere in the seeded list reverts the whole chunk, pins migrateIterator at their index, and the L126 reseed guard ('Pass in progress') makes the in-contract skip unreachable. This is the SAME root-cause class and the SAME end state as ledger V3-M-01 ('a single bad recipient bricks the pass, no in-contract recovery'), simply relocated from the forwarding leg to the withdraw leg. Story-025 hardened only the forwarding leg.",
+      "recommendation": "Wrap the per-user body (V2 withdraw + V3 stake + forwards) in try/catch, or add an owner-only `skipIndex`/`setIterator` so a pathological index can be stepped over without a redeploy. Hardening only the transfer legs does not deliver the story's 'the cursor always advances' guarantee.",
+      "flags": ["INCOMPLETE-FIX-CANDIDATE for V3-M-01 — do NOT auto-flip 0b7fa9be... to fixed on the strength of story-025"],
+      "deferTo": "code-scanner (confirm the V2 underflow reachability), poc-generator (V2 pause -> partial pauseWithdraw -> V2 unpause -> migrate reverts)"
+    },
+    {
+      "id": "LOCAL-102",
+      "type": "unskippable-revert / DoS",
+      "severity": "local-high",
+      "function": "migrate",
+      "line": 188,
+      "relatedTo": "INCOMPLETE FIX of ledger V3-M-01 (fix-pending)",
+      "description": "phlimboV3.stake(amount, user) at L188 is unskippable and reverts with 'Below minimum stake' whenever the LIVE V2 amount is in (0, MINIMUM_STAKE=1e15). V2's ordinary withdraw has a dust rule that forces a full exit rather than leaving sub-minimum dust, and V2.stake requires >= MINIMUM_STAKE — BUT V2.pauseWithdraw (V2 L280-290) has NO dust rule and no minimum, so a partial pauseWithdraw during a V2 pause can leave any dust amount, including 1 wei. migrate's own skip-on-zero guard (L173) only catches amount == 0, not sub-minimum dust.",
+      "impact": "Identical to LOCAL-101: cursor pinned at that index, reseed forbidden mid-pass, recovery is a redeploy + re-wire of both setMigrator roles. A user can self-inflict this cheaply and unilaterally (1 wei of residual stake), so it is also a griefing vector against the migration, not only an accident.",
+      "recommendation": "Change the skip guard to `if (amount < phlimboV3.MINIMUM_STAKE()) continue;` (and handle the dust position out-of-band), or adopt the try/catch from LOCAL-101 which covers both legs at once.",
+      "flags": ["INCOMPLETE-FIX-CANDIDATE for V3-M-01"],
+      "deferTo": "poc-generator (V2 pause -> pauseWithdraw(amount-1) -> V2 unpause -> migrate reverts 'Below minimum stake')"
+    },
+    {
+      "id": "LOCAL-103",
+      "type": "liveness-coupling",
+      "severity": "local-low",
+      "function": "migrate",
+      "line": 182,
+      "description": "migrate requires BOTH V2 and V3 to be unpaused: phlimboV2.withdraw and phlimboV3.stake are each whenNotPaused. Consequently (a) a V3 promo flush (which pauses V3 via beginFlush) halts migration entirely for its duration, and (b) V2 cannot be paused to freeze the user base during migration — the header NatSpec (L22-24) acknowledges this and it is the stated reason for the live-read design. Cursor is not corrupted, only stalled; recorded so the interaction scanner does not mistake the stall for a strand.",
+      "recommendation": "Operational only: do not run a V3 promo rotation concurrently with a migration pass.",
+      "deferTo": "interaction analysis"
+    },
+    {
+      "id": "LOCAL-104",
+      "type": "unchecked-abi-decode / non-reverting-transfer gap",
+      "severity": "local-low",
+      "function": "_tryTransfer",
+      "line": 276,
+      "description": "story-025 cloned PhlimboV3._tryTransfer verbatim, including the unchecked `abi.decode(returndata,(bool))`. A token whose transfer SUCCEEDS but returns non-empty return-data shorter than 32 bytes reverts inside the decode; the revert propagates through _forward and out of migrate, pinning the cursor. This directly contradicts _forward's documented 'never reverts' contract (L281-283) and the story-025 commit message's 'so the cursor always advances'. The `callSuccess &&` short-circuit correctly handles the ordinary revert case, so only the success-with-short-returndata case is affected.",
+      "impact": "Token-assumption-gated. phUSD and rewardToken are fixed and vetted; promoToken is owner-vetted per promotion. Low.",
+      "recommendation": "Add `returndata.length >= 32` to the decode guard, in BOTH contracts.",
+      "flags": ["NEW INSTANCE of the V3-L-02 / V3-F-02 root cause in a SECOND contract at this commit — deduplicator MUST NOT silently collapse this into V3-L-02 (different contract, different fingerprint, and the V3 entries do not cover the migrator's cursor-pinning impact)."],
+      "deferTo": "deduplicator (explicit instruction above)"
+    },
+    {
+      "id": "LOCAL-105",
+      "type": "stale-accounting / unbacked-claim",
+      "severity": "local-low",
+      "function": "withdrawAll / claimUnclaimable",
+      "line": 243,
+      "description": "withdrawAll sweeps the contract's entire phUSD/rewardToken/promoToken balances INCLUDING amounts banked in `unclaimable`, but does not zero the corresponding entries. The NatSpec (L62-68) explicitly accepts that banked CLAIMS become unbacked and that reimbursement is an out-of-band owner obligation — that trade-off is documented and, under Law 3, not itself reportable. What is NOT covered by the documented trade-off is the residual stale state: (a) the entries persist across a reseed into the next pass (`unclaimable` is never reset by seedUsers), and (b) if the contract is subsequently re-funded — which is expected, since withdrawAll deliberately does NOT abort the pass and migration is meant to resume — the surviving entries become first-come-first-served claims against inflows earmarked for other users' forwards, letting a claimUnclaimable front-run a live migrate chunk's forwarding balance.",
+      "impact": "Requires the owner to have used the last-ditch hatch and then resumed. No theft from an honest counterparty in the normal flow; the migrator holds no value at rest between chunks. Low, footgun-shaped (Law 3: a competent non-malicious owner would be surprised that resuming after a sweep re-arms stale claims).",
+      "recommendation": "Either zero the swept entries (requires tracking banked users/tokens, e.g. a per-token total), or document that withdrawAll is terminal and add an explicit `abortPass`. The current 'sweeps everything but resumption is still supported' combination is the source of the hazard.",
+      "deferTo": "econ-scanner (is the re-fund-and-resume flow actually operationally expected?), severity-classifier"
+    },
+    {
+      "id": "LOCAL-106",
+      "type": "faithfulness / doc-vs-code",
+      "severity": "local-low",
+      "function": "migrate / seedUsers",
+      "line": 44,
+      "description": "story-025 rewrote the recovery-note NatSpec to drop the unreachable 'exclude from seed list' escape (addressing ledger V3-F-01). The replacement text now claims 'the cursor always advances and a single bad recipient can never brick a pass'. That claim is true for the forwarding legs and false for the withdraw/stake legs (LOCAL-101/102) and for the decode gap (LOCAL-104). V3-F-01's root complaint — the contract documents recoverability it does not have — therefore SURVIVES story-025 in a new form: the old text overstated an escape hatch, the new text overstates the brick-proofing.",
+      "impact": "Faithfulness (Law 2). Standalone Low.",
+      "flags": ["V3-F-01 (3f241c3a...) should NOT be auto-flipped to fixed"],
+      "deferTo": "story-faithfulness"
+    },
+    {
+      "id": "LOCAL-107",
+      "type": "fixed-defect (positive finding)",
+      "severity": "n/a",
+      "function": "withdrawAll",
+      "line": 250,
+      "description": "story-025 added the live promo-token sweep and extended WithdrawnAll with the promo amount, closing ledger V3-Q-01 ('withdrawAll escape hatch omits promoToken sweep'). Verified complete: the promo leg mirrors migrate's live read of phlimboV3.promoToken() with the same address(0) handling.",
+      "flags": ["V3-Q-01 (e1392170...) — PROPOSE fixed (human applies per CLAUDE.md; never auto-flip)"]
+    },
+    {
+      "id": "LOCAL-108",
+      "type": "missing-zero-check",
+      "severity": "local-info",
+      "function": "seedUsers",
+      "line": 125,
+      "description": "seedUsers does not reject address(0) or duplicate entries in _users. Both are benign in practice: the live read of userInfo(address(0)) returns amount 0 and is skipped, and duplicates are skipped on the second visit. Owner-supplied input (Law 3: obvious misuse). Recorded for completeness only; not recommended for report."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      { "function": "seedUsers(address[] calldata _users)", "visibility": "external", "accessControl": "onlyOwner", "reentrancyGuard": false, "guard": "!seeded || migrateIterator == -1 ('Pass in progress'); _users.length > 0", "stateChanges": ["users (wholesale replace)", "seeded = true", "migrateIterator = 0"], "externalCalls": [], "notes": "Does NOT reset `unclaimable`. The between-passes-only guard is what makes LOCAL-101/102 unrecoverable in-contract." },
+      { "function": "migrate(uint256 maxIterations)", "visibility": "external", "accessControl": "PERMISSIONLESS", "reentrancyGuard": true, "guard": "seeded; migrateIterator >= 0; maxIterations > 0", "stateChanges": ["migrateIterator", "unclaimable[token][user] (on failed forward)"], "externalCalls": ["phUSD.forceApprove(phlimboV3, max)", "phlimboV3.promoToken() [view]", "phlimboV2.userInfo(user) [view]", "phlimboV2.withdraw(amount,user) [REVERT-CAPABLE, unskippable]", "phlimboV3.stake(amount,user) [REVERT-CAPABLE, unskippable]", "phUSD/rewardToken/promoToken.balanceOf x6", "phUSD/rewardToken/promoToken.transfer via _tryTransfer [raw call, non-reverting except LOCAL-104]"], "notes": "Permissionless by design — recipients and amounts are fixed by V2/V3 state, so a third party cannot redirect value. maxIterations is the only caller-controlled input and only bounds gas." },
+      { "function": "claimUnclaimable(address token)", "visibility": "external", "accessControl": "PERMISSIONLESS (pull for msg.sender only)", "reentrancyGuard": true, "guard": "unclaimable[token][msg.sender] > 0", "stateChanges": ["unclaimable[token][msg.sender] = 0"], "externalCalls": ["IERC20(token).safeTransfer(msg.sender, amount)"], "notes": "CEI-correct: entry zeroed BEFORE the transfer. Deliberately REVERTING (safeTransfer) — a still-blocked caller reverts and keeps their claim, which is the right semantics on a user-initiated path. `token` is caller-supplied but only indexes the caller's own banked balance, so an arbitrary-token argument cannot mint a claim." },
+      { "function": "withdrawAll()", "visibility": "external", "accessControl": "onlyOwner", "reentrancyGuard": false, "stateChanges": ["none — balances only; notably does NOT touch users/migrateIterator/unclaimable"], "externalCalls": ["phlimboV3.promoToken() [view]", "phUSD/rewardToken/promoToken.balanceOf + safeTransfer to owner()"], "notes": "Last-ditch hatch. Deliberately does NOT abort the pass (live reads mean no balance preconditions). See LOCAL-105." },
+      { "function": "userCount()", "visibility": "external view", "accessControl": "none", "stateChanges": [] },
+      { "function": "unclaimable(address,address) / users(uint256) / seeded() / migrateIterator() / phlimboV2() / phlimboV3() / phUSD() / rewardToken()", "visibility": "public getters", "accessControl": "none" }
+    ],
+
+    "externalCalls": [
+      { "target": "IPhlimboV2 phlimboV2 (immutable)", "methods": ["userInfo [view]", "withdraw"], "trustLevel": "trusted (sibling in-scope contract)", "notes": "REQUIRES wiring prerequisite (a): phlimboV2.setMigrator(this). Without it, withdraw reverts 'Not authorized' and the pass cannot start at all (fail-loud, not a strand). withdraw is whenNotPaused and CAN revert on bricked positions — see LOCAL-101." },
+      { "target": "IPhlimboV3 phlimboV3 (immutable)", "methods": ["promoToken [view]", "stake"], "trustLevel": "trusted (sibling in-scope contract)", "notes": "REQUIRES wiring prerequisite (b): phlimboV3.setMigrator(this). stake is whenNotPaused and enforces MINIMUM_STAKE — see LOCAL-102/103. Holds a standing max phUSD approval (L156)." },
+      { "target": "IFlax phUSD (immutable)", "methods": ["balanceOf", "forceApprove", "transfer (raw, via _tryTransfer)", "safeTransfer"], "trustLevel": "trusted", "notes": "No mint role needed on this contract — V2 mints the pending phUSD rewards during its withdraw." },
+      { "target": "IERC20 rewardToken (immutable)", "methods": ["balanceOf", "transfer (raw)", "safeTransfer"], "trustLevel": "semi-trusted", "notes": "Assumed standard ERC20, no fee-on-transfer, no hooks." },
+      { "target": "IERC20 promoToken (LIVE-read from V3 each call)", "methods": ["balanceOf", "transfer (raw)", "safeTransfer"], "trustLevel": "semi-trusted (owner-vetted by V3's startPromotion)", "notes": "Read once per migrate/withdrawAll call, so it cannot shift mid-loop. V3 guarantees promoToken is never phUSD or rewardToken, which is what makes the three balance brackets independent — this guarantee is LOAD-BEARING for the delta arithmetic and is worth an explicit cross-contract assertion." },
+      { "target": "address user (from the owner-seeded list)", "methods": ["transfer (raw call via _tryTransfer)", "safeTransfer via claimUnclaimable"], "trustLevel": "untrusted", "notes": "A user with a token-transfer callback gets control inside migrate's loop; migrate is nonReentrant so re-entry into migrate/claimUnclaimable is blocked. Re-entry into V2/V3 from that callback is possible (they have their own guards) — surfaced for the interaction scanner, not adjudicated here." }
+    ],
+
+    "stateVariables": [
+      { "name": "users", "type": "address[]", "mutators": ["seedUsers (delete + push loop)"], "readers": ["migrate", "userCount", "public getter"], "notes": "Not deduplicated, not zero-checked (LOCAL-108); both benign via skip-on-zero." },
+      { "name": "seeded", "type": "bool", "mutators": ["seedUsers (=true, never reset)"], "readers": ["migrate", "seedUsers guard"] },
+      { "name": "migrateIterator", "type": "int256", "mutators": ["seedUsers (=0)", "migrate (=i or -1)"], "readers": ["migrate guard", "seedUsers guard"], "notes": "int256 with a -1 completion sentinel, mirroring MigratorV1V2. Written once per migrate call, after the loop — so a revert leaves it untouched (the pinning mechanism in LOCAL-101/102)." },
+      { "name": "unclaimable", "type": "mapping(address token => mapping(address user => uint256))", "mutators": ["_forward (+= on failed transfer)", "claimUnclaimable (=0)"], "readers": ["claimUnclaimable", "public getter"], "notes": "NEW in story-025. NOT reset by seedUsers and NOT reduced by withdrawAll — the source of LOCAL-105. Per-user granularity here is strictly better than PhlimboV3's aggregate unclaimablePromo, which has no per-user record at all." },
+      { "name": "phlimboV2 / phlimboV3 / phUSD / rewardToken", "type": "immutable", "mutators": ["constructor (all zero-checked)"], "readers": ["migrate", "withdrawAll"] }
+    ],
+
+    "events": ["Seeded", "UserMigrated", "MigrateProgress", "RewardForwardFailed", "UnclaimableClaimed", "WithdrawnAll"],
+    "modifiers": ["onlyOwner", "nonReentrant"]
+  },
+
+  "trustAssumptions": [
+    "Both wiring prerequisites are performed by the staging scripts before migrate: phlimboV2.setMigrator(this) and phlimboV3.setMigrator(this). Neither is asserted in-contract; absence fails loud ('Not authorized'), not silently.",
+    "The migrator role is REVOKED on both V2 and V3 once migration completes — while wired, this contract can withdraw any V2 user's stake to itself. Not asserted or self-revoked in-contract.",
+    "V3 guarantees promoToken is never phUSD or rewardToken (enforced in startPromotion). LOAD-BEARING for the three independent balance brackets in migrate.",
+    "phUSD, rewardToken and promoToken are standard ERC20s with no transfer hooks and no fee-on-transfer; a fee-on-transfer token would make the L192-196 deltas under-report but would not underflow.",
+    "The owner is non-malicious (Law 3): withdrawAll's unconditional sweep and the seeded list's contents are trusted inputs and are not reported as attack vectors. LOCAL-105 is scoped to the non-obvious footgun (resume-after-sweep re-arms stale claims), not to the sweep itself.",
+    "Operationally, V2 is wound down (APY -> 0, collectReward stopped) before the straggler second pass — otherwise stragglers regenerate indefinitely. Documented at L40-44; not enforceable in-contract."
+  ],
+
+  "inheritanceChain": ["Ownable (OZ)", "ReentrancyGuard (OZ)", "IMigratorV2V3"],
+
+  "complexity": { "loc": 298, "functions": 7, "externalEntryPoints": 4, "externalCalls": 12, "stateVariables": 8, "loops": 2, "assemblyBlocks": 0, "uncheckedBlocks": 0 },
+
+  "handoffToInteractionAnalysis": [
+    "PRIORITY: LOCAL-101 and LOCAL-102 are the headline. Both are INCOMPLETE-FIX candidates against ledger V3-M-01 (fix-pending, 0b7fa9be...). story-025 hardened the forwarding legs only; the withdraw and stake legs inside the same loop remain unskippable and revert-capable, reproducing M-01's exact end state (pinned cursor, no in-contract recovery, redeploy-only). Per CLAUDE.md an incomplete fix outranks an unfixed bug — do NOT propose V3-M-01 fixed.",
+    "The trigger for both is PhlimboV2.pauseWithdraw's missing debt realignment and missing dust rule — a V2 defect that PhlimboV3 explicitly fixed in its own pauseWithdraw (V3 L521-525) and that the migrator then walks straight into. Root cause is in V2 (deployed, out of scope for change), impact is in MigratorV2V3 (in scope, fixable) — file against the migrator.",
+    "PROPOSE FIXED: V3-Q-01 (promo sweep, LOCAL-107). Human applies.",
+    "DO NOT AUTO-FLIP: V3-M-01 (LOCAL-101/102), V3-F-01 (LOCAL-106).",
+    "DEDUP INSTRUCTION: LOCAL-104 is a NEW instance of the V3-L-02/F-02 abi.decode root cause in a second contract with a distinct impact (cursor pinning vs flush bricking). Do not collapse.",
+    "TREAT AS AXIOM: the per-user balance-delta bracket is arithmetically sound and free of cross-user contamination; the principal nets out exactly. Any finding premised on the migrator mis-computing a reward delta from prior balances is REFUTED.",
+    "TREAT AS AXIOM: skip-on-zero + live reads make migrate idempotent per user; duplicates and post-processing V2 re-stakes cannot double-credit."
+  ]
+}

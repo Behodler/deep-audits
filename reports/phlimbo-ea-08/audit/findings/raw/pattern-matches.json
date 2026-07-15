@@ -1,0 +1,336 @@
+{
+  "project": "phlimbo-ea",
+  "commit": "bf42c12e3ad9d834373e8439f0e992aa8870aca4",
+  "scanTimestamp": "2026-07-15T00:00:00Z",
+  "scanType": "pattern-matching",
+  "patternDbVersion": "1.1",
+  "patternsChecked": 35,
+  "scope": [
+    "src/PhlimboV3.sol",
+    "src/MigratorV2V3.sol",
+    "src/interfaces/*.sol"
+  ],
+  "scopeNotes": "V1 (src/Phlimbo.sol) and V2 (src/PhlimboV2.sol) excluded per task instruction (deprecated/acknowledged). MigratorV1V2.sol not scanned (V1 leg).",
+  "findingsCount": 6,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "ROUNDING-DIRECTION",
+      "secondaryPatternId": "DIVISION-PRECISION",
+      "type": "accumulator-truncation-value-destruction",
+      "severity": "potential-high",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_updatePool",
+      "line": 724,
+      "alsoAt": [757],
+      "confidence": "high",
+      "description": "In both the stable block (L724-733) and the promo block (L757-765), the reward balance is decremented by `toDistribute` UNCONDITIONALLY while the accumulator is credited with the TRUNCATED quotient `(toDistribute * PRECISION) / totalStaked`. When `toDistribute * 1e18 < totalStaked` the accumulator gains ZERO but `rewardBalance`/`promoRewardBalance` is still debited by the full amount. The emission is destroyed: no staker is credited, and the tokens remain in the contract with the accounting believing they were paid out. `_updatePool` is reachable permissionlessly (collectReward, claim, stake, withdraw) at 12s granularity (the `block.timestamp <= lastRewardTime` guard only dedups within a second), so the loss compounds per block and is attacker-triggerable as pure griefing.",
+      "matchedSignatures": [
+        "accPromoPerShare += (promoToDistribute * PRECISION) / totalStaked",
+        "accStablePerShare += (toDistribute * PRECISION) / totalStaked",
+        "rewardPerShare",
+        "/ totalStaked"
+      ],
+      "vulnerableWhenMet": [
+        "fee/haircut/debt rounds DOWN against the protocol (here: the per-share credit rounds down to zero while the liability is still discharged)",
+        "the two legs of a conversion round in opposite directions (balance debited exact, accumulator credited floored)"
+      ],
+      "missingMitigations": [
+        "No remainder carry: the truncated dust is not retained for the next update (canonical MasterChef fix is to debit only the amount actually credited, i.e. accDelta * totalStaked / PRECISION, or carry the remainder forward)",
+        "No minimum-elapsed / minimum-toDistribute floor before the accumulator write",
+        "No decimals normalisation of the reward or promo token to 18dp"
+      ],
+      "quantified": {
+        "method": "exact integer simulation of the contract arithmetic",
+        "rewardToken6dp_100k_over_7d_perBlock": {
+          "totalStaked_100k_phUSD": "4.2% of each emission lost",
+          "totalStaked_1M_phUSD": "49.6% lost",
+          "totalStaked_10M_phUSD": "100% lost (accDelta == 0)"
+        },
+        "promo6dp_50k_over_30d_perBlock": {
+          "totalStaked_1M_phUSD_and_above": "100% lost (accDelta == 0)"
+        },
+        "control_18dp_rewardToken": "0% lost — the bug is decimals-conditional"
+      },
+      "preconditions": [
+        "rewardToken and/or promoToken has fewer than 18 decimals (6dp USDC-class is the realistic case), OR totalStaked is large enough that toDistribute*1e18 < totalStaked",
+        "_updatePool called at short intervals (every block) — normal traffic suffices; an attacker can force it"
+      ],
+      "evidenceOfIntent": "test/Mocks.sol ships `MockUSDC6` explicitly documented 'for partner-token decimals testing', and startPromotion accepts any partner ERC20 — low-decimal promo tokens are an ANTICIPATED, in-design scenario, not a hypothetical.",
+      "whyTestsMissIt": "test/PhlimboV3Test.t.sol:1271 `test_promo_6_decimal_partner_token` is the suite's only low-decimal test and it warps a full PROMO_DURATION/2 in ONE step, producing a single huge `toDistribute` where truncation is negligible. The defect only manifests under FREQUENT small-elapsed updates, which no test exercises. The suite's own decimals test masks the bug.",
+      "severityRationale": "Direct loss of user-entitled reward assets and stranding of protocol-funded emissions; permissionlessly triggerable with no privilege. Gated to potential-high pending confirmation of the deployed rewardToken decimals — if the live rewardToken is 18dp the stable leg collapses to dust and only the promo leg (partner-chosen decimals) carries it, which would argue Medium.",
+      "notes": "The stable leg is inherited from V2; the promo leg is V3-new (story-022). Both are in scope for this run. NOT introduced by story-024/025.",
+      "references": [
+        "https://github.com/sushiswap/sushiswap/blob/master/protocols/masterchef/contracts/MasterChef.sol"
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "type": "debt-aligned-without-settlement",
+      "severity": "potential-high",
+      "contract": "src/PhlimboV3.sol",
+      "function": "batchClaim",
+      "line": 444,
+      "confidence": "high",
+      "description": "batchClaim computes `pending`, then aligns `userDetails.promoDebt` to the current accumulator UNCONDITIONALLY (L448) BEFORE and REGARDLESS of whether `_tryTransfer` succeeds. On failure the amount is added only to the AGGREGATE counter `unclaimablePromo` (L454) — there is no per-user attribution and NO claim path anywhere in PhlimboV3 for that counter. `finalizePromotion` then sweeps the entire token balance (including the banked amount) to `leftoverRecipient` and zeroes the counter (L479-487). The user's entitlement is destroyed (debt aligned => pending == 0 forever, accPromoPerShare is never reset) and the tokens are routed to leftoverRecipient with no recovery. `unclaimablePromo` is a write-only variable — it is never read except to be zeroed, which is the smell that exposes the missing feature.",
+      "matchedSignatures": [
+        "accPromoPerShare",
+        "promoDebt",
+        "_updatePool"
+      ],
+      "vulnerableWhenMet": [
+        "state (promoDebt) mutated as though value was settled when it was not",
+        "the accounting write is not conditional on the value transfer succeeding"
+      ],
+      "missingMitigations": [
+        "No per-user `unclaimable[token][user]` record (the migrator HAS exactly this)",
+        "No `claimUnclaimable` pull on PhlimboV3 (the migrator HAS exactly this)",
+        "Debt alignment is not made conditional on transfer success"
+      ],
+      "escalationPath": "batchClaim is PERMISSIONLESS. If the promo token is temporarily non-transferable for everyone — a partner token that is paused, or a token-wide freeze — any caller can run batchClaim to completion during that window. Every staker's promoDebt is aligned, every transfer fails, 100% of accrued promo is banked into the aggregate counter and swept to leftoverRecipient. `abortFlush` does NOT undo the debt alignment and does NOT zero `unclaimablePromo`, so the entitlement is unrecoverable through either exit from Flushing. A griefer can burn the entire promotion's accrued rewards for every staker at the cost of gas.",
+      "storyRelation": "story-025 (audit-07 M-01) fixed EXACTLY this shape in MigratorV2V3 — replacing reverting safeTransfer with per-user `unclaimable` banking plus a permissionless `claimUnclaimable` pull. The remedy was applied only to the migrator leg. PhlimboV3.batchClaim (from story-022, pre-dating M-01) has the same push-failure shape with a strictly weaker remedy: aggregate-only, unattributed, unclaimable. This is an ASYMMETRIC/INCOMPLETE application of the story-025 fix pattern, and is DISTINCT from M-01 (different contract, different function) — it should not be collapsed into it.",
+      "severityRationale": "Loss of user-entitled assets. Single-blocklisted-recipient case is a guaranteed, deterministic loss for that user (Medium). Token-wide-freeze case is a permissionless total burn of all stakers' promo entitlements (High). Promo rewards are a bonus stream, which may argue the ceiling down to Medium at triage.",
+      "references": []
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "zombie-set-growth",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "function": "pauseWithdraw / batchClaim / finalizePromotion",
+      "line": 529,
+      "confidence": "medium",
+      "description": "`withdraw` removes a fully-exited user from `_stakers` (L650-652), but `pauseWithdraw` deliberately does NOT touch set membership (documented at L525-527, to keep the set frozen during a flush). A user who fully exits via pauseWithdraw therefore stays in `_stakers` FOREVER with amount == 0. The set is monotonically growing for that path — nothing ever prunes zombies. Every subsequent flush must iterate them (`finalizePromotion` requires `flushCursor == _stakers.length()`), so the cost of every future rotation grows permanently.",
+      "matchedSignatures": [
+        "for (; cursor < end; cursor++)",
+        "_stakers.length()",
+        "flushCursor == _stakers.length()"
+      ],
+      "vulnerableWhenMet": [
+        "Array grows unboundedly (no prune path for pauseWithdraw exits)"
+      ],
+      "notVulnerableWhenPartial": [
+        "batchClaim IS chunked via maxIterations — this is pagination, so no single call is forced over the block limit. That caps the severity: it is a permanent, growing gas TAX on rotations, not an outright brick."
+      ],
+      "attackPath": "Every flush pauses the contract, and pauseWithdraw is available exactly while paused. An attacker stakes MINIMUM_STAKE (1e15 = 0.001 phUSD) from N cheap addresses, waits for any flush's pause window, and pauseWithdraws to zero. All N addresses become permanent zombies iterated by every future rotation. The pause window needed for the attack is created by the protocol's own routine operation.",
+      "missingMitigations": [
+        "No prune/compact function for zero-amount members",
+        "No removal on pauseWithdraw when user.amount hits 0 (the docstring's freeze rationale explains why it is omitted, but offers no alternative reclamation)"
+      ],
+      "severityRationale": "Availability/cost degradation of a core owner operation, permanent and cheap to inflict, but paginated so recoverable. Likely Medium-to-Low at triage.",
+      "references": []
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "REWARD-RUNWAY-DEPLETION",
+      "type": "stale-accounting-after-sweep",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "function": "emergencyTransfer",
+      "line": 306,
+      "confidence": "medium",
+      "description": "emergencyTransfer sweeps the phUSD, rewardToken and promoToken BALANCES but resets NONE of the accounting: `rewardBalance`, `promoRewardBalance`, `rewardPerSecond`, `promoRewardPerSecond`, `accStablePerShare`, `accPromoPerShare`, `totalStaked` and every `userInfo` are left exactly as they were. It does not call `_updatePool`. The contract is left asserting a reward liability it no longer has the tokens to honour, and there is NO setter anywhere that can decrease `rewardBalance` or `promoRewardBalance` — they are only ever reduced by accrual inside `_updatePool`. The only route back to consistency is for the owner to return EXACTLY the swept amount.",
+      "matchedSignatures": [
+        "rewardBalance",
+        "rewardPerSecond",
+        "phusdPerSecond"
+      ],
+      "vulnerableWhenMet": [
+        "solvency invariant (balance covers rewardBalance) not enforced or restored after the sweep"
+      ],
+      "footgunPath": "If the owner sweeps and then returns only the staked principal (or any amount less than swept), `_updatePool` keeps advancing accStablePerShare against the phantom `rewardBalance`. `_claimRewards`'s `rewardToken.safeTransfer` then reverts on the shortfall — and because `withdraw` calls `_claimRewards` unconditionally (L631), WITHDRAW REVERTS for every user with pending stable rewards. Users are confined to `pauseWithdraw`, which only works while paused; unpausing to restore service is what bricks withdraw. A competent, non-malicious owner would be surprised that a rescue-and-return leaves the pool permanently mis-accounted with no setter to fix it (Law 3: surprise => footgun => report).",
+      "missingMitigations": [
+        "No accounting reset in emergencyTransfer",
+        "No setter to reconcile rewardBalance / promoRewardBalance downward",
+        "withdraw has no claim-skipping escape (unlike pauseWithdraw)"
+      ],
+      "dedupNote": "OVERLAPS the existing ledger entry M-02 (run-07, 'emergencyTransfer stale-promo brick footgun'). This is the same function and likely the same root cause with a broader framing (stable leg + no-setter angle, not only the promo leg). Flagged per the no-suppress instruction; expect the sanitizer to reconcile against M-02 by fingerprint. If M-02 is promo-only, the stable-leg/withdraw-brick angle may be a genuine widening rather than a duplicate.",
+      "references": []
+    },
+    {
+      "id": "PATTERN-005",
+      "source": "pattern-db",
+      "patternId": "RETURN-VALUE-IGNORE",
+      "type": "raw-call-treats-codeless-address-as-success",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_tryTransfer",
+      "line": 818,
+      "alsoAt": [],
+      "duplicatedIn": "src/MigratorV2V3.sol:275 (_tryTransfer — byte-identical copy)",
+      "confidence": "medium",
+      "description": "`_tryTransfer` does `address(token).call(...)` and returns `callSuccess && (returndata.length == 0 || abi.decode(returndata,(bool)))`. A raw call to an address with NO CODE returns `callSuccess == true` with empty returndata, so `_tryTransfer` reports SUCCESS for a token that does not exist. SafeERC20 guards this precisely with an `isContract` check; these hand-rolled copies drop it. On a false success PhlimboV3.batchClaim emits PromoClaimed and aligns the debt having moved nothing (compounding PATTERN-002), and MigratorV2V3._forward returns silently without banking.",
+      "matchedSignatures": [
+        ".call(",
+        "abi.encodeCall(IERC20.transfer"
+      ],
+      "vulnerableWhenMet": [
+        "Return bool not checked in the codeless case (empty returndata treated as success)"
+      ],
+      "notVulnerableWhenPartial": [
+        "Practical reachability is LOW: promoToken must pass `startPromotion`'s `safeTransferFrom`, which DOES revert on a codeless address, so a live promo slot is always a real contract. phUSD and rewardToken are immutable and trusted. So this is a latent robustness gap, not a live exploit path."
+      ],
+      "missingMitigations": [
+        "No `address(token).code.length > 0` check before the raw call"
+      ],
+      "severityRationale": "QA/Low — defence-in-depth deviation from the SafeERC20 contract with no demonstrated reachable exploit path today.",
+      "references": []
+    },
+    {
+      "id": "PATTERN-006",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "unchunkable-seed",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "seedUsers",
+      "line": 125,
+      "confidence": "medium",
+      "description": "`seedUsers` does `delete users` (an O(N) storage clear of the previous list) followed by an O(N) push loop, all in one unchunkable transaction. The list can only be replaced WHOLESALE — there is no append mode and no chunked seed. A user base large enough to exceed the block gas limit in either the clear or the push cannot be seeded at all, and cannot be reseeded for the straggler second pass that the contract's own docstring designates as the mitigation for mid-migration V2 stakers (L40-44).",
+      "matchedSignatures": [
+        "for (uint256 i = 0; i < _users.length; i++)",
+        "delete users",
+        "users.push"
+      ],
+      "vulnerableWhenMet": [
+        "No pagination on the seed path"
+      ],
+      "quantified": "Post-London refunds are capped at 20% of gas used, so `delete users` nets ~2.9k gas/slot. ~5,000 users clears in roughly 11-12M gas (fits in a 30M block); the ceiling is on the order of ~12-15k users. Whether this binds depends entirely on the real V2 user count — likely well under the limit for this protocol, which is why severity is Low.",
+      "missingMitigations": [
+        "No chunked/append seeding",
+        "No cap or documented maximum on the seed list length"
+      ],
+      "severityRationale": "Low — a scale limit on an owner-operated one-shot path, with an obvious workaround (deploy a fresh migrator). Flagged for completeness rather than as a likely live risk.",
+      "references": []
+    }
+  ],
+  "manualReviewCount": 4,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "type": "accrual-forfeit-on-emergency-exit",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "pauseWithdraw",
+      "line": 537,
+      "confidence": "low",
+      "description": "pauseWithdraw realigns phUSDDebt/stableDebt/promoDebt to the reduced amount at the CURRENT accumulators without paying out, so a user who emergency-exits during a pause forfeits ALL unclaimed accruals across all three streams. The forfeited stable/promo tokens stay in the contract and are ultimately swept to leftoverRecipient at finalizePromotion. This is explicitly documented as intentional at L523-525 (it fixes a latent V1/V2 underflow brick), so it is a deliberate trade-off — but the loser is the user and the beneficiary is the protocol/partner, and the pause windows in which it applies are created by routine flush operations. Routed for human adjudication: intended-but-user-adverse, and the alternative (pay out, or preserve the debt delta) was available.",
+      "matchedSignatures": ["promoDebt", "accPromoPerShare"],
+      "whyLowConfidence": "Documented intent + a real correctness motivation (underflow fix). Whether the forfeiture is acceptable is a design call, not a pattern verdict."
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "pattern-db",
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "type": "banked-debt-unbacked-after-sweep",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "withdrawAll",
+      "line": 243,
+      "confidence": "low",
+      "description": "withdrawAll sweeps the ENTIRE phUSD/rewardToken/promoToken balances including tokens backing live `unclaimable[token][user]` entries, leaving those claims unbacked — `claimUnclaimable` then reverts on transfer for the affected users, permanently unless the owner reimburses out of band. The docstring (L63-68) states this plainly as 'the accepted trade-off for keeping the emergency hatch unconditional and simple'. Under Law 3 this is a KNOWING owner action with an explicitly documented consequence, so it is close to trusted-and-suppressed rather than a footgun. Routed rather than dropped because the liability ledger and the swept balance are silently decoupled — no invariant or event warns the owner that live claims exist at sweep time.",
+      "matchedSignatures": ["balanceOf(address(this))", "unclaimable"],
+      "suggestedMitigation": "Track a `totalUnclaimable[token]` and either exclude it from the sweep or emit a warning event when sweeping over live claims — preserves the unconditional hatch while removing the silence.",
+      "whyLowConfidence": "Explicitly documented and owner-knowing; likely suppressed at triage."
+    },
+    {
+      "id": "PATTERN-MR-003",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-CROSS-FUNCTION",
+      "type": "raw-call-to-partner-token",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "batchClaim / _tryTransfer",
+      "line": 819,
+      "confidence": "low",
+      "description": "`_tryTransfer` hands execution to an owner-onboarded partner token via a raw call inside batchClaim's loop. Checked and found largely mitigated: batchClaim is `nonReentrant`, and OZ ReentrancyGuard is CONTRACT-wide, so the whole sibling set (stake/withdraw/claim/collectReward) is locked for the duration. The debt is also aligned BEFORE the call (CEI-correct). Residual surface: a malicious promo token could re-enter the non-guarded owner functions (finalizePromotion, abortFlush) — but those are onlyOwner, so an attacker cannot reach them. Recorded as a checked-and-largely-refuted match; a malicious partner token remains an onboarding-diligence concern rather than a code defect.",
+      "matchedSignatures": [".call(", "nonReentrant", "transfer("],
+      "whyLowConfidence": "Guard coverage appears complete; no concrete reentrant path identified. Recorded for a human to confirm the owner-function surface."
+    },
+    {
+      "id": "PATTERN-MR-004",
+      "source": "pattern-db",
+      "patternId": "RETURN-VALUE-IGNORE",
+      "type": "retired-promo-token-unrecoverable",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "withdrawAll",
+      "line": 250,
+      "confidence": "low",
+      "description": "withdrawAll reads `promoToken` LIVE from PhlimboV3. After a rotation, the RETIRED promo token is no longer the live slot, so any balance of it stranded in the migrator can never be swept — withdrawAll only ever sees the current promo token (or none, once the slot is empty). Banked `unclaimable` entries for the retired token remain claimable by their users (which is fine), but any non-banked residue of a retired token is permanently stuck. Low impact; the residue should be zero in normal operation since deltas are forwarded or banked in full.",
+      "matchedSignatures": ["balanceOf(address(this))", "promoToken"],
+      "whyLowConfidence": "No mechanism identified that leaves a non-banked residue; likely a theoretical gap only."
+    }
+  ],
+  "patternsSkipped": [
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "reason": "SKIP RULE: pattern `note` states C4 treats approve race / safeApprove front-running as QA/known-issue. Signature `approve` matched at MigratorV2V3.sol:156 (`phUSD.forceApprove(address(phlimboV3), type(uint256).max)`), but forceApprove is the correct OZ idiom and the spender is an immutable trusted address. No plausible HM twist found, so not routed to manualReview either."
+    }
+  ],
+  "checkedNoMatch": [
+    "ERC4626-INFLATION", "ORACLE-STALE", "ORACLE-ROUNDID", "REENTRANCY-ERC777",
+    "SIGNATURE-REPLAY", "FLASH-LOAN-PRICE", "UNSAFE-DOWNCAST", "UNPROTECTED-INIT",
+    "STORAGE-COLLISION", "MISSING-SLIPPAGE", "SELFDESTRUCT-FORCE-ETH", "DOUBLE-VOTING",
+    "PERMIT-FRONTRUN", "CROSS-CHAIN-REPLAY", "TIMELOCK-BYPASS", "MINT-ON-DEMAND-OVERMINT",
+    "BATCH-PAYOUT-FIXED-POT", "REENTRANCY-ERC721-RECEIVE", "REENTRANCY-READONLY",
+    "WEAK-PRNG", "FEE-ON-TRANSFER-ACCOUNTING", "CENTRALIZATION-ADMIN"
+  ],
+  "explicitlyRefuted": [
+    {
+      "patternId": "REWARD-RUNWAY-DEPLETION",
+      "alias": "Linear-Depletion / freeze-then-resume depletion rate drift",
+      "target": "src/PhlimboV3.sol :: _updatePool phase gate + abortFlush",
+      "verdict": "DOES NOT REPRODUCE — drop",
+      "reasoning": "Tasked to check whether freezing accPromoPerShare during Flushing and resuming causes rate drift or over/under-emission. Traced both exits from Flushing. During the freeze `_updatePool` skips the promo block but STILL advances `lastRewardTime = block.timestamp` (L767), so the frozen window's emission is simply not accrued and `promoRewardBalance` is NOT debited. (a) finalizePromotion exit: the un-emitted remainder is swept to leftoverRecipient by design — the promotion is over, no drift. (b) abortFlush exit: `promoRewardBalance` and `promoRewardPerSecond` are BOTH unchanged, and critically the rate is NOT recomputed on resume. Emission therefore resumes at the identical constant rate and the stream simply runs longer by the frozen duration. Total emitted remains bounded by the funded balance. The V1 Linear-Depletion bug was a RATE RECOMPUTE (`rate = balance / duration` re-anchored on every interaction, extending the window asymptotically); V3 preserves the V2 fix discipline — recompute lives ONLY in topUpPromotion and setPromoDepletionDuration, never in _updatePool. The structural precondition for the class is absent. Frozen-window tokens are deferred to post-abort stakers rather than accelerated to them; no over-emission."
+    },
+    {
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "alias": "emergencyWithdraw-skips-recompute => survivor over-emission (phoenix-nft-staking M-02 class)",
+      "target": "src/PhlimboV3.sol :: emergencyTransfer",
+      "verdict": "SUPERFICIAL MATCH — drop as this class (see PATTERN-004 for the real, different defect)",
+      "reasoning": "The phoenix-nft-staking M-02 class requires a PER-USER exit that reduces one staker's balance while skipping the schedule recompute, so the emission rate stays sized for the departed stake and SURVIVORS over-emit. PhlimboV3.emergencyTransfer is not a per-user exit at all: it touches no `userInfo` entry and does not change `totalStaked`, so no survivor's share ratio moves and there is no over-emission. It also `_pause()`es, halting every accruing user path. The name collision (emergencyWithdraw / emergencyTransfer) is what draws the match; the mechanism is unrelated. The genuine defect on this function is the inverse — stale reward accounting causing a BRICK, not over-emission — reported separately as PATTERN-004.",
+      "alsoChecked": "pauseWithdraw IS the true per-user emergency exit. It correctly realigns all three debts to the reduced amount and decrements totalStaked (L534-539). `_updatePhUSDEmissionRate` is NOT called there, so phUSDPerSecond stays sized for the pre-exit totalStaked until the next stake/withdraw — but phUSD is minted on demand with no balance to over-draw, and the next whenNotPaused op recomputes it. The window is a pause, during which no other user can accrue-and-claim. Not a live over-emission path."
+    },
+    {
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "alias": "double-bank on retry pass (story-025)",
+      "target": "src/MigratorV2V3.sol :: migrate / _forward",
+      "verdict": "REFUTED — drop",
+      "reasoning": "Tasked to check whether a straggler second pass double-banks. It cannot. `unclaimable` uses `+=` and the reward deltas are computed by balance-diff bracketing (`phUSDBefore` etc., L175-178 vs L192-196). Tokens banked on an earlier pass are still SITTING IN the contract's balance, so they are included in the `Before` snapshot and net out of the delta — a previously banked amount can never be re-forwarded or re-banked. The bracket is also correctly placed around BOTH the V2 withdraw and the V3 stake, so the principal nets out and only the reward component is forwarded."
+    },
+    {
+      "patternId": "REENTRANCY-CROSS-FUNCTION",
+      "alias": "CEI / reentrancy on the pull leg (story-025)",
+      "target": "src/MigratorV2V3.sol :: claimUnclaimable",
+      "verdict": "REFUTED — drop",
+      "reasoning": "Tasked to check the permissionless pull leg. It is correct: the entry is zeroed BEFORE the transfer (L230 precedes L231, textbook CEI), the function is `nonReentrant`, and OZ ReentrancyGuard is contract-wide so `migrate` cannot be re-entered from it either. Using reverting `safeTransfer` here (rather than the non-reverting `_tryTransfer`) is also correct — this is a user-initiated pull, so failing loudly while the caller is still blocked is the right behaviour, and it leaves the entry intact for a later retry since the zeroing reverts with it."
+    },
+    {
+      "patternId": "EMISSION-WINDOW-BOUNDARY",
+      "target": "src/PhlimboV3.sol :: _updatePool, startPromotion",
+      "verdict": "NO MATCH on the retroactivity leg",
+      "reasoning": "`startPromotion` calls `_updatePool()` BEFORE setting `promoToken` (L343), and at that moment the slot is empty so no promo accrues while `lastRewardTime` advances to now — the new stream provably starts from zero with no retroactive accrual. The `totalStaked == 0` early return (L712-715) advances lastRewardTime without accruing, so an empty-pool window correctly emits nothing and does not debit the balance. `pendingPromo` (L883-895) faithfully mirrors _updatePool's phase gate, so view and state agree during Flushing. All three `notVulnerableWhen` conditions hold. NOTE: the accumulator-write inside this same block IS defective for a different reason — see PATTERN-001."
+    },
+    {
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "target": "src/PhlimboV3.sol :: setDesiredAPY",
+      "verdict": "NO MATCH",
+      "reasoning": "The commit branch re-reads `bps` from calldata, but the guard `bps != pendingAPYBps` forces any differing value back into the PREVIEW branch, so a commit provably applies exactly the previewed value — equivalent to snapshotting. `_updatePool()` runs at the OLD rate before `desiredAPYBps` is mutated and `_updatePhUSDEmissionRate()` (L232-235), satisfying the settle-before-rate-change requirement. The setter is onlyOwner so no third party can force a re-arm. Both `notVulnerableWhen` conditions hold."
+    }
+  ],
+  "errors": [],
+  "coverageNotes": [
+    "src/interfaces/*.sol scanned: declarations only, no executable logic, no findings.",
+    "All 6 findings + 4 manualReview entries are pattern-tier hypotheses. PATTERN-001 is arithmetically proven by exact integer simulation but its severity is conditional on the DEPLOYED rewardToken/promoToken decimals, which could not be resolved from this repo — there is no script/ directory and no deploy wiring pins the reward token address. RESOLVING THAT DECIMAL IS THE HIGHEST-VALUE NEXT STEP and should gate PATTERN-001's severity.",
+    "PATTERN-004 is expected to reconcile against existing ledger entry M-02 (run-07) at the sanitizer."
+  ]
+}
