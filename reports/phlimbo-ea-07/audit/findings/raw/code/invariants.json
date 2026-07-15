@@ -1,0 +1,124 @@
+{
+  "project": "phlimbo-ea",
+  "reportDir": "reports/phlimbo-ea-07",
+  "commit": "7045a96",
+  "runTimestamp": "2026-07-14T00:00:00Z",
+  "agent": "invariant-generator",
+  "scope": "NEW V3 migration + promo subsystem (PhlimboV3.sol, MigratorV2V3.sol)",
+  "runners": { "forge": true, "medusa": false, "echidna": false },
+  "runnerNotes": "Foundry invariant runner used (primary). Medusa/Echidna not run this pass; the two failures were found decisively by Foundry with clean (no-revert) shrunk counterexamples and confirmed by a deterministic PoC, so a Medusa cross-run was not required to establish the finding. medusa.json in the workspace still targets the legacy V1 PhlimboMedusaHarness; a V3 Medusa harness is a possible follow-up but would not change the conclusion.",
+  "budget": { "invariantRuns": 200, "invariantDepthPerRun": 60, "callsPerHeldInvariant": 12000 },
+
+  "artifacts": {
+    "promoInvariantSuite": "workspace/phlimbo-ea/test/invariant/PhlimboV3PromoInvariant.t.sol",
+    "migrationInvariantSuite": "workspace/phlimbo-ea/test/invariant/MigrationInvariant.t.sol",
+    "canonicalPoC": "workspace/phlimbo-ea/test/invariant/PromoFlushAccrualPoC.t.sol"
+  },
+
+  "reproduce": {
+    "poc": "cd workspace/phlimbo-ea && forge test --match-contract PromoFlushAccrualPoC -vv",
+    "pocResult": "2 passed (test_collectReward_during_flush_breaks_zero_pending_and_solvency, test_flush_accrual_overcredits_beyond_next_promo_pool)",
+    "invariantCampaign": "cd workspace/phlimbo-ea && FOUNDRY_INVARIANT_RUNS=200 FOUNDRY_INVARIANT_DEPTH=60 FOUNDRY_INVARIANT_FAIL_ON_REVERT=false forge test --match-contract 'PhlimboV3PromoInvariants|MigrationInvariants' --nmt PoC"
+  },
+
+  "invariantsGenerated": 14,
+
+  "broken": [
+    {
+      "id": "INV-PROMO-01",
+      "invariants": [
+        "invariant_P3_phaseNone_zero_pending (found @ 14 runs / 840 calls, reverts:0)",
+        "invariant_P4_promo_solvency (found @ 30 runs / 1800 calls, reverts:0)"
+      ],
+      "title": "collectReward runs _updatePool during the promo Flushing window, inflating accPromoPerShare after batchClaim already aligned every staker's promoDebt",
+      "severity": "potential-high",
+      "contract": "src/PhlimboV3.sol",
+      "rootCause": "The rotation flush's load-bearing guarantee is that batchClaim aligns EVERY staker's promoDebt to the CURRENT accPromoPerShare, so that once the promo is finalized every staker's promo pending is exactly zero and the next promotion (which reuses the same never-reset accumulator) starts from zero. That guarantee is broken because accPromoPerShare can still be advanced AFTER the flush has aligned debts but BEFORE finalizePromotion clears promoToken. Any _updatePool call during the Flushing phase, while promoToken is still set and time has elapsed, bumps accPromoPerShare (and decrements promoRewardBalance) past the aligned debts. Every flushed staker is then left with pending = amount*(accPromo_after - accPromo_atFlush)/PRECISION > 0.",
+      "triggerPaths": [
+        {
+          "fn": "collectReward(uint256)",
+          "signature": "function collectReward(uint256 amount) external nonReentrant",
+          "modifiers": ["nonReentrant"],
+          "onlyOwner": false,
+          "whenNotPaused": false,
+          "callableDuringFlushing": true,
+          "privilege": "PERMISSIONLESS",
+          "note": "PRIMARY VECTOR. No onlyOwner and no whenNotPaused. The Flushing phase pauses the contract (beginFlush -> _pause), but collectReward is not gated by whenNotPaused, so any address can call it during the flush window. It calls _updatePool() first (line 563). Cost to arm: 1 wei of rewardToken + approval. An attacker/griefer needs no privilege."
+        },
+        {
+          "fn": "setDepletionDuration(uint256)",
+          "signature": "function setDepletionDuration(uint256 _duration) external onlyOwner",
+          "modifiers": ["onlyOwner"],
+          "onlyOwner": true,
+          "whenNotPaused": false,
+          "callableDuringFlushing": true,
+          "privilege": "OWNER-ONLY",
+          "note": "SECONDARY (owner footgun, Law 3 non-obvious). No whenNotPaused, no phase gate; calls _updatePool() during Flushing."
+        },
+        {
+          "fn": "setDesiredAPY(uint256)",
+          "signature": "function setDesiredAPY(uint256 bps) external onlyOwner",
+          "modifiers": ["onlyOwner"],
+          "onlyOwner": true,
+          "whenNotPaused": false,
+          "callableDuringFlushing": true,
+          "privilege": "OWNER-ONLY",
+          "note": "SECONDARY (owner footgun). The commit branch calls _updatePool() during Flushing."
+        }
+      ],
+      "notATrigger": {
+        "fn": "setPromoDepletionDuration(uint256)",
+        "reason": "onlyOwner AND require(promoPhase == PromoPhase.Active). During Flushing the phase is Flushing, not Active, so this reverts and CANNOT be used as a trigger. (Correcting the initial hypothesis: it is phase-gated out of the flush window.)"
+      },
+      "primaryVector": "PERMISSIONLESS (collectReward). This is not merely an owner footgun — any unprivileged address can arm the corruption during a rotation, so it is a griefing / solvency-break vector, not a Law-3-suppressed owner mistake.",
+      "impactClassification": {
+        "type": "BOTH (pool-size dependent)",
+        "theft": "If the next promotion's pool is large enough to cover the phantom over-credit, the over-credited staker(s) claim promo tokens they never earned in that promotion, draining the pool that belongs to the other stakers. Demonstrated: test_collectReward_during_flush_breaks_zero_pending_and_solvency — after finalize (phase None) alice retains 42,857e18 phantom pending; the NEXT promotion (fresh token partner2, pool 50,000 ether) shows alice pending 42,857e18 at t=0 (zero time staked) and she CLAIMS 42,857 partner2 tokens — pure value extraction from co-stakers.",
+        "dos": "If the phantom over-credit exceeds the next pool, the credited staker's legitimate claim reverts with ERC20InsufficientBalance, bricking that user's promo payout. Demonstrated: test_flush_accrual_overcredits_beyond_next_promo_pool — alice credited 1,142,857e18 against a 1,000,000e18 pool; claim reverts.",
+        "bookkeeping": "invariant_P4_promo_solvency broke: promoRewardBalance (undistributed-promo bookkeeping) can exceed the promo tokens actually held. Note P34_promo_conservation (token custody: funded == paidOut + held) still HELD — tokens do not vanish; the corruption lives in the per-share accumulator / debt space and surfaces as mis-crediting BETWEEN stakers, which is what makes early-claimer theft / late-claimer DoS the concrete impacts."
+      },
+      "counterexampleSequence": [
+        "alice: stake(1000 ether)",
+        "owner: startPromotion(partner, Q, DUR)   // phase Active",
+        "owner: beginFlush()                       // _updatePool + _pause, phase Flushing",
+        "anyone: batchClaim(N)                     // flushCursor == stakerCount; alice.promoDebt aligned to accPromo_X, pending == 0",
+        "warp(+3 days)",
+        "ATTACKER (permissionless): collectReward(1 wei)  // _updatePool bumps accPromoPerShare to accPromo_Y > accPromo_X while promoToken still set",
+        "owner: finalizePromotion(recipient); unpause()   // phase None, promoToken cleared",
+        "RESULT: pendingPromo(alice) == 42,857e18 > 0 while phase==None (P3 broken)",
+        "owner: startPromotion(partner2 or partner, newPool, DUR)  // next promo starts NON-zero for alice",
+        "alice: claim() -> paid phantom promo (theft) if pool covers it, else reverts (DoS)"
+      ],
+      "recommendation": "Prevent accPromoPerShare from advancing once the flush has begun. Options: (a) gate promo accrual in _updatePool on promoPhase != Flushing (freeze the promo stream during the flush window); or (b) add whenNotPaused to collectReward (blocks the permissionless trigger but not the owner-only setDepletionDuration/setDesiredAPY paths, so (a) is preferred and complete); or (c) have finalizePromotion re-align debts / snapshot accPromoPerShare at beginFlush and pin it for the remainder of the flush. Option (a) closes all three trigger paths at the accrual site."
+    }
+  ],
+
+  "held": {
+    "note": "All HELD invariants ran 200 runs x 60 depth = 12,000 calls each with zero reverts. HONESTY: a held invariant is 'no counterexample found in 12,000 sequenced calls', i.e. absence of evidence under this budget — NOT a proof. Fuzzing is bug-finding, not verification.",
+    "migrationSuite": {
+      "file": "workspace/phlimbo-ea/test/invariant/MigrationInvariant.t.sol",
+      "invariants": [
+        { "name": "invariant_P1_principal_conservation", "property": "Property 1/2 — every principal unit removed from V2 lands in V3, none lost or duplicated (ghost_v2Removed == ghost_v3Added)", "result": "HELD", "runs": 200, "calls": 12000 },
+        { "name": "invariant_P1_phUSD_reward_conservation", "property": "Property 1 — forwarded phUSD == owed phUSD (V2+V3 pending) for every processed user, to the wei", "result": "HELD", "runs": 200, "calls": 12000 },
+        { "name": "invariant_P1_stable_reward_conservation", "property": "Property 1 — forwarded stable == owed stable, to the wei", "result": "HELD", "runs": 200, "calls": 12000 },
+        { "name": "invariant_P1_promo_reward_conservation", "property": "Property 1 — forwarded promo == owed promo (V3 second-pass auto-claim), to the wei", "result": "HELD", "runs": 200, "calls": 12000 },
+        { "name": "invariant_P12_migrator_no_dust", "property": "Property 1/2 — after any migrate() the migrator holds zero phUSD/stable/promo (no value stranded or over-forwarded)", "result": "HELD", "runs": 200, "calls": 12000 }
+      ],
+      "coverage": "Chunked migration interleaved with mid-migration V2 partial/full exits, straggler re-stakes + reseeds (second pass), stable/phUSD reward accrual on both farms, and an active V3 promo for second-pass promo forwarding. No double-migration, no skip, and exact reward conservation held throughout."
+    },
+    "promoSuite": {
+      "file": "workspace/phlimbo-ea/test/invariant/PhlimboV3PromoInvariant.t.sol",
+      "invariants": [
+        { "name": "invariant_P34_promo_conservation", "property": "Property 3/4 — promo token custody: funded == paidOut + held, exactly", "result": "HELD", "runs": 200, "calls": 12000, "note": "Held even though P4_promo_solvency broke — tokens never vanish; the bug is in accumulator/debt bookkeeping, not custody." },
+        { "name": "invariant_P34_promo_out_le_funded", "property": "Property 4 — promo paid out never exceeds promo funded", "result": "HELD", "runs": 200, "calls": 12000 },
+        { "name": "invariant_P3_accPromo_monotone", "property": "Property 3 — accPromoPerShare is monotone non-decreasing (never reset across rotations)", "result": "HELD", "runs": 200, "calls": 12000 },
+        { "name": "invariant_P3_pendingPromo_no_underflow", "property": "Property 3 — amount*accPromo - promoDebt never underflows for a staked user", "result": "HELD", "runs": 200, "calls": 12000 },
+        { "name": "invariant_P4_stable_solvency", "property": "Property 4 — rewardBalance <= real reward-token balance held", "result": "HELD", "runs": 200, "calls": 12000 },
+        { "name": "invariant_principal_backed", "property": "totalStaked <= phUSD held by V3", "result": "HELD", "runs": 200, "calls": 12000 },
+        { "name": "invariant_totalStaked_eq_sum", "property": "totalStaked == sum of user amounts", "result": "HELD", "runs": 200, "calls": 12000 }
+      ]
+    }
+  },
+
+  "keyNuance": "Property 3 (promo funded => solvency) DOES hold at the token-custody level (funded == paidOut + held) and the never-reset accumulator IS monotone. What breaks is the tighter debt-alignment guarantee: the flush is supposed to leave every staker with zero promo pending, but a Flushing-window _updatePool (permissionless via collectReward) advances accPromoPerShare after debts were aligned, so the retired promo leaves a phantom pending that over-credits stakers against the NEXT promotion. In the ABSENCE of the Flushing-window _updatePool the promo accounting is clean (P34 conservation, accPromo monotone, no-underflow all hold)."
+}

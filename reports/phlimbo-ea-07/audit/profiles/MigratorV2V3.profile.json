@@ -1,0 +1,95 @@
+{
+  "contract": "src/MigratorV2V3.sol",
+  "profileTimestamp": "2026-07-14T00:00:00Z",
+  "commit": "7045a96",
+  "solidityVersion": "^0.8.19",
+  "status": "NEW — V2->V3 migrator, story-023 (live-read chunked migration, reward-delta forwarding, straggler second pass)",
+  "purpose": "One-time, cooperation-free, chunked migration of the PhlimboV2 user base into PhlimboV3 at the start of the first promotion. Owner-seeds an address list; migrate() reads each user's LIVE V2 position, withdraws it from V2 (routing principal+rewards to the migrator), restakes principal into V3 for the user, and forwards the reward deltas to the user via balance-diff bracketing.",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": "verified — migrate() loops [cursor, min(cursor+maxIterations, len)); seedUsers loops over owner-supplied array (owner-bounded)",
+    "checkedArithmetic": "verified — 0.8.19, no unchecked/assembly; balance-diff subtractions (after - before) cannot underflow because withdraw+stake net non-negative into this contract",
+    "reentrancyGuarded": ["migrate"],
+    "accessControlled": ["seedUsers (onlyOwner)", "withdrawAll (onlyOwner)"],
+    "permissionless": ["migrate (anyone may advance the chunked pass — recipients/amounts fixed by V2 state)"],
+    "initializerProtected": "n/a — immutable constructor wiring",
+    "doubleMigrationPrevented": "verified (local) — skip-on-zero: after a user is withdrawn from V2 their live V2 amount is 0, so a re-run / duplicate seed entry / second pass skips them (continue). A user can only be re-migrated if they RE-STAKE into V2 after migration, which is the intended straggler path.",
+    "reseedGuard": "verified — seedUsers requires (!seeded || migrateIterator==-1): first seed or only between completed passes; mid-pass reseed forbidden",
+    "cursorTermination": "verified — int256 migrateIterator advances to i, set to -1 exactly when i==len (pass complete)"
+  },
+
+  "localFindings": [
+    {
+      "id": "MIG-LOCAL-01",
+      "type": "unrecoverable-migrator-brick-on-reverting-recipient",
+      "severity": "local-high",
+      "function": "migrate",
+      "line": 186,
+      "description": "Reward forwarding uses safeTransfer to `user` (phUSD/stable/promo). If ANY user in the mid-list cannot receive a reward token (e.g. a USDC/USDT-blocklisted/frozen address, or a contract that reverts on receipt), the safeTransfer reverts the ENTIRE migrate chunk. Because the cursor is stuck at that index, the pass can never reach migrateIterator==-1; and seedUsers is FORBIDDEN mid-pass (requires ==-1). withdrawAll deliberately does NOT reset the pass. Therefore there is NO in-contract recovery — the whole remaining migration is bricked until a FRESH migrator is deployed and re-wired (setMigrator on both V2 and V3). The inline docs acknowledge 'exclude such addresses from the seed list', but exclusion requires a reseed that the mid-pass guard makes impossible. rewardToken being a compliance-gated stablecoin (USDC) makes a frozen staker realistic.",
+      "recommendation": "Either (a) wrap the three reward safeTransfers in a non-reverting try (bank failures like PhlimboV3.batchClaim's unclaimablePromo, or leave rewards claimable), or (b) allow the cursor to skip the failing index rather than reverting the batch, or (c) relax reseed to permit mid-pass re-seed by the owner. Flag for interaction/severity review — this is a griefable liveness/DoS vector, not owner-obvious."
+    },
+    {
+      "id": "MIG-LOCAL-02",
+      "type": "escape-hatch-incomplete-token-coverage",
+      "severity": "local-low",
+      "function": "withdrawAll",
+      "line": 216,
+      "description": "withdrawAll sweeps only phUSD and rewardToken to the owner; it does NOT sweep promoToken. Promo tokens can transiently land in this contract during a straggler second pass (V3 auto-claim of promo routed to msg.sender==migrator) and are forwarded immediately, but any promo stranded by rounding or a failed forward is unrecoverable via withdrawAll (needs a fresh migrator or manual rescue).",
+      "recommendation": "Add promoToken sweep to withdrawAll (read phlimboV3.promoToken() at call time), or document the gap."
+    }
+  ],
+
+  "migrationMechanics": {
+    "v2StateRead": "LIVE per user: (uint256 amount,,) = phlimboV2.userInfo(user) at loop time — robust to mid-migration V2 exits/partial withdrawals (skip-on-zero). No seeded snapshot amounts.",
+    "v3StateWrite": "phlimboV3.stake(amount, user) as the migrator role — credits the user, sets promoDebt against current accPromoPerShare (no retroactive promo accrual).",
+    "principalNetting": "phUSD balance bracket spans BOTH the V2 withdraw and the V3 stake. Principal withdrawn from V2 (== full live amount) is re-pulled by V3.stake, so it nets out of the phUSD delta; the phUSD remainder is exactly the phUSD reward. rewardToken(stable) and promo deltas are pure rewards. All positive deltas forwarded to user.",
+    "chunkedRuns": "migrate(maxIterations) processes [cursor, min(cursor+max, len)); partial runs advance migrateIterator to the next index; anyone can call to advance.",
+    "stragglerSecondPass": "After a pass completes (==-1) owner may seedUsers again with a fresh straggler list. On the second pass the same bracket also forwards any V3 auto-claimed rewards (incl. promo) that the user accrued in V3 since pass 1.",
+    "skipRisk": "A user who stakes into V2 AFTER their index was processed remains in V2 (not skipped incorrectly, but not migrated). Mitigation is OPERATIONAL: wind V2 down (APY->0, stop collectReward) then run a second pass. Documented limitation / owner footgun.",
+    "wiringPrereqs": "(a) phlimboV2.setMigrator(this) and (b) phlimboV3.setMigrator(this) — performed by staging scripts, NOT by this contract. No phUSD mint role needed (V2 mints during its withdraw). migrate forceApproves phUSD to V3 (max) each call.",
+    "minStakeSafety": "V3.stake requires amount>=MINIMUM_STAKE; any nonzero V2 position is guaranteed >=MINIMUM_STAKE by V2's dust rule, so stake won't revert on the minimum. Cross-contract assumption on V2's invariant."
+  },
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "seedUsers(address[] _users)", "visibility": "external onlyOwner", "stateChanges": ["users (wholesale replace)", "seeded=true", "migrateIterator=0"], "externalCalls": [], "guard": "!seeded || migrateIterator==-1; _users.length>0"},
+      {"function": "migrate(uint256 maxIterations)", "visibility": "external nonReentrant", "accessControl": "none (permissionless)", "stateChanges": ["migrateIterator", "phUSD approval to V3"], "externalCalls": ["phUSD.forceApprove(V3)", "phlimboV3.promoToken()", "phlimboV2.userInfo(user)", "phlimboV2.withdraw(amount,user)", "phlimboV3.stake(amount,user)", "phUSD/rewardToken/promoToken.balanceOf", "IERC20(phUSD).safeTransfer(user)", "rewardToken.safeTransfer(user)", "promoToken.safeTransfer(user)"]},
+      {"function": "withdrawAll()", "visibility": "external onlyOwner", "stateChanges": ["none — pure sweep, pass NOT reset"], "externalCalls": ["phUSD.safeTransfer(owner)", "rewardToken.safeTransfer(owner)"], "notes": "does NOT sweep promoToken (MIG-LOCAL-02)"},
+      {"function": "userCount()", "visibility": "external view", "stateChanges": [], "externalCalls": []}
+    ],
+    "externalCalls": [
+      {"target": "IPhlimboV2 phlimboV2 (immutable)", "methods": ["userInfo", "withdraw(amount,user)"], "trustLevel": "trusted predecessor (owner-deployed)", "notes": "withdraw routes principal+auto-claimed stable+minted phUSD to msg.sender==migrator; requires setMigrator(this) on V2"},
+      {"target": "IPhlimboV3 phlimboV3 (immutable)", "methods": ["promoToken", "stake(amount,user)"], "trustLevel": "trusted target (owner-deployed)", "notes": "requires setMigrator(this) on V3; V3.stake pulls principal phUSD from migrator, auto-claims to migrator on 2nd pass"},
+      {"target": "IFlax phUSD (immutable)", "methods": ["forceApprove", "balanceOf", "safeTransfer"], "trustLevel": "trusted protocol token"},
+      {"target": "IERC20 rewardToken (immutable)", "methods": ["balanceOf", "safeTransfer"], "trustLevel": "semi-trusted stablecoin — blocklist/frozen recipient => MIG-LOCAL-01 brick"},
+      {"target": "promoToken (read live from V3)", "methods": ["balanceOf", "safeTransfer"], "trustLevel": "semi-trusted partner token; V3 guarantees never phUSD/rewardToken; address(0)=no promo"},
+      {"target": "user (untrusted recipient of forwarded rewards)", "methods": ["safeTransfer receipt"], "trustLevel": "untrusted — a reverting/blocked recipient bricks the batch (MIG-LOCAL-01)"}
+    ],
+    "stateVariables": [
+      {"name": "phlimboV2/phlimboV3/phUSD/rewardToken", "type": "immutable", "notes": "set once in constructor with zero-address checks"},
+      {"name": "users", "type": "address[]", "mutators": ["seedUsers (delete+push)"], "readers": ["migrate", "userCount"]},
+      {"name": "seeded", "type": "bool"},
+      {"name": "migrateIterator", "type": "int256", "notes": "0->len then -1; controls reseed gate and progress"}
+    ],
+    "events": ["Seeded", "UserMigrated", "MigrateProgress", "WithdrawnAll"],
+    "modifiers": ["onlyOwner", "nonReentrant"]
+  },
+
+  "trustAssumptions": [
+    "Staging scripts wire setMigrator(this) on BOTH V2 and V3 before migrate can succeed (documented; not enforced on-chain — a missing wiring reverts inside V2/V3, not a silent failure).",
+    "V2's withdraw delivers exactly principal + accrued rewards to msg.sender and V2 dust-rule keeps positions >=MINIMUM_STAKE.",
+    "rewardToken/promoToken are receivable by every seeded user (violation => MIG-LOCAL-01).",
+    "Owner winds V2 down (APY->0, stop collectReward feed) before straggler passes so the second pass converges."
+  ],
+
+  "suspiciousAreas_forTier2": [
+    "PRIMARY: MIG-LOCAL-01 unrecoverable brick on a single reverting/blocklisted reward recipient mid-pass (reseed forbidden mid-pass, withdrawAll doesn't reset). Assess likelihood (USDC freeze) and severity — liveness DoS of the entire migration.",
+    "Reward-delta netting correctness under a straggler second pass where V3 auto-claims phUSD(minted)+stable+promo to the migrator: verify the phUSD bracket still nets principal exactly (principal in == principal out) and no reward is double-forwarded or stranded.",
+    "Cross-contract reentrancy across the V2.withdraw -> V3.stake boundary: rewardToken/promoToken transfers into the migrator could, for an ERC777-style token, attempt reentry; migrate is nonReentrant and V2/V3 entries are nonReentrant on their own guards — confirm no path re-enters a different contract to corrupt the in-flight bracket.",
+    "Duplicate addresses in the seed list are benign (skip-on-zero) but confirm no accounting anomaly if the same address is processed twice within one chunk after a partial V2 re-stake in between (not possible in a single tx, but note).",
+    "promoToken read once per migrate call (phlimboV3.promoToken()) — if a flush/finalize changes the promo slot between chunks, later chunks see a different promo token; confirm no mis-forwarding of a retired promo balance."
+  ],
+
+  "inheritanceChain": ["Ownable", "ReentrancyGuard", "IMigratorV2V3"],
+  "complexity": {"loc": 237, "externalFunctions": 4, "loops": 2, "externalTokenCounterparties": 5}
+}

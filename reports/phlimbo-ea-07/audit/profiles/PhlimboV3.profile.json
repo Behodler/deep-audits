@@ -1,0 +1,102 @@
+{
+  "contract": "src/PhlimboV3.sol",
+  "profileTimestamp": "2026-07-14T00:00:00Z",
+  "commit": "7045a96",
+  "solidityVersion": "^0.8.19",
+  "status": "NEW — entirely unaudited V3 core",
+  "purpose": "Staking yield farm for phUSD. Verbatim copy of PhlimboV2 (stake/withdraw/claim + migrator role + hook + fixed linear-depletion rate-recompute) PLUS an additive SINGLE promotional-reward-token subsystem with a pause->flush->rotate state machine (story-023 family: promo slot + history-free rotation).",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": "verified — the only loop (batchClaim) is chunked by maxIterations with a monotone flushCursor; seed/iteration bounds are owner/permissionless-chunked, never single-tx-unbounded",
+    "checkedArithmetic": "verified — Solidity 0.8.19, no unchecked blocks, no assembly",
+    "reentrancyGuarded": ["stake", "withdraw", "claim", "collectReward", "batchClaim"],
+    "reentrancyUNGuarded_stateChanging": ["pauseWithdraw (whenPaused only; no external call before state writes except final phUSD transfer)", "all onlyOwner admin fns", "startPromotion/topUpPromotion/setPromoDepletionDuration/beginFlush/finalizePromotion/abortFlush (onlyOwner)"],
+    "accessControlled": ["setDesiredAPY", "setDepletionDuration", "setPauser", "setMigrator", "setHook", "emergencyTransfer", "startPromotion", "topUpPromotion", "setPromoDepletionDuration", "beginFlush", "finalizePromotion", "abortFlush", "pause(pauser|owner)", "unpause(pauser|owner)"],
+    "initializerProtected": "n/a — non-upgradeable, constructor-initialized",
+    "pauseMechanism": "yes — Pausable; owner OR pauser may pause/unpause; unpause blocked while promoPhase==Flushing",
+    "weakRandomness": "none — no block/tx entropy driving value outcomes",
+    "promoDebtRealignmentOnPauseWithdraw": "verified — pauseWithdraw realigns phUSDDebt/stableDebt/promoDebt to the reduced amount, fixing the latent V1/V2 partial-pauseWithdraw underflow-brick",
+    "accPromoPerShareNeverReset": "verified — finalizePromotion clears promoToken/balances but retains accPromoPerShare; all debts aligned by flush so next promo starts pending==0 (prevents amount*acc-debt underflow)",
+    "flushCompleteness": "verified-by-construction — set membership mutates only in whenNotPaused ops; beginFlush pauses; finalizePromotion requires flushCursor==_stakers.length()",
+    "minStakeInvariant": "verified — stake requires amount>=MINIMUM_STAKE(1e15); withdraw dust-rule forces full exit when remaining<MINIMUM_STAKE, so any nonzero position is always >=MINIMUM_STAKE; _stakers membership <=> amount>0"
+  },
+
+  "localFindings": [
+    {
+      "id": "V3-LOCAL-01",
+      "type": "malformed-returndata-revert-in-nonreverting-transfer",
+      "severity": "local-low",
+      "function": "_tryTransfer / batchClaim",
+      "line": 816,
+      "description": "_tryTransfer treats `callSuccess && (returndata.length==0 || abi.decode(returndata,(bool)))` as success. A promo token whose transfer returns NON-empty returndata shorter than 32 bytes causes abi.decode to REVERT, which propagates and bricks the batchClaim chunk — defeating the whole point of the non-reverting try-transfer (flush must never brick). Owner-vetted partner token mitigates; flag for token-assumption review.",
+      "recommendation": "Length-check returndata (>=32) before decoding, or treat any non-standard returndata as failure and bank into unclaimablePromo."
+    },
+    {
+      "id": "V3-LOCAL-02",
+      "type": "phantom-staker-set-membership",
+      "severity": "local-informational",
+      "function": "pauseWithdraw",
+      "line": 537,
+      "description": "A user who pauseWithdraws to amount==0 is NOT removed from _stakers (by design — set frozen during pause). They persist as a zero-amount 'phantom' member until their next whenNotPaused withdraw removes them. Harmless to correctness (flush visits them with pending==0) but inflates stakerCount and adds flush iterations.",
+      "recommendation": "None required; document that stakerCount can exceed active stakers."
+    },
+    {
+      "id": "V3-LOCAL-03",
+      "type": "promo-rounding-dust-stranding",
+      "severity": "local-informational",
+      "function": "_updatePool",
+      "line": 759,
+      "description": "accPromoPerShare += (promoToDistribute*PRECISION)/totalStaked can round to 0 when totalStaked is large and per-tick promo small, stranding promo in the contract (standard MasterChef rounding). Swept to leftoverRecipient at finalizePromotion, so no permanent loss to protocol.",
+      "recommendation": "Accept; note that dust accrues to leftoverRecipient not stakers."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "stake(uint256 amount, address user)", "visibility": "external whenNotPaused nonReentrant", "accessControl": "msg.sender==user || msg.sender==migrator", "stateChanges": ["userInfo", "totalStaked", "_stakers", "acc*PerShare(via _updatePool)", "phUSDPerSecond"], "externalCalls": ["phUSD.mint(msg.sender) [auto-claim]", "rewardToken.safeTransfer(msg.sender)", "promoToken.safeTransfer(msg.sender)", "phUSD.safeTransferFrom(msg.sender)", "hook.onDeposit"], "notes": "auto-claim routes to msg.sender (caller), NOT user — migrator-delegation semantics"},
+      {"function": "withdraw(uint256 amount, address user)", "visibility": "external whenNotPaused nonReentrant", "accessControl": "msg.sender==user || msg.sender==migrator", "stateChanges": ["userInfo", "totalStaked", "_stakers(remove on full exit)", "phUSDPerSecond"], "externalCalls": ["auto-claim (mint/transfer to msg.sender)", "phUSD.safeTransfer(msg.sender)", "hook.onWithdraw"], "notes": "principal + rewards to msg.sender; dust-rule may force full exit"},
+      {"function": "claim(address user)", "visibility": "external whenNotPaused nonReentrant", "accessControl": "msg.sender==user || msg.sender==migrator", "stateChanges": ["userInfo debts"], "externalCalls": ["auto-claim to msg.sender", "hook.onClaim"]},
+      {"function": "collectReward(uint256 amount)", "visibility": "external nonReentrant", "accessControl": "none (permissionless funding)", "stateChanges": ["rewardBalance", "rewardPerSecond", "acc*"], "externalCalls": ["rewardToken.safeTransferFrom(msg.sender)"]},
+      {"function": "batchClaim(uint256 maxIterations)", "visibility": "external nonReentrant", "accessControl": "none (permissionless; only during Flushing)", "stateChanges": ["userInfo.promoDebt", "flushCursor", "unclaimablePromo"], "externalCalls": ["promoToken.transfer via _tryTransfer (non-reverting)"], "notes": "pays promo DIRECTLY to each staker (not caller-routed)"},
+      {"function": "pauseWithdraw(uint256 amount)", "visibility": "external whenPaused", "accessControl": "msg.sender-only (NOT delegatable to migrator)", "stateChanges": ["userInfo.amount+all debts", "totalStaked"], "externalCalls": ["phUSD.safeTransfer(msg.sender)"], "notes": "no _updatePool, no hook, no _stakers mutation"}
+    ],
+    "ownerLifecycleFns": ["startPromotion(token,amount,duration) None->Active", "topUpPromotion(amount) Active", "setPromoDepletionDuration(duration) Active", "beginFlush() Active->Flushing (pauses)", "finalizePromotion(leftoverRecipient) Flushing->None (sweeps residual promo balance)", "abortFlush() Flushing->Active", "setMigrator", "setHook", "setPauser", "setDesiredAPY(2-step)", "setDepletionDuration", "emergencyTransfer(recipient) (sweeps phUSD+reward+promo, pauses)"],
+    "externalCalls": [
+      {"target": "IFlax phUSD", "methods": ["mint", "safeTransfer", "safeTransferFrom", "balanceOf"], "trustLevel": "trusted-mintable — V3 must hold mint role; phUSD is protocol token", "notes": "reward phUSD is MINTED (unbacked emission gated by desiredAPYBps, owner-set)"},
+      {"target": "IERC20 rewardToken (stablecoin, from yield-accumulator)", "methods": ["safeTransfer", "safeTransferFrom", "balanceOf"], "trustLevel": "semi-trusted", "notes": "assumed standard ERC20, no fee-on-transfer; if USDC-like with blocklist, a frozen staker's stable claim reverts their stake/withdraw/claim path"},
+      {"target": "IERC20 promoToken (partner-supplied)", "methods": ["safeTransfer", "safeTransferFrom", "transfer(low-level in _tryTransfer)", "balanceOf"], "trustLevel": "semi-trusted (owner-vetted per promotion)", "notes": "fee-on-transfer explicitly rejected at startPromotion/topUp via balance-delta check; must never be phUSD or rewardToken (enforced)"},
+      {"target": "IPhlimboHook hook", "methods": ["onDeposit", "onWithdraw", "onClaim"], "trustLevel": "trusted (owner-set), called AFTER state finalization", "notes": "zero-address guarded"},
+      {"target": "migrator (MigratorV2V3)", "methods": ["calls stake/withdraw/claim on behalf of users"], "trustLevel": "trusted (owner-set)", "notes": "auto-claimed rewards route to migrator, forwarded on by migrator"}
+    ],
+    "stateVariables_key": [
+      {"name": "accPromoPerShare", "invariant": "MONOTONE, never reset; all promoDebts aligned to it at each flush"},
+      {"name": "_stakers (EnumerableSet)", "invariant": "membership <=> amount>0, mutates only whenNotPaused; frozen during flush"},
+      {"name": "promoPhase", "invariant": "None|Active|Flushing state machine; unpause blocked in Flushing"},
+      {"name": "flushCursor", "invariant": "monotone within a flush; finalize requires ==_stakers.length()"},
+      {"name": "lastRewardTime", "invariant": "SHARED across stable+phUSD+promo streams"}
+    ],
+    "events": ["Staked", "Withdrawn", "RewardsClaimed", "EmergencyWithdrawal", "MigratorSet", "HookSet", "RewardCollected", "RateUpdated", "DepletionDurationUpdated", "IntendedSetAPY", "DesiredAPYUpdated", "PromotionStarted", "PromotionToppedUp", "PromoDepletionDurationUpdated", "PromoClaimed", "PromoClaimFailed", "FlushProgress", "PromotionFinalized"],
+    "modifiers": ["onlyOwner", "whenNotPaused", "whenPaused", "nonReentrant"]
+  },
+
+  "trustAssumptions": [
+    "phUSD grants mint role to this contract; phUSD reward emission is UNBACKED mint gated only by owner-set desiredAPYBps (owner-trusted for the APY magnitude).",
+    "rewardToken is a standard ERC20 stablecoin, no fee-on-transfer. If it enforces a blocklist (USDC/USDT), a frozen staker cannot claim their stable and their stake/withdraw/claim path reverts.",
+    "promoToken is owner-vetted per promotion, non-fee-on-transfer (enforced), and is not phUSD/rewardToken (enforced).",
+    "hook (if set) is trusted and non-reverting on the happy path; called after state finalization.",
+    "Owner runs the promo state machine correctly (beginFlush -> drive batchClaim to completion -> finalizePromotion -> unpause). abortFlush is always safe.",
+    "leftoverRecipient at finalize is a receivable address."
+  ],
+
+  "suspiciousAreas_forTier2": [
+    "SHARED lastRewardTime across stable/phUSD/promo: startPromotion/topUp/setPromoDepletionDuration each call _updatePool first, but verify no path lets promo accrue over a window before the promo existed, and that a Active->dormant(depleted)->topUp reactivation does not double-count the dormant gap.",
+    "collectReward is PERMISSIONLESS and recomputes rewardPerSecond = rewardBalance*PRECISION/depletionDuration on every call — a griefer can repeatedly collect 1 wei to reset/dilute the depletion rate mid-window (also applies to V2). Confirm economic impact.",
+    "batchClaim permissionless during Flushing: reads frozen accPromoPerShare snapshot — confirm no interleaving with any non-paused promo accrual. Also _tryTransfer malformed-returndata revert (V3-LOCAL-01) can brick the flush chunk.",
+    "Cross-contract reentrancy via rewardToken/promoToken transfer callbacks during _claimRewards (transfers occur before debt writes within stake, though nonReentrant guards the entry) — all core entries are nonReentrant, but pauseWithdraw is only whenPaused; verify no ERC777-style reentry path.",
+    "emergencyTransfer sweeps ALL balances (incl. promo mid-Active) and pauses but does NOT touch promoPhase/promoRewardBalance bookkeeping — after emergencyTransfer during Active/Flushing the promo accounting is stale vs. zero on-hand balance; confirm no stuck state / underflow on subsequent finalize.",
+    "desiredAPYBps has no upper bound — phUSDPerSecond scales linearly; owner footgun for runaway phUSD mint (owner-trusted, likely QA)."
+  ],
+
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPhlimboV3", "IPausable"],
+  "complexity": {"loc": 963, "externalFunctions": 20, "ownerFunctions": 13, "stateVariables": 26, "externalTokenCounterparties": 3}
+}

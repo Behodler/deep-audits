@@ -1,0 +1,87 @@
+{
+  "project": "phlimbo-ea",
+  "scanTimestamp": "2026-07-14T00:00:00Z",
+  "scanType": "story-faithfulness",
+  "commit": "7045a96",
+  "storiesChecked": ["story-022", "story-023"],
+  "verifiedFaithful": [
+    {
+      "story": "story-023",
+      "claim": "live-read chunked V2->V3 migration",
+      "verdict": "FAITHFUL — migrate() reads (amount,,)=phlimboV2.userInfo(user) live at loop time (line 160), skip-on-zero (line 161), chunks [cursor, min(cursor+maxIterations,len)) (lines 151-154), cursor->-1 exactly at i==len (lines 199-203)."
+    },
+    {
+      "story": "story-023",
+      "claim": "reward-delta forwarding — each user gets exactly their V2-pending rewards",
+      "verdict": "FAITHFUL — balance-diff bracket spans BOTH V2.withdraw and V3.stake (lines 163-184). Verified principal nets exactly: V3.stake pulls precisely `amount` phUSD from msg.sender==migrator (PhlimboV3.sol:602) and V2.withdraw returned the same `amount` principal, so the phUSD delta is exactly the reward component. Stable/promo deltas are pure rewards. All positive deltas safeTransfer'd to the correct `user`. No cross-user contamination (each iteration re-baselines *Before to current balance)."
+    },
+    {
+      "story": "story-023",
+      "claim": "straggler second pass forwards V3 auto-claimed rewards",
+      "verdict": "FAITHFUL — on a 2nd pass V3.stake auto-claims the user's existing V3 rewards (phUSD minted + stable + promo) to msg.sender==migrator (PhlimboV3._claimRewards routes to beneficiary=msg.sender, lines 598/783/788/804); the same bracket captures and forwards them. Reseed permitted only between completed passes (line 114)."
+    },
+    {
+      "story": "story-022",
+      "claim": "None->Active->Flushing rotation state machine",
+      "verdict": "FAITHFUL — startPromotion None->Active (337/360), beginFlush Active->Flushing + _pause (419-425), finalizePromotion requires flushCursor==_stakers.length() Flushing->None (482-496), abortFlush Flushing->Active (506-509), unpause blocked while Flushing (270-272)."
+    },
+    {
+      "story": "story-022",
+      "claim": "accPromoPerShare is NEVER reset across promotions",
+      "verdict": "FAITHFUL — finalizePromotion clears promoToken/promoRewardPerSecond/promoRewardBalance/unclaimablePromo but deliberately leaves accPromoPerShare intact (lines 492-496); batchClaim aligns every staker's promoDebt to the current accumulator (line 456), so pending against the next token starts at exactly zero. Matches SolvencyDetermination.md 2.1."
+    },
+    {
+      "story": "story-022 / SolvencyDetermination.md 2",
+      "claim": "phUSD reward is minted on demand with no funded-budget cap (uncapped mint on the phUSD leg)",
+      "verdict": "NOT A FINDING — this is the DELIBERATE, DOCUMENTED design. SolvencyDetermination.md 2 explicitly states phUSD rewards are 'minted on demand at settlement — there is no pre-funded pool and therefore no balance-style insolvency', with the solvency condition being an active mint privilege, and emission bounded by 'totalStaked * desiredAPYBps / 10000 / SECONDS_PER_YEAR'. Code matches (PhlimboV3._claimRewards line 783 mint; _updatePhUSDEmissionRate). Not a contradiction of any stated solvency invariant; the only residual is desiredAPYBps having no upper bound = owner-trusted magnitude (Law 3, QA at most). No Law-1 story-unsafe escalation warranted."
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-01",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-023",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "migrate / seedUsers",
+      "line": 114,
+      "lineStart": 44,
+      "lineEnd": 61,
+      "specText": "story-023 (contract NatSpec, HEAD 7045a96): \"Recovery note: reward forwarding uses safeTransfer, so a recipient that cannot receive the reward token (e.g. a blocklisted address) reverts the batch. As with MigratorV1V2, the operational escape is to exclude such addresses from the seed list (or deploy and re-wire a fresh migrator)\" — and earlier: \"once a pass has completed (migrateIterator == -1) the owner may call seedUsers again with a fresh straggler list. Reseeding mid-pass is forbidden.\"",
+      "specSource": "src/MigratorV2V3.sol contract-level NatSpec (git commit 7045a96)",
+      "actualBehavior": "The story offers 'exclude such addresses from the seed list' as the primary operational escape from the reverting-recipient brick, but the code's own reseed guard require(!seeded || migrateIterator == -1) (line 114) — reinforced by the story's own line 'Reseeding mid-pass is forbidden' — makes that escape UNREACHABLE while the pass is bricked: a safeTransfer revert to a frozen recipient (lines 187/190/193) reverts the whole migrate chunk, the cursor stays pinned at that index so migrateIterator can never reach -1, and withdrawAll deliberately does NOT reset the pass (lines 210-229). Excluding the address requires a reseed that the guard forbids until -1, which the brick prevents. Only the secondary escape (deploy + re-wire a fresh migrator via setMigrator on both V2 and V3) actually works.",
+      "deviation": "Spec self-contradiction: the documented recovery path ('exclude from the seed list') is contradicted by the same document's mid-pass reseed prohibition and the code's reseed guard. The story overstates in-contract recoverability; the true recovery is only a full redeploy.",
+      "securityRelevance": "Same underlying brick as code-scanner MIG-LOCAL-01 (griefable liveness DoS of the whole migration by one blocklisted/reverting reward recipient, realistic for USDC/USDT stable rewardToken). Funds are not stolen or permanently stuck (users retain their V2 positions; withdrawAll recovers stranded balances), so this is a recoverable liveness hazard, not a Law-1 fund-loss escalation. The Law-2 contribution here is the false/contradictory recovery claim; severity of the DoS itself is owned by the code/econ scanner.",
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "F-02",
+      "type": "invariant-violation",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-022",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "batchClaim / _tryTransfer",
+      "line": 819,
+      "lineStart": 435,
+      "lineEnd": 820,
+      "specText": "story-022 (Phase 3 + batchClaim NatSpec, line 435): \"Failed transfers (e.g. blocklisted recipients) are banked into unclaimablePromo — the flush must never brick.\" Header design principle (lines 26-35): rotation is a \"cursor-guaranteed batchClaim flush\" whose completeness is load-bearing.",
+      "specSource": "src/PhlimboV3.sol NatSpec + SolvencyDetermination.md 4 (banked failed-transfer invariant), git commit 7045a96",
+      "actualBehavior": "The 'never brick' principle is implemented for outright transfer FAILURE (batchClaim banks pending into unclaimablePromo, lines 458-464), and that banking logic is itself faithful. However the non-reverting primitive _tryTransfer (lines 816-820) does abi.decode(returndata, (bool)) with no length check: a promo token that returns non-empty returndata SHORTER than 32 bytes causes abi.decode to REVERT, which propagates out of _tryTransfer and reverts the entire batchClaim chunk — bricking the flush it was designed to protect. finalizePromotion then cannot be reached (flushCursor cannot advance past that staker), stranding the rotation in Flushing (unpause also blocked).",
+      "deviation": "The stated invariant 'the flush must never brick' does not fully hold: it survives compliant failing transfers but not a non-standard/short-returndata promo token. The banking design is faithful; the decode edge case undermines it.",
+      "securityRelevance": "Duplicate of code-scanner V3-LOCAL-01. Mitigated by the owner-vetted-promo-token trust assumption (partner tokens are vetted per promotion), so likelihood is low; primary ownership and severity sit with the code scanner. Flagged here only because it contradicts an explicitly documented design principle.",
+      "lawImpacted": 2,
+      "confidence": "medium"
+    }
+  ],
+  "notes": [
+    "Regression/new-code scope: only the V3 subsystem (PhlimboV3.sol, MigratorV2V3.sol) is new at 7045a96; V1 (Phlimbo.sol) and V2 (PhlimboV2.sol) are unchanged and out of this faithfulness pass.",
+    "No docs/ dir exists; stories resolved from [story-NNN] commit messages (story-022 promo subsystem, story-023 migrator), CLAUDE.md contract inventory, and SolvencyDetermination.md. Commit BODIES for story-023 are terse ('Green: MigratorV2V3 ...'); the authoritative intent is the contract-level NatSpec authored under those commits, used as the story text above.",
+    "No story was flagged as unsafe-by-intent (no Law-1 override triggered). The most likely candidate — uncapped mint-on-demand phUSD — is a deliberate, explicitly-documented solvency model (SolvencyDetermination.md 2), not an unsafe story.",
+    "F-01 and F-02 both overlap security findings already raised locally (MIG-LOCAL-01, V3-LOCAL-01); recorded here for the spec-conformance report with the faithfulness/spec-contradiction framing, not as independent H/M — severity of the underlying DoS is owned by code/econ scanners."
+  ]
+}
