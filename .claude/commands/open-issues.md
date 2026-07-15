@@ -15,7 +15,9 @@ A finding is **dealt-with** (and therefore *hidden* by default) when its ledger 
 `fixed`, `acknowledged`, `wont-fix`, `false-positive`, `submitted`, `qa-bundled`, `merged`, `suppressed`.
 
 A finding is **undealt-with** (and therefore *shown*) when its status is anything else — i.e. it is still awaiting work or a decision. In practice this is:
-`open`, `pending`, `draft`, `needs-poc`, `ready`, `passing`, or any status not in the dealt-with set above.
+`open`, `fix-pending`, `pending`, `draft`, `needs-poc`, `ready`, `passing`, or any status not in the dealt-with set above.
+
+**`fix-pending` is undealt-with, not dealt-with.** It is a human triage decision, but the decision was *"this is real and we will fix it"* — the work is outstanding, so the finding stays visible until a human marks it `fixed`. Do not group it with `acknowledged`; they have opposite meanings (`acknowledged` = living with it, `fix-pending` = fixing it) and opposite scan behaviour.
 
 Rationale: `open`/`pending` are untriaged; `draft`/`needs-poc`/`ready`/`passing` are in-flight (found and possibly PoC'd, but neither reported nor triaged away). All of these still require the auditor's attention, so they count as undealt-with. A finding whose status is unrecognized is treated as **undealt-with** (fail-open: better to surface it than silently bury it).
 
@@ -45,7 +47,7 @@ Invoke **project-manager**: "Resolve friendly name (lowercase-kebab) and locate 
 ## 3. Load & Filter
 Invoke **finding-manager**: "Load the ledger, select undealt-with findings at or above the severity floor."
 - Load every entry from `reports/ledgers/<project>.json`.
-- **Status filter:** keep entries whose `status` is **not** in the dealt-with set (`fixed`, `acknowledged`, `wont-fix`, `false-positive`, `submitted`, `qa-bundled`, `merged`, `suppressed`). Unrecognized statuses are kept (fail-open).
+- **Status filter:** keep entries whose `status` is **not** in the dealt-with set (`fixed`, `acknowledged`, `wont-fix`, `false-positive`, `submitted`, `qa-bundled`, `merged`, `suppressed`). Unrecognized statuses are kept (fail-open). **`fix-pending` is deliberately NOT in the dealt-with set** — a fix is owed, so it is undealt-with by definition and must always be shown.
 - **Severity filter:** keep entries whose `severity` is at or above the floor.
 - Sort by severity (High → Medium → Low), then by label.
 - If `--include-dealt`, also collect the dealt-with set for a secondary section.
@@ -56,14 +58,15 @@ Group by severity. Show label, status, fingerprint prefix (8 chars), title, and 
 Undealt-with: phoenix-nft-staking  (floor: medium+ · ledger @ 9be4a87, updated 2026-05-30)
 ──────────────────────────────────────────────────────────────────────────────
 
-High (1)
-  H-03  [open]   a1f9c2b0  Reward-debt accounting drain on unstakeFor   first -12 · last -14
+High (2)
+  H-03  [open]         a1f9c2b0  Reward-debt accounting drain on unstakeFor   first -12 · last -14
+  H-04  [fix-pending]  88ae7589  Promo flush over-credit  (fix owed)          first -14 · last -14
 
 Medium (1)
   M-02  [open]   7c2e4419  Oracle staleness unchecked in price pull      first -13 · last -14
 
 Summary
-  Undealt-with at medium+: 2   (High 1 · Medium 1)
+  Undealt-with at medium+: 3   (High 2 · Medium 1)
   Hidden below floor: 4 Low/QA   ·   Hidden as dealt-with: 5 (fixed 2 · acknowledged 1 · submitted 1 · wont-fix 1)
 
 Next steps:

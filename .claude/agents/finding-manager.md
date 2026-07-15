@@ -86,7 +86,7 @@ Ledger entry shape:
 ```json
 {
   "fingerprint": "<sha256>", "title": "...", "severity": "high",
-  "status": "open | fixed | acknowledged | wont-fix | false-positive",
+  "status": "open | fix-pending | fixed | acknowledged | wont-fix | false-positive",
   "firstSeenRun": "phoenix-nft-staking-09", "lastSeenRun": "phoenix-nft-staking-12",
   "fixedAtCommit": null, "regressionOf": null,
   "contract": "src/RewardVault.sol", "function": "withdrawRewardToken",
@@ -94,12 +94,23 @@ Ledger entry shape:
   "reportPath": "reports/phoenix-nft-staking-12/submissions/H-01-submission.md"
 }
 ```
-Never silently overwrite a human-set status (`acknowledged`/`wont-fix`/`false-positive`) — those are triage decisions set via `/ledger`.
+Never silently overwrite a human-set status (`fix-pending`/`acknowledged`/`wont-fix`/`false-positive`) — those are triage decisions set via `/ledger`.
+
+**`fix-pending` is the one human-set status that is NOT a disposal.** It means "valid finding, human committed to fixing it, fix not yet verified". It behaves like `open` everywhere that matters — never suppressed by the sanitizer, always gets a carryover stub, always rescanned — and differs from `open` only in that it records an owner commitment. Do not auto-flip it to `fixed` even when the code changed and the scan no longer flags it: *propose* the flip, print the `/ledger <project> fixed <fingerprint>` command, and let the human confirm. A fix that merely stops tripping the scanner is not a verified fix, and this status exists precisely because someone is relying on the fix landing correctly (Law 1).
 
 ## CARRYOVER STUBS
-A finding that stays **`open`** in the ledger across runs (the sanitizer marked it `still-open`) is **not** re-reported with a full submission, but it must remain visible in the run you actually review. So for **every** still-open ledger entry — **all severities** (H/M/L/C) — write a thin stub to the current run's `submissions/carryover/<label>-CARRYOVER.md`. The stub carries no new analysis; it points back to the authoritative report.
+A finding that stays **`open`** or **`fix-pending`** in the ledger across runs (the sanitizer marked it `still-open`) is **not** re-reported with a full submission, but it must remain visible in the run you actually review. So for **every** still-open ledger entry — **all severities** (H/M/L/C) — write a thin stub to the current run's `submissions/carryover/<label>-CARRYOVER.md`. The stub carries no new analysis; it points back to the authoritative report.
 
-The sanitizer passes the still-open list (with each entry's ledger record); generate one stub per entry. Do **not** write stubs for `fixed`, `acknowledged`, `wont-fix`, or `false-positive` entries — only `open` ones that are still flagged by the current scan.
+The sanitizer passes the still-open list (with each entry's ledger record); generate one stub per entry. Do **not** write stubs for `fixed`, `acknowledged`, `wont-fix`, or `false-positive` entries — only `open` and `fix-pending` ones that are still flagged by the current scan.
+
+For a `fix-pending` entry, set the stub's **Status** line to `fix-pending (fix owed, not yet verified)` and, when the sanitizer reported `⚠ FIX-PENDING STILL LIVE (possible incomplete fix)` — i.e. the code changed but the finding survived — replace the stub's blockquote with:
+
+```markdown
+> **⚠ FIX-PENDING STILL LIVE — possible incomplete fix.** This finding was triaged
+> `fix-pending` (a fix was owed). The code has since changed, but the finding is
+> **still flagged**. Either the fix has not landed yet, or it is incomplete.
+> Verify with `/recheck <project> <label>` before assuming it is resolved.
+```
 
 Stub format:
 ```markdown
@@ -131,5 +142,6 @@ The link is **relative** from the current `submissions/carryover/` dir to the en
 2. **Preserve metadata** — creation/update timestamps.
 3. **Validate before transitions** — PoC must exist before `ready`.
 4. **Sequential labeling** — never reuse or skip labels.
-5. **Respect human ledger statuses** — never auto-overwrite acknowledged/wont-fix/false-positive.
+5. **Respect human ledger statuses** — never auto-overwrite fix-pending/acknowledged/wont-fix/false-positive.
 6. **Never drop an open finding from view** — every still-open ledger entry gets a carryover stub in the current run's `submissions/carryover/`; reusing its original label.
+7. **`fix-pending` is never a disposal** — it is rescanned, stubbed, and surfaced exactly like `open`. Never suppress it, and never auto-flip it to `fixed` — propose the flip and let the human confirm.

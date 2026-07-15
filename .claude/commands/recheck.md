@@ -22,7 +22,7 @@ Mechanism is **PoC-replay first**: if the finding has a runnable PoC, re-run it 
 1. **MUST NOT write `lastAuditedCommit`** on the ledger. That field is the regression diff baseline; advancing it after looking at only one finding would make all future regression scans silently skip everything that changed between the old baseline and now.
 2. **MUST NOT bump `lastSeenRun`** — that field means "observed by a discovery scan." recheck records its result in dedicated recheck-only fields instead (see step 6).
 3. **MUST touch only the target entry.** No other ledger entry, and no run pointer (`lastRun`), is modified.
-4. **MUST NOT auto-overwrite a human triage status** (`acknowledged` / `wont-fix` / `false-positive`) or auto-flip `open`↔`fixed`. recheck *proposes* a status change and prints the exact `/ledger` command; the human confirms.
+4. **MUST NOT auto-overwrite a human triage status** (`fix-pending` / `acknowledged` / `wont-fix` / `false-positive`) or auto-flip `open`↔`fixed`. recheck *proposes* a status change and prints the exact `/ledger` command; the human confirms. Note that `fix-pending` is *analysed* like `open` (it is a live finding — recheck fully engages with it) but *written* like a human status (only a human closes it).
 
 If you cannot honor all four, stop and tell the user to run `/full-audit` instead.
 
@@ -105,9 +105,12 @@ Invoke **finding-manager**: "Record recheck result on the target entry only — 
 - Set the ledger's top-level `updatedAt`. Do **not** touch `lastAuditedCommit` or `lastRun`.
 - **Propose**, do not apply, any status change, and print the exact command:
   - LIKELY-FIXED on an `open` finding → recommend `/ledger <project> fixed <fingerprint>` (which records `fixedAtCommit`).
+  - **LIKELY-FIXED on a `fix-pending` finding → the fix landed.** This is the status's happy path — the human promised a fix and the PoC now says it works. Recommend `/ledger <project> fixed <fingerprint>`. Do **not** auto-apply: `fix-pending` is a human status, and only a human closes it.
+  - **STILL-LIVE on a `fix-pending` finding whose code has CHANGED → possible INCOMPLETE FIX.** Surface this loudly, second only to a regression. Someone edited this code intending to fix it and the PoC still passes. Recommend no status change (it correctly remains `fix-pending`) and state plainly that the attempted fix does not close the finding.
+  - STILL-LIVE on a `fix-pending` finding whose code is unchanged → the fix has not landed yet. Expected, low signal; no status change.
   - **STILL-LIVE on a `fixed` finding → REGRESSION.** Surface this loudly (a fix that was marked done is exploitable again is the highest-signal result) and recommend `/ledger <project> reopen <fingerprint>`. Do not auto-reopen.
   - STILL-LIVE on an `open` finding → no status change needed; the recheck fields record the confirmation.
-  - Any result on an `acknowledged` / `wont-fix` / `false-positive` finding → report the result for information only; never change a human status.
+  - Any result on an `acknowledged` / `wont-fix` / `false-positive` finding → report the result for information only; never change a human status. (**`fix-pending` is not in this set** — it is a live finding awaiting a fix, so recheck engages with it exactly as it does an `open` one.)
 
 ## 7. Summary
 ```

@@ -50,7 +50,16 @@ Custom Claude Code commands orchestrate specialized agents in tiers:
 5. **Output** - severity-classifier, finding-manager (writes run dir + upserts ledger), poc-generator, report-writer, qa-bundler
 
 ### Re-running an audit (regression mode)
-Re-running `/analyze <project>` or `/full-audit <project>` defaults to a **regression scan** when a ledger exists: it focuses on files changed since the last audited commit and reconciles findings against the ledger, so previously-seen issues are not re-reported. A finding that reappears after being marked `fixed` is flagged as a **REGRESSION**. Pass `--full` to force a cold scan. Triage findings (acknowledge / wont-fix / fixed / reopen) with `/ledger <project>`; those statuses are authoritative and never auto-overwritten.
+Re-running `/analyze <project>` or `/full-audit <project>` defaults to a **regression scan** when a ledger exists: it focuses on files changed since the last audited commit and reconciles findings against the ledger, so previously-seen issues are not re-reported. A finding that reappears after being marked `fixed` is flagged as a **REGRESSION**. Pass `--full` to force a cold scan. Triage findings (fix-pending / acknowledge / wont-fix / fixed / reopen) with `/ledger <project>`; those statuses are authoritative and never auto-overwritten.
+
+**`fix-pending` vs `acknowledged` — a Law-1 distinction.** Both say "the finding is valid", but they are opposites downstream and must never be conflated:
+
+- **`acknowledged`** = *accepted and disposed of* ("we're living with it"). **Suppressed** from future scans, no carryover stub, hidden by `/open-issues`. Correct for a residual risk the owner has decided to carry.
+- **`fix-pending`** = *accepted and a fix is owed* ("we're fixing it"). **Never suppressed** — rescanned, stubbed, and shown by `/open-issues` exactly like `open`, until a human marks it `fixed`.
+
+A finding the owner intends to fix must **never** be filed as `acknowledged`: suppression would remove a live bug from every future scan precisely when someone is depending on the fix landing correctly, so an incomplete or absent fix would go unnoticed. When a triage instruction sounds like *"acknowledged, will fix"*, the operative word is **will fix** → `fix-pending`. If ambiguous, ask; never default to `acknowledged`.
+
+`fix-pending` is human-set and never auto-closed — `/analyze`, `/full-audit`, and `/recheck` may *propose* `fixed` but only a human applies it (a fix that merely stops tripping the scanner is not a verified fix). If the code changed and the finding survived, that is an **⚠ INCOMPLETE FIX** signal, ranked second only to a REGRESSION: an incomplete fix is more dangerous than an unfixed bug, because it reads as done.
 
 ### Re-verifying a single finding (`/recheck`)
 `/recheck <project> <label-or-fingerprint>` re-proves **one** finding against the current submodule HEAD without running discovery. It is **PoC-replay first**: it syncs the writable `workspace/` source to the target commit (preserving the PoC), re-runs the finding's PoC, and classifies the result as **STILL-LIVE** / **LIKELY-FIXED** / **INCONCLUSIVE** (a PoC that no longer *compiles* is inconclusive bit-rot, not a fix). Use it for a localized post-fix re-check; the command itself bounces you to `/full-audit` when the change is broader than the finding's contract.

@@ -137,6 +137,7 @@ Invoke **sanitizer**: "Remove known issues, then reconcile against the ledger"
 - First filter against the project's documented known issues.
 - Then reconcile each remaining finding against `reports/ledgers/<project>.json` by fingerprint:
   - matches an `open` entry → mark **still-open**, bump `lastSeenRun`, do not regenerate a report
+  - matches a `fix-pending` entry → **never suppress**; treat exactly like `open` (still-open + carryover stub). If the code changed since `lastAuditedCommit` and the finding survived, flag **⚠ FIX-PENDING STILL LIVE (possible incomplete fix)** — second only to REGRESSION in signal.
   - matches `acknowledged` / `wont-fix` / `false-positive` → suppress (like a known issue)
   - matches a `fixed` entry but reappears → flag **REGRESSION** (high priority)
   - no match → genuinely **new** finding
@@ -170,7 +171,7 @@ Tier 3:  1 invariant failure · 1 symbolic counterexample
 
 Pipeline:
   Raw: 74 → Deduplicated: 30 → After known-issues: 24
-  Ledger reconciliation: 18 still-open · 2 acknowledged (suppressed) · 1 REGRESSION · 3 new
+  Ledger reconciliation: 18 still-open · 1 fix-pending · 2 acknowledged (suppressed) · 1 REGRESSION · 3 new
 
 Classified (new + regressed only):
   High: 1 (1 REGRESSION)   Medium: 2   Low: 1

@@ -31,7 +31,7 @@ You are the sanitizer agent responsible for filtering out findings that are alre
 2. Dedicated known-issues.md file
 3. Bot race report (if present)
 4. Sponsor comments in code
-5. Previous audit findings marked "acknowledged"
+5. Previous audit findings marked "acknowledged" — **`acknowledged` only.** A finding marked **`fix-pending`** is NOT a known issue and must never be matched here: the human accepted it as a real bug and owes a fix, so it stays in the scan until the fix is verified. See **FIX-PENDING** under LEDGER RECONCILIATION.
 
 ### Matching Strategy
 
@@ -102,13 +102,27 @@ Per C4 rules, these are typically OOS:
 After removing known/OOS issues, reconcile each surviving finding against the persistent ledger `reports/ledgers/<project>.json` (provided by project-manager). Compute a stable `fingerprint = sha256(contract:function:rootCauseClass[:entryPoint])` for each finding and compare. The optional `entryPoint` (set on `/audit-script` findings, `null`/absent on contract-scan findings) is folded into the hash, so reconciliation is **per entry point automatically** — a script-audit finding reconciles only against prior findings from the same script, never against contract-scan findings on the same `contract:function`, and an empty `entryPoint` reproduces the legacy hash byte-for-byte. Then compare:
 
 - Matches an **`open`** entry → mark `origin: "still-open"`, bump `lastSeenRun`; **do not** regenerate a report this run.
+- Matches a **`fix-pending`** entry → **NEVER suppress.** Mark `origin: "still-open"`, bump `lastSeenRun`; **do not** regenerate a report this run. See **FIX-PENDING** below — this status means "human triaged it, and a fix is owed", so it must keep being rescanned exactly like `open`.
 - Matches **`acknowledged` / `wont-fix` / `false-positive`** → suppress (treat like a known issue); record the suppression.
 - Matches a **`fixed`** entry that has reappeared → mark `origin: "regression"`, set `regressionOf` = the run it was fixed in, and **flag prominently** (highest signal).
 - **No match** → `origin: "new"`.
 
-Only `new` and `regression` findings proceed to classification/reporting; `still-open` and suppressed findings are logged for the audit trail and passed to finding-manager for ledger bookkeeping. In a `--full` cold run, still treat human statuses (`acknowledged`/`wont-fix`/`false-positive`) as suppressions.
+Only `new` and `regression` findings proceed to classification/reporting; `still-open` and suppressed findings are logged for the audit trail and passed to finding-manager for ledger bookkeeping. In a `--full` cold run, still treat human statuses (`acknowledged`/`wont-fix`/`false-positive`) as suppressions — but **`fix-pending` is never suppressed, in cold runs or regression runs.**
 
-**Still-open carryover.** A `still-open` finding is not re-reported, but it must not silently vanish from the run's `submissions/` dir. Pass the full list of `still-open` entries (each with its ledger record: label, fingerprint, severity, title, contract/lines, `firstSeenRun`, `reportPath`) to finding-manager so it writes a thin **carryover stub** per entry (see finding-manager → CARRYOVER STUBS). This applies to all severities. Suppressed (`acknowledged`/`wont-fix`/`false-positive`) entries get **no** stub — the human already triaged them.
+**Still-open carryover.** A `still-open` finding is not re-reported, but it must not silently vanish from the run's `submissions/` dir. Pass the full list of `still-open` entries (each with its ledger record: label, fingerprint, severity, title, contract/lines, `firstSeenRun`, `reportPath`) to finding-manager so it writes a thin **carryover stub** per entry (see finding-manager → CARRYOVER STUBS). This applies to all severities, and to both `open` and `fix-pending` entries. Suppressed (`acknowledged`/`wont-fix`/`false-positive`) entries get **no** stub — the human already triaged them.
+
+### FIX-PENDING (`status: "fix-pending"`)
+
+`fix-pending` means **the human triaged the finding as valid and committed to fixing it** — the fix is owed but not yet verified. It is a human-set status (never auto-overwrite it), but unlike the other human-set statuses it is **not a disposal**: the finding is still live code, so it stays in the scan.
+
+Treat `fix-pending` **exactly like `open`** for reconciliation. It is NOT a known issue. Specifically:
+
+- **Never** fold it into the "Known Issues Sources" list below (source #5 covers findings marked `acknowledged` — `fix-pending` is *not* `acknowledged` and must not be semantically matched to it, to a sponsor "we are aware that…" note, or to any "Acknowledged: …" known-issue pattern). If you find yourself reasoning "the human already knows about this, so suppress it" — **stop**. That reasoning is exactly what `fix-pending` exists to prevent.
+- **Never** suppress it. **Never** omit its carryover stub.
+- Report its reconciliation outcome under one of two headings, based on whether the finding's code changed since `lastAuditedCommit`:
+  - **still flagged, code unchanged** → `FIX-PENDING (fix not yet landed)` — expected, low signal.
+  - **still flagged, code CHANGED** → `⚠ FIX-PENDING STILL LIVE (possible incomplete fix)` — **flag prominently, second only to REGRESSION.** Someone edited this code intending to fix it and the finding survived. Under Law 1 an incomplete fix is more dangerous than an unfixed bug, because it reads as done.
+  - **no longer flagged, code changed** → do **not** auto-flip to `fixed` (see finding-manager). *Propose* the flip and let the human confirm; a fix that merely evades the scanner is not a verified fix.
 
 ## ERROR HANDLING
 - **Missing Known Issues**: Warn and proceed without filtering
@@ -130,6 +144,8 @@ Watch for these common known issue formats:
 - "Won't fix: ..."
 - "Out of scope: ..."
 - "Design decision: ..."
+
+**These patterns describe issues the sponsor has *disposed of*.** "We will fix this", "fix planned", "will be addressed in the next release" is the **opposite** — an admission the finding is real and outstanding. Never treat a promise-to-fix as a known issue; it is the strongest possible confirmation the finding should stay in the scan.
 
 ## PASS-THROUGH PRIORITY
 Always pass through findings that:
