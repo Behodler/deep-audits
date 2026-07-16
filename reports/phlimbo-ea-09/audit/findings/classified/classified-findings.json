@@ -1,0 +1,454 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-07-16T00:30:00Z",
+    "project": "phlimbo-ea",
+    "run": "phlimbo-ea-09",
+    "agent": "severity-classifier",
+    "commit": "02b9bc2",
+    "inputFindings": 9,
+    "classifiedFindings": 9,
+    "severityBreakdown": { "high": 0, "medium": 2, "low": 4, "qa": 3 },
+    "disagreementsWithProposed": 0,
+    "escalationsConsidered": 2,
+    "escalationsApplied": 0,
+
+    "sourceVerifiedThisRun": {
+      "note": "The classifier independently re-read source rather than inheriting upstream claims. Every magnitude and every rescue path below was confirmed at 02b9bc2.",
+      "confirmed": [
+        "PhlimboV3.sol:596-611 pauseWithdraw mutates `totalStaked -= amount` with NO _updatePhUSDEmissionRate call. Confirmed as the ONLY such site: stake calls it at :674, withdraw at :725, setDesiredAPY at :245.",
+        "PhlimboV3.sol:893-901 _updatePhUSDEmissionRate is the sole writer of phUSDPerSecond (= totalStaked * desiredAPYBps / 10000 / SECONDS_PER_YEAR). Stale numerator over shrunken denominator is arithmetically exactly the reported defect.",
+        "CAP ASYMMETRY CONFIRMED — the basis of SAN-09-002's severity. Stable leg :789 `toDistribute = potentialReward > rewardBalance ? rewardBalance : potentialReward` — hard-capped, mere redistribution. phUSD leg :803-806 `phUSDReward = timeElapsed * phUSDPerSecond` — NO cap — and _claimRewards :853 `phUSD.mint(beneficiary, ...)` MINTS it. The owner capped one leg and not the other.",
+        "PhlimboV3.sol:698 _claimRewards(user, msg.sender) runs BEFORE the principal move at :723 and the transfer at :723. A reverting reward transfer at :858 (stable) or :873 (promo) therefore aborts the whole withdraw. Confirmed.",
+        "PhlimboV3.sol:445-447 NatSpec: 'Failed transfers (e.g. blocklisted recipients) are banked per-user into unclaimablePromoOf ... the flush must never brick'. Scoped to batchClaim ONLY. The self-service path has no such banking.",
+        "PhlimboV3.sol:429-437 beginFlush calls _updatePool() at :432 then _pause() at :433, and pauses on EVERY rotation — the window is routine and scheduled, not emergency.",
+        "RESCUE PATH, materially affects SAN-09-001's ceiling: pauseWithdraw (:596-611) transfers ONLY phUSD principal and NEVER calls _claimRewards. It is therefore a CLEAN escape for a blocklisted staker. Combined with PhlimboV3.sol:576 pause() being owner-OR-pauser, the V3 owner directly controls a one-action rescue.",
+        "V2 ASYMMETRY CONFIRMED: PhlimboV2.sol:270 pause() is `require(msg.sender == pauser, ...)` — PAUSER-ONLY, no owner clause. MigratorV2V3.sol:250 `phlimboV2.withdraw(amount, user)` is called BY the migrator, so the migrator is msg.sender and thus beneficiary — the blocked user is never the recipient on that path."
+      ]
+    },
+
+    "classifiedFinding": [
+      {
+        "id": "CLASS-001",
+        "originalId": "SAN-09-001",
+        "fingerprint": "69f8b29a043da5933c6e3adfe7bdf8d443bb4ee98cb36459cd998c5776c64df8",
+        "severity": "medium",
+        "proposedSeverity": "potential-medium",
+        "agreement": "CONFIRMED at Medium — not rubber-stamped; High was tested against the 'assets lost' bar and REFUTED, Low was tested and REFUTED.",
+        "plausibility": "plausible",
+        "regression": false,
+        "faithfulness": false,
+        "footgun": true,
+        "routing": "H/M individual submission",
+        "contract": "src/PhlimboV3.sol",
+        "function": "_claimRewards",
+        "lineStart": 844,
+        "lineEnd": 877,
+        "classification": {
+          "assetImpact": "A staker's phUSD PRINCIPAL is frozen — not stolen. Every self-service path into the position reverts: withdraw (:698 claims before moving principal at :723), stake (:657), and claim. The position is inaccessible to its owner indefinitely, until the protocol owner takes a protocol-wide action the staker cannot compel.",
+          "attackPath": [
+            "1. No attacker is required. The trigger is a THIRD PARTY: the reward-token issuer (e.g. Circle/Tether) blocklists a staker's address, for reasons entirely unrelated to this protocol.",
+            "2. The staker calls withdraw(amount, self). _updatePool() runs, then _claimRewards(user, msg.sender) at :698.",
+            "3. Inside _claimRewards, the stable leg at :858 (rewardToken.safeTransfer) or the promo leg at :873 (promoToken.safeTransfer) reverts — safeTransfer bubbles the token's own revert.",
+            "4. The entire withdraw transaction reverts. The principal move at :723 is never reached. The staker's phUSD principal is frozen.",
+            "5. The staker retries stake and claim; both route through _claimRewards and both revert identically. The staker has ZERO self-service recourse."
+          ],
+          "likelihood": "medium-to-high, and materially higher than the promo-only PoC suggests. The PROMO leg (:873, PoC 2/2) needs an active promotion on a blocklisting partner token. The STABLE leg (:858) is WIDER and is the leg that governs likelihood: it requires NO promotion at all, and rewardToken is the protocol's own stable — plausibly USDC, a blocklisting token. Any period in which the protocol holds a non-zero stable stream exposes every staker. Address blocklisting by USDC/USDT is an ordinary, recurring real-world event, not an exotic precondition.",
+          "assumptions": "The reward token or promo token implements a blocklist that causes transfer to REVERT (as USDC and USDT both do). The affected staker holds a non-zero pending reward on the blocked leg (pendingRewardAmount > 0 at :857 / pendingPromoAmount > 0 at :872) — a zero pending skips the transfer and the position remains accessible.",
+          "externalRequirements": "The token issuer must blocklist the staker. This is outside the protocol's control and outside the staker's control, and requires no error by either."
+        },
+        "severityJustification": {
+          "whyNotHigh": "REFUTED against the C4 'assets stolen/lost/compromised' bar. Three independent reasons, the first source-verified this run: (1) A CLEAN RESCUE EXISTS AND THE OWNER DIRECTLY CONTROLS IT. pauseWithdraw (:596-611) transfers ONLY phUSD principal and NEVER calls _claimRewards — so it does not touch the reverting transfer at all — and pause() at :576 is owner-OR-pauser. The owner can therefore restore every blocklisted staker's principal in ONE action they unilaterally control. Principal is recoverable, hence FROZEN, not LOST. (2) Nothing is stolen and no party profits — there is no attacker and no value transfer. (3) The freeze is not permanent by construction; it is permanent only if the owner never acts.",
+          "whyIndefiniteFreezeIsNotLost": "The task asks this directly. Answer: NO, not on this record — because the rescue is CHEAP, SINGLE-ACTION, and OWNER-CONTROLLED. Indefinite freeze would rise to 'lost' where recovery is impossible, requires a party who may not cooperate, or requires a key/quorum the protocol does not hold. None applies: PhlimboV3's owner needs no third party. Contrast SAN-09-009 on V2, where pause() is pauser-only and the owner must FIRST control or re-appoint the pauser — a strictly weaker rescue, which is why V2's caveat matters even though V2 sits at Low for a different reason.",
+          "whyNotLow": "Low ('state handling, spec deviation, centralization') materially understates this. Three reasons: (1) AVAILABILITY IS SQUARELY IMPACTED — the C4 Medium clause is 'the function of the protocol or its availability could be impacted', and here the affected staker's access to their own principal is reduced to zero on every self-service path. (2) The only rescue is a PROTOCOL-WIDE PAUSE, which halts stake/withdraw/claim for EVERY user to rescue one — the remedy is itself an availability event. (3) The stable leg makes this a standing exposure of the everyday path, not an edge case.",
+          "law3": "IN SCOPE as a footgun, and the surprise test is met unusually strongly. This is NOT a 'malicious owner' or 'reckless admin' vector — there is NO owner misconfiguration at all; the owner does nothing wrong and the staker does nothing wrong. Worse, the NatSpec at :445-447 AFFIRMATIVELY MISLEADS: it tells a reader blocklisted recipients are banked and 'the flush must never brick'. That is true of batchClaim ONLY. A competent, non-malicious owner reading their own contract would reasonably conclude the blocklist case is handled protocol-wide. It is handled on the rotation path and NOT on the self-service path. Documentation that does not merely omit a warning but states the opposite guarantees surprise."
+        },
+        "classifierNotes": {
+          "twoLegsOneFingerprint": "The severity above is set by the STABLE leg (:858), not the PoC'd promo leg (:873). Triage must not read the promo-only PoC as the finding's reach — the stable leg needs no promotion and is the wider, likelier trigger. One fix (the _tryTransfer + bank pattern the owner already wrote for story-027) covers both legs.",
+          "notAFoTFinding": "CONCUR with the sanitizer. The dropped L-04 precedent covers fee-on-transfer tokens (transfer moves less than `amount`). This is a REVERTING blocklist — different mechanism, different victim (staker principal, not a retryable owner funding call), different consequence. C4 explicitly carves USDT out of the weird-ERC20 exclusion, and USDT is a blocklisting token.",
+          "classNotClosedByStory027": "V3-M-03's proposed closure is correct WITHIN ITS SCOPE (batchClaim entitlement erasure) but must NOT be read as 'blocked recipients are now handled protocol-wide'. This finding is the previously-unreported sibling on the self-service path, which story-027 does not touch."
+        }
+      },
+      {
+        "id": "CLASS-002",
+        "originalId": "SAN-09-002",
+        "fingerprint": "efdc3c4f08ee7e371b6d4fb2de6f7a8a527fc938eb863b74fb9d8a68343598bc",
+        "severity": "medium",
+        "proposedSeverity": "potential-medium (delivered UNFLOORED and UNCAPPED)",
+        "agreement": "CONFIRMED at Medium on independent evidence. High re-tested and REFUTED. Low seriously tested and REFUTED. No known issue was used in either direction.",
+        "plausibility": "plausible",
+        "regression": false,
+        "faithfulness": false,
+        "footgun": true,
+        "routing": "H/M individual submission",
+        "contract": "src/PhlimboV3.sol",
+        "function": "pauseWithdraw",
+        "lineStart": 596,
+        "lineEnd": 611,
+        "classification": {
+          "assetImpact": "UNBACKED phUSD IS MINTED to surviving stakers, permanently diluting every phUSD holder. This is a value leak against the stablecoin's backing, not a redistribution: the phUSD leg is UNCAPPED (:803-806 has no rewardBalance ceiling, unlike the stable leg at :789) and :853 mints the excess into existence. No existing holder's balance is taken; the loss is borne pro-rata by all phUSD holders through dilution.",
+          "attackPath": [
+            "1. No attacker and no owner error required. The owner begins a ROUTINE promo rotation: beginFlush (:429-437) calls _updatePool() at :432, then _pause() at :433. Every rotation pauses.",
+            "2. Any staker (S0 -> S1) exits via pauseWithdraw during the window. Line :602 executes `totalStaked -= amount` and the function returns WITHOUT calling _updatePhUSDEmissionRate.",
+            "3. phUSDPerSecond remains sized for the pre-exit totalStaked (S0), while accPhUSDPerShare now divides by the post-exit totalStaked (S1). Emission per remaining share is inflated by exactly S0/S1.",
+            "4. The stale rate persists for the whole window. claim() does NOT repair it (:738-764), so the leak accrues continuously until the first post-unpause stake/withdraw.",
+            "5. On the first post-unpause stake, :648 _updatePool() settles the ENTIRE elapsed window at the STALE rate BEFORE :674 _updatePhUSDEmissionRate repairs it — so the repair arrives one step too late and cannot claw back the accrued excess.",
+            "6. Survivors claim; :853 mints unbacked phUSD to them."
+          ],
+          "likelihood": "medium, CONDITIONAL on desiredAPYBps > 0. No adversary is needed — the trigger is the intersection of two routine events (a scheduled rotation and any staker exiting). The window is scheduled and mempool-visible. Zero APY fully immunizes the finding (test_A_zeroAPYImmunizes), and the live value is UNKNOWN to this run — see the dormancy note below.",
+          "assumptions": "desiredAPYBps > 0 (the single deciding parameter). Magnitude anchored on ~68,212 phUSD live supply (carried from run-08) and 5% APY (docstring :63); the leak scales LINEARLY in both. Flush window modelled at 1 day, but the window is owner-controlled and unbounded in principle.",
+          "externalRequirements": "The owner must have committed a non-zero desiredAPYBps (a two-tx action via setDesiredAPY) and must run a promo rotation. Both are ordinary protocol operations, not misconfigurations.",
+          "measuredMagnitude": "Over-mint FACTOR 8.5x (= S0/S1). Absolute UNBACKED EXCESS 8.219178 phUSD/day = 0.012%/day of the ~68,212 live supply, at 5% APY with a whale exiting 60,000 of 68,000 over a 1-day window. Closed form: excess == exitedAmount * APY * window / year. Exiter forfeit measured at EXACTLY ZERO in the routine window (beginFlush's :432 _updatePool immediately precedes :433 _pause)."
+        },
+        "severityJustification": {
+          "whyNotHigh": "AGREED WITH THE STANDING REFUTATION, and re-derived independently rather than inherited. The escalation rests on conflating the unbounded FACTOR with the absolute LEAK, and the two are different quantities: (1) The factor S0/S1 is unbounded as S1 -> 0, but the factor multiplies a RATE-LIMITED base. The closed form `exitedAmount * APY * window / year` contains no S1 term at all — driving S1 to dust does NOT increase the absolute leak, it only concentrates the same leak on fewer survivors. The unbounded number is the wrong number. (2) NOTHING IS STOLEN — no attacker profits, no existing balance is taken. (3) The self-serving variant is SELF-DEFEATING and PoC-proven so: an exiter who splits across A/B forfeits APY on the exited stake exactly equal to the leak they create, and then must SHARE that leak with honest survivors. The rational actor's payoff is negative. (4) The absolute rate is 0.012%/day of supply — three orders of magnitude away from the 'assets can be stolen/lost' bar. HISTORY APPLIED: this is precisely the discipline run-08 exercised when it held the truncation finding at Low because the real phUSD supply (68,212) killed the High. The same real-supply anchor applies here and gives the same answer. DO NOT re-escalate on the factor.",
+          "whyNotLow": "This is the harder call and I make it deliberately. Low ('state handling') is the natural reading — a missing function call is textbook incorrect state handling — but it is WRONG here, for four reasons. (1) THE STATE ERROR IS NOT THE HARM; THE MINT IS. The consequence of the stale rate is not a mis-displayed number, it is `phUSD.mint()` at :853 creating tokens with nothing behind them. That is a SOLVENCY defect in a STABLECOIN, which is a value leak, not bookkeeping. (2) THE C4 MEDIUM CLAUSE FITS VERBATIM: 'leak value with a hypothetical attack path with stated assumptions, but external requirements'. Assumptions are stated (non-zero APY, rotation, an exit); external requirements are documented (owner-committed APY, owner-run rotation); value leaks; assets are NOT at direct risk. This finding is the clause's central case, not its margin. (3) MAGNITUDE IS NOT DUST — and dust is the usual reason a value leak drops to Low. 8.219178 phUSD/day is a RATE that runs unrepaired until the first post-unpause stake, over an owner-controlled and unbounded window, scaling linearly in both supply and APY. The per-day figure is a floor on a growing quantity, not a total. (4) THE OWNER'S OWN CODE ARGUES AGAINST LOW: the stable leg is deliberately capped at :789 to 'prevent over-distribution'. The owner clearly regarded uncapped emission as a defect worth guarding — and the phUSD leg, the only one that MINTS, is the one left unguarded. An unbacked mint that the protocol's own sibling code takes care to prevent is not a nit.",
+          "thirdPartyHarmMatters": "The exiter is NOT the beneficiary. The unbacked phUSD lands on SURVIVING STAKERS, and the dilution lands on ALL phUSD HOLDERS — parties who took no action and had no notice. This is decisive against importing V2-M-03's wont-fix rationale (see below): 'an implicit penalty to encourage users not to use this' describes a cost borne by the EXITER. The exiter's forfeit is real, implemented (debt realignment :604-606) and is NOT what this reports. Penalty semantics cannot justify a harm that lands on third parties.",
+          "law3": "IN SCOPE as a footgun, surprise test MET. No attacker and no owner error is required. SolvencyDetermination.md:43-44 — REGENERATED IN THIS VERY RANGE — asserts emission 'is recomputed on every stake/withdraw; it cannot exceed what the APY implies'. The PoC exceeds it by 8.5x. The doc enumerates stake/withdraw and silently omits pauseWithdraw; THE OMISSION IS THE GAP. pauseWithdraw's own docblock (:581-594) carefully enumerates the V3 deltas and the deliberate exiter forfeit but never states the emission rate is left stale. An owner reading their own freshly-written spec would conclude this cannot happen."
+        },
+        "classifierNotes": {
+          "kiIndependence": "This severity was decided on the evidence and on nothing else. KI-10's zero-APY claim was NOT used to suppress, to floor, or to cap. V2-M-03's KI-10-derived 'RE-CLASSIFY HIGH under any non-zero-APY config' rule was NOT inherited — that note rests entirely on an unfalsifiable KI and has no live support; had it been inherited mechanically it would have produced a High this record does not support. V2-M-03 is also a DIFFERENT CONTRACT (PhlimboV2), so it is not a fingerprint match and could not suppress this as a duplicate regardless.",
+          "dormancyIsNotInvalidity": "FLAG-09-03 is the highest-value open question in the run and it is a TRIAGE question, not a severity question. If the live desiredAPYBps is 0, this finding is DORMANT — not invalid, not Low. It is ARMED by any future setDesiredAPY commit: a two-tx owner action with NO warning that it activates a mint leak. The arming property is worth reporting regardless of the current value. I classify the finding at its ARMED severity (Medium) because that is its honest impact when live, and because a Low label would under-warn the owner at exactly the moment they later raise APY. If a human establishes desiredAPYBps == 0 against the live deployment AND confirms that is durable policy, a re-triage to Low-with-arming-note is defensible — but that must be established FROM THE CHAIN, not inherited from KI-10.",
+          "doNotCollapse": "CRITICAL. V3-Q-02 (93cdca59) sits on the SAME CONTRACT and SAME FUNCTION and will look like a duplicate to a future run. It is NOT. V3-Q-02 is scoped 'accounting exactly conserving; no insolvency, no over-emission' — this finding is PRECISELY the over-emission V3-Q-02 declares absent. Different rootCauseClass, different fingerprint. Collapsing them deletes the run's strongest Medium. MR-09-001 (missing nonReentrant) is a THIRD distinct root cause on the same function.",
+          "fixWarningCarried": "Append `_updatePhUSDEmissionRate();` after `totalStaked -= amount;` at :602 ONLY. Do NOT also add _updatePool() at the top — that walks into V3-Q-02's documented trap and risks resurrecting the underflow brick the V3 debt-realignment (:604-606) was added to fix.",
+          "evidenceQuality": "The strongest evidentiary record in the run and it must survive to submission. An ANALYTIC derivation (econ closed form) and an INDEPENDENT EMPIRICAL measurement (Tier-3 Run09PhUSDOverMintMeasure) agree on 8.219178 phUSD/day TO THE WEI, and a third artifact (invariant_phUSDRate_tracks_totalStaked) BROKE on its first run with a 3-call shrunk sequence at 4.83x stale. Agreement between an analytic and an empirical derivation is materially stronger than either alone.",
+          "remediationConsequence": "Gating collectReward would NOT fix this (refutation R-3). The leak does not route through permissionless collectReward — stake's :648 _updatePool precedes :674's rate repair, so the first post-unpause stake settles the window at the stale rate on its own. The PoC calls no collectReward and still measures 8.5x."
+        }
+      },
+      {
+        "id": "CLASS-003",
+        "originalId": "SAN-09-003",
+        "fingerprint": "9a99a21b4358ff6721444c947dd846b1a9242158342383d13d620b377ce6f033",
+        "severity": "low",
+        "proposedSeverity": "potential-low",
+        "agreement": "CONFIRMED at Low. Medium was tested (a 'permanent rotation DoS' reads as an availability impact) and REFUTED on reachability.",
+        "plausibility": "plausible",
+        "regression": false,
+        "footgun": false,
+        "routing": "QA report (Low)",
+        "contract": "src/PhlimboV3.sol",
+        "function": "batchClaim",
+        "lineStart": 460,
+        "lineEnd": 487,
+        "classification": {
+          "assetImpact": "None directly. A stuck rotation delays promo distribution; entitlements remain banked and pullable. The structural exposure is to protocol AVAILABILITY (the promo rotation), not to assets.",
+          "attackPath": [
+            "1. A staker in the flush cursor's path reverts inside the batchClaim loop (:460-484).",
+            "2. There is no per-user try/catch containment and no cursor skip, so the whole batchClaim reverts.",
+            "3. The cursor never advances past the reverting staker; the rotation cannot complete.",
+            "4. The byte-identical migrator path has BOTH backstops — showing the owner already considers them necessary."
+          ],
+          "likelihood": "low. Reachability TODAY is entirely V3-L-02's vector.",
+          "assumptions": "A revert vector must exist inside the loop.",
+          "externalRequirements": "Requires an owner-selected promo token returning malformed returndata (the abi.decode at :887)."
+        },
+        "severityJustification": {
+          "whyNotMedium": "'Permanent rotation DoS' sounds like an availability Medium, and I tested it as one. It fails on REACHABILITY. code-scanner enumerated every statement in the loop and found EXACTLY ONE revert vector — the abi.decode at :887, which IS V3-L-02's already-tracked defect. So this finding contributes no NEW reachable path today; its independent content is the STRUCTURAL gap against FUTURE revert vectors. A Medium resting on a vector that is (a) already tracked at Low elsewhere and (b) needs an owner-selected malformed-returndata token would overstate.",
+          "whyNotDropped": "The structural gap survives independently: the containment asymmetry persists for any future revert vector, and the migrator's own design shows the owner already treats that backstop as necessary. Per FLAG-09-04, if triage judges it not worth its own entry, MERGE INTO V3-L-02 as an aspect — do NOT drop it."
+        },
+        "classifierNotes": {
+          "honestOverlap": "Stated, not hidden. The finding is reachability-coupled to V3-L-02 today. See FLAG-09-04.",
+          "absorbedFact": "emergencyTransfer (:335-340) ends with _pause() (:339), and OZ's _pause() carries whenNotPaused — so emergencyTransfer REVERTS while already paused, INCLUDING the whole Flushing window, removing the stated last-resort exit. Correct sequence: abortFlush -> unpause -> emergencyTransfer. Shared with SAN-09-005; one fact, two findings citing it, no duplication."
+        }
+      },
+      {
+        "id": "CLASS-004",
+        "originalId": "SAN-09-004",
+        "fingerprint": "df605bea7321cb2d1711f98fa5cdbe9fef45cbcc41342b95994660dcadafc815",
+        "severity": "low",
+        "proposedSeverity": "potential-low",
+        "agreement": "CONFIRMED at Low.",
+        "plausibility": "plausible",
+        "regression": false,
+        "footgun": true,
+        "routing": "QA report (Low)",
+        "contract": "src/PhlimboV3.sol",
+        "function": "startPromotion / emergencyTransfer",
+        "lineStart": 335,
+        "lineEnd": 356,
+        "classification": {
+          "assetImpact": "A user's banked promo entitlement over a RETIRED token can be swept if that token is later re-promoted. The accounting itself is correct (R-2 refuted the double-spend outright); the exposure is created by the DOC's unconditional promise plus the unreconciled bank lifecycle.",
+          "attackPath": [
+            "1. A promotion over token T ends leaving an outstanding bank in unclaimablePromoOf[T][staker].",
+            "2. The :322-323 docblock states UNCONDITIONALLY that the retired bank 'is unreachable here and stays pullable via claimUnclaimablePromo'.",
+            "3. The owner runs a ROUTINE second campaign with the same partner token T (startPromotion).",
+            "4. T is now live again, so emergencyTransfer's carve-out no longer excludes it — the sweep is silently re-armed over the old bank.",
+            "5. The owner sweeps, believing the doc's carve-out protects the retired bank. The user's banked entitlement is gone."
+          ],
+          "likelihood": "low — requires a repeat campaign with the same partner token AND an outstanding bank AND an emergencyTransfer.",
+          "assumptions": "The owner re-promotes a token that still has an outstanding bank.",
+          "externalRequirements": "Owner runs a second campaign with the same partner token."
+        },
+        "severityJustification": {
+          "whyLow": "The on-chain accounting is CORRECT — this is not a solvency defect. What survives is a documentation footgun with a narrow trigger and no automatic loss: harm requires the owner to additionally invoke emergencyTransfer while misled. Spec-deviation-plus-narrow-trigger is Low territory.",
+          "law3": "IN SCOPE as a footgun. :322-323 states the carve-out UNCONDITIONALLY; it holds only while the token is not re-promoted. A competent owner running a routine repeat campaign would not expect it to silently re-arm the sweep over an old bank. Surprise => footgun.",
+          "notCentralization": "This is NOT a 'malicious owner sweeps a live bank' finding — that OBVIOUS face was already suppressed upstream at DROP-09-06 and is NOT re-filed. This is the NON-OBVIOUS consequence a truthful-looking docblock actively conceals."
+        },
+        "classifierNotes": {
+          "ejectorSeatCompliant": "VERIFIED. Proposes NO accounting inside emergencyTransfer. Filed against the DOC and startPromotion, which are not the ejector seat. The standing ejector-seat memo (pe7m2 closed INVALID) is honoured.",
+          "refutationPreserved": "R-2 — the DOUBLE-SPEND concern this grew out of is REFUTED OUTRIGHT (PoC test_C2). startPromotion assigns promoRewardBalance = amount at :369 and never adopts the old bank as distributable; finalizePromotion reserves cumulative totalUnclaimableOf at :517; debt alignment at :468 starts new pendings at zero. Recorded so a future run does not re-raise it.",
+          "doNotCollapse": "NOT V3-Q-03 (f82f04fe) — related but INVERSE and on a different contract: V3-Q-03 is a retired token MISSED by a sweep on MigratorV2V3; this is a retired bank WRONGLY CAUGHT by a sweep on PhlimboV3."
+        }
+      },
+      {
+        "id": "CLASS-005",
+        "originalId": "SAN-09-005",
+        "fingerprint": "9169babef5b785683138641b0bac3c5f95450d50ccdb0149ecaf65d09bcd4097",
+        "severity": "low",
+        "proposedSeverity": "potential-low",
+        "agreement": "CONFIRMED at Low.",
+        "plausibility": "plausible",
+        "regression": false,
+        "faithfulness": true,
+        "lawImpacted": 2,
+        "storyTag": "story-027",
+        "label": "F-09-05",
+        "routing": "spec-conformance report (Law 2) — NOT the QA/gas bundle",
+        "contract": "src/PhlimboV3.sol",
+        "function": "emergencyTransfer / finalizePromotion",
+        "lineStart": 328,
+        "lineEnd": 529,
+        "classification": {
+          "assetImpact": "No user asset loss. The PROTOCOL strands a new promotion's leftover via a phantom reserve; the falsified invariant is a documentation/spec defect whose cost is that a stated solvency guarantee cannot be relied on.",
+          "attackPath": [
+            "1. story-027 introduces a retired-token solvency invariant in SolvencyDetermination.md §4.",
+            "2. An emergencyTransfer sweeps the token's balance.",
+            "3. The invariant is now permanently FALSE for that token — no code path restores it.",
+            "4. On re-use, finalizePromotion's cumulative reservation at :517 leaves a phantom-reserve strand."
+          ],
+          "likelihood": "low — requires an emergencyTransfer followed by token re-use.",
+          "assumptions": "The owner invokes emergencyTransfer on a promo token.",
+          "externalRequirements": "Owner action; no attacker."
+        },
+        "severityJustification": {
+          "whyLow": "A stated invariant that does not hold is a Law-2 spec deviation — explicitly Low/QA territory under C4 — and no user assets are at risk. The protocol-side strand is bounded to a new promotion's leftover.",
+          "whyNotQA": "Held at Low rather than QA because the falsified invariant was written IN THIS VERY RANGE (story-027) and is a SOLVENCY invariant — a fresh, load-bearing guarantee that a reader would rely on. That is more consequential than a NatSpec ordering nit (contrast CLASS-006/007/008 at QA).",
+          "law2Routing": "Routes to the spec-conformance report at honest severity, per Law 2. It is NOT buried in the QA/gas bundle."
+        },
+        "classifierNotes": {
+          "ejectorSeatCompliant": "VERIFIED. Filed against SolvencyDetermination.md §4 and finalizePromotion, not the ejector seat. The recommended fix is documentary; the optional on-chain leg lands in startPromotion.",
+          "pairedWithCLASS004": "KEPT DISTINCT per FLAG-09-05. Different reports (spec-conformance vs QA), different trigger orders (sweep-then-retire vs retire-then-re-promote), different falsified docs (§4 + step 5 vs the :322-323 docblock), different victims (protocol strands leftover vs user loses a banked entitlement). Neither is a special case of the other.",
+          "triageEfficiency": "ONE on-chain fix (reconcile the bank lifecycle in startPromotion) closes both CLASS-004's and CLASS-005's on-chain legs — do not pay twice for it. The TWO documentation fixes remain separate and both are owed."
+        }
+      },
+      {
+        "id": "CLASS-006",
+        "originalId": "SAN-09-006",
+        "fingerprint": "1df7ed85b792c609c5e9e062fe027e8244dc9651c8ca4c4176bf40134f892e13",
+        "severity": "qa",
+        "proposedSeverity": "qa",
+        "agreement": "CONFIRMED at QA.",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": true,
+        "lawImpacted": 2,
+        "storyTag": "story-026",
+        "label": "F-09-06",
+        "routing": "spec-conformance report (Law 2)",
+        "contract": "src/interfaces/IMigratorV2V3.sol",
+        "function": "migrate",
+        "lineStart": 105,
+        "lineEnd": 112,
+        "classification": {
+          "assetImpact": "NONE — the CODE IS CORRECT. Only the prose is wrong.",
+          "attackPath": ["Not applicable — no exploit path. A reader of the NatSpec forms a false model of the execution order."],
+          "likelihood": "n/a — documentation defect with no runtime consequence.",
+          "assumptions": "none",
+          "externalRequirements": "none"
+        },
+        "severityJustification": {
+          "whyQA": "'Issues with comments' is named explicitly in the C4 QA definition. The implementation is correct and no asset or availability consequence exists. QA is the honest label.",
+          "whyReportedAtAll": "Law 2: even a pure behavioural/spec deviation with no security impact is reported visibly (F-09-06) rather than dropped into gas-report noise — and here the prose is not merely wrong, it is DANGEROUSLY wrong (see the trap)."
+        },
+        "classifierNotes": {
+          "trapWarningPreserved": "THE OBVIOUS REMEDIATION IS CATASTROPHIC AND MUST TRAVEL WITH THIS FINDING. The balance deltas bracket the whole withdraw+stake block (:243-246 vs :260-264), so forwarding MUST follow the stake for the principal to net out and leave the delta equal to the reward component alone. Reordering the CODE to match the PROSE would forward the PRINCIPAL to the user as if it were a reward — converting a comment nit into asset loss. FIX THE PROSE. DO NOT TOUCH THE CODE.",
+          "severityOfTheTrap": "The trap does NOT raise this finding's severity — the current code is correct and nothing is at risk today. Speculation on a future bad fix is not a present vulnerability. But the warning is load-bearing and must not be stripped in bundling."
+        }
+      },
+      {
+        "id": "CLASS-007",
+        "originalId": "SAN-09-007",
+        "fingerprint": "c39652b74df0d58cc6a243871376e94afc1d106fd9b1ebe4a88e22ef101bae48",
+        "severity": "qa",
+        "proposedSeverity": "qa",
+        "agreement": "CONFIRMED at QA — Low was tested and REFUTED on the off-chain-resolvability ground.",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": true,
+        "lawImpacted": 2,
+        "storyTag": "story-028",
+        "label": "F-09-07",
+        "routing": "spec-conformance report (Law 2)",
+        "contract": "src/interfaces/IMigratorV2V3.sol",
+        "function": "UserMigrationSkipped (event) / migrate",
+        "lineStart": 68,
+        "lineEnd": 73,
+        "classification": {
+          "assetImpact": "None directly. An owner may MISREAD an attempted-but-empty-revert skip as a dust skip and fail to retry a user who was genuinely not migrated.",
+          "attackPath": ["Not applicable — no exploit path. story-028's 'empty reason = not attempted' is asserted as a biconditional the code does not satisfy: an attempted call that reverts with NO returndata also emits an empty reason."],
+          "likelihood": "n/a — an observability/spec defect.",
+          "assumptions": "The owner relies on the `reason` field alone to triage skips.",
+          "externalRequirements": "none"
+        },
+        "severityJustification": {
+          "whyQA": "The ambiguity is RESOLVABLE OFF-CHAIN TODAY, which is what holds it at QA rather than Low: the `amount` field disambiguates all three empty-reason cases (skipCurrent emits amount == 0; the dust band emits 0 < amount < MINIMUM_STAKE; an attempted-then-empty-revert emits amount >= MINIMUM_STAKE). No user is stranded by the contract — only by a misreading the data itself can correct.",
+          "whyNotLower": "Not dropped: the interface text contradicts ITSELF in the same sentence, and an owner can only use the `amount` workaround if they know to — the interface tells them the opposite.",
+          "law2Routing": "Routes to spec-conformance (F-09-07) at honest severity, not the QA/gas bundle."
+        },
+        "classifierNotes": {
+          "crossRef": "Bears directly on V3-M-04's residual OOG vector. The OOG skip that V3-M-04's fix leaves as a documented scope limitation is EXACTLY the case this ambiguity would cause an owner to misread as dust. The 63/64 case is not hypothetical — it is anticipated by the SAME CONTRACT (skipCurrent's own NatSpec says 'e.g. gas exhaustion under the 63/64 rule'). This cross-reference must survive V3-M-04's closure."
+        }
+      },
+      {
+        "id": "CLASS-008",
+        "originalId": "SAN-09-008",
+        "fingerprint": "aedfcdb0869a96c92335c2bd1abee707dc11cb570d1bd3b20287eb8893b851fb",
+        "severity": "qa",
+        "proposedSeverity": "qa",
+        "agreement": "CONFIRMED at QA.",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": true,
+        "lawImpacted": 2,
+        "storyTag": "story-024..028 (all)",
+        "label": "F-09-08",
+        "routing": "spec-conformance report (Law 2) / run notes",
+        "contract": "CLAUDE.md",
+        "function": "n/a",
+        "classification": {
+          "assetImpact": "None directly. The process risk is that the project's spec/KI metadata is V1-era and cannot support reasoning about the V3 surface.",
+          "attackPath": ["Not applicable — a process/spec-coverage defect."],
+          "likelihood": "n/a",
+          "assumptions": "none",
+          "externalRequirements": "none"
+        },
+        "severityJustification": {
+          "whyQA": "Documentation coverage with no direct runtime consequence. Law 2 names CLAUDE.md as a story source, so a gap in it is a genuine spec-conformance defect rather than repo housekeeping — but it is not severity-bearing.",
+          "whyItMattersAnyway": "This is the ROOT of the run's known-issues block: the same file is the registry's knownIssuesSource for all 10 cached KIs, yet PhlimboV3 and MigratorV2V3 appear ZERO times in it. A spec file that does not mention the audit surface cannot support known issues about it. SAN-09-008 and the KI block are two symptoms of ONE defect."
+        },
+        "classifierNotes": {
+          "recommendation": "Add a V3 section covering PhlimboV3 + MigratorV2V3 and their Critical Invariants (the §4 solvency invariants, §2.1 accumulator-never-reset, the frozen-staker-set property). ALSO add a genuine Known Issues section, which would let a future run re-derive a falsifiable KI set and lift the block."
+        }
+      },
+      {
+        "id": "CLASS-009",
+        "originalId": "SAN-09-009",
+        "fingerprint": "b9de837c646605abfdb83a10c185081bfac73bcf0b13f4022fa6923adefee868",
+        "severity": "low",
+        "proposedSeverity": "low",
+        "agreement": "CONFIRMED at Low — but the margin is THIN and rests on a rescue that has an expiry date. Medium was seriously tested; see below.",
+        "plausibility": "plausible",
+        "regression": false,
+        "footgun": true,
+        "routing": "QA report (Low)",
+        "contract": "src/PhlimboV2.sol",
+        "function": "_claimRewards",
+        "line": 500,
+        "lineStart": 486,
+        "lineEnd": 507,
+        "classification": {
+          "assetImpact": "A V2 staker's phUSD principal is frozen on the self-service path — REAL but NEUTRALIZED in the current wiring. No loss: principal is recoverable via two owner-mediated routes.",
+          "attackPath": [
+            "1. No attacker. The rewardToken issuer blocklists a V2 staker.",
+            "2. The staker calls withdraw self-service; _claimRewards runs first and rewardToken.safeTransfer(beneficiary, ...) at :500 reverts.",
+            "3. The whole withdraw reverts; the staker's principal is frozen on every self-service path.",
+            "4. NEUTRALIZING ROUTE (a): MigratorV2V3.sol:250 calls phlimboV2.withdraw(amount, user) — the MIGRATOR is msg.sender and therefore the beneficiary, so the blocked user is never the transfer recipient. Migration carries the staker out automatically.",
+            "5. NEUTRALIZING ROUTE (b): setPauser -> pause -> full pauseWithdraw, which does not claim rewards."
+          ],
+          "likelihood": "low IN THE CURRENT WIRING (the migrator is live and cures affected stakers automatically). Rises if the migrator is unwired while any blocklisted staker remains.",
+          "assumptions": "rewardToken reverts on blocked transfers (USDC/USDT do). The staker holds a non-zero stable pending.",
+          "externalRequirements": "Token issuer blocklists the staker."
+        },
+        "severityJustification": {
+          "whyLow": "Assets are not at risk on this record: the migrator routing at MigratorV2V3.sol:250 makes the MIGRATOR the beneficiary — source-verified this run — so the everyday migration path bypasses the blocked recipient entirely and cures affected stakers WITHOUT any special owner intervention. This is the same argument that closed V3-M-01. With a live automatic cure plus two owner-mediated rescues, neither availability nor assets are meaningfully impacted today.",
+          "whyNotMedium": "The distinction from CLASS-001 (Medium) is real and I state it explicitly, because the two findings share a rootCauseClass and the severity split must be defensible. On V3 the blocklisted staker has ZERO recourse — every self-service path reverts and the ONLY escape is a protocol-wide pause. On V2 the staker is carried out automatically by the migration that is ALREADY RUNNING and is the entire point of stories 025/026/028. An automatic, already-live, no-special-action cure is the difference between an availability impact and a neutralized defect.",
+          "whyNotLower": "Not dropped and not QA. The defect is REAL (PoC 3/3), the trigger needs no owner or user error, and the neutralization is CONTINGENT rather than structural — it depends on wiring that is designed to be removed.",
+          "law3": "IN SCOPE as a footgun, same class as CLASS-001: the trigger is a third-party blocklist, not an admin mistake.",
+          "notAFoTFinding": "Same reasoning as CLASS-001 — a reverting blocklist, not a fee-on-transfer token. The dropped L-04 precedent does not reach it."
+        },
+        "classifierNotes": {
+          "LEDGER_CAVEAT_MUST_ATTACH": {
+            "headline": "THE RESCUE AND THE CURE ARE THE SAME EVENT. This caveat is the reason Low is correct TODAY and the reason the finding must NOT be closed on 'migration will cure it'.",
+            "detail": "The Low rests on rescue (a), the migrator routing — which is TEMPORARY. When migration completes and the owner unwires the migrator via setMigrator(0), rescue (a) DISAPPEARS. 'Migration cures it' and 'migration removes the rescue' are the SAME EVENT, so the cure cannot be cited as a reason to lower or close.",
+            "sharpeningFactSourceVerified": "The surviving rescue is WEAKER ON V2 THAN ON V3, and I re-read both lines this run. PhlimboV2.sol:270 pause() is `require(msg.sender == pauser, ...)` — PAUSER-ONLY. PhlimboV3.sol:576 is `require(msg.sender == pauser || msg.sender == owner(), ...)`. So on V2 the escape is a THREE-STEP setPauser -> pause -> pauseWithdraw sequence on a contract whose pause() the owner does NOT directly control — whereas the V3 owner has a one-action rescue.",
+            "triageConsequence": "If any V2 staker is blocklisted at the moment the migrator is unwired, the cheap rescue is gone and only the three-step pauser-mediated escape remains. RECOMMENDED TRIAGE: before setMigrator(0), confirm no remaining V2 staker is blocklisted on rewardToken; otherwise the residual exposure re-weighs toward CLASS-001's Medium. A human should record whether the finding is re-triaged at migration completion rather than closed."
+          },
+          "siblingCrossRef": "CLASS-001 (69f8b29a) — same rootCauseClass, DIFFERENT CONTRACT => different fingerprint => SIBLINGS, not duplicates. One fix pattern (_tryTransfer + bank, per story-027) covers V3's two legs; V2 would need its own.",
+          "recallNote": "This finding exists only because of a recall sweep — code-scanner mentioned the V2 instance in passing inside CODE-09-001's recommendation and filed nothing. Unlike the V3 stable leg (foldable into CLASS-001 on the same fingerprint), the V2 instance is on a different contract and could not be folded; without its own entry it would not have existed in the run. Exactly the silent drop Law 1 forbids."
+        }
+      }
+    ],
+
+    "escalationsConsideredAndRejected": [
+      {
+        "finding": "SAN-09-002",
+        "proposal": "High",
+        "verdict": "REJECTED — re-derived independently, not inherited from the prior refutation.",
+        "reasoning": "The escalation conflates the unbounded FACTOR (S0/S1) with the rate-limited ABSOLUTE leak. The closed form `exitedAmount * APY * window / year` contains NO S1 term — shrinking S1 concentrates the same leak on fewer survivors, it does not enlarge it. Nothing is stolen, no attacker profits, and the self-serving A/B variant is PoC-proven SELF-DEFEATING (the exiter forfeits APY exactly equal to the leak they create, then shares it with honest survivors — a negative-payoff 'attack'). At real params the leak is 0.012%/day of supply. RUN-08 PRECEDENT APPLIED: the truncation finding was correctly held at Low because the real phUSD supply (68,212) killed the High; the same real-supply anchor applies here.",
+        "doNotRelitigate": "Do NOT re-escalate on the factor in a future run. Also: V2-M-03's 'RE-CLASSIFY HIGH under any non-zero-APY config' note rests ENTIRELY on KI-10, which is unfalsifiable and was NOT inherited. That note must not be applied mechanically."
+      },
+      {
+        "finding": "SAN-09-001",
+        "proposal": "High (on the theory that indefinite freeze == 'assets lost')",
+        "verdict": "REJECTED.",
+        "reasoning": "Source-verified this run: pauseWithdraw (:596-611) transfers ONLY principal and NEVER calls _claimRewards, and pause() at :576 is owner-OR-pauser. The V3 owner therefore has a ONE-ACTION rescue they unilaterally control. Principal is recoverable => FROZEN, not LOST. Freeze rises to 'lost' only where recovery is impossible or depends on a party who may not cooperate; neither holds."
+      }
+    ],
+
+    "downgradesConsideredAndRejected": [
+      {
+        "finding": "SAN-09-002",
+        "proposal": "Low ('a missing function call is textbook incorrect state handling')",
+        "verdict": "REJECTED — this was the run's hardest call and is made deliberately.",
+        "reasoning": "The state error is not the harm; the MINT is. The consequence is `phUSD.mint()` at :853 creating unbacked stablecoin — a solvency/value-leak defect, not bookkeeping. The C4 Medium clause fits verbatim ('leak value with a hypothetical attack path with stated assumptions, but external requirements'), the magnitude is not dust (8.219178 phUSD/day as a RATE over an owner-controlled unbounded window, linear in supply and APY), and the owner's OWN code argues against Low: the stable leg is deliberately capped at :789 to 'prevent over-distribution' while the phUSD leg — the only one that MINTS — is left uncapped."
+      },
+      {
+        "finding": "SAN-09-001",
+        "proposal": "Low (a rescue exists, so nothing is really wrong)",
+        "verdict": "REJECTED.",
+        "reasoning": "The rescue is a PROTOCOL-WIDE PAUSE — halting stake/withdraw/claim for every user to rescue one. The remedy is itself an availability event, which is the C4 Medium clause, not a reason to discount. The affected staker's access to their own principal is reduced to zero on every self-service path, and the stable leg (:858) makes this a standing exposure of the everyday path requiring no promotion."
+      }
+    ],
+
+    "openQuestionsForTriage": [
+      {
+        "id": "FLAG-09-03",
+        "bearsOn": "CLASS-002",
+        "priority": "HIGHEST-VALUE OPEN QUESTION IN THE RUN",
+        "question": "Establish the LIVE desiredAPYBps AGAINST THE DEPLOYMENT. It is the single parameter deciding whether CLASS-002 is live or dormant.",
+        "constraint": "Must be answered FROM THE CHAIN. The natural resolution ('KI-10 says zero APY') is BLOCKED — V1-era, not re-derivable, unfalsifiable, and the memo records KI-10 and KI-4 NEARLY suppressing valid V3 findings in a prior run.",
+        "consequence": "If 0 AND durable policy => DORMANT, not invalid; a re-triage to Low-with-arming-note is defensible. If non-zero => live at Medium as classified. EITHER WAY the ARMING PROPERTY is worth reporting: setDesiredAPY is a two-tx owner action that activates a mint leak with no warning that it does so (see MR-09-002's sharpened framing)."
+      },
+      {
+        "id": "TRIAGE-002-SCOPE",
+        "bearsOn": "CLASS-002",
+        "question": "V2-M-03's wont-fix rationale describes a penalty on the EXITER. Confirm whether the owner understood that wont-fix to cover SURVIVOR over-mint or only the EXITER forfeit.",
+        "why": "The two were plausibly conflated when V2-M-03 was dispositioned. The exiter forfeit is real and implemented (:604-606) and is NOT what CLASS-002 reports — CLASS-002's harm lands on THIRD PARTIES (survivors receive unbacked phUSD; all phUSD holders are diluted), so no penalty semantics apply. Independently, V2-M-03's rationale rests on pauseWithdraw being EMERGENCY-only — true in V2, FALSE in V3, where beginFlush pauses on EVERY rotation and the exiter's forfeit is measured at EXACTLY ZERO."
+      },
+      {
+        "id": "TRIAGE-009-EXPIRY",
+        "bearsOn": "CLASS-009",
+        "question": "Before setMigrator(0), confirm no remaining V2 staker is blocklisted on rewardToken.",
+        "why": "CLASS-009's Low rests on a rescue that the completion of migration REMOVES. Re-triage at migration completion; do not close on 'migration cured it'."
+      },
+      {
+        "id": "FLAG-09-04",
+        "bearsOn": "CLASS-003",
+        "question": "If the structural containment gap is judged not worth its own entry, MERGE INTO V3-L-02 as an aspect — do NOT drop it."
+      }
+    ],
+
+    "verificationChecklist": {
+      "neverOverstated": "PASS — zero Highs. Both Medium proposals were tested against the High bar and both escalations REJECTED on source-verified rescue paths and on the factor-vs-absolute distinction. No finding was labelled above what its evidence carries.",
+      "neverUnderstated": "PASS — the two Low downgrade proposals (CLASS-001, CLASS-002) were tested and REJECTED with stated reasoning. Law 1: recall beats report-tidiness; nothing was lowered to tidy the report.",
+      "assumptionsDocumented": "PASS — every H/M carries stated assumptions and external requirements. CLASS-002's dependence on desiredAPYBps is stated as a live open question (FLAG-09-03) rather than resolved by inheritance.",
+      "attackPathsProvided": "PASS — both Mediums carry step-by-step paths with no hand-wavy hypotheticals; both are PoC-backed (2/2 and 4/4) and CLASS-002 additionally carries an independent Tier-3 measurement agreeing to the wei.",
+      "kiIndependence": "PASS — no known issue was used in EITHER direction on any finding. KI-10 was not used to suppress, floor, or cap CLASS-002; V2-M-03's KI-10-derived reclassNote was NOT inherited.",
+      "law2Routing": "PASS — CLASS-005/006/007/008 are tagged faithfulness:true and routed to the spec-conformance report as F-09-05..F-09-08 at honest severity. NONE was buried in the QA/gas bundle.",
+      "law3Applied": "PASS — every finding kept is a NON-OBVIOUS footgun or a third-party-triggered defect. No 'malicious owner' vector is classified. CLASS-001 and CLASS-009 involve NO owner error at all (the trigger is a token issuer). CLASS-002 requires no owner error (routine rotation + routine exit). Obvious-misuse faces were suppressed upstream and are not re-filed.",
+      "ejectorSeatRespected": "PASS — no finding proposes accounting inside emergencyTransfer or pauseWithdraw. CLASS-002's fix lands on the emission-rate recompute at :602, NOT on accrual settlement — the standing memo's boundary is honoured and its trap warning is carried.",
+      "doNotCollapseWarningsCarried": "PASS — CLASS-002 vs V3-Q-02 vs MR-09-001 (three distinct root causes on PhlimboV3.pauseWithdraw); CLASS-001 vs CLASS-009 (siblings, different contracts); CLASS-004 vs V3-Q-03 (inverse); CLASS-004 vs CLASS-005 (paired, not duplicate).",
+      "trapWarningsCarried": "PASS — all four survive: V3-Q-02's remediation trap (do not add _updatePool to pauseWithdraw), CLASS-006's do-not-invert-the-code trap, INV-M-2's nonReentrant trap-watch surviving V3-M-04's closure, and CLASS-002's do-not-fix-LEG-1-too warning.",
+      "sourceVerified": "PASS — the classifier re-read source rather than trusting upstream. The cap asymmetry (:789 vs :803-806/:853), the claim-before-principal ordering (:698 vs :723), the pauseWithdraw rescue (:596-611 never calls _claimRewards), the V2/V3 pause asymmetry (:270 vs :576), the migrator beneficiary routing (:250), and the misleading NatSpec (:445-447) were each confirmed at 02b9bc2."
+    }
+  }
+}

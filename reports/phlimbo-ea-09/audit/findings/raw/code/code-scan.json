@@ -1,0 +1,164 @@
+{
+  "project": "phlimbo-ea",
+  "scanTimestamp": "2026-07-15T22:05:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "mode": "regression",
+  "range": "7045a96..02b9bc2",
+  "contractsScanned": 2,
+  "scope": ["src/PhlimboV3.sol", "src/MigratorV2V3.sol"],
+
+  "fixVerification": [
+    {
+      "ledgerId": "V3-M-03",
+      "alias": "audit-08 M-01 (label collision: commit msgs say M-01)",
+      "story": "story-027",
+      "verdict": "COMPLETE",
+      "confidence": "high",
+      "reasoning": "M-03's root cause was that batchClaim aligned promoDebt (:468) before the transfer, so a failed transfer erased the entitlement (pendingPromo reads 0 forever). The fix does NOT move the alignment (correctly — §2.1 cross-promotion non-contamination requires unconditional alignment); it preserves the entitlement through a second channel: per-user bank at :479-480, reserved from the finalizePromotion sweep by the saturating leftover computation at :517-519, recovered by the permissionless claimUnclaimablePromo pull at :561-568. All four legs verified against source and re-proven by the project's own suite (119 PhlimboV3 tests green at 02b9bc2), including the two failure modes I would otherwise have had to construct myself: reverting recipient (MockBlocklistToken) and false-returning transfer (MockFalseReturnToken), plus a token-wide pause probe where 100% of the promo banks and every staker recovers.",
+      "residualsChecked": [
+        "Aggregate is decremented by exactly `amount` (:565), never zeroed — the '=0 variant' would have let one user's pull unreserve another's bank from the sweep. Correct, and regression-tested (test_two_banked_one_pulls_other_bank_still_backed).",
+        "Bank is keyed by token (:479), so a retired token's bank survives rotation and stays pullable after promoToken -> 0. Verified.",
+        "Underflow at :464 (`amount*acc/PRECISION - promoDebt`) is unreachable: accPromoPerShare is monotone (single write site :829) and every amount mutation realigns the debt in the same tx (:666/:712/:759/:606). So the fix cannot be bricked from the arithmetic side."
+      ]
+    },
+    {
+      "ledgerId": "V3-M-04",
+      "alias": "audit-08 M-02",
+      "story": "story-026 + story-028",
+      "verdict": "COMPLETE (within its documented scope)",
+      "confidence": "high",
+      "reasoning": "Both pinning vectors are closed. Vector 1a (dust position below V3's MINIMUM_STAKE, which phlimboV3.stake would reject) is now an explicit pre-attempt skip at :194-200. Vector 1b (a reverting position) is absorbed by the try/catch'd migrateOne self-call at :202-211. I enumerated every per-user statement in the migrate loop that sits OUTSIDE the try/catch: only `users[i]` (:189) and `phlimboV2.userInfo(user)` (:192, a public-mapping getter on a trusted sibling) — neither can revert. Every other per-user operation is inside migrateOne, so the cursor always advances (:214-218).",
+      "residualsChecked": [
+        "OOG under the 63/64 rule is NOT caught by try/catch — correctly documented at :71-77 with skipCurrent (:284) as the owner backstop. Scope limitation, not an incomplete fix.",
+        "skipCurrent's `users[idx]` is always in bounds: seedUsers forbids an empty list (:146) and migrateIterator is only ever set to an in-range index or -1.",
+        "story-028's skip-reason encoding holds: empty reason <=> never attempted (two sites, :198 and :287), non-empty only from the catch (:210)."
+      ]
+    },
+    {
+      "ledgerId": "V3-H-01",
+      "status_before": "fix-pending",
+      "story": "story-024",
+      "verdict": "COMPLETE — re-proven, propose fixed",
+      "confidence": "high",
+      "reasoning": "The exploit was: permissionless collectReward (not whenNotPaused) drives _updatePool during Flushing, advancing accPromoPerShare after batchClaim has aligned every promoDebt, minting phantom pending that survives finalizePromotion and is claimable against the NEXT promo's token. The fix gates the accrual block itself at :824 (`promoPhase != PromoPhase.Flushing`). This is complete rather than call-site whack-a-mole because :829 is the ONLY write site of accPromoPerShare in the file, so gating the block closes collectReward, setDesiredAPY's commit branch, setDepletionDuration, and any future caller at once. beginFlush's own final accrual (:432) is unaffected because it runs while the phase is still Active. The pendingPromo view mirrors the gate at :955-958, so view and state agree."
+    },
+    {
+      "ledgerId": "V3-M-01",
+      "status_before": "fix-pending",
+      "story": "story-025",
+      "verdict": "COMPLETE for the migrate path — propose fixed",
+      "confidence": "high",
+      "reasoning": "_forward (:360-365) is now non-reverting: failure banks into `unclaimable` (:363) and emits RewardForwardFailed. I also confirmed the migrate path cannot brick via the two cross-contract legs: phlimboV2.withdraw(amount,user) and phlimboV3.stake(amount,user) both route their auto-claimed rewards to msg.sender — the MIGRATOR, never the (possibly blocked) user — so a blocked recipient is only ever reachable at _forward, which is hardened. Belt-and-braces: even if _forward's _tryTransfer reverted (abi.decode on a non-conforming token), migrateOne is try/catch'd, so it degrades to a per-user skip rather than a pass-wide brick.",
+      "note": "This is precisely the containment the FARM lacks — see CODE-09-001 and CODE-09-002."
+    },
+    {
+      "invariantId": "INV-M-2",
+      "type": "regression-trap-watch",
+      "verdict": "NOT TRIPPED",
+      "evidence": "src/MigratorV2V3.sol:235 — `function migrateOne(address user, uint256 amount) external {` carries NO nonReentrant; the 'Only self' gate at :236 is intact and the rationale comment (:225-233) survives. The trap remains live for future runs: adding nonReentrant here would make migrate's self-call revert ReentrancyGuardReentrantCall into its own catch, silently skipping EVERY user while still reporting a clean completed pass (migrateIterator == -1)."
+    },
+    {
+      "openQuestionId": "UNV-1",
+      "question": "Live-token bank solvency (balanceOf >= totalUnclaimableOf)",
+      "verdict": "CLEARED for all non-ejector-seat paths",
+      "confidence": "medium-high",
+      "reasoning": "The bank is only ever credited in batchClaim from `pending`, which is value that _updatePool already deducted from promoRewardBalance (:830) and which is therefore physically present in the contract. The two accounting systems are disjoint but not double-spending: promoRewardBalance bounds all _claimRewards payouts, and the bank is funded from amounts already removed from that bound. Rounding runs in the safe direction (accPromoPerShare's floor division at :829 means the sum of user entitlements <= promoToDistribute, so the contract over-holds). finalizePromotion then reserves the bank (:517-519). The ONLY under-funding path is emergencyTransfer (:335-340) sweeping the LIVE token's bank — which is the documented ejector-seat trade-off (:316-323) and is NOT reported per the project's ejector-seat principle.",
+      "recommendation": "Worth confirming with a Tier-3 fuzz invariant, but I found no static path to insolvency."
+    },
+    {
+      "openQuestionId": "UNV-2",
+      "question": "Re-promoting a retired token whose bank is still outstanding — safe or double-spend?",
+      "verdict": "SAFE — no finding",
+      "confidence": "high",
+      "reasoning": "Walked the arithmetic. Say totalUnclaimableOf[T] = 100 with 100 T held. startPromotion(T, 500, d): balanceBefore reads 100, so the FoT delta assert at :366 checks (600-100)==500 and passes; promoRewardBalance = 500. The contract now holds 600 T against 500 of accrual budget + 100 of bank = exactly 600. Accrual payouts are bounded by promoRewardBalance and can never eat the bank; the old bank stays pullable via claimUnclaimablePromo throughout; and the next finalizePromotion reserves the CUMULATIVE totalUnclaimableOf[T] (:517), which still includes the old 100. Self-consistent at every step. The balanceBefore-delta form of the FoT check at :364-366 is what makes this work — a naive `balanceOf == amount` check would have broken here."
+    }
+  ],
+
+  "findings": [
+    {
+      "id": "CODE-09-001",
+      "type": "denial-of-service / unhardened-sibling-path",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_claimRewards (reached from withdraw / claim / stake)",
+      "line": 873,
+      "lineStart": 870,
+      "lineEnd": 876,
+      "description": "The fix-wave hardened the promo-rotation path against a recipient that cannot receive the promo token, but left the everyday self-service path unhardened. `batchClaim` uses the non-reverting `_tryTransfer` and banks failures per-user (:471-482). `_claimRewards` — reached by `stake` (:657), `withdraw` (:698) and `claim` (:755) — uses a REVERTING `promoToken.safeTransfer(beneficiary, pendingPromoAmount)` at :873. Because `withdraw` calls `_claimRewards` at :698 BEFORE it transfers principal at :723, a staker who is blocklisted on the live promo token cannot withdraw their phUSD principal at all: the promo leg reverts and takes the whole transaction with it. `stake` and `claim` are dead for them too. The staker's principal is frozen for the entire duration of the promotion, with no self-service exit (`pauseWithdraw` is `whenPaused` and so is unavailable unless the owner pauses the whole farm).",
+      "codeSnippet": "// PhlimboV3.sol:870-876 — reverting transfer on the ordinary path\nif (address(promoToken) != address(0)) {\n    uint256 pendingPromoAmount = (userDetails.amount * accPromoPerShare) / PRECISION - userDetails.promoDebt;\n    if (pendingPromoAmount > 0) {\n        promoToken.safeTransfer(beneficiary, pendingPromoAmount);  // <-- reverts; freezes principal\n        emit PromoClaimed(user, pendingPromoAmount);\n    }\n}\n\n// contrast PhlimboV3.sol:471-482 — the flush path, hardened by story-027\nif (_tryTransfer(promoToken, staker, pending)) { ... } else {\n    unclaimablePromoOf[address(promoToken)][staker] += pending;   // <-- banked, never reverts\n    totalUnclaimableOf[address(promoToken)] += pending;\n}",
+      "attackVector": "Not an attack by a third party — a liveness/availability failure triggered by the promo token's own issuer. (1) Alice stakes 1000 phUSD. (2) Owner runs a promotion on a blocklisting token (USDT/USDC-style — the exact token class the code's own comment at :445 names as the motivating threat). (3) Alice accrues promo. (4) The issuer blocklists Alice — she has no control over this and the protocol has none either. (5) Alice's `withdraw`, `claim` and `stake` all revert 'recipient blocked'; her principal is stranded in the farm. Recovery requires OWNER intervention: either a full promo rotation (beginFlush -> batchClaim -> finalizePromotion, which sets promoToken to 0 and skips the :870 block) or pausing the entire farm so Alice can use pauseWithdraw. Both are protocol-wide actions taken to free one user.",
+      "impact": "A staker's principal is unwithdrawable until the owner performs a protocol-wide rotation or pause. Assets are not stealable and are ultimately recoverable, so this is availability/protocol-function impact rather than direct loss — Medium, not High.",
+      "recommendation": "Apply the story-027 pattern to the promo leg of `_claimRewards`: use `_tryTransfer` and bank failures into `unclaimablePromoOf`/`totalUnclaimableOf` exactly as `batchClaim` does, so the existing `claimUnclaimablePromo` pull recovers them. The debt is already realigned by every caller (:666/:712/:759), so the banking is a drop-in and the entitlement is preserved by the same mechanism that already exists. NOTE the same reverting shape exists on the STABLE leg at :858 (`rewardToken.safeTransfer(beneficiary, pendingRewardAmount)`), where the trigger is wider still (no promotion required — rewardToken is the protocol's stable, i.e. plausibly USDC) and identical in PhlimboV2:500. One fix covers both legs; surfaced together so triage can decide whether to harden the stable leg in the same change.",
+      "confidence": "high",
+      "poc": "workspace/phlimbo-ea/test/poc-CODE-09-001-promo-blocklist-principal-freeze.t.sol",
+      "pocResult": "2/2 PASS at 02b9bc2. test_PoC_blocklistedStakerCannotWithdrawPrincipal proves withdraw/claim/stake all revert 'recipient blocked' while userInfo(alice).amount stays at 1000e18 and alice's phUSD balance never recovers. test_PoC_contrast_flushPathHandlesSameConditionFine proves the identical condition is absorbed gracefully by batchClaim's bank, and that alice's principal only becomes reachable AFTER a full owner-driven rotation.",
+      "lawBasis": "Law 3 footgun test — the owner selecting a blocklisting promo token is the trigger, but the consequence is NOT obvious: the contract's own NatSpec at :445-447 tells a reader that blocklisted recipients are handled ('the flush must never brick'), and the story-027 test suite models blocked recipients extensively. A competent, non-malicious owner reading this code would reasonably conclude the blocklist case is covered protocol-wide. It is covered on the rotation path only. Surprise => footgun => in scope.",
+      "novelty": "The code at :870-876 predates this range (present at 7045a96), so this is not a regression introduced by stories 024-028 and NOT an incomplete fix of V3-M-03 (whose stated scope — entitlement erasure in batchClaim — is fully closed). It is a previously-unreported sibling of the same root-cause class, surfaced by auditing the fix-wave's threat model. Reported under Law 1 (recall beats report-tidiness). Distinct from ledger V3-M-01, which is MigratorV2V3._forward, a different contract and function.",
+      "evidenceOfGap": "The story-027 suite blocks a staker in six separate tests (PhlimboV3Test.t.sol:1643, :1693, :1760, and the MockPausableToken probe at :1824) and in EVERY case drives the owner rotation path immediately afterward. Not one test has a blocked staker call withdraw/claim/stake for themselves while the promotion is still Active. The hole is precisely the untested quadrant of a heavily-tested area."
+    },
+    {
+      "id": "CODE-09-002",
+      "type": "containment-asymmetry / permanent-dos-of-rotation",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "batchClaim",
+      "line": 471,
+      "lineStart": 460,
+      "lineEnd": 487,
+      "description": "Adjudication of PATTERN-004 (pattern-matcher). The asymmetry is real but its reachability is much narrower than the pattern suggests, so it is filed Low rather than the Medium the raw pattern implies. MigratorV2V3 has TWO layers of per-user containment — try/catch around migrateOne (:202-211) plus an owner `skipCurrent` backstop (:284-291) — so no single user can pin its cursor. PhlimboV3.batchClaim has NEITHER: no try/catch, no per-staker skip. If any single iteration reverts, `flushCursor` (:486) can never advance past that index, `finalizePromotion`'s `flushCursor == _stakers.length()` gate (:513) can never be satisfied, and the promo token can NEVER be rotated. `abortFlush` (:539-542) returns the phase to Active and unpins the contract, but it does not unpin the ROTATION — the next beginFlush hits the same wall. The only remaining exit is emergencyTransfer, a terminal ejector seat.",
+      "codeSnippet": "// PhlimboV3.sol:885-888 — shared helper, non-reverting ONLY against a token that\n// cleanly reverts or cleanly returns false\nfunction _tryTransfer(IERC20 token, address to, uint256 amount) internal returns (bool success) {\n    (bool callSuccess, bytes memory returndata) = address(token).call(abi.encodeCall(IERC20.transfer, (to, amount)));\n    return callSuccess && (returndata.length == 0 || abi.decode(returndata, (bool)));\n}",
+      "attackVector": "I enumerated every statement in the loop (:460-484) that can revert and found exactly one: `abi.decode(returndata, (bool))` inside _tryTransfer (:887), which REVERTS rather than returning false when returndata is non-empty but not a well-formed bool (length < 32, or a word that is neither 0 nor 1). Reaching it requires a promo token with a CONFORMING `transferFrom`/`balanceOf` (so it survives startPromotion's safeTransferFrom and balance-delta assert at :364-366) but a NON-CONFORMING `transfer` return encoding — an asymmetric, non-standard token. The other candidate vectors are dead: the subtraction at :464 cannot underflow (accPromoPerShare is monotone from its single write site :829, and every amount mutation realigns the debt in the same tx), and the multiplication cannot realistically overflow (PRECISION = 1e18 would need accPromoPerShare near 1e54). A gas-exhaustion pin is not available either, since the caller chooses maxIterations and can retry with 1.",
+      "impact": "Permanent inability to rotate the promo slot, gated behind a non-standard token. Low because reachability requires a weird ERC20 (a C4 known-invalid class in its own right) AND owner selection of that token; but recorded rather than dropped because the consequence is terminal and the structural gap is real and cheap to close.",
+      "recommendation": "Mirror the migrator's backstop: add an owner-only `skipStaker()` that advances flushCursor by one without paying (the entitlement is preserved by the unconditional debt alignment plus a bank credit, exactly as the failure branch already does). This costs a few lines and removes the only permanent-DoS surface in the rotation lifecycle. Optionally also harden _tryTransfer to return false instead of reverting on malformed returndata (`returndata.length == 32 && abi.decode(...)`), which fixes both copies of the helper.",
+      "confidence": "medium",
+      "noteOnDuplication": "_tryTransfer is byte-identical in PhlimboV3.sol:885-888 and MigratorV2V3.sol:350-353 (profiler LOCAL-MIG-003). A hardening applied to one copy and not the other is a silent divergence of the same fork-drift class as the phoenix-nft-staking clone watch-note. Recommend a shared base/library, or a cross-file drift watch-note for future runs."
+    }
+  ],
+
+  "checklistsCleared": {
+    "reentrancyClasses": {
+      "classicSingleFn": "N/A at Tier 2 — profiler verified guards. Value paths batchClaim/claimUnclaimablePromo/collectReward/stake/withdraw/claim all nonReentrant; claimUnclaimablePromo and claimUnclaimable are CEI-ordered (writes precede transfer).",
+      "crossContract": "CLEARED. A->B->A requires a callback into PhlimboV3 or MigratorV2V3 during an external call. The only untrusted inbound surface is the owner-set IPhlimboHook, invoked LAST at :678/:729/:761 after all state writes and while V3's nonReentrant lock is held. From within migrate, the hook fires inside phlimboV3.stake, at which point BOTH locks are held (migrator's via migrate :172, V3's via stake :643) — every guarded re-entry target on both contracts reverts, migrateOne's 'Only self' gate (:236) rejects the hook as caller, and the only unguarded V3 functions are onlyOwner or whenPaused (pauseWithdraw, not reachable since the farm is unpaused during migrate).",
+      "crossFunction": "CLEARED. OZ v5's ReentrancyGuard is a single contract-wide lock shared across all guarded functions, not per-function, so the sibling-function reentry class does not apply to either contract.",
+      "readOnly": "CLEARED. The public views are pendingPhUSD (:907), pendingStable (:923), pendingPromo (:949) and the auto-generated getters. None is a price/share-price/exchange-rate oracle; each is a per-user accrual readout derived from monotone accumulators, and none is read by a sibling contract as a valuation input (MigratorV2V3 consumes only MINIMUM_STAKE, promoToken and phlimboV2.userInfo). Transient inconsistency during batchClaim's _tryTransfer is confined to the staker being paid, and pendingPromo is intentionally 0 for a banked user (documented at :941-947) with recovery surfaced via unclaimablePromoOf — so an integrator reading mid-flush sees a frozen accumulator (INV-3), not a manipulable one.",
+      "erc721Hook": "N/A — no ERC721 anywhere in scope.",
+      "erc1155Hook": "N/A — no ERC1155 anywhere in scope.",
+      "erc777Hook": "CLEARED by trust assumption. Profiler records 'no ERC777-style callbacks' as an explicit token trust assumption for promoToken/rewardToken, reinforced by the FoT balance-delta asserts at :366/:391. Noting for completeness: an ERC777 promo token would give an inbound hook at :873 and :471 — a further reason to prefer the CODE-09-001 recommendation, which removes the reverting/callback-bearing transfer from the principal path."
+    },
+    "accessControlChains": "CLEARED. The migrator role is the only cross-contract privilege: it may act for ANY user on stake/withdraw/claim and RECEIVES their principal and rewards (:723). MigratorV2V3 confines this correctly — recipients and amounts are fixed by state (seeded list + live V2 reads), so migrate's permissionless caller cannot redirect value. pauseWithdraw is deliberately not delegatable (:596). No A-trusts-B-trusts-C chain exists: both farms trust only the single immutable migrator address.",
+    "callbackExploitation": "CLEARED — see crossContract above.",
+    "returnValuePropagation": "Checked. _tryTransfer's return is consumed at both call sites (:471, :362). The no-code-address caveat (a call to an address with no code returns success + empty returndata and is read as SUCCESS) is unreachable in both: promoToken is zero-checked at :356 and would fail startPromotion's safeTransferFrom/balanceOf against a codeless address; the migrator's tokens are immutable and constructor-zero-checked (:122-125).",
+    "delegatecallChains": "N/A — no delegatecall, no proxy, no assembly in either contract (both non-upgradeable, constructor-initialized).",
+    "flashLoanCallbacks": "Out of scope for this agent — deferred to econ-scanner."
+  },
+
+  "notReported": [
+    {
+      "item": "_claimRewards' promo settlement (:870-876) is gated on promoToken != 0 but NOT on promoPhase",
+      "reason": "Instructed axiom INV-2 (Flushing => paused; all callers are whenNotPaused) makes it unreachable during a flush. Re-verified the one _unpause() call site at :282 is guarded at :281. Not a missing phase gate."
+    },
+    {
+      "item": "emergencyTransfer (:335-340) sweeps the LIVE promo token's bank, and MigratorV2V3.withdrawAll (:329-337) sweeps the migrator's bank (UNV-M-1)",
+      "reason": "Ejector seats — terminal by design, documented as accepted trade-offs at :316-323 and :82-87. Suppressed per the project's established ejector-seat principle (prior-run precedent pe7m2, closed INVALID). Not re-filed."
+    },
+    {
+      "item": "LOCAL-V3-001: emergencyTransfer ends with _pause(), which carries whenNotPaused, so it reverts while already paused (incl. the whole Flushing window)",
+      "reason": "Adjudicated against the ejector-seat precedent as requested: this makes the ejector seat unavailable exactly when a flush is stuck, which is the recovery path CODE-09-002 already names. Folded into CODE-09-002's impact rather than filed separately, to avoid diluting the report with a second entry on one root cause."
+    },
+    {
+      "item": "batchClaim:455 / migrate:184 `cursor + maxIterations` overflow-reverts instead of clamping (LOCAL-V3-002, LOCAL-MIG-002)",
+      "reason": "Tier-1 local findings, already captured in the profiles. Fails closed, no state written, any other input works. Not a Tier-2 interaction issue."
+    },
+    {
+      "item": "Owner-set hook is an arbitrary external contract",
+      "reason": "Law 3 — owner is non-malicious, and the consequence of setting a hostile hook is obvious rather than surprising. Reentrancy containment verified above regardless."
+    }
+  ],
+
+  "toolingNotes": [
+    "PoC workspace-first per project rules: lib/phlimbo-ea was never modified; all execution was in workspace/phlimbo-ea checked out to 02b9bc2 (src verified byte-identical to lib/ before use).",
+    "Four stale run-08 probe files (test/EconProbe.t.sol, test/probe-08-code.t.sol, test/probe-08-code2.t.sol, test/poc-m02-emergencytransfer-brick.t.sol) no longer compile at 02b9bc2 because story-027 removed the `unclaimablePromo` public scalar they read and changed PromoClaimFailed's signature. They were temporarily quarantined to run the PoC and have been RESTORED to test/. They will block any `forge test` / `forge build` over the whole test dir at this commit until updated to the per-user bank API (unclaimablePromoOf / totalUnclaimableOf) — flagging for the run's Tier-3 agents, which will hit the same wall.",
+    "Project suites at 02b9bc2: PhlimboV3 119/119 green, MigratorV2V3 48/48 green. The gaps found here are missing tests, not failing ones."
+  ]
+}

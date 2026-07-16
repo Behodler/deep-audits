@@ -1,0 +1,200 @@
+{
+  "project": "phlimbo-ea",
+  "reportDir": "reports/phlimbo-ea-09",
+  "scanTimestamp": "2026-07-15T00:00:00Z",
+  "scanType": "pattern-matching",
+  "targetCommit": "02b9bc2",
+  "diffRange": "7045a96..02b9bc2",
+  "patternDbVersion": "1.1",
+  "patternsChecked": 35,
+  "scope": [
+    "src/PhlimboV3.sol",
+    "src/MigratorV2V3.sol",
+    "src/PhlimboV2.sol",
+    "src/Phlimbo.sol",
+    "src/MigratorV1V2.sol"
+  ],
+  "suppressionPolicy": "known-issues suppression BLOCKED this run per operator instruction (cached KIs are stale V1-era). Nothing withheld on KI grounds.",
+  "findingsCount": 3,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "alsoMatches": ["MINT-ON-DEMAND-OVERMINT", "EMISSION-WINDOW-BOUNDARY"],
+      "type": "reward-accrual-ordering / rate-drift",
+      "severity": "potential-high",
+      "contract": "src/PhlimboV3.sol",
+      "line": 596,
+      "lineRange": "596-611",
+      "alsoAffects": ["src/PhlimboV2.sol:280-291"],
+      "description": "pauseWithdraw() mutates totalStaked (line 602) WITHOUT calling _updatePool() first and WITHOUT calling _updatePhUSDEmissionRate() afterward. It is the only state-mutating path in the contract that does neither (verified against the full _updatePool call-site map: 242,259,362,387,408,432,622,648,695,742 — none inside 596-611; and the _updatePhUSDEmissionRate map: 245,674,725). Accrual is NOT frozen by the pause: _updatePool remains reachable while paused via the PERMISSIONLESS collectReward (618, no whenNotPaused) and the owner setters setDesiredAPY/setDepletionDuration. Exploit sequence: (1) pool paused at T0 with lastRewardTime=T0 (beginFlush at 432 does exactly this on every promo rotation); (2) time passes to T1, no _updatePool runs; (3) a whale calls pauseWithdraw, dropping totalStaked by e.g. 90% and realigning their own debts to the stale T0 accumulators (forfeiting [T0,T1] — documented intent); (4) anyone calls collectReward(1 wei), and _updatePool computes timeElapsed=T1-T0 against the STALE phUSDPerSecond (still sized for the FULL pre-exit totalStaked, because pauseWithdraw never recomputes it) and divides by the NEW reduced totalStaked at line 805. Both errors push the same direction: the surviving 10% of stakers receive the entire pool's [T0,T1] phUSD emission — a ~10x per-share over-accrual. The stable leg (792) is capped by rewardBalance so it is a redistribution, but the phUSD leg is MINTED on demand (_claimRewards:853, phUSD.mint) with no budget cap, making it an unbacked over-mint. The stale rate also persists past unpause until the next stake/withdraw. Reachable in NORMAL operation, not an exotic path: beginFlush pauses the pool for every rotation. Same class as the confirmed sibling-repo finding phoenix-nft-staking NFTStaker.emergencyWithdraw survivor over-emission, and the Linear-Depletion/rate-drift family this protocol has a recurring history with.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "accPhUSDPerShare",
+        "rewardDebt (phUSDDebt/stableDebt/promoDebt)",
+        "_updatePool",
+        "phUSDPerSecond",
+        "mint("
+      ],
+      "vulnerableWhenMet": [
+        "totalStaked / share balance mutated before _updatePool() settles pending at the old rate",
+        "late/surviving staker receives accrual for a period they did not solely earn",
+        "per-call mint amount derived from accounting with no emission cap"
+      ],
+      "missingMitigations": [
+        "No _updatePool() at the head of pauseWithdraw",
+        "No _updatePhUSDEmissionRate() after the totalStaked mutation",
+        "Pause does not freeze the stable/phUSD accrual legs (only the promo leg is phase-gated at 824)"
+      ],
+      "notes": "The DEBT-FORFEIT on the exiting user is documented intent (V3 fix for the V1/V2 partial-pauseWithdraw brick) — that is NOT the finding. The finding is the un-settled window being redistributed to survivors at an inflated per-share rate. Possible relationship to the V3-Q-02 'trap warning' in the run-08 ledger (the obvious fix strands funds): a naive fix that settles accrual inside pauseWithdraw must not resurrect the underflow brick the debt realignment was added to fix. Windfall accrues passively to existing survivors; an attacker cannot enter during pause (stake is whenNotPaused), so this is value-leak/over-mint rather than a directable theft — severity-classifier should weigh that.",
+      "references": [
+        "patterns/vulnerability-patterns.json#REWARD-ACCRUAL-ORDER",
+        "patterns/vulnerability-patterns.json#MINT-ON-DEMAND-OVERMINT"
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "REWARD-RUNWAY-DEPLETION",
+      "alsoMatches": ["EMISSION-WINDOW-BOUNDARY"],
+      "type": "linear-depletion re-anchoring / emission griefing",
+      "severity": "potential-high",
+      "contract": "src/PhlimboV3.sol",
+      "line": 629,
+      "lineRange": "618-632",
+      "alsoAffects": ["src/PhlimboV2.sol:298-312", "src/Phlimbo.sol:283+"],
+      "description": "collectReward() is PERMISSIONLESS (external nonReentrant, only require(amount > 0) — no auth, no minimum amount) and unconditionally re-anchors the depletion schedule: rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration (line 629). Every call restarts a fresh FULL depletionDuration window over the entire remaining balance. Anyone can call collectReward(1) with 1 wei of rewardToken. Repeated calls convert the intended LINEAR depletion (balance fully distributed at t=D) into EXPONENTIAL decay (dB/dt = -B/D), so only ~63% is distributed after D and the stream never completes — stable rewards are asymptotically withheld from stakers for the cost of 1 wei plus gas per call. This is the V1 Linear-Depletion rate-recompute bug class NOT removed but RELOCATED: the V2 fix (documented at _updatePool:797) removed the recompute from _updatePool, yet left it at collectReward, which is a permissionless entry point. The intended caller is the yield-accumulator delivering real yield; nothing enforces that. Note the same re-anchor exists at the promo mirror (topUpPromotion:394, setPromoDepletionDuration:412) but those are onlyOwner, so they are at most an owner footgun, not a griefing vector.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "rewardPerSecond",
+        "rewardBalance",
+        "depletionDuration",
+        "_updatePool"
+      ],
+      "vulnerableWhenMet": [
+        "recompute pushes the effective window end forward and applies it to already-elapsed/remaining balance",
+        "emission schedule re-anchored by an unprivileged caller"
+      ],
+      "missingMitigations": [
+        "No access control on collectReward",
+        "No minimum contribution amount",
+        "No rate-limit / cooldown on the re-anchor",
+        "No preservation of the original window end"
+      ],
+      "notes": "Operator memory explicitly records the Linear-Depletion bug as REPORTABLE for this project and directs it not to be re-suppressed. Legit high-frequency small collectReward calls stretch the schedule even with no attacker. Likely Medium downstream (griefing / DoS of reward delivery, no theft) — severity-classifier to adjudicate; recorded here at the pattern's own HIGH mapping.",
+      "references": ["patterns/vulnerability-patterns.json#REWARD-RUNWAY-DEPLETION"]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "RETURN-VALUE-IGNORE",
+      "type": "silent-failure transfer helper",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "line": 885,
+      "lineRange": "885-888",
+      "alsoAffects": ["src/MigratorV2V3.sol:350-353"],
+      "description": "_tryTransfer returns `callSuccess && (returndata.length == 0 || abi.decode(returndata, (bool)))`. A raw .call to a CODELESS address returns success=true with empty returndata, so the helper reports TRUE for a transfer that never happened — in PhlimboV3.batchClaim (471) that records a promo payment as paid and aligns promoDebt, erasing the entitlement with nothing banked; in MigratorV2V3._forward (362) it returns early without banking. Confirmed divergence from OZ SafeERC20: OZ routes through Address, which checks `target.code.length > 0` (Address.sol:143) and reverts AddressEmptyCode; _tryTransfer omits precisely that check. DUPLICATION STATUS (explicitly checked per task): the two copies are BYTE-IDENTICAL — md5 of PhlimboV3.sol:885-889 == md5 of MigratorV2V3.sol:350-354 (27d9d3e6b52b4d6aafb53d9d79caf546). The 7045a96..02b9bc2 diff shows story-028 ADDED the MigratorV2V3 copy as a fresh duplicate of the existing defect, and touched the PhlimboV3 copy only to rejoin a wrapped line (formatting, no semantic change). So neither copy was fixed — there is no one-fixed-one-missed divergence, but the defect surface has DOUBLED and any future fix must land in both.",
+      "confidence": "medium",
+      "matchedSignatures": [".call(", "abi.encodeCall(IERC20.transfer", "returndata.length == 0"],
+      "vulnerableWhenMet": ["Return bool not checked against the codeless-target case (no require/assert on target having code)"],
+      "missingMitigations": ["No token.code.length check", "Not using SafeERC20's _callOptionalReturn semantics"],
+      "reachabilityBarrier": "The token address, not the recipient, must be codeless for the false-success. In PhlimboV3 promoToken is installed only via startPromotion (365) whose safeTransferFrom would itself revert AddressEmptyCode on a codeless token; MigratorV2V3's tokens are the immutable phUSD/rewardToken plus V3's vetted promoToken. Post-Cancun, deployed code cannot be removed. So the defect is real and certain in the code but its exploit path is currently blocked by the install-time barrier — which is why this reconciles to the existing open Low V3-L-10 rather than escalating. Flagged as still-live, NOT re-severitized.",
+      "references": ["patterns/vulnerability-patterns.json#RETURN-VALUE-IGNORE"]
+    }
+  ],
+  "manualReviewCount": 4,
+  "manualReview": [
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "RETURN-VALUE-IGNORE",
+      "type": "cursor brick via abi.decode short-return",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "line": 887,
+      "confidence": "low",
+      "description": "abi.decode(returndata, (bool)) REVERTS on a non-empty returndata shorter than 32 bytes. Inside PhlimboV3.batchClaim the revert propagates out of the whole loop, permanently pinning flushCursor at the offending staker: finalizePromotion requires flushCursor == _stakers.length() (513), so the promo rotation can never complete. CONTAINMENT ASYMMETRY (the notable part): the byte-identical MigratorV2V3 copy is defended — _forward runs inside migrateOne, which migrate wraps in try/catch (202-211), and the owner has skipCurrent (284) as a cursor backstop. PhlimboV3.batchClaim has NEITHER an outer try/catch NOR any cursor-skip. The same helper is therefore fail-safe in the migrator and fail-brick in the farm. Owner can abortFlush (539) to unpin the contract, so the pool is not bricked — only the rotation is, and re-running beginFlush hits the same staker again.",
+      "reachabilityBarrier": "A short-returning promoToken cannot be installed: startPromotion's safeTransferFrom (365) routes through OZ SafeERC20, whose own abi.decode would revert on the same short return. Requires a token that returns 32 bytes for transferFrom but short data for transfer, or an upgradeable token that changes behaviour post-install — speculative. Routed to manualReview rather than dropped: this is the existing open V3-L-02, and the containment asymmetry vs the migrator copy is new information worth a human look.",
+      "matchedSignatures": ["abi.decode(returndata, (bool))"],
+      "references": ["patterns/vulnerability-patterns.json#RETURN-VALUE-IGNORE"]
+    },
+    {
+      "id": "PATTERN-005",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-CROSS-FUNCTION",
+      "type": "unguarded sibling sharing state",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "line": 596,
+      "confidence": "low",
+      "description": "pauseWithdraw is the ONLY user-facing state-mutating function without nonReentrant (stake:643, withdraw:688, claim:738, collectReward:618, batchClaim:450, claimUnclaimablePromo:561 all carry it). It mutates user.amount, totalStaked and all three debts. batchClaim calls out to the owner-chosen promoToken via _tryTransfer mid-loop (471), and _claimRewards transfers promoToken (873) BEFORE its callers write debts (stake:664, withdraw:710, claim:757) — a CEI violation that is currently saved only by the shared OZ v5 lock. No profitable path found: stake/withdraw/claim are whenNotPaused while pauseWithdraw is whenPaused, so they cannot overlap; and a reentrant pauseWithdraw during batchClaim realigns debts against an accPromoPerShare that is frozen during Flushing (824), leaving pending==0 — consistent. Surfaced because the guard omission is real and the protection is incidental rather than designed; a future change to the phase gate or the whenNotPaused set could turn this live.",
+      "matchedSignatures": ["nonReentrant", "safeTransfer(", "userInfo["],
+      "references": ["patterns/vulnerability-patterns.json#REENTRANCY-CROSS-FUNCTION"]
+    },
+    {
+      "id": "PATTERN-006",
+      "source": "pattern-db",
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "type": "two-step setter with no minimum delay",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "line": 233,
+      "confidence": "low",
+      "description": "setDesiredAPY's two-step commit has an UPPER bound (block.number > pendingAPYBlockNumber + 100 re-arms a preview) but NO LOWER bound: preview and commit can occur in the same block/transaction, so the two-step provides no timelock or observation window — it only guards against a single fat-fingered call. Step 2 correctly compares the passed bps against the snapshotted pendingAPYBps rather than re-reading a live value, and the commit branch correctly _updatePool()s at the old rate (242) before _updatePhUSDEmissionRate() (245), so the accrual-ordering leg of this pattern is NOT vulnerable. Owner-only, and the transparency limitation is arguably obvious → likely Law-3 trusted rather than a footgun. Routed for adjudication, not asserted.",
+      "matchedSignatures": ["pendingAPYBps", "block.number", "commit"],
+      "references": ["patterns/vulnerability-patterns.json#TWO-STEP-COMMIT-WINDOW"]
+    },
+    {
+      "id": "PATTERN-007",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "unbounded array delete",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "line": 148,
+      "confidence": "low",
+      "description": "seedUsers does `delete users` (148) then push-loops the new list (149-151). The delete costs gas proportional to the PREVIOUS pass's length, so a large first pass (e.g. 10k addresses) could make the reseed for a small straggler list OOG — the straggler pass is the documented mitigation for users who re-enter V2 after their index was processed, so bricking it would strand those users in V2. Owner-controlled input on both legs and chunkable in practice by seeding smaller lists; migrate/batchClaim themselves are properly chunked via maxIterations. Low, surfaced for completeness.",
+      "matchedSignatures": ["for (uint256 i = 0; i < _users.length", "delete users"],
+      "references": ["patterns/vulnerability-patterns.json#DOS-UNBOUNDED-LOOP"]
+    }
+  ],
+  "patternsSkipped": [
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "reason": "Skip rule: pattern note states C4 treats approve race / safeApprove front-running as QA/known-issue. Signature `approve(` does hit (MigratorV2V3:178 forceApprove to type(uint256).max), but no plausible HM twist — the approval is to the trusted PhlimboV3 and forceApprove is the recommended idiom. Not routed to manualReview."
+    },
+    {
+      "patternId": "CENTRALIZATION-ADMIN",
+      "reason": "Skip rule: pattern note states C4 considers centralization Low/QA unless it enables a rug pull. Signatures hit broadly (onlyOwner on 9 functions incl. emergencyTransfer:325, withdrawAll:318). Suppressed under Law 3 (owner assumed non-malicious); the sweep-includes-banked-funds trade-off in emergencyTransfer/withdrawAll is documented intent and, per the recorded ejector-seat principle for this project, accounting must not be proposed inside a terminal escape hatch. Non-obvious owner footguns found elsewhere are reported above on their own merits."
+    }
+  ],
+  "patternsCheckedNoMatch": [
+    "ERC4626-INFLATION", "ORACLE-STALE", "ORACLE-ROUNDID", "SIGNATURE-REPLAY",
+    "FLASH-LOAN-PRICE", "UNSAFE-DOWNCAST", "DIVISION-PRECISION", "UNPROTECTED-INIT",
+    "STORAGE-COLLISION", "MISSING-SLIPPAGE", "SELFDESTRUCT-FORCE-ETH", "DOUBLE-VOTING",
+    "PERMIT-FRONTRUN", "FIRST-DEPOSITOR-ATTACK", "INCORRECT-OPERATOR", "CROSS-CHAIN-REPLAY",
+    "TIMELOCK-BYPASS", "BATCH-PAYOUT-FIXED-POT", "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+    "REENTRANCY-ERC777", "REENTRANCY-ERC721-RECEIVE", "REENTRANCY-READONLY",
+    "ROUNDING-DIRECTION", "WEAK-PRNG", "FEE-ON-TRANSFER-ACCOUNTING"
+  ],
+  "noMatchRationale": {
+    "FIRST-DEPOSITOR-ATTACK": "MINIMUM_STAKE = 1e15 (164) enforced at stake:644; no share-price mechanic (fixed-denomination accumulator farm, not a vault).",
+    "ERC4626-INFLATION": "Not a vault; no shares/totalAssets conversion.",
+    "FEE-ON-TRANSFER-ACCOUNTING": "notVulnerableWhen satisfied: startPromotion:366 and topUpPromotion:391 both measure the balance delta and require strict equality, rejecting FoT/rebasing tokens by policy. MigratorV2V3.migrateOne uses balance-delta bracketing (243-264) rather than crediting requested amounts.",
+    "ROUNDING-DIRECTION": "Accumulator arithmetic rounds DOWN via integer division on both the accrual leg (792/805/829) and the debt leg, i.e. against the user; no ceil/floor asymmetry and no round-trip conversion pair.",
+    "REENTRANCY-ERC721-RECEIVE": "No ERC721/1155 surface in this project.",
+    "REENTRANCY-READONLY": "Views (pendingPhUSD/pendingStable/pendingPromo, getPoolInfo) report per-user entitlements, not a price/exchange-rate consumed as an oracle by integrators. pendingPromo:955 correctly mirrors _updatePool's Flushing phase gate.",
+    "WEAK-PRNG": "block.timestamp is used for time-based accrual only, no value-bearing random outcome.",
+    "INCORRECT-OPERATOR": "Boundary checks reviewed: finalizePromotion's strict `flushCursor == _stakers.length()` (513) is reachable because batchClaim caps the cursor at len (456-458); the +100 block window at 234 has no value consequence. No off-by-one with consequence found.",
+    "TIMELOCK-BYPASS": "No timelock construct in scope (see PATTERN-006 for the related no-minimum-delay observation).",
+    "UNPROTECTED-INIT / STORAGE-COLLISION": "Non-upgradeable; constructor-initialized, no proxy/delegatecall."
+  },
+  "errors": [],
+  "coverageNotes": [
+    "All 5 in-scope contracts read in full or grepped for every pattern signature; no unreadable files.",
+    "MigratorV1V2.sol carries the same permissionless-collectReward exposure only indirectly (it targets V1/V2, both of which share the PATTERN-002 root cause at Phlimbo.sol:283 and PhlimboV2.sol:298).",
+    "PhlimboV2.sol:280-291 pauseWithdraw is a WORSE instance of PATTERN-001 than V3's: it neither settles accrual nor realigns debts (the latter being the V1/V2 brick V3 was written to fix)."
+  ]
+}

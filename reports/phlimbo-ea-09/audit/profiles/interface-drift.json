@@ -1,0 +1,58 @@
+{
+  "analysis": "Interface/impl drift — IPhlimboV3.sol + IMigratorV2V3.sol (NEW-in-scope this run)",
+  "profileTimestamp": "2026-07-15T00:00:00Z",
+  "run": "phlimbo-ea-09 (regression 7045a96..02b9bc2)",
+
+  "method": {
+    "signatureDrift": "MECHANICALLY EXCLUDED. PhlimboV3 declares `is ... IPhlimboV3` (src/PhlimboV3.sol:47) and MigratorV2V3 declares `is ... IMigratorV2V3` (src/MigratorV2V3.sol:89). Solidity therefore enforces that every function declared in each interface is implemented with an exactly matching signature, or compilation fails. `forge build --force` completes with 'Compiler run successful with warnings' (warnings are lints only: mixed-case naming and unchecked-transfer hints in test/, zero errors). CONCLUSION: no signature-level drift is possible between these interfaces and their impls.",
+    "semanticDrift": "Reviewed by reading each interface NatSpec claim against the implementation body. Findings below.",
+    "consumerArityCheck": "MigratorV2V3 consumes IPhlimboV2.userInfo (3-tuple, IPhlimboV2.sol:190) at :192 via `(uint256 amount,,)` and IPhlimboV3.MINIMUM_STAKE at :181. Both arity/type-correct. NOTE the deliberate asymmetry: IPhlimboV3.userInfo returns a 4-TUPLE (adds promoDebt, IPhlimboV3.sol:369-372) while IPhlimboV2.userInfo returns a 3-tuple; MigratorV2V3 only ever destructures the V2 one, so the arity difference is not mis-consumed."
+  },
+
+  "semanticDriftFindings": [
+    {
+      "id": "DRIFT-001",
+      "severity": "local-informational",
+      "file": "src/interfaces/IMigratorV2V3.sol",
+      "line": 109,
+      "type": "doc-order-mismatch",
+      "description": "IMigratorV2V3.migrate's NatSpec describes the per-user order as '...withdraws the position from V2 ..., forwards the reward deltas to the user, and re-stakes the principal into V3'. The implementation does the opposite: withdraw (:250) -> stake (:256) -> forward (:268-272). The forwarding MUST come after the stake, because the deltas bracket the whole withdraw+stake block (:243-246 vs :260-264) so the principal nets out. The implementation is correct and the interface prose is stale/reordered.",
+      "impact": "Documentation only — no ABI or behavioural consequence. Recorded because a future reader implementing against the prose would compute the wrong deltas.",
+      "recommendation": "Reorder the prose to match: withdraw -> restake -> forward deltas."
+    },
+    {
+      "id": "DRIFT-002",
+      "severity": "local-informational",
+      "file": "src/interfaces/IPhlimboV3.sol",
+      "type": "incomplete-surface (not drift)",
+      "description": "IPhlimboV3 does not declare the whole public surface of PhlimboV3. Absent from the interface but present on the impl: pause()/unpause()/pauser() (these come from the separately-inherited IPausable, PhlimboV3.sol:13/:47 — so they ARE interface-covered, just not by IPhlimboV3); and getPendingAPYInfo() (:1031) plus the auto-getters pendingAPYBps/pendingAPYBlockNumber/apySetInProgress (:70-76), which are covered by NO interface. Events declared only on the impl and not in IPhlimboV3: RewardCollected (:188), RateUpdated (:191), DepletionDurationUpdated (:194), IntendedSetAPY (:197), DesiredAPYUpdated (:200).",
+      "impact": "None for on-chain integration — an interface is permitted to be a subset. Consumers holding an IPhlimboV3 reference simply cannot reach the APY-preview surface. Recorded so downstream agents do not treat IPhlimboV3 as the complete surface when reasoning about reachability.",
+      "recommendation": "No action required."
+    },
+    {
+      "id": "DRIFT-003",
+      "severity": "local-informational",
+      "file": "src/interfaces/IMigratorV2V3.sol",
+      "type": "incomplete-surface (not drift)",
+      "description": "IMigratorV2V3 omits the impl's public auto-getters: users(uint256) (:101), seeded (:104), migrateIterator (:107), and the four immutables phlimboV2/phlimboV3/phUSD/rewardToken (:95-98). Notably migrateIterator is the pass-completion sentinel that seedUsers' own precondition is stated in terms of (IMigratorV2V3.sol:103-104 prose references `migrateIterator == -1`) — so the interface's documented precondition references a variable the interface does not expose.",
+      "impact": "Documentation/ergonomics only.",
+      "recommendation": "Optional: add `function migrateIterator() external view returns (int256);` so the documented precondition is checkable through the interface."
+    },
+    {
+      "id": "DRIFT-004",
+      "severity": "local-informational",
+      "file": "src/interfaces/IPhlimboV3.sol",
+      "line": 267,
+      "type": "verified-accurate (no drift)",
+      "description": "Checked, and CONFIRMED ACCURATE rather than drifted — recorded because these are the highest-risk semantic claims in the new interface and their accuracy is load-bearing for downstream reasoning. (a) emergencyTransfer NatSpec (:267-270) says it sweeps the LIVE promo token INCLUDING banked amounts and notes the asymmetry with finalizePromotion — matches PhlimboV3.sol:335-340 (no reservation) vs :517-519 (reservation). (b) finalizePromotion NatSpec (:184-188) says banked amounts are reserved 'saturating at zero' and accPromoPerShare is 'NEVER reset' — matches :519 (saturating ternary) and :524-529 (accumulator untouched). (c) claimUnclaimablePromo NatSpec (:199-204) says permissionless, not pause-gated, reverts 'Nothing to claim', reverting safeTransfer — matches :561-567 exactly. (d) pendingPromo NatSpec (:212-214) says it returns 0 for banked users by design — matches :969 (debt was aligned at :468). (e) UserMigrationSkipped's reason INVARIANT (IMigratorV2V3.sol:68-73) — matches, see MigratorV2V3 profile INV-M-3."
+    }
+  ],
+
+  "oldSurfaceRemoved": {
+    "description": "The global scalar `unclaimablePromo()` was REMOVED from IPhlimboV3 in this range (was 7045a96:src/interfaces/IPhlimboV3.sol:340, backed by 7045a96:src/PhlimboV3.sol:138). It is replaced by the two per-token/per-user views unclaimablePromoOf(address,address) (IPhlimboV3.sol:382) and totalUnclaimableOf(address) (:385).",
+    "abiImpact": "BREAKING for any off-chain consumer or sibling contract reading `unclaimablePromo()` — the selector no longer exists and the call will revert. PhlimboV3 is not yet deployed per the migration narrative, so this is expected to be inert, but it is recorded for the deployment-wiring/script audit surface (the phStaging script family reads Phlimbo state).",
+    "behaviouralDelta": "The old scalar was ZEROED and its tokens SWEPT to leftoverRecipient by finalizePromotion (7045a96:src/PhlimboV3.sol:495). The new per-token bank is RESERVED from that sweep (02b9bc2:src/PhlimboV3.sol:517-519) and deliberately NOT cleared (:527-528). This is the audit-08 M-01 fix and is the single most consequential semantic change in this range."
+  },
+
+  "summary": "No signature drift (mechanically excluded by compilation, both impls inherit their interfaces). No behavioural drift found between the new interfaces and their implementations. Four informational items: one stale prose ordering in IMigratorV2V3.migrate (DRIFT-001), two subset-surface notes (DRIFT-002/003), and one positive confirmation that the load-bearing semantic claims are accurate (DRIFT-004). Separately, the removal of the `unclaimablePromo()` scalar is an intentional breaking ABI change."
+}

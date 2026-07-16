@@ -1,0 +1,118 @@
+{
+  "project": "phlimbo-ea",
+  "run": "phlimbo-ea-09",
+  "agent": "deduplicator",
+  "commit": "02b9bc2",
+  "createdAt": "2026-07-15T23:30:00Z",
+  "purpose": "Law-1 VISIBLE PARKED CHANNEL. Findings the deduplicator would otherwise have dropped for low confidence or below-threshold quality, plus items no agent adjudicated. Recall beats report-tidiness: culling happens at triage (/ledger), never by withholding a finding from the run a human reviews. A dedup run that removed borderline findings but wrote no manual-review.json is a bug.",
+  "reviewPolicy": "Each entry names its reason, originalId and confidence. NONE of these is asserted as a finding; each is a live question a human should close. If any is promoted, it needs a fingerprint minted at that time.",
+  "count": 5,
+
+  "entries": [
+    {
+      "id": "MR-09-001",
+      "originalId": "PATTERN-005",
+      "source": "pattern-matcher (self-routed to its own manualReview; NOT adjudicated to a verdict by any Tier-2 agent)",
+      "reason": "low-confidence / protection-is-incidental-not-designed",
+      "confidence": "low",
+      "severity": "potential-medium (pattern's raw mapping; unadjudicated)",
+      "contract": "src/PhlimboV3.sol",
+      "function": "pauseWithdraw",
+      "line": 596,
+      "summary": "pauseWithdraw is the ONLY user-facing state-mutating function WITHOUT nonReentrant (stake:643, withdraw:688, claim:738, collectReward:618, batchClaim:450, claimUnclaimablePromo:561 all carry it). It mutates user.amount, totalStaked and all three debts. batchClaim calls out to the owner-chosen promoToken via _tryTransfer mid-loop (:471), and _claimRewards transfers promoToken (:873) BEFORE its callers write debts (:664/:710/:757) — a CEI violation currently saved ONLY by OZ v5's shared contract-wide lock.",
+      "whyNotDropped": "NO PROFITABLE PATH FOUND TODAY — stake/withdraw/claim are whenNotPaused while pauseWithdraw is whenPaused, so they cannot overlap; and a reentrant pauseWithdraw during batchClaim realigns debts against an accPromoPerShare that is FROZEN during Flushing (:824), leaving pending == 0 — consistent. So it is not a live finding. But the guard omission is REAL and the protection is INCIDENTAL rather than designed: it depends on two unrelated invariants (the whenNotPaused/whenPaused split, and story-024's phase gate) that a future change could remove without anyone noticing this function was relying on them. That is exactly the shape of a latent Law-1 exploit and exactly why it must not vanish into a log.",
+      "interactionNote": "story-024's phase gate — one of the two load-bearing invariants — was ADDED THIS RANGE. The other (whenNotPaused/whenPaused split) is what DEDUP-09-001 already shows to be load-bearing in a different way. This function is accumulating implicit dependencies.",
+      "ask": "Decide: (a) add nonReentrant to pauseWithdraw as cheap defence-in-depth and close this, or (b) record a WATCH-NOTE that pauseWithdraw's safety depends on the whenNotPaused/whenPaused split AND the :824 phase gate, so a future run re-checks it if either changes. Do NOT simply close as 'no path found' — that discards the reason it was raised.",
+      "crossRef": "Same function as DEDUP-09-002 and V3-Q-02, but a THIRD, distinct root cause (missing guard, vs missing rate recompute, vs missing accrual settle). Do not collapse any of the three."
+    },
+
+    {
+      "id": "MR-09-002",
+      "originalId": "PATTERN-006",
+      "source": "pattern-matcher (self-routed to manualReview, 'Routed for adjudication, not asserted')",
+      "reason": "Law-3 boundary call — arguably obvious (trusted) rather than surprising (footgun); needs a human, not an agent",
+      "confidence": "low",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "setDesiredAPY",
+      "line": 233,
+      "summary": "setDesiredAPY's two-step commit has an UPPER bound (block.number > pendingAPYBlockNumber + 100 re-arms a preview) but NO LOWER bound: preview and commit can occur in the same block/transaction, so the two-step provides no timelock and no observation window — it guards only against a single fat-fingered call.",
+      "notVulnerable": "The ACCRUAL-ORDERING leg of this pattern is NOT vulnerable and that was checked: step 2 correctly compares the passed bps against the SNAPSHOTTED pendingAPYBps rather than re-reading a live value, and the commit branch correctly _updatePool()s at the OLD rate (:242) before _updatePhUSDEmissionRate() (:245). Only the transparency/observation-window leg survives.",
+      "whyNotDropped": "Owner-only, and the transparency limitation is ARGUABLY obvious => arguably Law-3 trusted => arguably suppress. But 'arguably' is not a verdict, and no Tier-2 agent adjudicated it. Under Law 1 an unadjudicated Law-3 boundary call is parked, not dropped by the deduplicator's own guess.",
+      "sharpeningContext": "TWO REASONS A HUMAN SHOULD LOOK RATHER THAN RUBBER-STAMP. (1) setDesiredAPY's commit is ALREADY the subject of two ledger entries — L-02 (470bf433, 'commit is mempool-visible; stakers front-run to capture', acknowledged) and V2-L-05/L-03 ('commit branch does not clear pendingAPYBps'). A no-lower-bound window interacts with L-02's front-run face: a same-block preview+commit actually REMOVES the front-run window L-02 describes, so this may be user-PROTECTIVE rather than harmful. (2) FAR MORE IMPORTANT: per FLAG-09-03, setDesiredAPY is the two-tx owner action that ARMS DEDUP-09-002's mint leak, with no warning that it does so. If the live config is zero-APY, this setter is the single control that activates a Medium. That elevates the value of an observation window well above generic 'timelock hygiene' — and it is NOT the framing pattern-matcher raised it under.",
+      "ask": "Adjudicate the Law-3 boundary. If suppressed as obvious, do so on the transparency face ONLY — the arming-DEDUP-09-002 face is a separate question that should be answered on DEDUP-09-002's record, not silently closed here.",
+      "distinctFrom": "L-02 (front-run, different root cause), V2-L-05 (stale pending not cleared, different root cause). Fingerprints would differ."
+    },
+
+    {
+      "id": "MR-09-003",
+      "originalId": "PATTERN-007",
+      "source": "pattern-matcher (self-routed to manualReview, 'Low, surfaced for completeness')",
+      "reason": "low-confidence owner footgun; mitigated in practice but the failure mode strands users",
+      "confidence": "low",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "seedUsers",
+      "line": 148,
+      "summary": "seedUsers does `delete users` (:148) then push-loops the new list (:149-151). The delete costs gas proportional to the PREVIOUS pass's length, so a large first pass (e.g. 10k addresses) could make the reseed for a small straggler list OOG.",
+      "whyNotDropped": "The STRAGGLER PASS IS THE DOCUMENTED MITIGATION for users who re-enter V2 after their index was processed. Bricking the mitigation strands exactly those users in V2 — i.e. the failure mode defeats the recovery mechanism the design depends on. That is a real, if unlikely, availability consequence, not style noise.",
+      "mitigation": "Owner-controlled input on both legs and chunkable in practice by seeding smaller lists; migrate/batchClaim themselves are properly chunked via maxIterations. So a competent owner can avoid it — which is what holds it at Low and makes it a Law-3 boundary call rather than a clear footgun.",
+      "ask": "Adjudicate: is 'seed in smaller batches' an OBVIOUS enough operational constraint (=> Law-3 trusted, suppress) or a NON-OBVIOUS one (=> footgun, file at Low)? Note nothing in the source or NatSpec warns the owner that a large first pass can brick a later small one — which leans footgun. If suppressed, a one-line NatSpec note would close it properly.",
+      "crossRef": "V3-L-03 (zombie _stakers gas inflation) is the same gas-accumulation FAMILY on PhlimboV3 but a different contract and root cause. Do not collapse."
+    },
+
+    {
+      "id": "MR-09-004",
+      "originalId": "none — surfaced by the deduplicator; filed by NO agent",
+      "proposedFingerprint": "b9de837c646605abfdb83a10c185081bfac73bcf0b13f4022fa6923adefee868",
+      "proposedFingerprintInput": "src/PhlimboV2.sol:_claimRewards:reverting-reward-transfer-on-self-service-path-freezes-staker-principal",
+      "source": "deduplicator (recall sweep over CODE-09-001's recommendation text)",
+      "reason": "UNFILED SIBLING — mentioned in passing inside another finding's recommendation and would otherwise have left the run invisibly",
+      "confidence": "medium",
+      "severity": "potential-medium (unadjudicated — the V3 sibling is potential-medium)",
+      "contract": "src/PhlimboV2.sol",
+      "function": "_claimRewards",
+      "line": 501,
+      "lineStart": 486,
+      "lineEnd": 507,
+      "summary": "PhlimboV2._claimRewards has the IDENTICAL reverting-stable-transfer shape as DEDUP-09-001: `rewardToken.safeTransfer(beneficiary, pendingRewardAmount)` at :501 with no failure containment. A V2 staker blocklisted on the stable token (rewardToken, plausibly USDC) cannot withdraw their principal, since withdraw settles rewards before moving principal.",
+      "sourceVerification": "VERIFIED BY THE DEDUPLICATOR AGAINST SOURCE. lib/phlimbo-ea/src/PhlimboV2.sol:486-507 read in full: same _claimRewards structure as PhlimboV3:844-877 minus the promo leg — `pendingRewardAmount > 0 => rewardToken.safeTransfer(beneficiary, pendingRewardAmount)` at :501, reverting, uncontained. This is not inference from the V3 code; it is the V2 source.",
+      "whyNotDropped": "CODE-09-001's recommendation says: 'NOTE the same reverting shape exists on the STABLE leg at :858... and identical in PhlimboV2:500.' Code-scanner mentioned it and filed nothing. The V3 stable leg is folded into DEDUP-09-001 as an instance (same fingerprint). The V2 instance CANNOT be — DIFFERENT CONTRACT => different fingerprint => it needs its own entry or it does not exist in the run at all. That is precisely the silent drop Law 1 forbids.",
+      "scopeArgument": "IN SCOPE and plausibly LIVE, which is why this matters. Scope is default-in-scope denylist — every first-party .sol in the submodule is in scope; PhlimboV2.sol is first-party and pattern-matcher listed it in its own scope array. And PhlimboV2 is NOT dead code: it holds live stakers RIGHT NOW — that is the entire reason MigratorV2V3 exists and the entire subject of stories 025/026/028 in this very range. A blocklisted V2 staker cannot exit today.",
+      "counterArgument": "STATED HONESTLY FOR TRIAGE, NOT SUPPRESSED ON: (a) V2 is being migrated away from, so the exposure window is bounded by the migration's completion; (b) the migrator itself may rescue such a user, since MigratorV2V3 calls phlimboV2.withdraw(amount, user) with rewards routed to the MIGRATOR (msg.sender), NOT to the blocked user — which is exactly the argument that closed V3-M-01. If the migrator's withdraw leg genuinely bypasses the blocked recipient, a blocked V2 staker's exit path exists via migration and the severity collapses toward Low/informational. THIS IS THE DECIDING QUESTION and I did not resolve it: it needs the same per-leg beneficiary-routing trace code-scanner did for V3-M-01, applied to PhlimboV2.withdraw's own _claimRewards call. Note the rescue is not self-service — it requires the owner to run the migration.",
+      "ask": "Trace PhlimboV2.withdraw's beneficiary routing into _claimRewards. If the blocked user IS the beneficiary on the V2 self-service path, this is a live Medium sibling of DEDUP-09-001 and should be filed. If the migrator bypasses it and migration is imminent, downgrade — but on THAT reasoning, recorded, not by default.",
+      "crossRef": "DEDUP-09-001 (69f8b29a) — same rootCauseClass, different contract. If both are filed they are siblings, not duplicates. One fix pattern (_tryTransfer + bank, per story-027) covers V3's two legs; V2 would need its own."
+    },
+
+    {
+      "id": "MR-09-005",
+      "originalId": "ADERYN-013",
+      "source": "aderyn (uncorroborated by slither); static-analyzer annotation is INCOMPLETE — see below",
+      "reason": "genuine unguarded CEI violation; my own refutation is unreviewed and no agent adjudicated it",
+      "confidence": "low",
+      "severity": "potential-high (tool mapping; almost certainly not — see analysis)",
+      "contract": "src/PhlimboV3.sol",
+      "function": "finalizePromotion",
+      "line": 518,
+      "lineStart": 511,
+      "lineEnd": 529,
+      "summary": "Aderyn flags 'state change after external call' in finalizePromotion. The static-analyzer annotated it with the same rationale as the four FoT-guard FPs: 'finalizePromotion is onlyOwner; balanceOf view drives leftover calc.' THAT ANNOTATION IS INCOMPLETE and the grouping does not survive contact with the source.",
+      "correctedFacts": "VERIFIED BY THE DEDUPLICATOR AGAINST SOURCE (lib/phlimbo-ea/src/PhlimboV3.sol:511-529): (1) the function signature is `function finalizePromotion(address leftoverRecipient) external onlyOwner {` — there is NO nonReentrant, unlike batchClaim/stake/withdraw/claim/collectReward/claimUnclaimablePromo which all carry it; (2) the flagged external call is NOT only a balanceOf view — there is a REAL `retiredToken.safeTransfer(leftoverRecipient, leftover)` at :520; (3) it is FOLLOWED by four state writes at :521-528: promoToken = IERC20(address(0)), promoRewardPerSecond = 0, promoRewardBalance = 0, promoPhase = PromoPhase.None. That is a textbook unguarded state-change-after-transfer. The other four Aderyn highs (:364/:366/:389/:391) genuinely ARE balanceOf views and were dropped as FPs; this one is materially different and was split out.",
+      "myAnalysis": "PROBABLY HARMLESS, BUT THIS IS MY OWN UNREVIEWED REASONING AND THAT IS THE POINT. A re-entrant finalizePromotion during the :520 transfer would recompute `leftover = balance > banked ? balance - banked : 0` against the ALREADY-REDUCED balance and get 0, so no double sweep; the outer frame then zeroes state that the inner frame already zeroed — idempotent. Re-entry also requires a callback-bearing promo token, which the profiler's token trust assumption ('no ERC777-style callbacks' for promoToken/rewardToken) excludes, and the owner selects the token. So: probably a non-issue.",
+      "whyNotDropped": "THREE REASONS. (1) The guard omission is REAL and UNGUARDED — this is not a false positive, unlike its four siblings. (2) The only thing standing between it and a live vector is a TRUST ASSUMPTION about the token plus my own arithmetic — and code-scanner's own ERC777 note concedes 'an ERC777 promo token would give an inbound hook at :873 and :471', acknowledging the callback surface is assumption-gated rather than structurally absent. (3) NO AGENT ADJUDICATED IT: code-scanner's reentrancy checklist enumerated the guarded value paths and cleared the classes, but finalizePromotion does not appear in its nonReentrant list because it is not in it. Dropping a real unguarded CEI violation on the deduplicator's own five-minute analysis is exactly the 'when unsure, it goes to manual-review, never to /dev/null' case.",
+      "ask": "Confirm the idempotency argument and the token trust assumption, then close — or add nonReentrant to finalizePromotion as one-line defence-in-depth. Also worth correcting the static-analyzer's annotation: grouping :518 with the four balanceOf-view FPs is the kind of annotation error that turns a real observation into permanent noise on every future run.",
+      "crossRef": "DROP-09-01 (the four genuine FoT-guard FPs, dropped). DEDUP-09-005 also concerns finalizePromotion but on a completely different root cause (phantom reserve / falsified §4 invariant) — do not collapse."
+    }
+  ],
+
+  "notParked": {
+    "note": "For completeness — items considered for this channel and NOT parked, with the reason. Recorded so the parking decisions are auditable in both directions.",
+    "items": [
+      { "item": "The 4 FoT-guard Aderyn highs (:364/:366/:389/:391)", "reason": "Genuine false positives with a source-verified refutation (the 'external call' is a balanceOf VIEW). Category (b) tool noise. Additionally the balance-delta form they flag is correctness-LOAD-BEARING per econ-scanner R-2 — parking it would invite a harmful 'fix'." },
+      { "item": "8 corroborated 'state change after external call' (ADERYN-001..008)", "reason": "Dual-tool structural noise, adjudicated by code-scanner's enumerated reentrancy checklist across all classes. C4 explicitly out-of-scope: 'common findings from automated tools without demonstrated HM exploit path'." },
+      { "item": "79 remaining Slither/Aderyn medium+low", "reason": "Operator-named noise classes (timestamp comparison, missing events, modifier ordering, mul-after-div accumulator idiom) or already owned by live ledger entries (V3-L-10, V3-L-07, V3-L-01)." },
+      { "item": "econ R-1..R-6, story-faithfulness notReported, code-scanner UNV-1/UNV-2", "reason": "NEGATIVE results, not withheld findings. A refuted hypothesis is not a finding. All are preserved in-band on the deduplicated record so a future run does not re-derive them." },
+      { "item": "emergencyTransfer / withdrawAll sweeping live banks", "reason": "Ejector-seat principle (standing operator memo; pe7m2 closed INVALID). The OBVIOUS face is suppressed; every NON-OBVIOUS consequence survives visibly as DEDUP-09-004, DEDUP-09-005 and V3-L-08." }
+    ]
+  }
+}

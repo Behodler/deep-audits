@@ -1,0 +1,108 @@
+{
+  "analysis": "Context profiles — unchanged but interacting contracts",
+  "profileTimestamp": "2026-07-15T00:00:00Z",
+  "run": "phlimbo-ea-09 (regression 7045a96..02b9bc2)",
+  "note": "These four files are UNCHANGED in 7045a96..02b9bc2. Profiled only to the depth needed to discharge PhlimboV3/MigratorV2V3 cross-contract dependencies. Solidity ^0.8.19, OZ v5 throughout; no unchecked blocks, no assembly, no loops in PhlimboV2 or Phlimbo.",
+
+  "PhlimboV2": {
+    "file": "src/PhlimboV2.sol",
+    "loc": 593,
+    "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPhlimboV2", "IPausable"],
+    "dependenciesDischarged": [
+      {
+        "id": "DEP-1",
+        "claim": "MigratorV2V3.migrateOne depends on PhlimboV2.withdraw routing principal AND auto-claimed rewards to msg.sender",
+        "status": "CONFIRMED",
+        "evidence": "Principal: safeTransfer(msg.sender, actualWithdrawAmount) at PhlimboV2.sol:392. Rewards: _claimRewards(user, msg.sender) at :373 -> phUSD.mint(beneficiary,..) :495 and rewardToken.safeTransfer(beneficiary,..) :500. `user` is debited (:384-386) and used only as the event/hook subject (:396,:399) — never a payee. Auth: require(user != address(0)) :364; require(msg.sender == user || msg.sender == migrator) :365; require(userDetails.amount >= amount) :368. Gating: external whenNotPaused nonReentrant (:363)."
+      },
+      {
+        "id": "DEP-2",
+        "claim": "PhlimboV2.userInfo returns exactly 3 fields (no promoDebt)",
+        "status": "CONFIRMED",
+        "evidence": "struct UserInfo { amount; phUSDDebt; stableDebt; } at :107-111; mapping public userInfo at :116; explicit interface decl IPhlimboV2.sol:190. grep for `promoDebt` in PhlimboV2.sol: ZERO hits. MigratorV2V3.sol:192's `(uint256 amount,,)` destructure is arity-correct."
+      },
+      {
+        "id": "DEP-3",
+        "claim": "MigratorV2V3 documents 'a stale-debt V2 position that panics in _claimRewards' as a skip case (MigratorV2V3.sol:59-61)",
+        "status": "CONFIRMED — exact panic sites located",
+        "evidence": "PhlimboV2.sol:493 `(amount * accPhUSDPerShare)/PRECISION - phUSDDebt` and :498 `(amount * accStablePerShare)/PRECISION - stableDebt`. Both unguarded, both panic 0x11 when debt > amount*acc/PRECISION; :493 is hit first. `amount == 0` early-returns at :489 so a zero position cannot panic. The SAME unguarded subtraction is cloned into the views pendingPhUSD :536 and pendingStable :557 (so a stale-debt position makes those views revert too) and into claim's pre-hook snapshot :419-420. _updatePool (:442-477) contains NO amount*acc-debt pattern and CANNOT produce this panic; its divisions by totalStaked (:460,:473) are protected by the totalStaked==0 early-return at :447.",
+        "downstreamRelevance": "This is the exact vector MigratorV2V3's try/catch (:202-211) absorbs — the catch emits UserMigrationSkipped carrying the raw Panic(uint256) data (selector 0x4e487b71), and the cursor advances (INV-M-1)."
+      },
+      {
+        "id": "DEP-4",
+        "claim": "PhlimboV3 asserts (PhlimboV3.sol:41-42, :587-590) that V1/V2 have a latent partial-pauseWithdraw brick",
+        "status": "CONFIRMED for BOTH V2 and V1",
+        "evidence": "PhlimboV2.pauseWithdraw :280-291 — full body writes user.amount -= amount (:285) and totalStaked -= amount (:286), transfers (:288), emits (:290). There is NO write to phUSDDebt or stableDebt anywhere in the body and NO _updatePool() call. So amount shrinks while both debts retain values computed against the pre-withdrawal larger amount, breaking the invariant in exactly the direction (debt > amount*acc/PRECISION) that panics at :493/:498. PhlimboEA V1 is identical in shape: Phlimbo.sol:264/:267 mutate without realignment; panic sites Phlimbo.sol:459-461 and :467-469.",
+        "qualifications": [
+          "The 'partial' qualifier is EXACT. On a FULL exit user.amount becomes 0, so _claimRewards early-returns (V2 :489 / V1 :454) and a later stake skips the claim (V2 :336 / V1 :321) and unconditionally overwrites both debts (V2 :344-345 / V1 :334-335), clearing the stale values. Only a partial exit leaves a live poisoned position.",
+          "Reaching the panic requires pause -> partial pauseWithdraw -> unpause (pauseWithdraw is whenPaused :280; withdraw/claim/stake are whenNotPaused). Whether the position self-heals depends on the accumulators later growing past the stale debt.",
+          "PhlimboV3.pauseWithdraw:604-606 realigns all THREE debts, which is the fix. V3's claim about its predecessors is accurate."
+        ]
+      }
+    ],
+    "additionalObservations": [
+      "pauseWithdraw decrements totalStaked (:286) but does NOT call _updatePhUSDEmissionRate() (contrast :349, :394), so phUSDPerSecond stays sized to the pre-exit totalStaked until the next stake/withdraw/setDesiredAPY-commit. Same in V1 (:267 vs :341/:382). PhlimboV3 inherits this shape (:596-611 likewise omits the recompute). Observation only — not adjudicated.",
+      "collectReward (:298) is permissionless and NOT pause-gated — it reaches _updatePool while paused. This is the same shape as PhlimboV3.collectReward (:618) and is the primary path PhlimboV3's :824 phase gate exists to close.",
+      "event RateUpdated (:126) is declared but NEVER emitted anywhere in the file. Same in V1 (Phlimbo.sol:115) and inherited into PhlimboV3 (:191).",
+      "pauseWithdraw (:280) and emergencyTransfer (:251) carry no nonReentrant."
+    ],
+    "trustBoundaries": ["phUSD (IFlax) — ctor-fixed :154, no setter; mint :495 requires an externally-granted role", "rewardToken — ctor-fixed :155, no setter", "hook (IPhlimboHook) :89 — owner-set, called post-state-write, zero-address guarded; a reverting hook bricks stake/withdraw/claim (:354,:399,:430)", "migrator :85 — single owner-set address with full delegated stake/withdraw/claim over every user; withdraw routes 100% of principal+rewards to it", "pauser :44 — controls the pause bit independently of owner (:217,:271)"]
+  },
+
+  "Phlimbo_V1": {
+    "file": "src/Phlimbo.sol",
+    "loc": 596,
+    "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPhlimbo", "IPausable"],
+    "status": "Header (:14-16) states all mainnet users have been migrated off V1; contract inactive. Structurally V2 minus the migrator role and hooks.",
+    "keyDeltasVsV2": [
+      "V1 depletion-rate BUG present: _updatePool DOES recompute the rate at Phlimbo.sol:435 (`rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration;`) inside the toDistribute>0 branch. V2 removes it (V2 :465-467 marks the deletion site). This is the known V1 Linear-Depletion bug.",
+      "ReentrancyGuard is inherited (:23) but stake/withdraw/claim carry NO nonReentrant (:308,:351,:391); only collectReward (:283) does. V2 added the modifier to all three.",
+      "stake(uint256, address recipient) :308 is PERMISSIONLESS with no auth check at all; recipient==address(0) defaults to msg.sender (:312-314).",
+      "_claimRewards(address user) :451 is single-arg — rewards always go to `user` (:463,:471). No beneficiary routing, so V1 cannot serve a migrator-pull pattern.",
+      "No migrator, no hook, no MigratorSet/HookSet events."
+    ],
+    "sharedWithV2": ["UserInfo 3-field struct :93-97", "MINIMUM_STAKE = 1e15 :83", "dust rule :365-368", "pauseWithdraw latent brick (see DEP-4)"]
+  },
+
+  "MigratorV1V2": {
+    "file": "src/MigratorV1V2.sol",
+    "loc": 270,
+    "inheritanceChain": ["Ownable", "ReentrancyGuard", "IMigratorV1V2"],
+    "role": "Reference for the three idioms MigratorV2V3 explicitly mirrors (MigratorV2V3.sol:19-21).",
+    "idiomsMirrored": [
+      {"idiom": "Owner-seeded list", "v1v2": "seedObligations(address[],uint256[],uint256[],uint256[]) :106-142, one-shot (require(!seeded) :112), seeds AMOUNTS across four parallel arrays", "v2v3Divergence": "V2V3 seeds ADDRESSES ONLY and re-reads amounts LIVE from V2 (:192), and permits reseeding once a pass completes (:145). V1V2 is strictly one-shot. This is the documented improvement (MigratorV2V3.sol:20-23) making migration robust to mid-pass V2 interaction."},
+      {"idiom": "int256 cursor terminating at -1", "v1v2": "TWO cursors, settleIterator :79 and migrateIterator :82; per-pass pattern require(iterator>=0) :157/:205 -> uint256 i = uint256(iterator) :165/:216 -> end = min(i+maxIterations, len) :166-168/:217-219 -> chunked loop -> `if (i == len) iterator = -1; else iterator = int256(i)` :186-190/:232-236", "v2v3Divergence": "V2V3 collapses to a SINGLE migrateIterator (:107) with the identical completion semantics (:214-218), and skipCurrent (:289) replicates them."},
+      {"idiom": "withdrawAll escape hatch", "v1v2": ":249-262 onlyOwner, sweeps usdc + phUSD to owner(); explicitly does NOT touch arrays/totals/iterators (:246-248), which ABORTS the pass in practice because the next pass then trips the strict balance precondition", "v2v3Divergence": "V2V3 keeps it (:318) extended to THREE tokens, and it does NOT abort the pass — live reads mean there are no balance preconditions to break (:314-316)."}
+    ],
+    "keyContrast": {
+      "description": "V1V2's loop bodies are NOT try/catch-wrapped — a single reverting position aborts the entire pass. This is precisely the brittleness MigratorV2V3 fixes via the migrateOne self-call (MigratorV2V3.sol:57-64, :202-211) plus the owner-only skipCurrent backstop (:284). Relevant to the run-08 M-02 lineage.",
+      "otherMechanics": [
+        "settleDebt(uint256) :155 and migrateDeposits(uint256) :203 are BOTH permissionless (no onlyOwner) despite the lifecycle doc at :23-24 saying 'Owner calls'. Same shape as MigratorV2V3.migrate being permissionless (LOCAL-MIG-001).",
+        "settleDebt preconditions are STRICT EQUALITIES: usdc.balanceOf(this) == totalUSDC :159 and phUSD.balanceOf(this) == totalPHUSD_deposited :160-163 — deliberate per :153-154, to catch over-funding, with withdrawAll as recovery. V2V3 has no such precondition (live reads).",
+        "migrateDeposits does phUSD.forceApprove(phlimboV2, type(uint256).max) once per call :214 — the same max-approve idiom V2V3 reuses at :178."
+      ]
+    }
+  },
+
+  "IFlax": {
+    "file": "src/IFlax.sol",
+    "loc": 21,
+    "surface": [
+      "mint(address recipient, uint256 amount) external — :16. EXACT signature: no return value, no role args, no pause gate at interface level.",
+      "burn(address holder, uint256 amount) external — :17",
+      "authorizedMinters(address minter) external view returns (MinterInfo memory) — :18, where struct MinterInfo { bool canMint; uint256 mintVersion; } :11-14",
+      "mintVersion() external view returns (uint256) — :19",
+      "revokeAllMintPrivileges() external — :20",
+      "plus all of IERC20 (`interface IFlax is IERC20` :10)"
+    ],
+    "accessControlImplied": "mint carries NO modifier at the interface level. The presence of authorizedMinters(minter) -> MinterInfo{canMint, mintVersion} (:18), mintVersion() (:19) and revokeAllMintPrivileges() (:20) implies the IMPLEMENTATION gates mint on a per-caller canMint role with version-based mass-revocation. Corroborated by in-repo documentation only, not code: MigratorV1V2.sol:36-40 ('phUSD-token owner: grant THIS migrator the canMint == true role on the phUSD token (e.g. via Flax's authorizedMinters setter)') and :179-181.",
+    "NOT_VERIFIED": "The Flax/phUSD IMPLEMENTATION is not present in this submodule — IFlax.sol is interface-only and there is no Flax contract under src/. The actual auth on mint, the semantics of mintVersion, whether mint can be paused, and whether revokeAllMintPrivileges is owner-only are ALL unverified from this repo. Treat phUSD as an OUT-OF-SCOPE TRUST BOUNDARY. Every mint call site (PhlimboV3.sol:853, PhlimboV2.sol:495, Phlimbo.sol:463, MigratorV1V2.sol:181) depends on an externally-granted role that this codebase neither grants nor checks. Note MigratorV2V3 needs NO mint role — V2 itself mints during withdraw (MigratorV2V3.sol:54-55)."
+  },
+
+  "notVerifiedGlobal": [
+    "The Flax/phUSD token implementation (interface-only in this repo).",
+    "lib/mutable/pauser/src/interfaces/IPausable.sol contents were not read; only the pause()/unpause()/pauser() overrides in the Phlimbo files were inspected.",
+    "OZ v5 Pausable/ReentrancyGuard/Ownable/SafeERC20 internals assumed canonical — EXCEPT Pausable._pause/_unpause, which WERE read and confirmed to carry whenNotPaused/whenPaused respectively (Pausable.sol:96, :108). That confirmation underpins PhlimboV3 INV-2 and LOCAL-V3-001.",
+    "No deployment/wiring state is verifiable from source — whether setMigrator, setHook, or the phUSD mint role are actually configured is off-chain. MigratorV2V3 makes this an explicit documented operator obligation (:69-71)."
+  ]
+}

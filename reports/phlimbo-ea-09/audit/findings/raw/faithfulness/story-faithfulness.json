@@ -1,0 +1,164 @@
+{
+  "project": "phlimbo-ea",
+  "scanTimestamp": "2026-07-15T22:30:00Z",
+  "scanType": "story-faithfulness",
+  "range": "7045a96..02b9bc2",
+  "mode": "regression",
+  "storiesChecked": ["story-024", "story-025", "story-026", "story-027", "story-028"],
+
+  "conformanceVerdicts": [
+    {
+      "storyTag": "story-024",
+      "verdict": "FAITHFUL",
+      "specText": "story-024 (d61a7a3): \"Freeze accPromoPerShare during Flushing at the accrual site: collectReward (permissionless), setDesiredAPY, and setDepletionDuration all reach _updatePool while paused, so the freeze is an accrual property, not a pause property. Mirrors the gate in pendingPromo so the view cannot over-report mid-rotation, and corrects the three stale invariant comments that attributed the accumulator freeze to pausing.\"",
+      "specSource": "git commit d61a7a3 subject+body",
+      "actualBehavior": "src/PhlimboV3.sol:824 gates the whole promo accrual block on `address(promoToken) != address(0) && promoPhase != PromoPhase.Flushing` — at the accrual site inside _updatePool, so all three named callers are closed at once. Mirrored in the view at :955-958 (identical `promoPhase != PromoPhase.Flushing` conjunct). The accPromoPerShare NatSpec at :120-126 now attributes the freeze to \"_updatePool's phase gate\", not to pausing. beginFlush's own final accrual is unaffected (it runs while promoPhase is still Active).",
+      "notes": "Every clause of the story is discharged, including the doc-correction clause. Law-1 override check: freezing accrual during Flushing is strictly conservative — it under-credits rather than over-credits, and the debts were aligned to the frozen accumulator, so no exploit is introduced by the intent. Story is safe."
+    },
+    {
+      "storyTag": "story-025",
+      "verdict": "FAITHFUL",
+      "specText": "story-025 (ef98cd9): \"Copy house _tryTransfer helper from PhlimboV3; add _forward that banks failed forwards into per-user unclaimable mapping and emits RewardForwardFailed instead of reverting, so the cursor always advances. Add permissionless claimUnclaimable pull (CEI, reverting safeTransfer by design on the user-initiated path). Extend withdrawAll to sweep the live promo token... Rewrite the recovery-note NatSpec (audit F-01): drop the unreachable 'exclude from seed list' escape, document the banked-claims trade-off\"",
+      "specSource": "git commit ef98cd9 body",
+      "actualBehavior": "_tryTransfer at src/MigratorV2V3.sol:346-349 (low-level call, tolerates no-return and false-return). _forward at :357-362 banks into `unclaimable[token][user]` and emits RewardForwardFailed, never reverts. claimUnclaimable at :302-308 is permissionless, self-scoped, nonReentrant, zeroes the entry BEFORE a reverting safeTransfer (CEI). withdrawAll at :319-338 sweeps the live promo leg. Recovery-note NatSpec (IMigratorV2V3.sol withdrawAll) now reads \"LAST-DITCH... including amounts banked in `unclaimable`, whose claims become unbacked (reimbursement is then an out-of-band owner obligation)\" — the unreachable escape is gone and the trade-off is stated.",
+      "notes": "All six clauses discharged. See F-09-05 for a cross-story asymmetry note (not a deviation from THIS story's text — the story explicitly asks for the trade-off it got)."
+    },
+    {
+      "storyTag": "story-026",
+      "verdict": "FAITHFUL",
+      "specText": "story-026 (af6a20f): \"Unbrickable per-user migrate body: migrateOne self-call + dust skip + skipCurrent (audit-08 M-02)\" — with IMigratorV2V3 NatSpec: \"a live position below V3's MINIMUM_STAKE can never be staked into V3, so it is passed over\".",
+      "specSource": "git commit af6a20f subject; src/MigratorV2V3.sol:162-172 @dev block",
+      "actualBehavior": "migrate (:174-224) wraps each per-user body in `try this.migrateOne(user, amount) { } catch (bytes memory reason)` so the cursor always advances (:227-231). migrateOne (:236) is external, \"Only self\"-gated (:237), and deliberately carries NO nonReentrant — correctly reasoned at :230-235, since OZ v5's single shared lock is already held by migrate and a guarded migrateOne would make the catch skip EVERY user. skipCurrent (:283-290) is the owner backstop and matches migrate's -1 completion semantics.",
+      "notes": "DUST-BAND BOUNDARY VERIFIED EXACT, no off-by-one: migrate skips on `amount < minStake` (:184) and PhlimboV3.stake requires `amount >= MINIMUM_STAKE` (src/PhlimboV3.sol:644) — precisely complementary. The story's claim \"can never be staked into V3\" is TRUE and is NOT weakened by second-pass cumulation: stake's guard tests the INCREMENTAL `amount`, not `userDetails.amount + amount`, so a dust position is unstakeable regardless of the user's existing V3 balance. Law-1 override check: skipping is availability-preserving and leaves the V2 position untouched and the user's; no exploit in the intent. Story is safe."
+    },
+    {
+      "storyTag": "story-027",
+      "verdict": "FAITHFUL — and does NOT walk into the V3-Q-02 trap (see trapAssessment)",
+      "specText": "story-027 (13623b2): \"Replace the write-only aggregate unclaimablePromo with unclaimablePromoOf[token][user] + totalUnclaimableOf[token]. batchClaim banks failed flush transfers per-user (debt alignment at the accumulator unchanged, §2.1). finalizePromotion sweeps only balance − banked with saturating subtraction and no longer clears the bank — it survives rotation. claimUnclaimablePromo is nonReentrant, CEI, reverting-transfer, deliberately ungated (mid-flush self-rescue), and decrements the aggregate by the pulled amount (never zeroes it).\"",
+      "specSource": "git commit 13623b2 body",
+      "actualBehavior": "Bank declared at src/PhlimboV3.sol:141 (unclaimablePromoOf) + totalUnclaimableOf, keyed by token so a retired token's bank survives rotation. batchClaim banks at :468-476 with the debt aligned unconditionally at :462 (§2.1 preserved). finalizePromotion at :517-519: `banked = totalUnclaimableOf[retiredToken]; leftover = balance > banked ? balance - banked : 0` — saturating, and :527-528 explicitly does NOT clear the bank. claimUnclaimablePromo at :561-567 is nonReentrant, requires amount > 0 (\"Nothing to claim\"), zeroes the per-user entry and decrements the aggregate by exactly `amount` BEFORE a reverting safeTransfer, and carries no whenNotPaused.",
+      "lawOneCheck": "The ungated (non-whenNotPaused) pull is the clause most worth challenging under Law 1, and it survives: `token` is attacker-supplied but the mapping is written ONLY by batchClaim with the real promo token, so an arbitrary-token argument reads 0 and reverts \"Nothing to claim\" — there is no path to drain an unrelated token. It is self-scoped to msg.sender, CEI-ordered, and nonReentrant. Ungating is REQUIRED, not merely convenient: beginFlush pauses, so a whenNotPaused gate would lock a blocked-then-unblocked staker out of self-rescue for the entire flush window. Story intent is safe."
+    },
+    {
+      "storyTag": "story-028",
+      "verdict": "FAITHFUL IN MECHANISM, but its stated INVARIANT is self-contradicting — see F-09-02",
+      "specText": "story-028 (d130006): \"Widen UserMigrationSkipped with a trailing un-indexed bytes reason: - empty reason = skipped without attempting (dust band, skipCurrent) - non-empty = raw ABI-encoded revert data caught from the migrateOne self-call\"",
+      "specSource": "git commit d130006 body; invariant restated in src/interfaces/IMigratorV2V3.sol:68-73",
+      "actualBehavior": "Event widened to 3 args (IMigratorV2V3.sol:74). Dust emits \"\" (src/MigratorV2V3.sol:189), skipCurrent emits \"\" (:286), and the catch emits the raw `reason` bytes (:200). The mechanism is exactly as described.",
+      "notes": "The DIRECTION of the mapping is right; the claimed biconditional is not. See F-09-02."
+    }
+  ],
+
+  "trapAssessment": {
+    "question": "Does story-027's reserved-from-sweep banking walk into the V3-Q-02 trap (ledger 93cdca59: 'THE OBVIOUS REMEDIATION STRANDS VALUE THE CURRENT CODE PRESERVES')?",
+    "verdict": "NO — the trap is explicitly and correctly avoided.",
+    "reasoning": "V3-Q-02's trap is that pauseWithdraw's debt-realignment forfeits look like an unbanked entitlement, and 'fixing' them into a bank would strand value that the sweep currently conserves exactly (sum(claimable) == emitted, claims <= balance always). story-027 draws the line in exactly the right place and, decisively, WRITES THE DISTINCTION DOWN as a rationale rather than arriving at it by accident. src/PhlimboV3.sol:507-512 (finalizePromotion NatSpec): \"Forfeit-sweep vs bank-retain (audit-08 M-01): `pauseWithdraw` forfeits realign the debt with NOTHING banked — those tokens are legitimately swept here as leftover. Failed flush transfers, by contrast, are banked per-user in `batchClaim` and reserved from this sweep via `totalUnclaimableOf`; they belong to users, not to `leftoverRecipient`.\" The bank is written at ONE site only — batchClaim:468-476, the failed-_tryTransfer branch. pauseWithdraw (:537+) touches no bank. So the reservation covers exactly the failed-transfer set and no forfeits, and V3-Q-02's conserving accounting is untouched. The saturating subtraction at :519 is a second, independent trap-avoidance: even under accounting drift finalize cannot revert, so the fix cannot pin the contract in Flushing — the failure mode the trap warning most feared. RECOMMENDATION: V3-Q-02 should REMAIN retained as a trap warning; story-027 is evidence the warning worked, not grounds to close it."
+  },
+
+  "findings": [
+    {
+      "id": "F-09-01",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-026",
+      "severity": "qa",
+      "contract": "src/interfaces/IMigratorV2V3.sol",
+      "function": "migrate",
+      "line": 109, "lineStart": 105, "lineEnd": 112,
+      "specText": "IMigratorV2V3.migrate NatSpec: \"...withdraws the position from V2 (principal + auto-claimed rewards land in this contract), forwards the reward deltas to the user, and re-stakes the principal into V3 on the user's behalf.\"",
+      "specSource": "src/interfaces/IMigratorV2V3.sol:105-112",
+      "actualBehavior": "migrateOne executes withdraw (src/MigratorV2V3.sol:250) -> stake (:256) -> forward (:268-272).",
+      "deviation": "The interface prose states forward-then-restake; the implementation restakes then forwards. DOCS-ONLY — THE IMPLEMENTATION IS CORRECT AND MUST NOT BE INVERTED: the balance deltas bracket the whole withdraw+stake block (:243-246 vs :260-264), so forwarding MUST follow the stake for the principal to net out and leave the delta equal to the reward component alone. Reordering the code to match the prose would forward the principal to the user as if it were a reward.",
+      "recommendation": "Fix the PROSE to read withdraw -> restake -> forward deltas. Do not touch the code.",
+      "lawImpacted": 2,
+      "confidence": "high",
+      "crossRef": "profiles/interface-drift.json DRIFT-001"
+    },
+    {
+      "id": "F-09-02",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-028",
+      "severity": "qa",
+      "contract": "src/interfaces/IMigratorV2V3.sol",
+      "function": "UserMigrationSkipped (event contract) / migrate",
+      "line": 70, "lineStart": 68, "lineEnd": 73,
+      "specText": "story-028 (d130006): \"empty reason = skipped without attempting (dust band, skipCurrent)\". Restated as a hard invariant in IMigratorV2V3.sol:68-73: \"INVARIANT: empty (`reason.length == 0`) means the migration was skipped WITHOUT being attempted (dust band or `skipCurrent`); non-empty means the `migrateOne` self-call was attempted and reverted with this data (standard encodings: `Error(string)` selector 0x08c379a0, `Panic(uint256)` selector 0x4e487b71, or empty returndata reverts).\"",
+      "specSource": "git commit d130006 body + src/interfaces/IMigratorV2V3.sol:68-73",
+      "actualBehavior": "The catch at src/MigratorV2V3.sol:199-201 emits whatever returndata the reverting migrateOne produced — including NOTHING. A bare `revert()`, a `require(cond)` with no message anywhere in the withdraw/stake/hook chain, or out-of-gas in the sub-call under the 63/64 rule all yield `reason.length == 0` from the ATTEMPTED branch.",
+      "deviation": "The stated invariant is a biconditional the code does not satisfy: empty reason does NOT imply 'not attempted'. The interface text contradicts ITSELF in the same sentence — it lists \"empty returndata reverts\" as a member of the NON-EMPTY clause. This is the conflicting-source case: the spec is internally ambiguous, and the ambiguity lands precisely on story-028's stated purpose (letting the owner read the events to tell a genuinely bad position from a misconfiguration). An empty-returndata revert currently reads as dust and would be silently written off. NOTE the 63/64 OOG case is not hypothetical — the same contract anticipates it explicitly in skipCurrent's own NatSpec (\"e.g. gas exhaustion under the 63/64 rule\").",
+      "mitigatingFact": "The ambiguity IS resolvable off-chain today, which is what holds this at QA rather than Low: the `amount` field disambiguates all three empty-reason cases. skipCurrent emits amount == 0; the dust band emits 0 < amount < MINIMUM_STAKE (1e15); an attempted-then-empty-revert emits amount >= MINIMUM_STAKE. An owner reading events per story-028's instruction can separate them — but only if they know to, and the interface tells them the opposite.",
+      "recommendation": "Either (a) correct the invariant prose to the true, one-directional statement ('non-empty implies attempted-and-reverted; empty means either not attempted or attempted with no returndata — disambiguate via `amount` against MINIMUM_STAKE'), or (b) make it a real biconditional by emitting a non-empty sentinel from the catch when reason.length == 0. (a) is sufficient and cheaper.",
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "F-09-03",
+      "type": "invariant-violation",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-027",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "emergencyTransfer / finalizePromotion",
+      "line": 519, "lineStart": 328, "lineEnd": 529,
+      "specText": "SolvencyDetermination.md §4 (ADDED IN THIS RANGE by story-027, commit 1c4e1a9): \"A separate invariant holds for every token `t` ever used as a promo token, including retired ones (`promoToken == address(0)` or rotated to another token): `t.balanceOf(phlimbo) >= totalUnclaimableOf[t]` ... because `finalizePromotion` reserves the bank from its sweep and the only exit for a banked amount is the user's own `claimUnclaimablePromo` pull, which decrements `totalUnclaimableOf[t]` by exactly the amount transferred. (`emergencyTransfer` is the owner-gated exception for the *live* token only — it sweeps the live token's bank; a retired token's bank is out of its reach.)\" Restated as step 5 of the public solvency procedure: \"`t.balanceOf(phlimbo) − totalUnclaimableOf(t) >= 0` (§4).\"",
+      "specSource": "SolvencyDetermination.md §4 + solvency check procedure step 5, both added in 7045a96..02b9bc2",
+      "actualBehavior": "emergencyTransfer (src/PhlimboV3.sol:328-340) sweeps the live promo token's ENTIRE balance — bank included, by design — but does NOT clear `unclaimablePromoOf` / `totalUnclaimableOf`. The bank is a pure liability record with no backing thereafter. The token then RETIRES (finalizePromotion, or simply rotating to another token), at which point the carve-out the doc relies on ('live token only') no longer applies and the invariant is permanently false for that token: totalUnclaimableOf[t] > 0 == t.balanceOf(phlimbo). The published step-5 procedure then reports the contract insolvent for t, forever.",
+      "deviation": "The invariant added by story-027 is stated to hold for EVERY token ever promoted, including retired ones. It does not survive an emergencyTransfer that fires while a bank is live. The doc's parenthetical acknowledges the live-token sweep as an 'exception' but does not carry that exception into the retired state, where it in fact lands.",
+      "secondOrderEffect": "PHANTOM RESERVE. Because the stale bank is never cleared, if `t` is later re-used as the promo token, finalizePromotion:517-519 computes `leftover = balance − banked` against the PHANTOM banked amount, permanently stranding that much of the NEW promotion's genuine leftover in the contract (the slot is zeroed at :521-523, so the only exits left are another promotion in `t` or another emergencyTransfer). The saturating subtraction prevents a revert but not the strand.",
+      "ejectorSeatFact": "STATED AS FACT FOR TRIAGE, NOT ARGUED: emergencyTransfer terminates in `_pause()` (:339), and OZ's `_pause()` carries `whenNotPaused` — so emergencyTransfer REVERTS when the contract is already paused, including for the whole Flushing window (beginFlush pauses). The ejector-seat precedent (story-022 'recovery out-of-band'; pe7m2 closed INVALID) plausibly covers this entry, and NO accounting is being proposed inside emergencyTransfer. The reachable delta is narrow: emergencyTransfer must fire while a bank is live and the contract unpaused, and the phantom-reserve leg additionally needs unpause + re-promotion of the SAME token. FILED AGAINST THE DOC AND finalizePromotion, not against the ejector seat.",
+      "recommendation": "Cheapest correct fix is DOCUMENTARY and does not touch the ejector seat: amend §4 to scope the retired-token invariant with 'absent an emergencyTransfer, which sweeps the live token's bank and leaves an unbacked record — reimbursement is then an out-of-band owner obligation, as with MigratorV2V3.withdrawAll', and add that caveat to step 5 so an observer does not read a post-ejector contract as anomalously insolvent. If the phantom-reserve strand is judged worth closing on-chain, do it in startPromotion (reject or zero a stale bank for a token being re-promoted) — NOT inside emergencyTransfer.",
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "F-09-04",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-024, story-025, story-026, story-027, story-028 (all)",
+      "severity": "qa",
+      "contract": "CLAUDE.md",
+      "function": "n/a",
+      "line": null, "lineStart": null, "lineEnd": null,
+      "specText": "Audit CLAUDE.md, Law 2: \"Stories live in `[story-NNN]`-tagged git commit messages, `lib/<project>/docs/`, and the project `CLAUDE.md`.\"",
+      "specSource": "audit-root CLAUDE.md (three-law hierarchy)",
+      "actualBehavior": "lib/phlimbo-ea/CLAUDE.md is 120 lines and contains ZERO occurrences of 'PhlimboV3' or 'MigratorV2V3' (verified by grep). Both contracts — the entire subject of stories 023-028 and of this run's scope — are absent from the project spec. There is also no docs/ directory; the only design doc is the root-level SolvencyDetermination.md.",
+      "deviation": "DOCUMENTATION GAP, NOT A CODE DEVIATION. Recorded so downstream agents and future runs do not treat this CLAUDE.md as an authoritative spec for the V3 surface: for stories 024-028 the ONLY usable intent sources are the commit bodies, the interface NatSpec, and SolvencyDetermination.md. Every conformance verdict in this run rests on those three. A future run that tries to reconcile V3 behaviour against CLAUDE.md will find nothing and must not read that silence as absence of intent.",
+      "recommendation": "Add a V3 section to lib/phlimbo-ea/CLAUDE.md covering PhlimboV3 + MigratorV2V3 and their Critical Invariants (the §4 solvency invariants, §2.1 accumulator-never-reset, the frozen-staker-set property). Low effort, high leverage for every subsequent audit.",
+      "lawImpacted": 2,
+      "confidence": "high"
+    },
+    {
+      "id": "F-09-05",
+      "type": "faithfulness",
+      "faithfulness": true,
+      "securityEscalation": false,
+      "storyTag": "story-025 vs story-027 (cross-story asymmetry)",
+      "severity": "qa",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "withdrawAll",
+      "line": 319, "lineStart": 319, "lineEnd": 338,
+      "specText": "story-027 (13623b2), on the SAME defect class in PhlimboV3: \"finalizePromotion sweeps only balance − banked with saturating subtraction and no longer clears the bank — it survives rotation.\" Contrast story-025 (ef98cd9): \"Extend withdrawAll to sweep the live promo token\" + \"document the banked-claims trade-off\". PhlimboV3.sol:507-512 states the principle the owner adopted: banked amounts \"belong to users, not to `leftoverRecipient`.\"",
+      "specSource": "git commits 13623b2 and ef98cd9; src/PhlimboV3.sol:507-512",
+      "actualBehavior": "Within this one range the owner fixed the sweep-eats-the-bank problem in PhlimboV3 (reservation at :517-519) but left the structurally identical problem in MigratorV2V3.withdrawAll (:319-338), which sweeps all three token balances in full with no reservation and does not clear the `unclaimable` mapping — banked claims become unbacked and claimUnclaimable then reverts on the ERC20 transfer.",
+      "deviation": "NOT a deviation from story-025's text — story-025 asked for exactly this and got it, and the trade-off is now explicitly documented at IMigratorV2V3.withdrawAll: \"Owner-only LAST-DITCH recovery sweep... including amounts banked in `unclaimable`, whose claims become unbacked (reimbursement is then an out-of-band owner obligation)\". Under Law 3 a documented, owner-gated, explicitly-reasoned trade-off is a trusted design choice, not a footgun. FILED AT QA PURELY TO SURFACE THE ASYMMETRY FOR A HUMAN DECISION, because one detail keeps it from being a clean mirror of the PhlimboV3 ejector seat: PhlimboV3.emergencyTransfer is TERMINAL (ends in _pause() at :339, and reverts if already paused), whereas withdrawAll is explicitly NON-TERMINAL — \"does NOT abort the pass... the seeded list and iterator are untouched and migration can resume\" (:314-316). So the migrator can be swept and then keep migrating, with banked users' claims silently unbacked while the pass continues to look healthy. That resumability is what distinguishes it from the ejector-seat precedent; whether it is worth closing is the owner's call.",
+      "recommendation": "No code change required if the owner affirms the documented trade-off. If closing is preferred, mirror the PhlimboV3 pattern: track a per-token aggregate in _forward and reserve it in withdrawAll with the same saturating subtraction. Do NOT propose accounting inside PhlimboV3.emergencyTransfer — the ejector-seat precedent (pe7m2, closed INVALID) governs there.",
+      "lawImpacted": 2,
+      "confidence": "medium"
+    }
+  ],
+
+  "notReported": [
+    "story-024 accrual-gate presence, audit-08 M-01 sweep-reservation presence, INV-2 (Flushing => paused), and DRIFT-001's direction were supplied as verified axioms and re-confirmed, not re-litigated.",
+    "PhlimboV3.emergencyTransfer sweeping the LIVE promo bank: NOT filed as a standalone finding. Deliberate, documented (:320-327 and IPhlimboV3.sol:267-270), owner-gated and terminal — ejector-seat precedent (story-022 / pe7m2). Its one non-obvious CONSEQUENCE (the doc invariant it falsifies + the phantom reserve) is filed as F-09-03 against the DOC and finalizePromotion instead.",
+    "claimUnclaimablePromo's attacker-supplied `token` argument: checked under Law 1 and REFUTED as a vector — the mapping is written only by batchClaim with the real promo token, so any other token reads 0 and reverts 'Nothing to claim'. Recorded so a future run does not re-raise it.",
+    "migrateOne's missing nonReentrant: checked and CORRECT AS WRITTEN, not an omission — OZ v5's shared lock is already held by migrate, so a guarded migrateOne would revert ReentrancyGuardReentrantCall and the catch would skip every user. The 'Only self' gate is the right substitute. Do not 'fix' this.",
+    "story-026 dust-band off-by-one: checked and EXACT (migrate `amount < minStake` vs stake `amount >= MINIMUM_STAKE`). Not a finding."
+  ],
+
+  "summary": "All five stories (024-028) are faithfully implemented; no story's intent is unsafe, so no Law-1 override fires and there are no security escalations from this scan. Five findings, all QA/Low and all documentation-or-asymmetry rather than behavioural: F-09-01 stale prose ordering (code correct, must not be inverted), F-09-02 story-028's empty-reason invariant is a self-contradicting biconditional, F-09-03 story-027's new retired-token solvency invariant does not survive an emergencyTransfer (+ phantom-reserve strand on token re-use), F-09-04 project CLAUDE.md is stale and omits the entire V3 surface, F-09-05 story-025/027 asymmetry on sweep-vs-reserve. V3-Q-02 TRAP: story-027 does NOT walk into it — the forfeit-sweep vs bank-retain distinction is drawn correctly and written down as rationale at PhlimboV3.sol:507-512, and the saturating subtraction independently prevents the finalize-brick the warning feared. Recommend V3-Q-02 stay retained."
+}

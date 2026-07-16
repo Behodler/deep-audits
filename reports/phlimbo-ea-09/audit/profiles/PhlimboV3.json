@@ -1,0 +1,182 @@
+{
+  "contract": "src/PhlimboV3.sol",
+  "profileTimestamp": "2026-07-15T00:00:00Z",
+  "solidityVersion": "^0.8.19 (compiled with solc 0.8.30)",
+  "run": "phlimbo-ea-09 (regression 7045a96..02b9bc2)",
+  "changedInRange": true,
+  "stories": ["story-024 (H-01 phase gate)", "story-027 (per-user promo bank, audit-08 M-01)"],
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPhlimboV3", "IPausable"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {
+      "status": "verified",
+      "evidence": "Only loop is batchClaim src/PhlimboV3.sol:460-484, bounded by caller-supplied maxIterations and clamped to _stakers.length() at :456-458. Chunked-iterator idiom with monotone flushCursor persisted at :486."
+    },
+    "checkedArithmetic": {
+      "status": "verified",
+      "evidence": "pragma ^0.8.19, no `unchecked` blocks and no assembly anywhere in the file (grep clean). All arithmetic reverts on over/underflow."
+    },
+    "reentrancyGuarded": ["batchClaim (:450)", "claimUnclaimablePromo (:561)", "collectReward (:618)", "stake (:643)", "withdraw (:688)", "claim (:738)"],
+    "notReentrancyGuarded": ["pauseWithdraw (:596) — whenPaused only; CEI respected (state :601-606 before transfer :608)", "emergencyTransfer (:325) — onlyOwner", "finalizePromotion (:511) — onlyOwner", "all owner promo-lifecycle setters"],
+    "accessControlled": ["setDesiredAPY", "setDepletionDuration", "setPauser", "setMigrator", "setHook", "emergencyTransfer", "startPromotion", "topUpPromotion", "setPromoDepletionDuration", "beginFlush", "finalizePromotion", "abortFlush"],
+    "permissionless": ["batchClaim (:450) — deliberate, recipients+amounts fixed by state (:444-447)", "claimUnclaimablePromo (:561) — deliberate self-rescue pull (:551-555)", "collectReward (:618)"],
+    "initializerProtected": "n/a — non-upgradeable, constructor-initialized (:210)",
+    "weakRandomness": {
+      "status": "verified-absent",
+      "evidence": "block.timestamp is used only as a linear-accrual clock (_updatePool :774-834), never as an entropy source for a value-bearing selection. No blockhash/prevrandao/difficulty."
+    }
+  },
+
+  "coreInvariants": [
+    {
+      "id": "INV-1",
+      "name": "Bank conservation",
+      "statement": "totalUnclaimableOf[t] == SUM over u of unclaimablePromoOf[t][u], for every token t",
+      "status": "verified",
+      "evidence": "Exhaustive write-site enumeration. Only two mutation sites: batchClaim :479-480 increments BOTH by the same `pending`; claimUnclaimablePromo :564-565 zeroes the user entry and decrements the total by exactly `amount` (never wholesale-zeroed). finalizePromotion :527-528 deliberately does NOT clear either mapping. No other writes exist."
+    },
+    {
+      "id": "INV-2",
+      "name": "Flushing implies paused",
+      "statement": "promoPhase == Flushing ==> Pausable._paused == true",
+      "status": "verified",
+      "evidence": "Flushing is set only at beginFlush :436, immediately after _pause() :433. The sole _unpause() call site is :282 inside unpause(), which reverts while Flushing (:281). Therefore no path clears the pause while Flushing. This is what makes _claimRewards' promo settlement (:870-876, gated only on promoToken != 0, NOT on phase) unreachable during a flush — its callers stake/withdraw/claim are all whenNotPaused (:643,:688,:738)."
+    },
+    {
+      "id": "INV-3",
+      "name": "accPromoPerShare frozen during Flushing",
+      "statement": "promoPhase == Flushing ==> accPromoPerShare does not advance",
+      "status": "verified",
+      "evidence": "_updatePool's accrual block is gated `address(promoToken) != address(0) && promoPhase != PromoPhase.Flushing` at :824. This is the story-024 / audit-07 H-01 fix, enforced at the accrual site rather than via whenNotPaused on callers, which closes the three paths that reach _updatePool while paused (collectReward, setDesiredAPY commit branch, setDepletionDuration) — see the rationale comment :813-823. beginFlush's own final accrual (:432) runs while phase is still Active, so it is unaffected. The pendingPromo view mirrors the same gate at :955-958, so view and state agree."
+    },
+    {
+      "id": "INV-4",
+      "name": "accPromoPerShare never reset",
+      "statement": "accPromoPerShare is monotonically non-decreasing across promotions",
+      "status": "verified",
+      "evidence": "finalizePromotion clears promoToken/rate/balance (:524-526) but deliberately not the accumulator (:497-499). Only write site is the += at :829. Combined with batchClaim's unconditional debt alignment (:468), pending against the next token starts at exactly zero."
+    },
+    {
+      "id": "INV-5",
+      "name": "Flush completeness over a frozen set",
+      "statement": "finalizePromotion requires flushCursor == _stakers.length(), and set membership cannot mutate during the flush",
+      "status": "verified",
+      "evidence": "Requirement at :513. _stakers mutates only at stake :672 (whenNotPaused) and withdraw :718 (whenNotPaused); INV-2 gives paused during Flushing, so the set is frozen. flushCursor advances monotonically (:460-486) making coverage contiguous. pauseWithdraw (:596, whenPaused) deliberately does NOT touch membership (:592-594)."
+    },
+    {
+      "id": "INV-6",
+      "name": "Sweep reserves the bank",
+      "statement": "finalizePromotion never transfers out tokens owed to the per-user bank",
+      "status": "verified",
+      "evidence": "leftover = balance > banked ? balance - banked : 0 at :517-519, saturating deliberately so the function can never revert and pin the contract in Flushing (:506-509). Contrast the pre-change behaviour at 7045a96:src/PhlimboV3.sol:495, where the global scalar `unclaimablePromo` was zeroed and its tokens swept as leftover — this is the audit-08 M-01 fix."
+    }
+  ],
+
+  "invariantsNOTVerified": [
+    {
+      "id": "UNV-1",
+      "statement": "promoToken.balanceOf(this) >= totalUnclaimableOf[promoToken] (bank solvency for the LIVE token)",
+      "status": "unverified",
+      "why": "Requires reasoning over the interleaving of _claimRewards' reverting promo settlement (:873, pays from accrued amounts tracked via promoRewardBalance) against banked amounts (tracked separately in totalUnclaimableOf). The two accounting systems are disjoint and never cross-checked. Cannot be discharged by local static reasoning — needs a Tier-3 invariant/fuzz run. NOT a claim that it is violated; it is simply not locally provable.",
+      "recommendation": "Hand to invariant-generator as a candidate invariant."
+    },
+    {
+      "id": "UNV-2",
+      "statement": "Re-using a previously-retired token as a NEW promo token is safe w.r.t. its surviving bank",
+      "status": "unverified",
+      "why": "startPromotion (:356) rejects only address(0)/phUSD/rewardToken — it does NOT reject a token whose bank from an earlier promotion is still outstanding. On re-use the contract already holds `banked` of that token while promoRewardBalance tracks only the new `amount` (:369). finalizePromotion's reservation is cumulative over totalUnclaimableOf[token] (:517) so it appears self-consistent, and emergencyTransfer's live-token sweep (:335-340) would again reach that bank. Flagged for interaction/econ scanners to adjudicate; not adjudicated here."
+    },
+    {
+      "id": "UNV-3",
+      "statement": "Staker-set membership <=> userInfo.amount > 0",
+      "status": "violated (as literally stated in the code comment)",
+      "why": "The comment at :670-671 asserts membership <=> amount > 0. The forward direction (amount > 0 ==> member) holds. The converse does NOT survive pauseWithdraw: :596-611 can drive user.amount to 0 while deliberately leaving membership intact (:592-594). The weaker true invariant is `amount > 0 ==> member`. The code's own design accounts for this (a zero-amount member is visited by the flush with pending == 0, harmless per :594), so this is a documentation imprecision, not a behavioural defect. Recorded so downstream agents do not rely on the stronger biconditional."
+    }
+  ],
+
+  "localFindings": [
+    {
+      "id": "LOCAL-V3-001",
+      "type": "state-machine-observation",
+      "severity": "local-informational",
+      "function": "emergencyTransfer",
+      "line": 342,
+      "description": "emergencyTransfer ends with _pause(). OpenZeppelin's Pausable._pause() carries `whenNotPaused` (Pausable.sol:96), so it REVERTS when the contract is already paused. Consequently emergencyTransfer is not callable while the contract is paused — which includes the whole Flushing window (INV-2) and any ordinary pause. Surfaced as a grounded behavioural fact only; exploitability/severity is deliberately not adjudicated here. NOTE for triage: the project's established position is that emergencyTransfer/pauseWithdraw are terminal 'ejector seats' by design (see prior-run precedent pe7m2, closed INVALID).",
+      "recommendation": "No recommendation made at profile stage — for code-scanner to adjudicate against the ejector-seat precedent."
+    },
+    {
+      "id": "LOCAL-V3-002",
+      "type": "arithmetic-observation",
+      "severity": "local-informational",
+      "function": "batchClaim",
+      "line": 455,
+      "description": "`uint256 end = cursor + maxIterations;` overflows and reverts (checked arithmetic) for maxIterations near type(uint256).max, rather than clamping. The clamp at :456-458 only handles end > len after the addition. Fails closed (revert), permissionless caller, no state written — recorded for completeness, not a DoS (any other value works).",
+      "recommendation": "Optional: clamp before adding."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "startPromotion(address,uint256,uint256)", "accessControl": "onlyOwner + whenNotPaused", "precondition": "promoPhase == None (:355); token not 0/phUSD/rewardToken (:356); amount>0; duration>0", "postcondition": "phase -> Active; promoRewardPerSecond = amount*PRECISION/duration (:371)", "externalCalls": ["IERC20(token).balanceOf", "IERC20(token).safeTransferFrom(owner,this)"], "notes": "FoT rejected by balance-delta assert :366; _updatePool() first (:362) so no retroactive accrual"},
+      {"function": "topUpPromotion(uint256)", "accessControl": "onlyOwner", "precondition": "promoPhase == Active (:383)", "postcondition": "promoRewardBalance += amount; rate recomputed over EXISTING window (:393-394)", "externalCalls": ["promoToken.balanceOf", "promoToken.safeTransferFrom"], "notes": "NOT whenNotPaused. Canonical recompute site. FoT assert :391"},
+      {"function": "setPromoDepletionDuration(uint256)", "accessControl": "onlyOwner", "precondition": "promoPhase == Active (:404)", "postcondition": "rate recomputed over remaining balance (:412)", "notes": "NOT whenNotPaused; reaches _updatePool while paused — a path the :824 phase gate exists to close"},
+      {"function": "beginFlush()", "accessControl": "onlyOwner", "precondition": "promoPhase == Active (:430); NOT already paused (_pause reverts, :433)", "postcondition": "final accrual at Active phase (:432); paused; flushCursor=0; phase -> Flushing", "stateChanges": ["_paused", "flushCursor", "promoPhase", "accPromoPerShare via _updatePool"]},
+      {"function": "batchClaim(uint256)", "accessControl": "PERMISSIONLESS + nonReentrant", "precondition": "promoPhase == Flushing (:451)", "postcondition": "for each staker in [cursor,end): promoDebt aligned UNCONDITIONALLY to amount*accPromoPerShare/PRECISION (:468); pending paid direct to STAKER (not caller) via _tryTransfer (:471), else banked (:479-480); flushCursor advanced (:486)", "externalCalls": ["promoToken.transfer via _tryTransfer -> UNTRUSTED recipient"], "stateChanges": ["userInfo[].promoDebt", "unclaimablePromoOf", "totalUnclaimableOf", "flushCursor"], "notes": "Beneficiary is the staker — differs from the caller-routing of ordinary claims. Touches ONLY promo state; stable/phUSD pendings untouched."},
+      {"function": "finalizePromotion(address)", "accessControl": "onlyOwner", "precondition": "phase == Flushing (:512); flushCursor == _stakers.length() (:513); recipient != 0 (:514)", "postcondition": "leftover = max(balance - banked, 0) swept (:519-522); promoToken/rate/balance zeroed (:524-526); banks NOT cleared (:527-528); phase -> None", "externalCalls": ["retiredToken.balanceOf", "retiredToken.safeTransfer(leftoverRecipient) -> semi-trusted"]},
+      {"function": "abortFlush()", "accessControl": "onlyOwner", "precondition": "phase == Flushing (:540)", "postcondition": "phase -> Active. Does NOT unpause — contract stays paused until owner calls unpause()", "notes": "Partial flush leaves consistent state (debts aligned) per :536-537"},
+      {"function": "claimUnclaimablePromo(address)", "accessControl": "PERMISSIONLESS + nonReentrant", "precondition": "unclaimablePromoOf[token][msg.sender] > 0 (:563)", "postcondition": "user entry zeroed (:564); total decremented by exactly amount (:565); reverting safeTransfer to msg.sender (:566)", "notes": "Deliberately NOT whenNotPaused (:551-555) so a blocked-then-unblocked staker can self-rescue mid-flush. CEI: both writes precede the transfer. Works for RETIRED tokens too."},
+      {"function": "pauseWithdraw(uint256)", "accessControl": "whenPaused, strictly msg.sender-only (NOT delegatable to migrator)", "postcondition": "amount debited; ALL THREE debts realigned to reduced amount (:604-606), forfeiting unclaimed accruals; membership NOT touched", "notes": "V3 delta: the debt realignment fixes the latent V1/V2 partial-pauseWithdraw brick. No nonReentrant but CEI-ordered."},
+      {"function": "stake(uint256,address)", "accessControl": "whenNotPaused + nonReentrant + (msg.sender == user || msg.sender == migrator) (:646)", "postcondition": "amount >= MINIMUM_STAKE (:644); auto-claim routed to msg.sender (:657); all 3 debts realigned (:664-666); _stakers.add (:672)", "externalCalls": ["phUSD.safeTransferFrom(msg.sender)", "hook.onDeposit -> UNTRUSTED, called LAST after all state (:678-680)"]},
+      {"function": "withdraw(uint256,address)", "accessControl": "whenNotPaused + nonReentrant + (msg.sender == user || msg.sender == migrator) (:690)", "postcondition": "dust rule forces full exit if 0 < remaining < MINIMUM_STAKE (:704-707); principal AND auto-claimed rewards go to msg.sender (:723); _stakers.remove on full exit (:718)", "externalCalls": ["phUSD.safeTransfer(msg.sender)", "hook.onWithdraw -> UNTRUSTED, called last"]},
+      {"function": "claim(address)", "accessControl": "whenNotPaused + nonReentrant + (msg.sender == user || msg.sender == migrator) (:740)", "postcondition": "rewards -> msg.sender; all 3 debts realigned (:757-759)", "externalCalls": ["hook.onClaim -> UNTRUSTED, called last"]},
+      {"function": "collectReward(uint256)", "accessControl": "PERMISSIONLESS + nonReentrant", "notes": "NOT whenNotPaused — reaches _updatePool while paused; this is the primary path the :824 phase gate closes"},
+      {"function": "emergencyTransfer(address)", "accessControl": "onlyOwner", "postcondition": "sweeps phUSD + rewardToken + LIVE promoToken ENTIRE balance INCLUDING banks (:335-340); then _pause() (:342)", "notes": "See LOCAL-V3-001. Documented trade-off :316-323. A RETIRED token's bank is unreachable here."},
+      {"function": "unpause()", "accessControl": "pauser or owner (:280)", "precondition": "promoPhase != Flushing (:281)"},
+      {"function": "pause()", "accessControl": "pauser or owner (:577)", "notes": "_pause() reverts if already paused"}
+    ],
+
+    "externalCalls": [
+      {"target": "promoToken (IERC20, partner-supplied)", "methods": ["transfer via _tryTransfer (batchClaim)", "safeTransfer (_claimRewards, finalizePromotion, claimUnclaimablePromo, emergencyTransfer)", "safeTransferFrom", "balanceOf"], "trustLevel": "semi-trusted", "notes": "Owner-chosen partner token. FoT/rebasing rejected by policy + balance-delta asserts at :366/:391 (start/topUp only — NOT re-asserted elsewhere). Standard ERC20 assumed."},
+      {"target": "staker address (batchClaim recipient)", "methods": ["promoToken.transfer via _tryTransfer :471"], "trustLevel": "untrusted", "notes": "Arbitrary staker. Non-reverting by construction so a blocklisted/reverting recipient cannot brick the flush. NOTE: _tryTransfer is a raw .call — it does NOT check that `token` has code; a token with no code returns success with empty returndata and is treated as SUCCESS (:887). promoToken is owner-set and non-zero-checked at :356, so this is not reachable with address(0) in the batchClaim path."},
+      {"target": "hook (IPhlimboHook)", "methods": ["onDeposit", "onWithdraw", "onClaim"], "trustLevel": "untrusted (owner-set, external contract)", "notes": "Zero-address guarded at each site (:678,:729,:761). Always invoked LAST, after all state writes and inside nonReentrant. Reentrancy exploitability deferred to interaction analysis."},
+      {"target": "phUSD (IFlax)", "methods": ["mint", "balanceOf", "safeTransfer", "safeTransferFrom"], "trustLevel": "trusted (protocol token)", "notes": "mint at :853 credits the beneficiary — unbounded from this contract's view; supply control lives in phUSD."},
+      {"target": "rewardToken (IERC20)", "methods": ["safeTransfer", "safeTransferFrom", "balanceOf"], "trustLevel": "semi-trusted", "notes": "Assumed standard ERC20, no FoT."}
+    ],
+
+    "stateVariables": [
+      {"name": "accPromoPerShare", "type": "uint256", "mutators": ["_updatePool :829 (ONLY write site)"], "invariant": "INV-3, INV-4"},
+      {"name": "promoPhase", "type": "PromoPhase enum {None,Active,Flushing}", "mutators": ["startPromotion :372 (None->Active)", "beginFlush :436 (Active->Flushing)", "finalizePromotion :529 (Flushing->None)", "abortFlush :541 (Flushing->Active)"], "notes": "Complete transition set; no other writes."},
+      {"name": "flushCursor", "type": "uint256", "mutators": ["beginFlush :435 (reset 0)", "batchClaim :486 (monotone advance)"]},
+      {"name": "unclaimablePromoOf", "type": "mapping(address token => mapping(address user => uint256))", "mutators": ["batchClaim :479 (+=)", "claimUnclaimablePromo :564 (=0)"], "notes": "NEW in this range — replaced the global scalar `unclaimablePromo` (was 7045a96:src/PhlimboV3.sol:138, swept+zeroed at :495)"},
+      {"name": "totalUnclaimableOf", "type": "mapping(address token => uint256)", "mutators": ["batchClaim :480 (+=)", "claimUnclaimablePromo :565 (-= exactly amount)"], "invariant": "INV-1; read for sweep reservation at :517"},
+      {"name": "_stakers", "type": "EnumerableSet.AddressSet (private)", "mutators": ["stake :672 (add)", "withdraw :718 (remove on full exit)"], "invariant": "INV-5; see UNV-3", "notes": "remove is swap-and-pop — mid-flush removal would silently skip a member, which INV-5 prevents"},
+      {"name": "userInfo[].promoDebt", "type": "uint256", "mutators": ["stake :666", "withdraw :712", "claim :759", "pauseWithdraw :606", "batchClaim :468 (unconditional alignment)"]},
+      {"name": "promoRewardBalance", "type": "uint256", "mutators": ["startPromotion :369", "topUpPromotion :393", "_updatePool :830 (accrual decrement)", "finalizePromotion :526 (zero)"]},
+      {"name": "promoRewardPerSecond", "type": "uint256", "mutators": ["startPromotion :371", "topUpPromotion :394", "setPromoDepletionDuration :412", "finalizePromotion :525"], "notes": "Deliberately never recomputed in _updatePool (V2 bug-fix discipline, :810-811)"}
+    ],
+
+    "events": ["Staked", "Withdrawn", "RewardsClaimed", "EmergencyWithdrawal", "MigratorSet", "HookSet", "PromotionStarted", "PromotionToppedUp", "PromoDepletionDurationUpdated", "PromoClaimed", "FlushProgress", "PromoClaimFailed", "UnclaimablePromoClaimed", "PromotionFinalized", "RewardCollected", "RateUpdated", "DepletionDurationUpdated", "IntendedSetAPY", "DesiredAPYUpdated"],
+    "modifiers": ["onlyOwner", "whenNotPaused", "whenPaused", "nonReentrant"]
+  },
+
+  "valueFlow": {
+    "whoCanMovePromoTokensOut": [
+      {"actor": "anyone", "via": "batchClaim :471", "phase": "Flushing only", "destination": "the staker (fixed by state, not caller-chosen)", "bounded": "each staker's accrued pending"},
+      {"actor": "anyone (self)", "via": "claimUnclaimablePromo :566", "phase": "ANY phase, paused or not", "destination": "msg.sender only", "bounded": "own banked amount"},
+      {"actor": "user or migrator", "via": "_claimRewards :873 (from stake/withdraw/claim)", "phase": "requires !paused, hence Active or None", "destination": "msg.sender (caller) — migrator receives during delegation", "bounded": "user's accrued pending"},
+      {"actor": "owner", "via": "finalizePromotion :521", "phase": "Flushing + full cursor coverage", "destination": "leftoverRecipient", "bounded": "balance - banked (bank reserved)"},
+      {"actor": "owner", "via": "emergencyTransfer :338", "phase": "any UNPAUSED state (see LOCAL-V3-001)", "destination": "recipient", "bounded": "ENTIRE live promo balance incl. banks"}
+    ],
+    "note": "Promo tokens can never be moved out during Flushing by the owner (finalizePromotion needs full coverage; emergencyTransfer reverts while paused per LOCAL-V3-001), only by the permissionless flush/pull paths."
+  },
+
+  "trustAssumptions": [
+    "promoToken / rewardToken are standard ERC20: no fee-on-transfer, no rebasing, no ERC777-style callbacks. FoT is asserted only at startPromotion :366 and topUpPromotion :391.",
+    "phUSD is the trusted protocol token; PhlimboV3 holds an unbounded mint right on it (:853).",
+    "The owner-set `hook` is an arbitrary external contract, invoked last at :678/:729/:761 inside nonReentrant.",
+    "The owner-set `migrator` may act on behalf of ANY user for stake/withdraw/claim and RECEIVES their principal and rewards (:723). pauseWithdraw is deliberately not delegatable (:596).",
+    "Owner is non-malicious (project Law 3). Owner sequencing obligations: beginFlush -> batchClaim to full coverage -> finalizePromotion -> unpause."
+  ],
+
+  "complexity": {"loc": 1038, "externalPublicFunctions": 26, "stateVariables": 24, "loops": 1, "assemblyBlocks": 0, "uncheckedBlocks": 0}
+}

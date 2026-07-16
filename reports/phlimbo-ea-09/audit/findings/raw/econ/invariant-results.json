@@ -1,0 +1,117 @@
+{
+  "project": "phlimbo-ea",
+  "run": "phlimbo-ea-09",
+  "agent": "invariant-generator",
+  "commit": "02b9bc21bf83a5d04e40a7345c75fa34663ba55a",
+  "runTimestamp": "2026-07-15T00:00:00Z",
+  "runners": { "forge": true, "medusa": true, "echidna": false },
+  "medusaVersion": "1.5.1",
+  "testFiles": [
+    "workspace/phlimbo-ea/test/invariant/Run09PromoBankInvariant.t.sol",
+    "workspace/phlimbo-ea/test/invariant/Run09MigratorCursorInvariant.t.sol",
+    "workspace/phlimbo-ea/test/invariant/Run09PhUSDBackingInvariant.t.sol",
+    "workspace/phlimbo-ea/test/invariant/Run09PhUSDOverMintMeasure.t.sol",
+    "workspace/phlimbo-ea/test/medusa/Run09PromoBankMedusaHarness.sol"
+  ],
+  "fuzzerConfig": "workspace/phlimbo-ea/medusa-run09.json",
+
+  "honestyNote": "A passing invariant campaign is 'no counterexample found at the stated depth' — absence of evidence, not proof of safety. Only Halmos [PASS] is a proof. Depths are recorded per invariant below and must not be summarized as 'verified safe'.",
+
+  "vacuityWarning": "The PRE-EXISTING harness (test/invariant/PhlimboV3PromoInvariant.t.sol) uses MockStable as the promo token. MockStable transfers NEVER fail, so _tryTransfer (PhlimboV3.sol:471) never returns false, so unclaimablePromoOf/totalUnclaimableOf (:479-480) are NEVER written. Any bank invariant asserted against that harness passes VACUOUSLY (0 == 0). The run-09 harnesses use MockBlocklistToken/MBlockToken and seed a NON-EMPTY bank into every run, with a require() tripwire that aborts the campaign if the bank is empty. That tripwire fired on the first Medusa attempt and caught exactly this vacuity.",
+
+  "invariants": [
+    {
+      "id": "INV-1",
+      "name": "invariant_INV1_bank_conservation_A / _B",
+      "type": "conservation",
+      "statement": "totalUnclaimableOf[t] == SUM over u of unclaimablePromoOf[t][u], for every promo token t",
+      "verdict": "HOLDS",
+      "forge": { "runs": 1000, "depth": 250, "calls": 250000, "reverts": 0 },
+      "medusa": { "calls": 516266, "sequences": 5207, "failures": 0, "branches": 2453 },
+      "coverage": "NON-VACUOUS: bank seeded non-empty in every run; batchClaim exercised 3511+ times/campaign; live bank credits and claimUnclaimablePromo pulls both observed. Campaign drove full rotations (startPromotion -> beginFlush -> batchClaim -> finalizePromotion / abortFlush), re-promotion of a PREVIOUSLY RETIRED token, mid-flush block/unblock churn, and interleaved stake/withdraw/claim/pauseWithdraw/collectReward.",
+      "mutationSitesCovered": [
+        "batchClaim :479-480 (increments both by same `pending`)",
+        "claimUnclaimablePromo :564-565 (zeroes user entry, decrements total by exactly `amount`)",
+        "finalizePromotion :527-528 (clears neither — confirmed bank survives rotation)"
+      ]
+    },
+    {
+      "id": "UNV-1",
+      "name": "invariant_bank_solvency_A / _B",
+      "type": "solvency",
+      "statement": "promoToken.balanceOf(phlimboV3) >= totalUnclaimableOf[promoToken]",
+      "verdict": "HOLDS",
+      "forge": { "runs": 1000, "depth": 250, "calls": 250000, "reverts": 0 },
+      "medusa": { "calls": 516266, "sequences": 5207, "failures": 0 },
+      "note": "Empirically independent of the econ-scanner's ANALYTIC discharge (INV-2 time-disjointness). Two different kinds of evidence now agree. The finalizePromotion sweep reserving `banked` (:517-519) held under every rotation the fuzzer produced, including re-promotion of a retired token."
+    },
+    {
+      "id": "INV-3",
+      "name": "invariant_INV3_acc_frozen_during_flush",
+      "type": "state-machine",
+      "statement": "promoPhase == Flushing ==> accPromoPerShare does not advance (story-024 / audit-07 V3-H-01 fix, gate at :824)",
+      "verdict": "HOLDS",
+      "forge": { "runs": 1000, "depth": 250, "calls": 250000, "reverts": 0 },
+      "medusa": { "calls": 516266, "sequences": 5207, "failures": 0 },
+      "attackedPaths": [
+        "collectReward — permissionless, NOT whenNotPaused, reaches _updatePool during Flushing (the original V3-H-01 vector)",
+        "setDesiredAPY commit branch — reaches _updatePool while paused",
+        "setDepletionDuration — reaches _updatePool while paused",
+        "topUpPromotion / setPromoDepletionDuration during Flushing",
+        "time advance up to 45 days mid-flush, with partial batchClaim cursors"
+      ],
+      "corroboration": "The run-07 V3-H-01 PoC (test/invariant/PromoFlushAccrualPoC.t.sol:76) asserts the BUG exists via assertGt(accAfterCollect, accAfterFlush). It now FAILS at exactly that line — accAfterCollect == accAfterFlush — i.e. the old exploit no longer reproduces. This is PoC-replay evidence that the fix is real, independent of the fuzz campaign.",
+      "supportsProposal": "STRENGTHENS the fix-pending -> fixed proposal for V3-H-01. Not a proof; recommend handing the :824 gate to symbolic-analyzer (Halmos) for an actual proof."
+    },
+    {
+      "id": "INV-4",
+      "name": "invariant_INV4_acc_never_reset",
+      "type": "monotonicity",
+      "statement": "phase == None ==> every staker's pendingPromo == 0 (accumulator never reset across rotations)",
+      "verdict": "HOLDS",
+      "forge": { "runs": 1000, "depth": 250, "calls": 250000, "reverts": 0 },
+      "coverage": "Exercised across repeated rotations including re-promotion of a previously retired token."
+    },
+    {
+      "id": "INV-M-1",
+      "name": "invariant_INVM1_cursor_never_pinned / _never_regresses / _in_range",
+      "type": "liveness",
+      "statement": "A successful migrate(maxIterations > 0) always advances migrateIterator (or completes to -1); the cursor never regresses (story-026 / audit-08 V3-M-04 fix)",
+      "verdict": "HOLDS",
+      "forge": { "runs": 1000, "depth": 250, "calls": 250000, "reverts": 0 },
+      "coverage": "Every migrate call observed advanced the cursor (migrateCalls == advancingMigrates in all sampled runs); completions and skipCurrent both exercised. The campaign actively manufactured reverting positions to try to pin the cursor: V3 un-wired ('Not authorized' inside migrateOne), V2 un-wired, V3 paused (stake reverts), V2 paused (withdraw reverts), dust-band positions (:194-200), fully-exited positions (:193), and blocked reward recipients (_forward banking path). The try/catch at :202-211 absorbed all of them and fell through.",
+      "knownScopeLimit": "Per profile INV-M-1 caveat: try/catch absorbs REVERTS, not gas exhaustion. An OOG migrateOne under the 63/64 rule is NOT reachable by this campaign and remains a documented residual (skipCurrent :284 is the owner backstop). Recorded as a coverage gap with zero weight, not as a clean bill."
+    },
+    {
+      "id": "ECON-09-001-CORROBORATION",
+      "name": "invariant_phUSDRate_tracks_totalStaked",
+      "type": "backing",
+      "statement": "phUSDPerSecond == totalStaked * desiredAPYBps / 10000 / SECONDS_PER_YEAR (the stored emission rate always tracks the live totalStaked)",
+      "verdict": "BROKEN",
+      "forge": { "runs": 1, "calls": 1, "shrunkSequenceLength": 3 },
+      "counterexample": {
+        "sequence": ["stake(actor=0, amount)", "pauseContract()", "pauseWithdraw(actor=0, amount)"],
+        "observed": "phUSDPerSecond = 177751057212395, expected = 36818786564632 (4.83x stale)",
+        "note": "Broken on the FIRST run, 3-call shrunk sequence. No exotic interleaving required."
+      },
+      "corroborates": "ECON-09-001 (econ-scanner, potential-medium, src/PhlimboV3.sol pauseWithdraw)",
+      "severity": "corroboration-only — NOT a new finding; dedup should collapse this into ECON-09-001"
+    }
+  ],
+
+  "passed": 13,
+  "failed": 1,
+  "failures": [
+    {
+      "invariant": "invariant_phUSDRate_tracks_totalStaked",
+      "runner": "forge",
+      "collapsesInto": "ECON-09-001"
+    }
+  ],
+
+  "coverageGaps": [
+    "migrateOne gas-exhaustion (63/64 rule) stall is not reachable by revert-based fuzzing — zero-weight gap, not a clean result.",
+    "Fuzz campaigns used mock tokens; real partner-token quirks (fee-on-transfer, short-return) are out of this campaign's scope and are covered by separate prior probes (P5/P6).",
+    "A HOLDS verdict here bounds nothing beyond the stated call counts."
+  ]
+}

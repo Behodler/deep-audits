@@ -1,0 +1,169 @@
+{
+  "contract": "src/MigratorV2V3.sol",
+  "profileTimestamp": "2026-07-15T00:00:00Z",
+  "solidityVersion": "^0.8.19 (compiled with solc 0.8.30)",
+  "run": "phlimbo-ea-09 (regression 7045a96..02b9bc2)",
+  "changedInRange": true,
+  "stories": ["story-025 (non-reverting forwarding, audit-07 M-01)", "story-026 (migrateOne self-call + dust skip + skipCurrent, audit-08 M-02)", "story-028 (capture revert reason on skip)"],
+  "inheritanceChain": ["Ownable", "ReentrancyGuard", "IMigratorV2V3"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {
+      "status": "verified",
+      "evidence": "Two loops. seedUsers :149-151 is bounded by the owner-supplied calldata array (owner-controlled, not attacker-controlled). migrate :188-212 is bounded by caller-supplied maxIterations and clamped to users.length at :185-186."
+    },
+    "checkedArithmetic": {"status": "verified", "evidence": "pragma ^0.8.19; no unchecked blocks, no assembly (grep clean)."},
+    "reentrancyGuarded": ["migrate (:172)", "claimUnclaimable (:302)"],
+    "notReentrancyGuarded": ["migrateOne (:235) — DELIBERATE and load-bearing, see INV-M-2", "seedUsers/skipCurrent/withdrawAll — onlyOwner"],
+    "accessControlled": ["seedUsers (onlyOwner :144)", "skipCurrent (onlyOwner :284)", "withdrawAll (onlyOwner :318)", "migrateOne (self-call gate :236)"],
+    "permissionless": ["migrate (:172) — NO onlyOwner; anyone may drive the pass", "claimUnclaimable (:302) — self-pull only"],
+    "initializerProtected": "n/a — non-upgradeable; all four dependencies are immutable and zero-checked in the constructor (:122-125)",
+    "weakRandomness": {"status": "verified-absent", "evidence": "No block/tx-derived entropy anywhere in the file."}
+  },
+
+  "coreInvariants": [
+    {
+      "id": "INV-M-1",
+      "name": "The cursor always advances",
+      "statement": "A migrate call with maxIterations > 0 cannot leave migrateIterator unchanged due to a reverting user position",
+      "status": "verified",
+      "evidence": "Every per-user outcome in the loop :188-212 advances `i`: zero position -> continue (:193); dust below minStake -> event + continue (:194-200); otherwise the ENTIRE per-user body runs inside `try this.migrateOne(...)` (:202) whose catch (:204-211) merely emits UserMigrationSkipped and falls through. The cursor is committed at :214-218. This is the audit-08 M-02 fix.",
+      "caveat": "Scope-limited by design and documented at :71-77: try/catch absorbs REVERTS, not gas exhaustion — under the 63/64 rule an OOG migrateOne can starve the rest of the pass. skipCurrent (:284) is the owner backstop."
+    },
+    {
+      "id": "INV-M-2",
+      "name": "migrateOne must NOT be nonReentrant",
+      "statement": "Adding nonReentrant to migrateOne would silently skip EVERY user",
+      "status": "verified",
+      "evidence": "migrate holds the OZ v5 ReentrancyGuard lock (:172 nonReentrant) when it self-calls migrateOne (:202). OZ v5's guard is a single lock shared across all guarded functions, so a guarded migrateOne would revert ReentrancyGuardReentrantCall — and the catch at :204 would swallow it as a per-user skip, producing a silently no-op pass. The contract instead gates with `require(msg.sender == address(this), \"Only self\")` (:236). Rationale documented at :227-234. RECORDED AS A REGRESSION TRAP: any future 'hardening' that adds nonReentrant here is a silent, total failure that still emits a clean-looking completed pass."
+    },
+    {
+      "id": "INV-M-3",
+      "name": "Skip-reason encoding",
+      "statement": "UserMigrationSkipped.reason is empty <=> the migration was never attempted",
+      "status": "verified",
+      "evidence": "Empty reason is emitted at exactly two sites, both before any attempt: the dust-band skip (:198) and skipCurrent (:287). Non-empty reason is emitted only from the catch (:210), carrying raw ABI-encoded revert data from an attempted migrateOne. Matches the INVARIANT documented in IMigratorV2V3.sol:68-73. This is the story-028 delta."
+    },
+    {
+      "id": "INV-M-4",
+      "name": "Reseed only between passes",
+      "statement": "seedUsers cannot replace the list mid-pass",
+      "status": "verified",
+      "evidence": "`require(!seeded || migrateIterator == -1, \"Pass in progress\")` at :145. First call passes on !seeded; later calls require a completed pass. Replaces the list wholesale (:148-151) and resets the cursor to 0 (:154)."
+    },
+    {
+      "id": "INV-M-5",
+      "name": "Reward-delta bracketing nets out the principal",
+      "statement": "phUSD delta across the withdraw+stake block equals the reward component only",
+      "status": "verified (cross-contract legs confirmed against PhlimboV2/PhlimboV3 source)",
+      "evidence": "Balances snapshotted at :243-246, deltas computed at :260-264 after phlimboV2.withdraw(:250) and phlimboV3.stake(:256). The principal is received then restaked so it nets out. Both cross-contract legs confirmed: (a) PhlimboV2.withdraw routes 100% of principal AND auto-claimed rewards to msg.sender — principal via PhlimboV2.sol:392, minted phUSD reward via _claimRewards(user, msg.sender) at PhlimboV2.sol:373 -> :495, stable reward via :500; `user` is only debited (:384-386) and never a payee. (b) PhlimboV3.stake pulls exactly `amount` from msg.sender (PhlimboV3.sol:661) and routes its own auto-claim to msg.sender (:657). So the bracketing is exact on both passes. RESIDUAL ASSUMPTION: no fee-on-transfer on any of the three tokens.",
+      "dustRuleInteraction": "PhlimboV2.withdraw carries a dust rule (PhlimboV2.sol:375-382) that can silently withdraw MORE than the requested `amount` when the residual would be non-zero but sub-MINIMUM_STAKE. It is INERT on the migrate path: migrate passes the full live `amount` read at :192, so remaining == 0 and the branch is not taken. MigratorV2V3's own dust-skip at :194-200 independently excludes sub-minStake positions."
+    }
+  ],
+
+  "invariantsNOTVerified": [
+    {
+      "id": "UNV-M-1",
+      "statement": "unclaimable[token][user] is always backed by a real balance",
+      "status": "explicitly false BY DESIGN",
+      "why": "withdrawAll (:318-340) sweeps the ENTIRE phUSD/rewardToken/live-promo balances to the owner with NO reservation of `unclaimable` — unlike PhlimboV3.finalizePromotion which reserves totalUnclaimableOf. Documented as an accepted trade-off at :82-87 and IMigratorV2V3.sol:150-158: reimbursement becomes an out-of-band owner obligation. Note the deliberate asymmetry: MigratorV2V3 has NO `totalUnclaimable` counterpart to PhlimboV3's totalUnclaimableOf, precisely because it never needs to reserve. Recorded so downstream agents do not read this as an oversight."
+    },
+    {
+      "id": "UNV-M-2",
+      "statement": "The promo bracketing in migrateOne captures the full promo delta",
+      "status": "unverified",
+      "why": "promoToken is read LIVE once at :241 and used for both the `before` snapshot (:245-246) and the `after` read (:262-264). If PhlimboV3's promo slot rotated mid-pass the two would still refer to the same token (cached in a local), so the delta is internally consistent. But whether the promo leg can be non-zero on a FIRST pass, and whether a rotation between migrate calls can strand promo tokens in this contract, is a cross-contract question. Deferred to interaction analysis."
+    }
+  ],
+
+  "localFindings": [
+    {
+      "id": "LOCAL-MIG-001",
+      "type": "access-control-observation",
+      "severity": "local-informational",
+      "function": "migrate",
+      "line": 172,
+      "description": "migrate is PERMISSIONLESS (no onlyOwner) — anyone may drive the pass at any chunk size, and each call issues `phUSD.forceApprove(address(phlimboV3), type(uint256).max)` (:178). Recipients and amounts are fixed by state (seeded list + live V2 reads), so a caller cannot redirect value. Surfaced for interaction analysis: the max-approve to PhlimboV3 is attacker-triggerable, though PhlimboV3.stake only pulls `amount` from msg.sender.",
+      "recommendation": "None at profile stage — for code-scanner to adjudicate."
+    },
+    {
+      "id": "LOCAL-MIG-002",
+      "type": "arithmetic-observation",
+      "severity": "local-informational",
+      "function": "migrate",
+      "line": 184,
+      "description": "`uint256 end = i + maxIterations;` overflows and reverts for maxIterations near type(uint256).max, rather than clamping (clamp at :186 happens after the addition). Identical shape to PhlimboV3.batchClaim:455. Fails closed, no state written.",
+      "recommendation": "Optional: clamp before adding."
+    },
+    {
+      "id": "LOCAL-MIG-003",
+      "type": "code-duplication",
+      "severity": "local-low",
+      "function": "_tryTransfer",
+      "line": 350,
+      "description": "_tryTransfer is duplicated byte-for-byte across MigratorV2V3.sol:350-353 and PhlimboV3.sol:885-888 (verified by diff — see the divergence analysis below). Two independent copies of a security-relevant helper that must stay in lockstep; a future fix applied to one and not the other is a silent divergence. Same fork-drift class as the phoenix-nft-staking clone watch-note.",
+      "recommendation": "Extract to a shared library/base, or add a cross-file drift watch-note for future runs."
+    }
+  ],
+
+  "tryTransferDivergenceAnalysis": {
+    "requested": "Profile BOTH copies and note any divergence",
+    "result": "NO DIVERGENCE — byte-for-byte identical",
+    "method": "sed -n '885,888p' src/PhlimboV3.sol vs sed -n '350,353p' src/MigratorV2V3.sol; diff returned empty",
+    "body": "(bool callSuccess, bytes memory returndata) = address(token).call(abi.encodeCall(IERC20.transfer, (to, amount))); return callSuccess && (returndata.length == 0 || abi.decode(returndata, (bool)));",
+    "sharedSemantics": [
+      "Returns true iff the low-level call succeeded AND (returndata is empty OR decodes to true) — the standard non-reverting SafeERC20-style acceptance rule.",
+      "NO code-existence check on `token`: a call to an address with NO CODE succeeds with empty returndata and is therefore treated as SUCCESS. In PhlimboV3.batchClaim the token is the owner-set, non-zero-checked promoToken (PhlimboV3.sol:356), so this is not reachable with address(0). In MigratorV2V3._forward the tokens are the immutable constructor-checked phUSD/rewardToken (:122-125) and the live promoToken, which is only forwarded under an explicit `address(promoToken) != address(0)` guard (:270-272). Recorded as a shared latent property of the helper, not adjudicated here.",
+      "abi.decode(returndata, (bool)) REVERTS (not returns false) if returndata is non-empty but shorter than 32 bytes or malformed. _tryTransfer is therefore NOT fully non-reverting against a non-conforming token — it is non-reverting against a token that cleanly reverts or cleanly returns false. Both copies share this property. Deferred to interaction analysis for exploitability."
+    ],
+    "callSiteDivergence": "The helper bodies are identical, but the two call sites differ in what they do on failure — correctly, per their contracts: PhlimboV3.batchClaim banks into BOTH unclaimablePromoOf and totalUnclaimableOf (:479-480, the total being needed for the finalizePromotion sweep reservation), while MigratorV2V3._forward banks into `unclaimable` ONLY (:363), since withdrawAll deliberately reserves nothing (UNV-M-1). This is a designed asymmetry, not drift."
+  },
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "seedUsers(address[])", "accessControl": "onlyOwner", "precondition": "!seeded || migrateIterator == -1 (:145); _users.length > 0 (:146)", "postcondition": "users replaced wholesale; seeded = true; migrateIterator = 0", "notes": "No amounts seeded — positions are read live"},
+      {"function": "migrate(uint256)", "accessControl": "PERMISSIONLESS + nonReentrant", "precondition": "seeded (:173); migrateIterator >= 0 (:174); maxIterations > 0 (:175)", "postcondition": "cursor advanced to min(i+maxIterations, len), or -1 on completion (:214-218)", "externalCalls": ["phUSD.forceApprove(phlimboV3, max) :178", "phlimboV3.MINIMUM_STAKE() :181", "phlimboV2.userInfo(user) :192 (LIVE read)", "this.migrateOne (try/catch) :202"], "stateChanges": ["migrateIterator", "unclaimable (via migrateOne->_forward)"]},
+      {"function": "migrateOne(address,uint256)", "accessControl": "SELF-CALL ONLY (:236) — external purely because try/catch requires an external call", "postcondition": "V2 position withdrawn, principal restaked into V3 for `user`, reward deltas forwarded (never reverting)", "externalCalls": ["phlimboV3.promoToken() :241", "balanceOf x3 (bracket) :243-246", "phlimboV2.withdraw(amount,user) :250 -> requires V2 setMigrator(this)", "phlimboV3.stake(amount,user) :256 -> requires V3 setMigrator(this)", "balanceOf x3 (bracket) :260-264", "_forward x3 :268-272"], "notes": "MUST NOT be nonReentrant — see INV-M-2"},
+      {"function": "skipCurrent()", "accessControl": "onlyOwner", "precondition": "seeded && migrateIterator >= 0 (:285)", "postcondition": "emits UserMigrationSkipped(users[idx], 0, \"\") (:287); cursor -> next, or -1 if it consumed the final index (:289)", "notes": "Does NOT touch the skipped user's V2 position. users[idx] is in-bounds: seedUsers forbids an empty list (:146) and the require bounds idx < len."},
+      {"function": "claimUnclaimable(address)", "accessControl": "PERMISSIONLESS + nonReentrant", "precondition": "unclaimable[token][msg.sender] > 0 (:304)", "postcondition": "entry zeroed BEFORE the transfer (CEI, :305-306); reverting safeTransfer to msg.sender", "notes": "Reverting-by-design: a caller still blocked keeps their claim. Mirrors PhlimboV3.claimUnclaimablePromo — but note that copy ALSO decrements a total (PhlimboV3.sol:565); there is no total here."},
+      {"function": "withdrawAll()", "accessControl": "onlyOwner", "postcondition": "sweeps ENTIRE phUSD + rewardToken + live promo balances to owner() INCLUDING banked `unclaimable` (:329-337)", "notes": "Does NOT abort the pass — live reads mean no balance preconditions, so migration can resume (:314-316). Diverges from MigratorV1V2, which does abort."}
+    ],
+
+    "externalCalls": [
+      {"target": "phlimboV2 (IPhlimboV2, immutable)", "methods": ["userInfo (3-field read)", "withdraw(amount,user)"], "trustLevel": "trusted (sibling protocol contract)", "notes": "Requires phlimboV2.setMigrator(this) — deployment prerequisite (a), NOT performed by this contract (:48-50). Missing wiring surfaces as a pass full of 'Not authorized' skips."},
+      {"target": "phlimboV3 (IPhlimboV3, immutable)", "methods": ["MINIMUM_STAKE", "promoToken", "stake(amount,user)"], "trustLevel": "trusted (sibling protocol contract)", "notes": "Requires phlimboV3.setMigrator(this) — deployment prerequisite (b) (:51-52). A PAUSED V3 makes every stake revert -> whole pass skips with 'Pausable: paused'; this includes the entire Flushing window (PhlimboV3 INV-2)."},
+      {"target": "user (forward recipient)", "methods": ["token.transfer via _tryTransfer"], "trustLevel": "untrusted", "notes": "Non-reverting; failure banks into `unclaimable` (:363)"},
+      {"target": "phUSD (IFlax, immutable)", "methods": ["forceApprove", "balanceOf", "safeTransfer"], "trustLevel": "trusted", "notes": "NO mint role needed on this contract — V2 itself mints pending phUSD during withdraw (:54-55)"},
+      {"target": "rewardToken (IERC20, immutable)", "methods": ["balanceOf", "safeTransfer"], "trustLevel": "semi-trusted"}
+    ],
+
+    "stateVariables": [
+      {"name": "users", "type": "address[] (public)", "mutators": ["seedUsers :148-151 (delete + push)"]},
+      {"name": "seeded", "type": "bool", "mutators": ["seedUsers :153"], "notes": "Never reset to false — once true, reseeding is governed solely by migrateIterator == -1"},
+      {"name": "migrateIterator", "type": "int256", "mutators": ["seedUsers :154 (0)", "migrate :215/:217", "skipCurrent :289"], "notes": "0 -> len, then -1 on completion. int256 sentinel idiom inherited from MigratorV1V2."},
+      {"name": "unclaimable", "type": "mapping(address token => mapping(address user => uint256))", "mutators": ["_forward :363 (+=)", "claimUnclaimable :305 (=0)"], "notes": "No total counterpart — see UNV-M-1"},
+      {"name": "phlimboV2 / phlimboV3 / phUSD / rewardToken", "type": "immutable", "mutators": [], "notes": "All four zero-checked at :122-125"}
+    ],
+
+    "events": ["Seeded", "UserMigrated", "MigrateProgress", "RewardForwardFailed", "UserMigrationSkipped", "UnclaimableClaimed", "WithdrawnAll"],
+    "modifiers": ["onlyOwner", "nonReentrant", "'Only self' require-gate (:236)"]
+  },
+
+  "valueFlow": {
+    "whoCanMoveTokensOut": [
+      {"actor": "anyone (via migrate -> migrateOne -> _forward)", "destination": "the seeded user only (fixed by state)", "bounded": "the bracketed reward deltas", "notes": "Caller cannot redirect value; principal lands in PhlimboV3 as the user's position"},
+      {"actor": "anyone (self)", "via": "claimUnclaimable :306", "destination": "msg.sender only", "bounded": "own banked amount"},
+      {"actor": "owner", "via": "withdrawAll :329-337", "destination": "owner() only (not a caller-chosen recipient)", "bounded": "EVERYTHING incl. banks"}
+    ],
+    "custodyWindow": "This contract holds value only transiently WITHIN a single migrateOne (between the V2 withdraw at :250 and the _forward calls at :268-272), plus persistently for any banked `unclaimable` amounts."
+  },
+
+  "trustAssumptions": [
+    "Deployment wiring is a PRECONDITION not enforced on-chain: phlimboV2.setMigrator(this) AND phlimboV3.setMigrator(this) (:48-52). A misconfigured pass still COMPLETES and marks migrateIterator = -1 — it merely emits a pass full of skips. The owner MUST read UserMigrationSkipped events after every pass before trusting it (:69-71). This is an explicit, documented operator obligation.",
+    "The seeded address list is produced by off-chain enumeration of V2 stakers — completeness of the list is not verifiable on-chain.",
+    "All three tokens are standard ERC20 with no fee-on-transfer (the balance-delta bracketing at :260-264 assumes exact transfers).",
+    "Owner is non-malicious (project Law 3); withdrawAll is an acknowledged unconditional escape hatch."
+  ],
+
+  "complexity": {"loc": 373, "externalPublicFunctions": 7, "stateVariables": 8, "loops": 2, "assemblyBlocks": 0, "uncheckedBlocks": 0}
+}

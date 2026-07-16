@@ -22,7 +22,8 @@ Given a submission living at `reports/<run-dir>/submissions/...` with a C4 label
 2. **report#** — the stripped run number with leading zeros removed (`05` → `5`, `10` → `10`).
    A bare family dir with no `-NN` suffix (legacy/seed run) is report `0`.
 3. **type** — the label letter, lowercased: `h` (High), `m` (Medium), `l` (Low),
-   `c` (Centralization), `g` (Gas, if ever labeled).
+   `c` (Centralization), `q` (QA / hardening note, as used by the `Q-0x` sections of a
+   `qa-report.md`), `g` (Gas, if ever labeled).
 4. **issue#** — the label number with leading zeros removed (`M-02` → `2`).
 
 ## Worked examples
