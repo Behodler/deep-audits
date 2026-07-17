@@ -1,0 +1,164 @@
+{
+  "project": "phlimbo-ea",
+  "scanTimestamp": "2026-07-17T00:00:00Z",
+  "scanType": "code",
+  "scanTier": 2,
+  "commit": "f279c627313cf8a9dffa7c4af62b6bdf56bd593d",
+  "baseline": "e32588d",
+  "mode": "regression (story-031)",
+  "contractsScanned": 4,
+  "scannedFiles": [
+    "src/PhlimboV3.sol",
+    "src/MigratorV2V3.sol",
+    "src/PhlimboV2.sol (comparison only)",
+    "src/IFlax.sol (interface only)"
+  ],
+  "knownIssuesSuppression": "BLOCKED for this run per orchestrator instruction (cached KIs are V1-era and not re-derivable from source). Nothing suppressed on KI grounds.",
+
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "denial-of-service / principal-freeze via untrusted callback leg",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "function": "withdraw / stake / claim",
+      "line": 781,
+      "lineStart": 780,
+      "lineEnd": 782,
+      "additionalLocations": [
+        { "function": "stake", "line": 730, "lineStart": 729, "lineEnd": 731 },
+        { "function": "claim", "line": 813, "lineStart": 812, "lineEnd": 814 },
+        { "function": "setHook", "line": 334, "lineStart": 334, "lineEnd": 338 }
+      ],
+      "description": "The optional IPhlimboHook is invoked with no try/catch at the tail of all three principal-moving functions. A reverting hook unwinds the ENTIRE call — including withdraw's principal safeTransfer at :774 — freezing every staker's phUSD principal pool-wide until the owner intervenes. Story-031 completed the three-story banking arc (027/029/031) that made every reward leg in _claimRewards non-reverting, so the hook is now the SOLE remaining revert path in PhlimboV3 that can freeze principal. Critically, the mitigation that justified rating this class a LOW on PhlimboV2 no longer exists: ledger finding V2-L-09 ('Reverting/gas-heavy IPhlimboHook bricks stake/withdraw/claim (no try/catch); pauseWithdraw is hook-exempt') was rated low expressly because 'pauseWithdraw is hook-exempt so a principal exit survives'. Story-030 (e32588d) DELETED pauseWithdraw from PhlimboV3 — verified: zero occurrences of 'pauseWithdraw' in src/PhlimboV3.sol at f279c62 (full-file grep, untruncated). PhlimboV3 therefore has NO hook-exempt user-side exit: no pauseWithdraw, no emergencyWithdraw, and emergencyTransfer is onlyOwner and terminal by design. The escape hatch is gone; the brick remains; and there is no V3-labelled ledger entry for the hook leg at all.",
+      "codeSnippet": "// withdraw(), after the principal transfer at :774\n        if (address(hook) != address(0)) {\n            hook.onWithdraw(msg.sender, user, actualWithdrawAmount);\n        }",
+      "attackVector": "No attacker required. Owner sets a legitimate hook (points system, booster, indexer). At any later time the hook begins reverting — its own bug, a paused/upgraded dependency, a downstream oracle revert, or gas growth. Every subsequent withdraw/stake/claim reverts for EVERY staker. Users have no self-service recourse and cannot compel a fix; recovery requires the owner to notice and call setHook(address(0)).",
+      "lawAnalysis": "Law 3 — IN SCOPE as a non-obvious owner footgun, NOT a 'malicious owner' vector. The owner's knowing action is 'attach an observer', not 'brick withdrawals'. The revert is emergent, third-party, and TIME-SHIFTED: the hook can start reverting long after it was set, with no owner action at that moment. Non-obviousness is amplified by code shape and by the audit record — the hook is the last statement of each function, positioned after all state writes and after the principal transfer, reading as fire-and-forget notification; and the contract profile asserts INV-01 ('A user's principal is never frozen by a failing reward payout') HOLDS at f279c62. That invariant is true only in its narrow reward-leg reading. A competent, non-malicious owner reading it would conclude principal is safe. It is not. Surprise => footgun => report.",
+      "invariantImpact": "INV-01 as written ('never frozen by a failing reward PAYOUT') survives narrowly, but its evident intent ('principal is never frozen') does NOT hold at f279c62. withdraw() reaches its principal safeTransfer at :774 regardless of any reward leg, but the transaction still unwinds at :781.",
+      "severityRationale": "Medium, not High: principal is FROZEN, not stolen; no theft, no permanent loss; owner-reversible in a single cheap setHook(address(0)) tx. Medium, not Low: C4 Medium = 'protocol function/availability impacted' — this is a pool-wide, indefinite-duration withdrawal brick with zero user recourse. The impact shape is identical to ledger finding V3-M-05 (medium, fix-pending): 'Principal is FROZEN, not stolen — recovery requires a protocol-wide owner action the staker cannot compel.' V2-L-09 earned its Low solely from the pauseWithdraw escape; with the escape deleted, the Low rationale is void and the same mechanism lands at Medium on V3.",
+      "conditionality": "HONEST CAVEAT — materiality is config-conditional: `hook` is zero-initialized (:102, :250-253), no default hook contract is deployed, and every call site is zero-address guarded. If no hook is ever set, this finding is inert. It arms the moment setHook is called with a non-zero address. Flagged for human weighting rather than pre-discounted.",
+      "relatedLedgerEntries": [
+        { "label": "V2-L-09", "fingerprint": "08da5bba91148bd7362c082d10f10be2ae08f78ea1e77cd03684861bed2f367e", "status": "open", "severity": "low", "contract": "src/PhlimboV2.sol", "relationship": "SAME mechanism, DIFFERENT contract (PhlimboV2) and different fingerprint. Disclosed per the 'disclose when re-filing' discipline. Re-file basis: V2-L-09's stated Low rationale ('pauseWithdraw is hook-exempt so a principal exit survives') was invalidated on V3 by story-030's removal of pauseWithdraw. This is NOT a silent severity override of a triaged entry — V2-L-09 is open, was never triaged down by a human, and its mitigating fact is now false on V3." },
+        { "label": "V3-M-06", "fingerprint": "efdc3c4f08ee7e371b6d4fb2de6f7a8a527fc938eb863b74fb9d8a68343598bc", "status": "fixed", "relationship": "DIRECTLY ANSWERS this entry's own human triage instruction: 'On verification, also confirm the removal (a) does not strand stakers who could previously escape during a beginFlush pause.' It does strand them — in the hooked configuration. This finding is the discharge of that open verification obligation." },
+        { "label": "V3-M-05", "fingerprint": "69f8b29a043da5933c6e3adfe7bdf8d443bb4ee98cb36459cd998c5776c64df8", "status": "fix-pending", "relationship": "SIBLING, not incompleteFixOf. V3-M-05's root cause is a reverting reward transfer INSIDE _claimRewards; story-029+031 closed that. The hook leg is OUTSIDE _claimRewards and was never in V3-M-05's scope. Do NOT collapse: closing V3-M-05 is correct on its own terms, but must not be read as establishing 'principal can never freeze'." }
+      ],
+      "recommendation": "Wrap the three hook invocations in try/catch (emitting a HookCallFailed event), mirroring the non-reverting discipline the protocol already applies to every reward leg. A hook is an observer; it must not be load-bearing on principal. If the hook is intentionally load-bearing, say so explicitly in NatSpec and reconcile it against INV-01, because the current code shape asserts the opposite.",
+      "confidence": "high",
+      "confidenceBasis": "Mechanism verified directly in source at HEAD. Full-file untruncated greps confirm (a) zero pauseWithdraw occurrences in PhlimboV3.sol, and (b) the ONLY try/catch in the entire file is story-031's phUSD mint leg at :913-914 — the hook sites at :730/:781/:813 are unguarded. Confidence is on the mechanism; see conditionality for materiality.",
+      "newInThisRange": false,
+      "materialityChangedThisRange": true,
+      "materialityNote": "The hook leg is pre-existing (inherited from V2), NOT introduced by story-031. It is surfaced now because two changes in the current baseline window raised its materiality: story-030 deleted the escape hatch that justified its Low, and story-031 made it the sole surviving principal-freeze leg. Routed here per the profile's deferredToInteractionAnalysis item 2."
+    },
+
+    {
+      "id": "CODE-002",
+      "type": "stranded-value / unreachable bank for non-self-service beneficiary",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_claimRewards / claimUnclaimablePhUSD",
+      "line": 915,
+      "lineStart": 913,
+      "lineEnd": 918,
+      "crossContract": "src/MigratorV2V3.sol",
+      "description": "Adjudication of profiler LOCAL-001, which the profile deliberately deferred to interaction analysis. Under migrator delegation, stake/withdraw/claim pass msg.sender as `beneficiary` (:708, :749, :806), so a banked phUSD mint credits unclaimablePhUSDOf[migrator]. VERIFIED against MigratorV2V3 source: the migrator calls only phlimboV3.MINIMUM_STAKE(), phlimboV3.promoToken() and phlimboV3.stake() — it exposes NO call-through to PhlimboV3.claimUnclaimablePhUSD(), no generic execute/forwarder, and claimUnclaimablePhUSD is strictly msg.sender-keyed with no pull-on-behalf. The migrator therefore cannot reach the bank. Unlike the stable/promo banks, the phUSD bank is UN-MINTED, so no balance-sweeping hatch reaches it either: MigratorV2V3.withdrawAll and PhlimboV3.emergencyTransfer both sweep balances, and there is no balance here to sweep. Meanwhile the user's phUSDDebt IS realigned by the caller (:715), so the user's on-chain entitlement is discharged.",
+      "reachabilityAnalysis": "Only the migrator's STRAGGLER (second) pass can reach this. On a first pass the user has no V3 position, so _claimRewards returns early at :898-900 and nothing banks. On a second pass the user has a V3 position with accrued pending, so stake -> _claimRewards(user, migrator) -> try phUSD.mint(migrator, ...) can bank. Additionally requires PhlimboV3's phUSD minter privilege to be revoked INDIVIDUALLY: a global revokeAllMintPrivileges would also break PhlimboV2's bare inline mint (PhlimboV2.sol:495), reverting migrateOne, which MigratorV2V3.migrate catches as UserMigrationSkipped (:202-211) leaving the user's V2 position untouched and unharmed. Two independent exotic preconditions.",
+      "attackVector": "No attacker. Operational: straggler pass runs while PhlimboV3 (but not PhlimboV2) has lost phUSD mint authority. The user's V3 phUSD reward banks to an address that can never pull it, the debt realigns, and migrateOne emits UserMigrated — the pass reports SUCCESS while the reward is silently unreachable.",
+      "dedupAdjudication": "SAME CLASS as ledger V3-L-15 (low, open) — 'MigratorV2V3 lacks a self-pull forwarder: PhlimboV3-side unclaimable bank owned by the migrator is stranded'. This extends it to a THIRD asset (phUSD), exactly as the profiler predicted. Treat as an ECHO of V3-L-15, not a fresh root cause; the single recommended fix (a self-pull forwarder on MigratorV2V3) closes all three legs at once.",
+      "notMateriallyWorse": "EXPLICIT DE-ESCALATION — resisting the tempting inflation. The phUSD leg differs from V3-L-15's stable/promo legs in mechanism (no on-chain recovery path at all, vs. emergencyTransfer for the others), but NOT in severity, and arguably lands SOFTER: (1) no capital is locked — the tokens were never minted, so the protocol's balance sheet is untouched and nothing is stranded from other users; (2) the practical remedy is CHEAPER and less destructive than V3-L-15's — the owner controls phUSD's uncapped mint and can reimburse the user directly, whereas V3-L-15's on-chain remedy (emergencyTransfer) is a TERMINAL ejector seat that kills the protocol to recover the value. Both remain out-of-band owner obligations. Stays LOW, matching V3-L-15.",
+      "recommendation": "Adopt V3-L-15's existing recommendation — add a forwarder on MigratorV2V3 that calls PhlimboV3.claimUnclaimableStable/Promo/PhUSD for itself — and extend it to cover the phUSD pull. Alternatively confirm operationally that the migrator is never a live beneficiary of a failing mint.",
+      "confidence": "high",
+      "confidenceBasis": "Migrator source read in full; absence of a call-through confirmed by reading the complete contract (373 lines), not by a truncated grep."
+    },
+
+    {
+      "id": "CODE-003",
+      "type": "observability / diagnostic loss on a caught revert",
+      "severity": "qa",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_claimRewards",
+      "line": 914,
+      "lineStart": 913,
+      "lineEnd": 918,
+      "description": "The phUSD mint leg uses a bare `catch { }`, discarding the revert data. PhUSDMintFailed(beneficiary, amount) records THAT the mint failed but not WHY. The sibling contract in the same repo does this correctly and deliberately: MigratorV2V3.migrate uses `catch (bytes memory reason)` (:204) and emits the raw ABI-encoded revert data in UserMigrationSkipped, with a docstring that explicitly warns the owner 'MUST read the UserMigrationSkipped events after every pass before trusting it' precisely because the reason is what distinguishes a genuinely bad position from a misconfiguration. The same argument applies here — a bank accruing because mint authority was revoked, because a supply cap was hit, or because the beneficiary is blocklisted are operationally very different situations demanding different responses, and PhUSDMintFailed cannot tell them apart. Silent, unexplained bank growth is exactly the condition an operator most needs to diagnose.",
+      "codeSnippet": "try phUSD.mint(beneficiary, pendingPhUSDAmount) {}\ncatch {\n    unclaimablePhUSDOf[beneficiary] += pendingPhUSDAmount;\n    totalUnclaimablePhUSD += pendingPhUSDAmount;\n    emit PhUSDMintFailed(beneficiary, pendingPhUSDAmount);\n}",
+      "impact": "Off-chain observability only. On-chain accounting is correct (INV-02/03/04 verified to hold). No value at risk.",
+      "recommendation": "Use `catch (bytes memory reason)` and add the reason to PhUSDMintFailed, mirroring MigratorV2V3.migrate's UserMigrationSkipped. Note this is an ADDITIVE event-field change and would be an ABI break for existing indexers of PhUSDMintFailed — cheap now (story-031 is unreleased), expensive later.",
+      "confidence": "high"
+    },
+
+    {
+      "id": "CODE-004",
+      "type": "read-only reentrancy (stale pending views during the value-out window)",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_claimRewards / pendingPhUSD / pendingStable / pendingPromo",
+      "line": 954,
+      "lineStart": 946,
+      "lineEnd": 962,
+      "description": "Recorded per the mandatory reentrancy-class checklist: this row could not be cleared, so it is surfaced rather than silently passed. Debt realignment is CALLER-SIDE (:715-717, :761-763, :808-810), so throughout _claimRewards all three debts are stale — phUSD is already minted (:913) and stable already transferred (:930) while phUSDDebt/stableDebt still hold their pre-claim values. The external pending views (pendingPhUSD :993, pendingStable :1014, pendingPromo :1040) read those debts directly, so during any callback originating inside _claimRewards they report the FULL pending for value that has already been delivered. An integrator consuming these views as an entitlement oracle would double-count.",
+      "reachabilityAnalysis": "The window is real but its trigger is narrow. phUSD (IFlax : IERC20) and the USDC-class rewardToken have no transfer hooks, and neither leg calls the beneficiary directly — so the only inbound-callback surface inside _claimRewards is the promo leg's _tryTransfer(promoToken, ...) at :954, reachable only if the owner selects a hooked (ERC777-class) promo token. startPromotion (:391) rejects only address(0), phUSD and rewardToken — it does NOT exclude hooked tokens. State-changing reentry is fully blocked: OZ ReentrancyGuard uses a single contract-wide lock and every value-handling external entry point (stake, withdraw, claim, batchClaim, collectReward, and all three claimUnclaimable* pulls) carries nonReentrant, so classic, cross-function and cross-contract reentrancy are all cleared. Only the READ-ONLY leg survives, and it lands on a downstream integrator, not on PhlimboV3 itself.",
+      "lawAnalysis": "Law 3 — narrow but genuinely non-obvious owner footgun. An owner choosing an ERC777-class promo token has no reason to expect it to corrupt third parties' reads of pendingPhUSD, an unrelated accumulator. Reported at honest (low) severity with low confidence rather than suppressed, per Law 1 (an uncleared checklist row is a recall risk, not a pass).",
+      "relatedLedgerEntries": [
+        { "label": "L-09", "status": "acknowledged", "contract": "src/Phlimbo.sol", "relationship": "Same class ('cross-function reentrancy lever conditional on hooked-token semantics'), acknowledged on the deprecated V1. On V3 the state-changing leg of that class is fully closed by the contract-wide nonReentrant coverage; only the read-only view leg remains." }
+      ],
+      "recommendation": "Cheapest robust fix: exclude hooked/ERC777 tokens by policy in startPromotion's NatSpec (the fee-on-transfer rejection precedent at :401-403 already establishes the pattern). Structurally cleaner: move debt realignment inside _claimRewards so no external call is ever made against stale debt — but note that is a larger refactor and the current caller-side placement is load-bearing for the banking design's correctness (it is what makes paid and banked paths settle identically).",
+      "confidence": "low",
+      "confidenceBasis": "Window verified in source; exploitability requires BOTH an owner-selected hooked promo token AND a downstream integrator treating the pending views as an oracle. No such integrator identified in scope."
+    }
+  ],
+
+  "clearedLeads": [
+    {
+      "lead": "1 — catch swallows EVERY revert reason, not just blocklisting (supply cap => unpayable ever-growing obligation)",
+      "verdict": "NOT A FINDING (mechanism refuted). Enumerated revert modes: minter-role revoked, global revokeAllMintPrivileges (IFlax:20), supply cap, token pause, recipient blocklist, malicious/upgraded phUSD. For EVERY mode, banking is strictly safer than propagating: it never destroys value, the caller-side debt realignment is identical on paid and banked paths, and the pull retries. The prompt's specific supply-cap concern does not land, for two independently sufficient reasons. (a) The bank is an inert RECORD, not a liability: verified by full-file untruncated grep that unclaimablePhUSDOf and totalUnclaimablePhUSD are touched at exactly 5 sites — declarations :172/:181, the pull :645/:647/:648, and the bank :915/:916. NOTHING in any accounting path reads either. There is no cap adjustment, no solvency check, no distributable-pool interaction (contrast the stable leg's rewardBalance ceiling at :840). An unpayable bank simply sits dormant. (b) 'The pull path would revert forever' is the CORRECT and intended semantic, not a defect: it is exactly claimUnclaimableStable's recoverability contract (profile INV-06), and the revert is atomic — it rolls back the :647-648 writes, leaving the bank intact and payable the instant the cap is raised or authority restored. Converting the revert into a debt owed is right: the alternative (propagating) is precisely the V3-M-07 principal freeze that story-031 exists to close.",
+      "challengedProfileClaim": "Independently re-verified the profile's 'informational only / no cap interaction' claim rather than trusting it — the profile tagged it descriptively, not as `verified`."
+    },
+    {
+      "lead": "2 — try/catch 63/64 gas semantics: force an OOG-revert of a mint that would have succeeded",
+      "verdict": "REFUTED ARITHMETICALLY. The griefing window requires cost(mint) > 63 x cost(catch), and it is not close. `try` forwards 63/64 of gas available at :913 and retains 1/64. To land the attack, 63/64*G must be too little for the mint WHILE 1/64*G still covers the catch block. The catch is not cheap — it is two SSTOREs plus an event: unclaimablePhUSDOf[beneficiary] cold zero->nonzero (~22.1k), totalUnclaimablePhUSD cold nonzero->nonzero (~7.1k), PhUSDMintFailed (~1.5k) — call it ~31k. An ERC20 mint is ~50k (cold balance SSTORE + totalSupply + overhead). Requiring 1/64*G >= 31k forces G >= ~1.98M, which forwards ~1.95M to the mint — roughly 39x more than it needs. The two conditions are mutually exclusive by a ~40x margin. The window only opens if the mint costs more than ~63x the catch (~2M+ gas), which is implausible for an ERC20 mint. If the WHOLE tx runs out of gas, everything reverts and nothing banks. Independently, even if the window existed the impact would be nil: _claimRewards is reachable only via stake/withdraw/claim, all gated on msg.sender == user || msg.sender == migrator, and beneficiary is msg.sender — so a griefer can only grief THEMSELVES, and claimUnclaimablePhUSD re-mints, making it self-healing (INV-06 confirmed as a real recovery path, not a nominal one). No third-party grief vector exists. The same arithmetic refutes the nested-try/catch variant on MigratorV2V3.migrate -> migrateOne -> stake -> mint, whose docstring already flags the 63/64 hazard at the migrateOne level (backstopped by owner-only skipCurrent)."
+    },
+    {
+      "lead": "3 — reentrancy through the catch / new reentry window before caller-side debt realignment",
+      "verdict": "CLEARED for all state-changing classes; the read-only leg is filed as CODE-004. The structural risk the prompt correctly identified — debt realigned AFTER _claimRewards returns, mint is an external call, so a reentrant call could observe stale debt and double-claim — is REAL IN SHAPE but UNREACHABLE IN PRACTICE, for two independent reasons, either of which alone is sufficient. (1) No callback: phUSD is IFlax : IERC20 (src/IFlax.sol, 21 lines, read in full) — mint/burn/authorizedMinters/mintVersion/revokeAllMintPrivileges, no hook surface; a standard ERC20 mint does not call the recipient. (2) No reentry even if it did: OZ ReentrancyGuard is a SINGLE contract-wide _status slot, not per-function, and every value-handling external entry point carries nonReentrant — stake, withdraw, claim, batchClaim, collectReward, claimUnclaimablePromo, claimUnclaimableStable, claimUnclaimablePhUSD. So classic, cross-function AND cross-contract (A->B->A) reentrancy are all blocked; there is no unguarded sibling sharing this state. Full checklist walked: ERC721/ERC1155/ERC777 receive-hooks — verified absent, no _safeMint/safeTransferFrom/onERC*Received anywhere in scope; the only value tokens are ERC20 phUSD (trusted, constructor-fixed, no setter), the USDC-class rewardToken, and the owner-chosen promoToken. story-031 introduces NO new reentry window: the try/catch does not weaken the guard, and the mint at :913 sits inside the same lock the bare mint occupied before."
+    },
+    {
+      "lead": "5 — batchClaim / V3-M-03 risk posture after story-031",
+      "verdict": "UNCHANGED — confirmed, no coupling. batchClaim (:485-520) touches ONLY promo state: it reads accPromoPerShare/promoDebt, aligns promoDebt, and banks failures into unclaimablePromoOf/totalUnclaimableOf. It never reads or writes unclaimablePhUSDOf, totalUnclaimablePhUSD, or any stable field (confirmed by the same full-file grep that bounds the phUSD bank to 5 sites, none in batchClaim). story-031 added no shared helper and no shared state. V3-M-03 (medium, open — 'batchClaim aligns promoDebt BEFORE the transfer... finalizePromotion sweeps the bank to leftoverRecipient (no claimUnclaimable analogue)') is neither worsened nor mitigated. NOTE for the regression/finding-manager pass: V3-M-03's title asserts 'no claimUnclaimable analogue' exists, but claimUnclaimablePromo(address token) IS present at :596 and finalizePromotion reserves totalUnclaimableOf from its sweep (:552-556) — that part of V3-M-03's premise may be stale (likely closed by story-027). Flagged as a re-read target, NOT adjudicated here: V3-M-03's debt-aligned-before-transfer root cause is out of this scan's diff scope and its ledger entry carries no description field to check the claim against."
+    }
+  ],
+
+  "regressionObservations": [
+    {
+      "label": "V3-M-07",
+      "fingerprint": "27e83ab27be4abb142f259f554a61142a592989b180054d1bd3c9dde1904d5c8",
+      "currentStatus": "wont-fix",
+      "observation": "PROPOSE fixed — with a process flag. V3-M-07 ('phUSD mint leg (:863) un-wrapped freezes principal on mint-authorization revocation') was triaged WONT-FIX on 2026-07-16 under Law-3 owner-trust reasoning. story-031 (e04136d, 2026-07-17) implements V3-M-07's recommendation verbatim ('Wrap the phUSD.mint leg in the same _tryTransfer+bank pattern as the stable and promo legs') — the owner fixed a finding they had declined to fix, one day later. The code is correct and this is a good outcome; the flag is that a wont-fix entry silently becoming fixed is a ledger-reconciliation hazard, since wont-fix findings are not normally rescanned for fix verification. Human should apply the status change.",
+      "verificationNote": "The fix is COMPLETE for V3-M-07's own stated scope (the mint leg). It does NOT establish the broader 'principal can never freeze' property — see CODE-001."
+    },
+    {
+      "label": "V3-M-05",
+      "fingerprint": "69f8b29a043da5933c6e3adfe7bdf8d443bb4ee98cb36459cd998c5776c64df8",
+      "currentStatus": "fix-pending",
+      "observation": "All three _claimRewards value-out legs are now non-reverting at f279c62: phUSD mint :913 (try/catch, story-031), stable :930 (_tryTransfer, story-029), promo :954 (_tryTransfer, story-029). V3-M-05's stated root cause — a reverting reward transfer on the stable or promo leg freezing principal — is closed. Human verification required per the fix-pending contract; do not auto-close. Caveat on closure framing: closing V3-M-05 must not be recorded as establishing that principal cannot freeze, because the hook leg (CODE-001) still freezes it."
+    }
+  ],
+
+  "profileChallenges": [
+    {
+      "property": "INV-01 — 'A user's principal is never frozen by a failing reward payout' (profile status: HOLDS at f279c62)",
+      "challenge": "CONTRARY EVIDENCE FOUND — the profile's basis is incomplete. Its supporting argument, 'withdraw() reaches its principal safeTransfer at :774 regardless of any leg failing', is true but not sufficient: REACHING the transfer is not the same as the transfer PERSISTING. The tx can still revert at :781 (hook.onWithdraw), unwinding the :774 transfer atomically. INV-01 survives only under its narrow literal reading ('a failing reward PAYOUT'); its evident intent — the property three stories were spent buying — does not hold in the hooked configuration. See CODE-001. This is exactly why the profile routed the hook to interaction analysis (deferredToInteractionAnalysis item 2); flagging that INV-01 should not have been marked HOLDS while that question was still open."
+    },
+    {
+      "property": "LOCAL-001 (profile severity: local-medium)",
+      "challenge": "DE-ESCALATED to low after interaction-level adjudication. Reachability is gated on TWO independent exotic preconditions (straggler second pass AND individual — not global — revocation of PhlimboV3's minter privilege), and the phUSD leg is not materially worse than the V3-L-15 stable/promo legs it echoes. See CODE-002."
+    }
+  ],
+
+  "summary": {
+    "newFindings": 4,
+    "bySeverity": { "potential-high": 0, "potential-medium": 1, "potential-low": 2, "qa": 1 },
+    "leadsCleared": 4,
+    "leadsRefuted": 2,
+    "storyVerdict": "story-031's phUSD mint-leg banking is correctly implemented. The banking mechanism itself is sound: CEI-correct pull, atomic-revert recoverability, no debt interference, no reentry window, no cap coupling, and no gas-griefing window. The principal finding is not in what story-031 changed but in what it REVEALS: having closed the last reward leg, it leaves the un-try/catch'd IPhlimboHook as the sole surviving path that can freeze staker principal — while story-030, in the same baseline window, deleted the pauseWithdraw escape hatch that was the express reason this class was rated Low on V2."
+  }
+}

@@ -1,0 +1,204 @@
+{
+  "project": "phlimbo-ea",
+  "scanTimestamp": "2026-07-17T00:00:00Z",
+  "scanType": "pattern-matching",
+  "mode": "regression",
+  "submoduleHead": "f279c627313cf8a9dffa7c4af62b6bdf56bd593d",
+  "baselineCommit": "e32588d",
+  "patternDbVersion": "1.1",
+  "patternsChecked": 35,
+  "scope": [
+    "src/PhlimboV3.sol",
+    "src/interfaces/IPhlimboV3.sol",
+    "src/MigratorV2V3.sol",
+    "test/Mocks.sol",
+    "test/PhlimboV3Test.t.sol"
+  ],
+  "changeUnderReview": {
+    "commit": "e04136d",
+    "story": "story-031",
+    "summary": "Banks a failed phUSD mint leg in _claimRewards (try/catch) into unclaimablePhUSDOf[beneficiary] instead of reverting; adds claimUnclaimablePhUSD() which RE-MINTS on pull."
+  },
+  "findingsCount": 1,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "FAILED-PUSH-BANK-UNREACHABLE-PULL",
+      "patternStatus": "NOT-IN-DB — see dbCoverageGaps; matched against task-specified class 1 (try/catch banking: 'the pull path itself reverting / unreachable')",
+      "type": "pull-payment-unreachable-recipient",
+      "severity": "potential-medium",
+      "severityDisputed": true,
+      "contract": "src/PhlimboV3.sol",
+      "function": "_claimRewards / claimUnclaimablePhUSD",
+      "line": 915,
+      "secondaryLines": [644, 645, 647, 648, 913, 916, 361, 364],
+      "relatedContract": "src/MigratorV2V3.sol",
+      "relatedLines": [256, 260, 268, 302, 318],
+      "confidence": "high",
+      "title": "story-031's phUSD bank is unreachable when the beneficiary is the MigratorV2V3 contract: the new catch converts a safe revert-and-retry into permanent, unrecoverable reward loss",
+      "description": "PhlimboV3._claimRewards:913-918 banks a failed phUSD mint into unclaimablePhUSDOf[beneficiary]. beneficiary is msg.sender, which the three call sites (stake:708, withdraw:749, claim:806) gate to `msg.sender == user || msg.sender == migrator`. So beneficiary is either the user (who can pull) or the migrator (who cannot). MigratorV2V3 exposes NO function that calls PhlimboV3.claimUnclaimablePhUSD() and has no arbitrary-call/delegatecall escape; its own claimUnclaimable(token):302 reads its OWN internal `unclaimable` mapping, a different bank. Because the phUSD was NEVER MINTED (the mint reverted), neither PhlimboV3.emergencyTransfer:361-366 nor MigratorV2V3.withdrawAll:318 can recover it — both sweep `balanceOf`, and the bank has no backing balance to sweep. unclaimablePhUSDOf is written only at :915 and drained only at :645-648 keyed by msg.sender, with no owner override or reassignment. The entitlement is therefore PERMANENTLY unrecoverable by any party.\n\nREGRESSION-ADJACENT (the core of this finding): BEFORE story-031, during a phUSD mint-authority outage, MigratorV2V3.migrateOne:256 -> phlimboV3.stake -> _claimRewards -> phUSD.mint REVERTED, unwinding the whole iteration; migrate:204 caught it, emitted UserMigrationSkipped, and the user's V2 position was left UNTOUCHED — the owner restores authority, re-runs migration, user made whole. FULLY RECOVERABLE. AFTER story-031 the mint failure is swallowed, migrateOne COMPLETES (V2 position withdrawn and restaked into V3), the balance-delta reward measurement at :260 reads zero for the V3 component, _forward:268 forwards nothing, and the user's accrued V3 phUSD reward is stranded in unclaimablePhUSDOf[migrator] forever. Loss is bounded to the V3 auto-claim component (the V2 reward component R2 still forwards correctly), but it is permanent.\n\nThe contract's own docblock (:637-643) asserts the opposite: 'A pull that fails because authority is still missing SHOULD revert, leaving the bank intact (exactly the claimUnclaimableStable recoverability semantics).' Those recoverability semantics do NOT hold for the migrator beneficiary — a Law-2 story-faithfulness gap as well as a Law-1 value-loss one.",
+      "matchedSignatures": [
+        "try phUSD.mint(beneficiary, pendingPhUSDAmount) {} catch { unclaimablePhUSDOf[beneficiary] += pendingPhUSDAmount; ... }",
+        "function claimUnclaimablePhUSD() external nonReentrant { uint256 amount = unclaimablePhUSDOf[msg.sender]; ... }",
+        "phlimboV3.stake(amount, user)  // MigratorV2V3:256 — migrator is msg.sender, therefore beneficiary"
+      ],
+      "missingMitigations": [
+        "MigratorV2V3 has no forwarder calling PhlimboV3.claimUnclaimablePhUSD()",
+        "No owner-side override/reassignment of unclaimablePhUSDOf",
+        "emergencyTransfer/withdrawAll sweep balanceOf only — a never-minted bank has no balance to sweep",
+        "No test wires a CONTRACT migrator: test migrator is EOA address(0x5), never passed to setMigrator, so every new test exercises only the self-service path where the pull always works"
+      ],
+      "triggerConditions": [
+        "PhlimboV3 has lost phUSD mint authority (the exact condition story-031 exists to survive)",
+        "PhlimboV3.migrator is the MigratorV2V3 CONTRACT (the deployment intent; an EOA migrator could self-pull and would not strand)",
+        "A migrator pass runs over a user who ALREADY has a V3 position (userInfo[user].amount > 0), e.g. a user who staked directly into V3 before migration, or re-staked into V2 after pass 1",
+        "That user has pendingPhUSDAmount > 0"
+      ],
+      "ledgerDisclosure": {
+        "note": "MANDATORY disclosure — this is adjacent to an owner WONT-FIX and to an open Low, and mints a NEW fingerprint that dedup will not flag. Do not auto-suppress under either precedent.",
+        "V3-M-07": {
+          "fingerprint": "27e83ab27be4abb142f259f554a61142a592989b180054d1bd3c9dde1904d5c8",
+          "status": "wont-fix",
+          "relationship": "V3-M-07 IS the phUSD-mint-leg finding, triaged wont-fix 2026-07-16. story-031 implemented its recommendation ('Wrap the phUSD.mint leg at :863 in the same _tryTransfer+bank pattern') ANYWAY. Its wont-fix rationale was quoted as: 'at worst a temporary, owner-reversible misconfiguration, not an external attack vector' and 'Fully recoverable (re-grant mint role or emergencyTransfer).' THE FIX INVALIDATES THAT RATIONALE ON THE MIGRATOR LEG: the banked phUSD is no longer recoverable by re-granting the mint role (nobody can call the pull) NOR by emergencyTransfer (nothing minted to sweep). The wont-fix precedent therefore does NOT automatically extend to this finding — the property it rested on no longer holds. V3-M-07 itself is now arguably moot (the leg IS wrapped); propose re-triage rather than auto-flip.",
+          "action": "human re-triage proposed; do NOT auto-close, do NOT reuse as suppression basis"
+        },
+        "V3-L-15": {
+          "fingerprint": "166e63933cbe106c5cfeadcbebd8b50122b0095bddd64748492281192925518f",
+          "status": "open",
+          "severity": "low",
+          "relationship": "Same structural hole (migrator lacks a self-pull forwarder), but V3-L-15 is scoped to the STABLE and PROMO banks and was ranked Low on the explicit rationale: 'Value is NOT lost (owner emergencyTransfer sweeps it).' That rationale is TOKEN-SPECIFIC and does NOT extend to the phUSD bank, which holds no backing balance because the mint never happened. This finding should therefore rank ABOVE V3-L-15, not collapse into it. Fixing V3-L-15 as written (add a forwarder for claimUnclaimableStable/Promo) would NOT fix this — the forwarder must also cover claimUnclaimablePhUSD.",
+          "action": "do not collapse; consider widening V3-L-15's recommendation to include the phUSD pull"
+        },
+        "V3-M-05": {
+          "fingerprint": "69f8b29a043da5933c6e3adfe7bdf8d443bb4ee98cb36459cd998c5776c64df8",
+          "status": "fix-pending",
+          "relationship": "story-031 cites V3-M-05/V3-L-14 as its motivation. V3-M-05's trigger is an EXTERNAL blocklisted recipient on the stable/promo legs — already banked by story-029. Per its own triageReason, do not conflate or collapse with the phUSD mint-authority trigger. fix-pending is human-set and never auto-closed."
+        }
+      },
+      "severityRationale": "Proposed potential-medium. FOR Medium: permanent, unrecoverable value loss (C4: 'value leak with stated assumptions and external requirements'); no owner remedy exists; strictly worse than the Low-ranked V3-L-15, whose Low rests on recoverability that is absent here. AGAINST Medium (Law-3 discount, stated honestly): the trigger is an owner-controlled mint-authority revocation, and the same trigger already earned V3-M-07 a wont-fix on owner-trust grounds; assets at risk are accrued rewards, not principal. COUNTER to that discount: Law 3 exempts only OBVIOUS owner-misuse. A competent, non-malicious owner revoking mint authority (a shared-token kill-switch, per V3-M-07's own framing) would be SURPRISED that it permanently destroys migrating users' rewards with no recovery path — especially when the code's docblock promises recoverability. Surprise => footgun => in scope at honest severity. Routed for human triage rather than self-resolved.",
+      "recommendation": "Either (a) add a forwarder on MigratorV2V3 that calls PhlimboV3.claimUnclaimablePhUSD() (and, per V3-L-15, claimUnclaimableStable/Promo) and forwards the proceeds to the affected user; or (b) credit the phUSD bank to `user` rather than `beneficiary` when beneficiary is a contract; or (c) keep the phUSD mint leg reverting specifically on the migrator-delegated path, preserving the pre-story-031 revert-and-skip semantics that V3-M-07's wont-fix relied upon. Whichever is chosen, add a test that wires a CONTRACT migrator via setMigrator — the current suite cannot observe this class.",
+      "references": [
+        "reports/ledgers/phlimbo-ea.json entries V3-M-07, V3-L-15, V3-M-05",
+        "https://docs.soliditylang.org/en/latest/control-structures.html#try-catch"
+      ]
+    }
+  ],
+  "manualReviewCount": 1,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "FAILED-PUSH-BANK-UNREACHABLE-PULL",
+      "type": "gas-griefing-forced-banking",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_claimRewards",
+      "line": 913,
+      "confidence": "low",
+      "title": "try/catch on phUSD.mint catches out-of-gas under the 63/64 rule, so a gas-starved call could force banking on an otherwise-successful mint",
+      "description": "`try phUSD.mint(...)` forwards 63/64 of remaining gas and its catch swallows OOG as well as authorization reverts. In principle a caller who meters gas precisely could make the mint OOG, get caught, and force the amount into the bank while the outer frame survives on the retained 1/64. ASSESSED AS LIKELY SELF-LIMITING: (1) the retained 1/64 must still cover two SSTOREs, an event, the stable leg's low-level call, the promo leg, three debt-realignment SSTOREs, the principal safeTransfer and the hook — the outer tx almost certainly OOGs too and reverts atomically, leaving no state change; (2) beneficiary == msg.sender on every path, so a griefer can only force-bank their OWN reward; (3) the self-service bank is pullable, making it a no-op at worst. Recorded because confidence-of-applicability is low, not because impact is low — it composes with PATTERN-001 (if the caller is the migrator, forced banking becomes permanent loss WITHOUT any mint-authority outage, removing that finding's owner-action precondition). Warrants a Tier-3/PoC gas-metering check before dismissal.",
+      "matchedSignatures": ["try phUSD.mint(beneficiary, pendingPhUSDAmount) {} catch { ... }"],
+      "missingMitigations": ["No explicit gas floor check before the try (e.g. require(gasleft() > N))", "catch does not distinguish OOG from a revert reason"],
+      "routingReason": "Confidence != severity. Low confidence that the pattern APPLIES (gas arithmetic likely makes it self-defeating); if it does apply, it removes PATTERN-001's owner-action precondition. Routed for a gas-metering PoC rather than dropped (Law 1)."
+    }
+  ],
+  "checkedNoMatch": [
+    {
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "verdict": "REFUTED — do not report",
+      "whyItLooksLikeAMatch": "Signatures `mint(`, `IMintable`, `phUSD` all hit, and vulnerableWhen 'two paths can mint for the same accrual (double mint)' is literally true on its face: _claimRewards:913 mints, and claimUnclaimablePhUSD:649 RE-MINTS the same accrual. Any signature-driven tool would flag this.",
+      "whyItIsNotVulnerable": "The two mint paths are mutually exclusive by construction. The bank at :915 is credited ONLY inside the catch — i.e. only when the :913 mint minted nothing. The pull then re-mints exactly the banked amount and zeroes the entry (:647) before minting (CEI). Debt is realigned exactly once by the caller after _claimRewards returns (stake:715, withdraw:761, claim:808), all three of which were verified to have no early-return between the _claimRewards call and the realignment, so pending settles to zero on both branches. No accrual can be minted twice."
+    },
+    {
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "verdict": "REFUTED — do not report",
+      "whyItLooksLikeAMatch": "Signatures `accPhusdPerShare`(≈accPhUSDPerShare), `rewardDebt`(≈phUSDDebt), `_updatePool` all hit; and the phlimbo-ea ledger already carries V3-M-03, the sibling bug where batchClaim aligns promoDebt BEFORE the transfer so a failed transfer destroys earned promo. The task explicitly asked whether the new code repeats that.",
+      "whyItIsNotVulnerable": "The new phUSD leg is the INVERSE of V3-M-03 and is correct. _claimRewards computes pending (:902), attempts the value leg (:913), and banks on failure (:915) — the debt is NOT touched inside _claimRewards. The caller realigns afterwards (:715/:761/:808). So a failed mint leaves the entitlement recorded in the bank, never destroyed. V3-M-03's defect is that batchClaim:503 aligns promoDebt UNCONDITIONALLY before the transfer at :506 — but batchClaim also banks at :514, so V3-M-03's live root cause is the finalizePromotion sweep, not the ordering per se. Ordering verified correct at all three call sites. V3-M-03 is untouched by this range and remains open on its own fingerprint.",
+      "note": "Also verified the rate setters settle at the OLD rate first: setDesiredAPY:270 calls _updatePool() before mutating desiredAPYBps:272 and recomputing at :273; setDepletionDuration:287 calls _updatePool() before recomputing rewardPerSecond:295. stake/withdraw call _updatePool() (:699/:746) before mutating amount and only then _updatePhUSDEmissionRate() (:725/:776). No accrual-order defect."
+    },
+    {
+      "patternId": "REWARD-RUNWAY-DEPLETION + EMISSION-WINDOW-BOUNDARY",
+      "verdict": "REFUTED — Linear-Depletion class does NOT apply to this change",
+      "whyItLooksLikeAMatch": "Linear-Depletion is a known phlimbo-ea-origin class (V1 rate-recompute bug, recurred as phoenix-nft-staking run-18 M-01), and the task asked specifically whether story-031 touches a depletion/emission-rate recompute path.",
+      "whyItIsNotVulnerable": "The changed code touches NO rate path. claimUnclaimablePhUSD:644-651 does not call _updatePool() or _updatePhUSDEmissionRate(), and does not need to: phUSDPerSecond = (totalStaked * desiredAPYBps)/10000/SECONDS_PER_YEAR (:985) is a function of totalStaked and APY only, and the pull mutates neither. It also does not touch rewardBalance or accPhUSDPerShare. The phUSD leg is uncapped minting, not drawn from the depleting `rewardBalance` pool, so no windowEnd/runway interaction exists. The V2 discipline (no recompute inside _updatePool) is intact at :848. Rate recomputes remain confined to setDepletionDuration:295, collectReward:680, topUpPromotion:429, setPromoDepletionDuration:447, startPromotion:406 — none in the diff.",
+      "note": "totalUnclaimablePhUSD is pure bookkeeping — not consumed by any cap or solvency check. Underflow-safe at :648 because it is the sum of all per-user banks, so total >= amount always."
+    },
+    {
+      "patternId": "REENTRANCY-ERC777 / REENTRANCY-CROSS-FUNCTION / REENTRANCY-READONLY",
+      "verdict": "REFUTED — do not report",
+      "whyItLooksLikeAMatch": "The new code adds an external call (phUSD.mint) inside _claimRewards, and _claimRewards runs BEFORE the caller realigns phUSDDebt — a transient window where pendingPhUSD() reads stale non-zero. claimUnclaimablePhUSD also makes an external mint call.",
+      "whyItIsNotVulnerable": "CEI is respected in claimUnclaimablePhUSD: the entry is zeroed (:647) and the total decremented (:648) BEFORE the mint (:649). All state-mutating user entry points carry nonReentrant (stake:694, withdraw:739, claim:789, batchClaim:485, collectReward:669, claimUnclaimablePromo:596, claimUnclaimableStable:619, claimUnclaimablePhUSD:644). OZ v5 ReentrancyGuard is a SINGLE lock shared across all guarded functions, so the sibling set is genuinely covered — the pattern's 'per-function guards not sharing a lock' condition does not hold. The only unguarded state-mutating functions are onlyOwner setters plus pause/unpause; reentering those requires the owner (Law 3, non-malicious owner). Read-only reentrancy is moot: phUSD is a FIRST-PARTY token fixed at construction that never rotates, so the mint callee is not attacker-controlled, and the hook (an owner-set external call) fires only AFTER debt realignment (:812), outside the inconsistent window."
+    },
+    {
+      "patternId": "RETURN-VALUE-IGNORE",
+      "verdict": "REFUTED — superficial, tool-noise; explicitly NOT reported",
+      "whyItLooksLikeAMatch": "`_tryTransfer` uses a raw `.call` (:972) and the new code uses try/catch — both look like unchecked external calls to a signature matcher.",
+      "whyItIsNotVulnerable": "Both deliberately and correctly handle the return: _tryTransfer:973 checks `callSuccess && (returndata.length == 0 || abi.decode(returndata,(bool)))`, which is the correct non-reverting SafeERC20-equivalent; try/catch is used for phUSD.mint precisely because IFlax.mint returns void and cannot be bool-decoded. Reporting this would dilute the report (CLAUDE.md: common findings from automated tools without a demonstrated HM path are out of scope)."
+    },
+    {
+      "patternId": "FEE-ON-TRANSFER-ACCOUNTING",
+      "verdict": "REFUTED",
+      "whyItLooksLikeAMatch": "MigratorV2V3.migrateOne:243-264 uses balanceBefore/balanceAfter deltas — a direct signature hit.",
+      "whyItIsNotVulnerable": "The balance-delta measurement is the CORRECT (notVulnerableWhen) side of this pattern, not the defective one. Tokens are first-party phUSD plus an owner-chosen rewardToken/promoToken. Generic fee-on-transfer is C4-known-invalid and was already dropped for this project as L-04 (run-07)."
+    },
+    {
+      "patternId": "MIGRATION-CURSOR-PINNING (V3-M-04, open Medium)",
+      "verdict": "UNAFFECTED by this range — no new match",
+      "detail": "src/MigratorV2V3.sol is NOT modified in e32588d..f279c62. V3-M-04 (two unskippable revert vectors permanently pin the migration cursor) remains open on its own fingerprint (95552867…). Interaction assessed: story-031 REMOVES a potential revert from migrateOne's path (the phUSD mint), which weakly HELPS cursor progress — but that is precisely the mechanism of PATTERN-001, where advancing instead of reverting is what strands the reward. Note the pre-existing backstops migrate:202-211 (try/catch + UserMigrationSkipped) and skipCurrent:284 already absorb a reverting mint, so the mint was never a cursor-pinning vector; do not credit story-031 with fixing V3-M-04."
+    },
+    {
+      "patternId": "BLOCKLIST-REVERTING-RECIPIENT (USDC-style)",
+      "verdict": "No new match; V3-Q-06 confirmed still live",
+      "detail": "The phUSD mint leg's trigger is mint-authority revocation, not recipient blocklisting — phUSD is first-party and does not blocklist. The stable/promo legs' blocklist banking (:930, :954) is pre-existing (story-029) and unchanged. V3-Q-06 (test/Mocks.sol MockBlocklistToken mislabelled 'USDT-style' when it is recipient-side and therefore models USDC) is CONFIRMED STILL PRESENT at test/Mocks.sol:140 — untouched by this range, so it remains open, not re-filed. Corroborates the standing project note: USDC blocks recipients, USDT is sender-side only."
+    },
+    {
+      "patternId": "INCORRECT-OPERATOR / UNSAFE-DOWNCAST / DIVISION-PRECISION / ROUNDING-DIRECTION",
+      "verdict": "No match in the changed surface",
+      "detail": "The new code performs no casts, no divisions, and no boundary comparisons. `require(amount > 0)` (:646) is a nothing-to-claim guard, not a value-bearing threshold — explicitly excluded by INCORRECT-OPERATOR's own note ('do NOT flag every require()/if()')."
+    },
+    {
+      "patternId": "ERC4626-INFLATION, ORACLE-STALE, ORACLE-ROUNDID, SIGNATURE-REPLAY, FLASH-LOAN-PRICE, UNPROTECTED-INIT, STORAGE-COLLISION, MISSING-SLIPPAGE, SELFDESTRUCT-FORCE-ETH, DOS-UNBOUNDED-LOOP, DOUBLE-VOTING, PERMIT-FRONTRUN, FIRST-DEPOSITOR-ATTACK, CROSS-CHAIN-REPLAY, TIMELOCK-BYPASS, REENTRANCY-ERC721-RECEIVE, WEAK-PRNG, YIELD-PRINCIPAL-ACCOUNTING-SKEW, BATCH-PAYOUT-FIXED-POT, TWO-STEP-COMMIT-WINDOW",
+      "verdict": "Checked — zero grep hits or no applicable surface in the changed code (normal, not an error)",
+      "detail": "No ERC4626 vault, no oracle, no signatures/permit, no proxy/initializer, no swap, no ETH handling, no NFT receive hook, no PRNG, no strategy routing, no count-gated pot, no bridge in the changed surface. TWO-STEP-COMMIT-WINDOW hits setDesiredAPY:262 but that code is unchanged in this range and its accrual-settle ordering was verified correct (see REWARD-ACCRUAL-ORDER note); DOS-UNBOUNDED-LOOP hits batchClaim:495 and migrate:188 but both are cursor-chunked and unchanged."
+    }
+  ],
+  "patternsSkipped": [
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "reason": "SKIP RULE: note field explicitly states 'C4 typically considers this QA/known issue'. Not emitted as a primary finding. Checked for an HM twist beyond the generic QA framing: MigratorV2V3:178 uses forceApprove(type(uint256).max) on a first-party token to a first-party spender — no plausible HM twist, so nothing routed to manualReview."
+    },
+    {
+      "patternId": "CENTRALIZATION-ADMIN",
+      "reason": "note states 'C4 considers centralization as Low/QA unless it enables rug pull'. onlyOwner surface unchanged in this range; V2-C-01..04 already carry the standing centralization findings in the ledger. Not re-emitted."
+    }
+  ],
+  "dbCoverageGaps": [
+    {
+      "proposedPatternId": "FAILED-PUSH-BANK-UNREACHABLE-PULL",
+      "gap": "vulnerability-patterns.json v1.1 has NO pattern for the failed-push-becomes-pull / pull-payment banking class, despite phlimbo-ea now carrying FOUR distinct banks (unclaimablePromoOf, unclaimableStableOf, unclaimablePhUSDOf, and MigratorV2V3.unclaimable) and the class having already produced V3-M-03, V3-L-15 and now PATTERN-001. PATTERN-001 was found by reasoning against the task-specified class list, NOT by the DB — the DB tier alone would have missed it.",
+      "proposedCodeSignatures": ["try ", "catch {", "unclaimable", "banked", "_tryTransfer", "claimUnclaimable", "pull-payment"],
+      "proposedVulnerableWhen": [
+        "banked amount is keyed to a beneficiary that has no code path to call the pull (contract beneficiary without a forwarder)",
+        "the pull re-mints/re-creates value rather than transferring custodied tokens, so no balance-sweep escape hatch can recover it",
+        "debt/entitlement aligned before the value leg so a failure destroys the entitlement (V3-M-03 shape)",
+        "catch swallows out-of-gas as well as the intended failure, allowing forced banking",
+        "banking converts a previously atomic revert-and-retry into an irreversible partial state transition",
+        "a sweep/finalize path drains the bank's backing balance"
+      ],
+      "proposedNotVulnerableWhen": [
+        "beneficiary is provably an EOA or a contract with a pull forwarder",
+        "entitlement recorded before/independently of the value leg",
+        "an owner escape hatch can recover the banked value"
+      ],
+      "recommendation": "Add to patterns/vulnerability-patterns.json (v1.2) with category 'staking-yield' or a new 'pull-payment' category, severity MEDIUM. Note the beneficiary-reachability check explicitly — it is the non-obvious leg."
+    }
+  ],
+  "errors": [],
+  "coverageNotes": [
+    "Pattern DB loaded successfully: 35 patterns, v1.1, no parse errors.",
+    "All 5 changed files were readable; no coverage gaps from unreadable sources.",
+    "src/MigratorV2V3.sol read in full despite being outside the diff range, per the task's V3-M-04 request.",
+    "TEST-BLIND-SPOT (not itself a finding, but material to PATTERN-001): the 5 new tests in PhlimboV3PhUSDMintBankTest declare `address migrator = address(0x5)` but NEVER call phlimbo.setMigrator(...). The address is used only as a funded ordinary staker. Every new test therefore exercises beneficiary == msg.sender == user, the one routing where the pull always succeeds. The suite is structurally incapable of observing the migrator-stranding class it introduces."
+  ]
+}

@@ -1,0 +1,365 @@
+{
+  "contract": "src/PhlimboV3.sol",
+  "profileTimestamp": "2026-07-17T00:00:00Z",
+  "solidityVersion": "^0.8.19",
+  "commit": "f279c627313cf8a9dffa7c4af62b6bdf56bd593d",
+  "baseline": "e32588d",
+  "scope": "Diff-anchored profile of the reward-claim / banking machinery (story-031).",
+  "worktreeClean": true,
+
+  "diffCharacterization": {
+    "commitsInRange": [
+      {
+        "sha": "e04136d",
+        "story": "story-031",
+        "summary": "Bank failed phUSD mint leg in _claimRewards (V3-L-14 / V3-M-05 residual)",
+        "sourceImpact": "All 57 added lines in src/PhlimboV3.sol come from this commit."
+      },
+      {
+        "sha": "f279c62",
+        "story": "story-031",
+        "summary": "Enable optimizer, disable via_ir for builds (resolves EIP-170 flag)",
+        "sourceImpact": "foundry.toml + .gas-snapshot only. Zero Solidity source delta."
+      }
+    ],
+
+    "newStateVariables": [
+      {
+        "name": "unclaimablePhUSDOf",
+        "type": "mapping(address => uint256)",
+        "visibility": "public",
+        "line": 172,
+        "purpose": "Per-beneficiary bank of phUSD reward whose mint reverted inside _claimRewards.",
+        "keying": "NOT token-keyed. Justified: phUSD is constructor-assigned and has no setter (verified)."
+      },
+      {
+        "name": "totalUnclaimablePhUSD",
+        "type": "uint256",
+        "visibility": "public",
+        "line": 181,
+        "purpose": "Aggregate of the phUSD bank across all users. Purely informational: nothing is custodied against it because the tokens were never minted.",
+        "capInteraction": "None. phUSD emission is uncapped minting, not drawn from a distributable pool, so there is no ':789'-style cap adjustment as was required for the stable bank."
+      }
+    ],
+
+    "newFunctions": [
+      {
+        "name": "claimUnclaimablePhUSD()",
+        "line": 644,
+        "visibility": "external",
+        "modifiers": ["nonReentrant"],
+        "pauseGated": false,
+        "note": "Deliberately NOT whenNotPaused: beginFlush pauses the contract, so a gate would lock users out of self-rescue for the whole flush window. Mirrors claimUnclaimableStable / claimUnclaimablePromo."
+      }
+    ],
+
+    "newEvents": ["PhUSDMintFailed(address indexed beneficiary, uint256 amount)", "UnclaimablePhUSDClaimed(address indexed user, uint256 amount)"],
+
+    "changedControlFlow": {
+      "_claimRewards": "phUSD mint leg (line 913) wrapped in try/catch. On catch: credit unclaimablePhUSDOf[beneficiary], increment totalUnclaimablePhUSD, emit PhUSDMintFailed. Previously a bare phUSD.mint() that propagated the revert and bricked the whole principal path.",
+      "batchClaim": "UNCHANGED in this range. Still banks promo via _tryTransfer at :506 into unclaimablePromoOf/totalUnclaimableOf (story-027, audit-08 M-01). batchClaim never touches the phUSD or stable legs.",
+      "bankingHelpers": "No new shared helper. The phUSD leg uses try/catch rather than the existing _tryTransfer (:971) because IFlax.mint returns void and _tryTransfer is a bool-decoding ERC20.transfer wrapper."
+    },
+
+    "interfaceDelta": "IPhlimboV3.sol adds the two events, the claimUnclaimablePhUSD() declaration, and the unclaimablePhUSDOf/totalUnclaimablePhUSD view getters. Additive only — no signature changed or removed, so no ABI break for existing integrators."
+  },
+
+  "threeValueOutLegs": {
+    "note": "Line numbers are ACTUAL at HEAD f279c62 and have shifted from the historical values in the task prompt. Actual leg ORDER in _claimRewards is phUSD -> stable -> promo.",
+    "enclosingFunction": "_claimRewards(address user, address beneficiary) internal  [line 895-963]",
+
+    "legs": [
+      {
+        "leg": "phUSD mint leg",
+        "historicalLine": "~863",
+        "currentLine": 913,
+        "bankBlock": "914-918",
+        "code": "try phUSD.mint(beneficiary, pendingPhUSDAmount) {}\ncatch {\n    unclaimablePhUSDOf[beneficiary] += pendingPhUSDAmount;\n    totalUnclaimablePhUSD += pendingPhUSDAmount;\n    emit PhUSDMintFailed(beneficiary, pendingPhUSDAmount);\n}",
+        "guardMechanism": "try/catch (high-level)",
+        "failureBehavior": "CAUGHT and BANKED. Does not propagate.",
+        "changedThisRange": true,
+        "pendingComputedAt": 902,
+        "stateWrittenBefore": "None inside _claimRewards. pendingPhUSDAmount is read-only-derived from userDetails.amount, accPhUSDPerShare, userDetails.phUSDDebt.",
+        "stateWrittenAfter": "None inside _claimRewards on the success path. On the catch path: unclaimablePhUSDOf[beneficiary], totalUnclaimablePhUSD. Debt realignment is done by the CALLER after _claimRewards returns.",
+        "trigger": "PhlimboV3 losing mint authority on phUSD (owner-privileged, fully recoverable)."
+      },
+      {
+        "leg": "stable / reward transfer leg",
+        "historicalLine": "~858",
+        "currentLine": 930,
+        "bankBlock": "931-933",
+        "code": "if (!_tryTransfer(rewardToken, beneficiary, pendingRewardAmount)) {\n    unclaimableStableOf[beneficiary] += pendingRewardAmount;\n    totalUnclaimableStable += pendingRewardAmount;\n    emit StableClaimFailed(beneficiary, pendingRewardAmount);\n}",
+        "guardMechanism": "_tryTransfer (low-level call + bool decode)",
+        "failureBehavior": "CAUGHT and BANKED. Does not propagate.",
+        "changedThisRange": false,
+        "pendingComputedAt": 921,
+        "stateWrittenBefore": "None inside _claimRewards.",
+        "stateWrittenAfter": "On failure: unclaimableStableOf[beneficiary], totalUnclaimableStable.",
+        "trigger": "Recipient-blocklisting rewardToken (USDC-class). Note: USDC blocklists recipients; USDT does not (see audit-09 Q-03 mock mislabel).",
+        "capNote": "No ':789' cap change needed — banked stable was already accrued out of rewardBalance in _updatePool, so it is not part of the distributable balance and is never redistributed (audit-09 M-01)."
+      },
+      {
+        "leg": "promo transfer leg",
+        "historicalLine": "~873",
+        "currentLine": 954,
+        "bankBlock": "956-960",
+        "code": "if (_tryTransfer(promoToken, beneficiary, pendingPromoAmount)) {\n    emit PromoClaimed(user, pendingPromoAmount);\n} else {\n    unclaimablePromoOf[address(promoToken)][beneficiary] += pendingPromoAmount;\n    totalUnclaimableOf[address(promoToken)] += pendingPromoAmount;\n    emit PromoClaimFailed(address(promoToken), beneficiary, pendingPromoAmount);\n}",
+        "guardMechanism": "_tryTransfer (low-level call + bool decode)",
+        "failureBehavior": "CAUGHT and BANKED. Does not propagate.",
+        "changedThisRange": false,
+        "pendingComputedAt": 947,
+        "guardedBy": "Whole block gated on address(promoToken) != address(0) at line 946.",
+        "stateWrittenBefore": "None inside _claimRewards.",
+        "stateWrittenAfter": "On failure: unclaimablePromoOf[promoToken][beneficiary], totalUnclaimableOf[promoToken].",
+        "reservation": "Banked promo lands in totalUnclaimableOf and is RESERVED from finalizePromotion's leftover sweep (:552-556)."
+      }
+    ],
+
+    "conclusion": "All three value-out legs in _claimRewards are now non-reverting and banked. story-031 closes the last propagating leg. No leg in the claim path can brick a user's principal path as of f279c62."
+  },
+
+  "bankingMechanism": {
+    "summary": "Three parallel, independent per-beneficiary banks — one per asset class. Each records a failed payout and exposes a permissionless, un-pause-gated self-service pull.",
+
+    "banks": [
+      {
+        "asset": "phUSD",
+        "perUser": "unclaimablePhUSDOf[beneficiary]",
+        "aggregate": "totalUnclaimablePhUSD",
+        "tokenKeyed": false,
+        "keyingJustification": "VERIFIED: phUSD assigned only at constructor :243, no setter exists. Cannot rotate.",
+        "writtenBy": ["_claimRewards :915-916"],
+        "retrievalPath": "claimUnclaimablePhUSD() :644",
+        "retrievalAuth": "msg.sender only — permissionless but strictly self-service. No pull-on-behalf.",
+        "pauseGated": false,
+        "settlement": "RE-MINTS. phUSD.mint(msg.sender, amount) at :649. Unique among the three: the tokens were NEVER minted, so the contract custodies nothing against this balance.",
+        "custodyBacking": "NONE — this is the key asymmetry vs the stable/promo banks.",
+        "failedPullSemantics": "Reverts (mint still unauthorized), leaving the bank intact. Matches claimUnclaimableStable recoverability."
+      },
+      {
+        "asset": "stable / rewardToken",
+        "perUser": "unclaimableStableOf[beneficiary]",
+        "aggregate": "totalUnclaimableStable",
+        "tokenKeyed": false,
+        "keyingJustification": "rewardToken assigned only at constructor :244, no setter.",
+        "writtenBy": ["_claimRewards :931-932"],
+        "retrievalPath": "claimUnclaimableStable() :619",
+        "retrievalAuth": "msg.sender only",
+        "pauseGated": false,
+        "settlement": "rewardToken.safeTransfer(msg.sender, amount) :624 — reverting transfer, contract holds the tokens.",
+        "custodyBacking": "Contract-held rewardToken balance, already accrued out of rewardBalance."
+      },
+      {
+        "asset": "promo",
+        "perUser": "unclaimablePromoOf[token][beneficiary]",
+        "aggregate": "totalUnclaimableOf[token]",
+        "tokenKeyed": true,
+        "keyingJustification": "REQUIRED: promoToken DOES rotate — set at :403 (startPromotion), cleared at :559 (finalizePromotion). Design is internally consistent.",
+        "writtenBy": ["_claimRewards :957-958", "batchClaim :514-515"],
+        "retrievalPath": "claimUnclaimablePromo(address token) :596",
+        "retrievalAuth": "msg.sender only",
+        "pauseGated": false,
+        "settlement": "IERC20(token).safeTransfer(msg.sender, amount) :601 — reverting transfer.",
+        "custodyBacking": "Contract-held promo balance, reserved from finalizePromotion's sweep."
+      }
+    ],
+
+    "debtAlignmentInteraction": {
+      "criticalFinding": "NO cross-leg debt interference. _claimRewards writes NO debt fields at all.",
+      "mechanism": "Verified by inspection of lines 895-963: there is no assignment to userDetails.phUSDDebt / stableDebt / promoDebt anywhere inside _claimRewards. Every one of the three legs computes its pending amount from a debt value that the leg never mutates. Legs are therefore mutually independent — banking on the phUSD leg cannot corrupt the stable or promo leg's pending computation, and vice versa.",
+      "realignmentIsCallerSide": true,
+      "callers": [
+        { "function": "stake(uint256,address)", "claimAt": 708, "conditional": "only if userDetails.amount > 0", "realignsAt": "715-717 (all three debts, unconditional)" },
+        { "function": "withdraw(uint256,address)", "claimAt": 749, "conditional": "unconditional", "realignsAt": "761-763 (all three debts)" },
+        { "function": "claim(address)", "claimAt": 806, "conditional": "unconditional", "realignsAt": "808-810 (all three debts)" }
+      ],
+      "callerCompleteness": "VERIFIED: _claimRewards has exactly three call sites (708, 749, 806) and all three realign all three debts to the full accumulator immediately after it returns.",
+      "consequence": "Debt realigns to the full accumulator identically on the paid path and the banked path. Pending therefore settles to zero either way, and the banked amount can never be double-credited. This is what makes banking safe without any debt bookkeeping inside the legs.",
+      "testConfirmation": "test_revertingMint_claim_succeeds_and_banks asserts pendingPhUSD(alice) == 0 after a banked claim; test_bankedPhUSD_notRedistributed_toCostaker asserts a co-staker's pending is unchanged."
+    }
+  },
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {
+      "status": "verified",
+      "detail": "Single loop at :495 inside batchClaim, bounded by maxIterations via the cursor/end pattern. finalizePromotion requires flushCursor == _stakers.length() (:548) rather than looping. No loop in the claim path."
+    },
+    "checkedArithmetic": {
+      "status": "verified",
+      "detail": "pragma ^0.8.19, no unchecked blocks, no assembly in the claim/banking path. totalUnclaimablePhUSD -= amount (:648) is underflow-protected."
+    },
+    "reentrancyGuarded": {
+      "status": "verified",
+      "functions": ["stake", "withdraw", "claim", "batchClaim", "collectReward", "claimUnclaimablePromo", "claimUnclaimableStable", "claimUnclaimablePhUSD"],
+      "detail": "claimUnclaimablePhUSD is nonReentrant AND checks-effects-interactions correct: bank zeroed (:647) and aggregate decremented (:648) BEFORE the mint (:649)."
+    },
+    "accessControlled": {
+      "status": "verified",
+      "onlyOwner": ["setDesiredAPY", "setDepletionDuration", "setPauser", "setMigrator", "setHook", "emergencyTransfer", "startPromotion", "topUpPromotion", "setPromoDepletionDuration", "beginFlush", "finalizePromotion", "abortFlush"],
+      "delegated": ["stake", "withdraw", "claim — all require msg.sender == user || msg.sender == migrator"],
+      "permissionless": ["batchClaim", "collectReward", "claimUnclaimablePromo", "claimUnclaimableStable", "claimUnclaimablePhUSD"]
+    },
+    "initializerProtected": { "status": "n/a", "detail": "Not upgradeable. Constructor-based, with zero-address checks on _phUSD and _rewardToken (:240-241)." },
+    "weakRandomness": { "status": "verified-absent", "detail": "block.timestamp / block.number used only for reward accrual timing and the setDesiredAPY two-step commit window. No value-bearing entropy source." },
+    "inboundCallbackSurface": { "status": "verified", "detail": "No ERC721/1155/777 hooks. The only inbound-callback surface is the optional IPhlimboHook (onDeposit/onWithdraw/onClaim), invoked AFTER all state writes in stake/withdraw/claim, and the phUSD.mint / ERC20.transfer legs themselves." }
+  },
+
+  "claimPathInvariants": [
+    {
+      "id": "INV-01",
+      "statement": "A user's principal is never frozen by a failing reward payout.",
+      "status": "HOLDS at f279c62",
+      "basis": "All three value-out legs (913, 930, 954) are non-reverting and banked. story-031 closed the last propagating leg (phUSD mint). withdraw() reaches its principal safeTransfer at :774 regardless of any leg failing.",
+      "testEvidence": "test_revertingMint_withdraw_returns_principal_and_banks asserts phUSD.balanceOf(alice) == balBefore + STAKE_AMOUNT with the mint reverting."
+    },
+    {
+      "id": "INV-02",
+      "statement": "banked + paid == earned, per user per asset.",
+      "status": "HOLDS",
+      "basis": "Each leg either pays pendingX in full or banks pendingX in full — there is no partial path and no amount is dropped. The caller then realigns the debt to the full accumulator, so earned is accounted exactly once."
+    },
+    {
+      "id": "INV-03",
+      "statement": "Debt alignment matches value actually delivered-or-banked.",
+      "status": "HOLDS",
+      "basis": "Debt realignment is unconditional and caller-side, and is identical on the paid and banked paths. Because banking is in-full, 'delivered-or-banked' always equals the pending that the realignment discharges."
+    },
+    {
+      "id": "INV-04",
+      "statement": "sum(unclaimablePhUSDOf[*]) == totalUnclaimablePhUSD.",
+      "status": "HOLDS",
+      "basis": "Incremented together (:915-916), decremented by exactly `amount` on pull (:647-648). The aggregate is never zeroed wholesale — it spans all users. Correct."
+    },
+    {
+      "id": "INV-05",
+      "statement": "A banked phUSD amount is never redistributed to other stakers.",
+      "status": "HOLDS",
+      "basis": "phUSD emission is uncapped minting driven by accPhUSDPerShare, not drawn from a finite distributable pool. Banking does not return value to any pool. Structurally distinct from the stable bank, which required the audit-09 M-01 no-redistribution reasoning.",
+      "testEvidence": "test_bankedPhUSD_notRedistributed_toCostaker"
+    },
+    {
+      "id": "INV-06",
+      "statement": "A failed bank pull leaves the bank intact (recoverable).",
+      "status": "HOLDS",
+      "basis": "claimUnclaimablePhUSD reverts atomically if the mint is still unauthorized, rolling back the :647-648 writes.",
+      "testEvidence": "test_claimUnclaimablePhUSD_roundTrip asserts bank intact after a failed pull, then full re-mint after authority restore."
+    },
+    {
+      "id": "INV-07",
+      "statement": "The un-token-keyed banks are safe because their asset cannot rotate.",
+      "status": "HOLDS today, but compiler-unenforced",
+      "basis": "phUSD (:243) and rewardToken (:244) are constructor-only with no setter — verified by grep. promoToken DOES rotate (:403 / :559), which is exactly why unclaimablePromoOf is token-keyed. Design is internally consistent. See LOCAL-002: the invariant rests on absence-of-setter rather than the `immutable` keyword."
+    }
+  ],
+
+  "localFindings": [
+    {
+      "id": "LOCAL-001",
+      "type": "unreachable-bank-for-non-self-service-beneficiary",
+      "severity": "local-medium",
+      "function": "_claimRewards / claimUnclaimablePhUSD",
+      "line": 915,
+      "description": "The phUSD bank credits `beneficiary`, which under migrator delegation is the migrator (stake/withdraw/claim all pass msg.sender as beneficiary at 708/749/806). The only retrieval path, claimUnclaimablePhUSD() :644, is strictly msg.sender-keyed with no pull-on-behalf. A beneficiary that cannot itself originate a call to PhlimboV3.claimUnclaimablePhUSD() therefore has no retrieval path for its bank. Unlike the stable/promo banks, the phUSD bank is un-minted, so it is not reachable by a balance-sweeping escape hatch either.",
+      "relationship": "Extends the surface of the existing audit-10 finding V3-L-15 (migrator no-self-pull) to a THIRD asset. Do NOT treat as a fresh root cause — same class, new leg.",
+      "boundaryNote": "MigratorV2V3 exposes claimUnclaimable(address token) for its OWN internal forward-failure bank and an onlyOwner withdrawAll, but no call-through to PhlimboV3's claimUnclaimable* pulls. Confirming whether the migrator can reach this bank is an INTERACTION-level question — deliberately not adjudicated here.",
+      "recommendation": "Either add a pull-on-behalf variant, or confirm the migrator is never a live beneficiary of a failing mint. Route to interaction analysis together with V3-L-15."
+    },
+    {
+      "id": "LOCAL-002",
+      "type": "compiler-unenforced-invariant",
+      "severity": "local-low",
+      "function": "state declarations",
+      "line": 51,
+      "description": "The NatSpec at :168-171 justifies the un-token-keyed phUSD bank with 'phUSD is fixed at construction and never rotates'. That is true today, but `IFlax public phUSD` (:51) and `IERC20 public rewardToken` (:55) are plain storage, not `immutable`. The safety of both un-keyed banks rests on the continued absence of a setter rather than on a compiler guarantee — a future setter would silently strand every banked balance under the old asset.",
+      "recommendation": "Declare phUSD and rewardToken `immutable` so the banks' keying invariant is enforced by the compiler. Zero runtime cost; also saves an SLOAD per claim."
+    },
+    {
+      "id": "LOCAL-003",
+      "type": "build-provenance-footgun",
+      "severity": "local-low",
+      "function": "n/a (foundry.toml, commit f279c62)",
+      "line": 0,
+      "description": "foundry.toml now sets optimizer=true, optimizer_runs=10000, via_ir=false, with an inline comment stating via_ir is disabled because it collapses repeated vm.warp calls in tests, and that 'Deploying with via_ir is safe'. If deployment ever uses via_ir=true, the deployed bytecode is produced by a different codegen pipeline than the bytecode the entire test suite exercises. The tests would not have validated the deployed artifact.",
+      "unverifiedClaim": "The comment's EIP-170 claim (~16 KB, +8.6 KB margin under legacy+optimizer) was NOT independently verified here — building would write to the read-only submodule's out/. Downstream should confirm from workspace/.",
+      "recommendation": "Pin the deployment profile to the same codegen as the tested profile, or add a [profile.deploy] and a size check in CI. Fix the test-side vm.warp interaction rather than diverging the pipelines."
+    },
+    {
+      "id": "LOCAL-004",
+      "type": "event-accuracy",
+      "severity": "local-low",
+      "function": "_claimRewards",
+      "line": 939,
+      "description": "RewardsClaimed(user, pendingPhUSDAmount, pendingRewardAmount) is emitted at :939 whenever either amount is non-zero, including when that value was BANKED rather than paid. An indexer sees both RewardsClaimed and PhUSDMintFailed/StableClaimFailed for the same value and may double-count distributed rewards. Pre-existing for the stable leg; story-031 extends the ambiguity to phUSD.",
+      "note": "Accounting is correct on-chain — this is an off-chain observability issue only.",
+      "recommendation": "Emit RewardsClaimed with the amounts actually delivered, or document that RewardsClaimed means 'settled (paid or banked)'."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      { "function": "stake(uint256 amount, address user)", "visibility": "external", "accessControl": "msg.sender == user || msg.sender == migrator", "reentrancyGuard": true, "pauseGated": true, "stateChanges": ["userInfo[user].amount", "userInfo[user].{phUSD,stable,promo}Debt", "totalStaked", "_stakers", "phUSDPerSecond", "banks (via _claimRewards)"], "externalCalls": ["_claimRewards(user, msg.sender) if amount>0", "phUSD.safeTransferFrom(msg.sender, this, amount)", "hook.onDeposit"], "notes": "Rewards route to msg.sender, NOT user — migrator delegation lands rewards (and banks) in the migrator." },
+      { "function": "withdraw(uint256 amount, address user)", "visibility": "external", "accessControl": "msg.sender == user || msg.sender == migrator", "reentrancyGuard": true, "pauseGated": true, "stateChanges": ["userInfo[user].amount", "debts", "totalStaked", "_stakers", "phUSDPerSecond", "banks"], "externalCalls": ["_claimRewards", "phUSD.safeTransfer(msg.sender, actualWithdrawAmount)", "hook.onWithdraw"], "notes": "Principal transfer at :774 is UNCONDITIONALLY reached — no reward leg can block it. Dust rule forces full exit below MINIMUM_STAKE." },
+      { "function": "claim(address user)", "visibility": "external", "accessControl": "msg.sender == user || msg.sender == migrator", "reentrancyGuard": true, "pauseGated": true, "stateChanges": ["debts", "banks"], "externalCalls": ["_claimRewards", "hook.onClaim"], "notes": "Snapshots pending BEFORE _claimRewards to feed the hook exact amounts. Hook receives the amounts EARNED, which may have been banked rather than paid." },
+      { "function": "claimUnclaimablePhUSD()", "visibility": "external", "accessControl": "none (msg.sender-keyed)", "reentrancyGuard": true, "pauseGated": false, "stateChanges": ["unclaimablePhUSDOf[msg.sender] -> 0", "totalUnclaimablePhUSD -= amount"], "externalCalls": ["phUSD.mint(msg.sender, amount)"], "notes": "NEW in story-031. RE-MINTS. CEI-correct. Reverts 'Nothing to claim' on empty bank; reverts on still-missing authority leaving bank intact." },
+      { "function": "claimUnclaimableStable()", "visibility": "external", "accessControl": "none (msg.sender-keyed)", "reentrancyGuard": true, "pauseGated": false, "stateChanges": ["unclaimableStableOf[msg.sender] -> 0", "totalUnclaimableStable -= amount"], "externalCalls": ["rewardToken.safeTransfer"] },
+      { "function": "claimUnclaimablePromo(address token)", "visibility": "external", "accessControl": "none (msg.sender-keyed)", "reentrancyGuard": true, "pauseGated": false, "stateChanges": ["unclaimablePromoOf[token][msg.sender] -> 0", "totalUnclaimableOf[token] -= amount"], "externalCalls": ["IERC20(token).safeTransfer"], "notes": "Token-keyed because promoToken rotates." },
+      { "function": "batchClaim(uint256 maxIterations)", "visibility": "external", "accessControl": "none (permissionless)", "reentrancyGuard": true, "pauseGated": false, "stateChanges": ["flushCursor", "userInfo[staker].promoDebt", "promo bank"], "externalCalls": ["_tryTransfer(promoToken, staker, pending)"], "notes": "UNCHANGED this range. Forces payout to the STAKER (not the caller), unlike _claimRewards which routes to beneficiary. Permissionless — see audit-09 V3-H-01 history re: accrual during Flushing." },
+      { "function": "collectReward(uint256 amount)", "visibility": "external", "accessControl": "none (permissionless)", "reentrancyGuard": true, "externalCalls": ["rewardToken.safeTransferFrom(msg.sender, this, amount)"] },
+      { "function": "beginFlush() / finalizePromotion(address) / abortFlush()", "visibility": "external", "accessControl": "onlyOwner", "notes": "beginFlush pauses the contract — the rationale for all three bank pulls being un-pause-gated." },
+      { "function": "emergencyTransfer(address recipient)", "visibility": "external", "accessControl": "onlyOwner", "notes": "Ejector seat BY DESIGN (story-022, terminal, recovery out-of-band). Sweeps the ENTIRE phUSD/rewardToken/promo balances including principal and live banks. Per project precedent, do NOT propose accounting inside it." },
+      { "function": "setMigrator / setHook / setPauser / setDesiredAPY / setDepletionDuration / setPromoDepletionDuration / startPromotion / topUpPromotion", "visibility": "external", "accessControl": "onlyOwner" }
+    ],
+
+    "externalCalls": [
+      { "target": "IFlax phUSD", "methods": ["mint", "transfer", "transferFrom"], "trustLevel": "trusted", "notes": "Constructor-fixed, no setter. Doubles as the STAKING token and a REWARD token. mint() returns void -> try/catch, not _tryTransfer. Mint authority is owner-managed and revocable — that revocation is precisely the banked path's trigger." },
+      { "target": "IERC20 rewardToken", "methods": ["transfer", "transferFrom"], "trustLevel": "semi-trusted", "notes": "Constructor-fixed. Assumed USDC-class; recipient blocklisting is the modelled failure. USDC blocklists recipients, USDT does not (audit-09 Q-03)." },
+      { "target": "IERC20 promoToken", "methods": ["transfer", "transferFrom"], "trustLevel": "semi-trusted", "notes": "ROTATES (startPromotion :403 / finalizePromotion :559). Owner-chosen." },
+      { "target": "IPhlimboHook hook", "methods": ["onDeposit", "onWithdraw", "onClaim"], "trustLevel": "semi-trusted", "notes": "Optional, zero-address guarded, owner-set. Invoked AFTER all state writes. A reverting hook WOULD brick stake/withdraw/claim — the banking work does not cover the hook leg. Interaction-level concern." },
+      { "target": "address migrator", "methods": ["inbound only — calls stake/withdraw/claim on behalf of users"], "trustLevel": "semi-trusted", "notes": "Owner-set delegate. Becomes `beneficiary` for delegated claims and therefore the credited party for any bank. See LOCAL-001." },
+      { "target": "address beneficiary (= msg.sender)", "methods": ["mint / transfer recipient"], "trustLevel": "untrusted", "notes": "Arbitrary caller address on self-service paths. All three legs are non-reverting, so a hostile recipient cannot brick the path — it can only force its own value into the bank." }
+    ],
+
+    "stateVariables": [
+      { "name": "unclaimablePhUSDOf", "type": "mapping(address => uint256)", "mutators": ["_claimRewards", "claimUnclaimablePhUSD"], "readers": ["claimUnclaimablePhUSD", "public getter"] },
+      { "name": "totalUnclaimablePhUSD", "type": "uint256", "mutators": ["_claimRewards", "claimUnclaimablePhUSD"], "readers": ["public getter"], "notes": "Not read by any accounting logic — informational only. No cap interaction." },
+      { "name": "unclaimableStableOf", "type": "mapping(address => uint256)", "mutators": ["_claimRewards", "claimUnclaimableStable"], "readers": ["claimUnclaimableStable"] },
+      { "name": "totalUnclaimableStable", "type": "uint256", "mutators": ["_claimRewards", "claimUnclaimableStable"], "readers": ["public getter"], "notes": "audit-09 M-01 no-redistribution property." },
+      { "name": "unclaimablePromoOf", "type": "mapping(address => mapping(address => uint256))", "mutators": ["_claimRewards", "batchClaim", "claimUnclaimablePromo"], "readers": ["claimUnclaimablePromo"] },
+      { "name": "totalUnclaimableOf", "type": "mapping(address => uint256)", "mutators": ["_claimRewards", "batchClaim", "claimUnclaimablePromo"], "readers": ["finalizePromotion (sweep reservation :552)"] },
+      { "name": "userInfo", "type": "mapping(address => UserInfo{amount, phUSDDebt, stableDebt, promoDebt})", "mutators": ["stake", "withdraw", "claim"], "readers": ["_claimRewards", "pending* views"], "notes": "CRITICAL: debts are mutated ONLY by the three external callers, never inside _claimRewards." },
+      { "name": "accPhUSDPerShare / accStablePerShare / accPromoPerShare", "type": "uint256", "mutators": ["_updatePool"], "readers": ["_claimRewards", "callers' realignment", "pending* views"] },
+      { "name": "phUSD / rewardToken", "type": "IFlax / IERC20", "mutators": ["constructor only"], "notes": "No setter — see LOCAL-002 (not `immutable`)." },
+      { "name": "promoToken", "type": "IERC20", "mutators": ["startPromotion :403", "finalizePromotion :559"], "notes": "Rotates — hence token-keyed promo bank." }
+    ],
+
+    "events": ["PhUSDMintFailed", "UnclaimablePhUSDClaimed", "StableClaimFailed", "UnclaimableStableClaimed", "PromoClaimFailed", "PromoClaimed", "UnclaimablePromoClaimed", "RewardsClaimed", "Staked", "Withdrawn", "PromotionFinalized", "IntendedSetAPY", "DesiredAPYUpdated"],
+
+    "modifiers": ["nonReentrant", "onlyOwner", "whenNotPaused"]
+  },
+
+  "trustAssumptions": [
+    "phUSD (IFlax) is a trusted, non-rotating token whose mint authority is owner-managed. Losing that authority is the ONLY trigger for the phUSD bank, and it is fully recoverable by re-granting.",
+    "rewardToken is USDC-class: standard ERC20 semantics plus possible recipient blocklisting. Fee-on-transfer is out of scope (C4 known-invalid).",
+    "promoToken is owner-chosen per promotion and may blocklist recipients.",
+    "The optional IPhlimboHook is trusted not to revert — the banking work does NOT protect the hook leg, which is invoked after state writes in stake/withdraw/claim.",
+    "emergencyTransfer is a terminal ejector seat by design (story-022); it sweeps live banks along with principal and is out-of-band recovery, not an accounting path.",
+    "The migrator is a trusted owner-set delegate. Its ability to retrieve a bank credited to it is an INTERACTION-level question (LOCAL-001)."
+  ],
+
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPhlimboV3", "IPausable"],
+
+  "deferredToInteractionAnalysis": [
+    "Whether MigratorV2V3 can retrieve a phUSD/stable bank credited to it as beneficiary (LOCAL-001 / V3-L-15 class).",
+    "Whether a reverting IPhlimboHook can brick stake/withdraw/claim despite all three reward legs now being banked.",
+    "Interaction of a live phUSD bank with emergencyTransfer's terminal sweep (bank re-mints fresh supply post-sweep).",
+    "Whether the permissionless batchClaim's promo accrual interacts with the new phUSD bank (audit-09 V3-H-01 lineage) — no coupling found locally."
+  ],
+
+  "complexity": { "loc": 1129, "functions": 36, "externalCalls": 6, "stateVariables": 12, "interfaceLoc": 471 },
+
+  "coverageNotes": {
+    "story031Tests": ["test_revertingMint_claim_succeeds_and_banks", "test_revertingMint_withdraw_returns_principal_and_banks", "test_claimUnclaimablePhUSD_roundTrip", "test_claimUnclaimablePhUSD_ungatedByPause", "test_bankedPhUSD_notRedistributed_toCostaker"],
+    "harnessQuality": "NOT vacuous. MockRevertingMintFlax genuinely reverts on mint while leaving transfers intact, so the banked path is actually exercised rather than trivially passing. Assertions check both per-user and aggregate bank state plus debt realignment to zero.",
+    "gaps": ["No test covers a migrator-as-beneficiary banked mint (LOCAL-001).", "No stateful fuzz/invariant test over the new bank — consistent with the project's known lack of stateful fuzzing."]
+  }
+}

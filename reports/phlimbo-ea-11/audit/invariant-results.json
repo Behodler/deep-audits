@@ -1,0 +1,192 @@
+{
+  "project": "phlimbo-ea",
+  "run": 11,
+  "runTimestamp": "2026-07-17T00:00:00Z",
+  "commit": "f279c627313cf8a9dffa7c4af62b6bdf56bd593d",
+  "baseline": "e32588d",
+  "story": "story-031 (phUSD mint-leg banking, src/PhlimboV3.sol:913)",
+  "target": "NEW phUSD bank: unclaimablePhUSDOf / totalUnclaimablePhUSD / claimUnclaimablePhUSD():644",
+
+  "runners": { "forge": true, "medusa": true, "echidna": false },
+  "buildProvenance": {
+    "optimizer": true,
+    "optimizer_runs": 10000,
+    "via_ir": false,
+    "codegen": "legacy",
+    "caveat": "All results below are evidence about the legacy-codegen (via_ir=false) build ONLY. Per profile LOCAL-003, a via_ir=true deployment would be a different codegen pipeline than the one tested here."
+  },
+
+  "headline": "0 broken / 5 targeted invariants held. No counterexample found. The banked path was PROVEN exercised (tripwire + Medusa probe), and the harness was PROVEN able to fail (3/3 mutations caught).",
+
+  "artifacts": {
+    "foundryHarness": "workspace/phlimbo-ea/test/BankInvariant.t.sol",
+    "medusaHarness": "workspace/phlimbo-ea/src/medusaharness/BankMedusaHarness.sol",
+    "medusaConfigReal": "workspace/phlimbo-ea/medusa-run11.json",
+    "medusaConfigProbe": "workspace/phlimbo-ea/medusa-run11-probe.json",
+    "mutationScript": "scratchpad/mutate.py (transient; PhlimboV3.sol restored byte-identical, git diff src/ empty)"
+  },
+
+  "commands": [
+    "cd workspace/phlimbo-ea && forge test --match-contract BankInvariantCampaignTest   # 256 runs x 500 depth = 128,000 calls/invariant",
+    "cd workspace/phlimbo-ea && FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=500 forge test --match-contract BankInvariantCampaignTest   # 500,000 calls/invariant",
+    "cd workspace/phlimbo-ea && forge test --match-contract BankCoverageProofTest -vv   # runs=1 depth=500 + anti-vacuous tripwire",
+    "cd workspace/phlimbo-ea && medusa fuzz --config medusa-run11-probe.json   # non-vacuity probe: FAILURE is the proof",
+    "cd workspace/phlimbo-ea && medusa fuzz --config medusa-run11.json   # real campaign"
+  ],
+
+  "runConfig": {
+    "forgeBroad": { "runs": 256, "depth": 500, "callsPerInvariant": 128000, "fail_on_revert": false, "wallClockSec": 31 },
+    "forgeDeep": { "runs": 1000, "depth": 500, "callsPerInvariant": 500000, "wallClockSec": 123 },
+    "forgeCoverageProof": { "runs": 1, "depth": 500, "calls": 500, "note": "single long sequence so afterInvariant can read accumulated ghosts" },
+    "medusaReal": { "workers": 10, "testLimit": 1500000, "callSequenceLength": 80, "callsExecuted": 1514251, "wallClockSec": 198, "throughput": "~7,750 calls/sec" }
+  },
+
+  "passed": 10,
+  "failed": 0,
+  "failures": [],
+  "counterexamples": [],
+
+  "tripwire": {
+    "status": "PASSED - banked path PROVEN exercised",
+    "mechanism": "BankCoverageProofTest.afterInvariant() hard-requires ghost_phusdBankEvents>0, ghost_stableBankEvents>0, ghost_promoBankEvents>0 AND ghost_phusdPulls>0. A campaign that never wrote or never drained the phUSD bank FAILS instead of reporting a vacuous green.",
+    "medusaEquivalent": "property_neverBankedPhUSD / property_neverDrainedPhUSD probes BROKE within 3s (shrunk sequence: `[event] PhUSDMintFailed(0xA3, 63419583967000)`). Under Medusa, that FAILURE is the reachability proof. Probes disabled for the real campaign.",
+    "vacuityTrapFoundAndFixed": "desiredAPYBps defaults to 0 => phUSDPerSecond == 0 (:985) => pendingPhUSD ALWAYS 0 => the phUSD bank could never be written and every phUSD invariant would trivially pass 0==0. The run-10 harness never set an APY (it only needed stable/promo), so reusing its setUp verbatim would have produced a fully vacuous green. Both harnesses now commit a real 2000bps APY through the two-step gate (:262) and assert `phUSDPerSecond() > 0` in setUp.",
+    "secondVacuityGuard": "phUSD is BOTH the staking token and a reward token, so a mock whose mint is globally revoked would also break actor funding and silently collapse coverage. Funding therefore uses a `faucet()` path that PhlimboV3 never calls; `mint()` is reserved as the leg under test."
+  },
+
+  "invariants": [
+    {
+      "id": "INV-BANK-SUM",
+      "name": "invariant_phUSDBankConservation",
+      "type": "conservation",
+      "statement": "totalUnclaimablePhUSD == sum(unclaimablePhUSDOf[user]) at all times; no bank credited outside the actor set.",
+      "result": "HELD",
+      "evidence": "128k + 500k Foundry calls; 1.51M Medusa calls (property_phusdConservation).",
+      "mutationCaught": "M2 (aggregate not incremented on bank) -> FAIL 'phUSD total != sum of per-user banks: 0 != 18222621765600712000'"
+    },
+    {
+      "id": "INV-NO-DOUBLE-PAY",
+      "name": "invariant_phUSDNoDoublePay",
+      "type": "value-conservation",
+      "statement": "Per user: (phUSD minted to them by PhlimboV3) + (outstanding bank) == (phUSD they earned). No pending is ever both banked AND minted, dropped, or over-drained.",
+      "result": "HELD",
+      "method": "ghost_earnedPhUSD[user] accumulates pendingPhUSD(user) snapshotted immediately before every op that runs _claimRewards. Verified the view (:993) simulates un-accrued time with the SAME math as _updatePool (:855) so the snapshot is exact, not approximate. `delivered` is measured inside the mock, counting ONLY phlimbo-initiated mints (reward mints :913 + bank re-mints :649), with faucet funding excluded by construction.",
+      "evidence": "128k + 500k Foundry calls; 1.51M Medusa calls.",
+      "mutationCaught": "M3 (pull does not zero the per-user bank) -> FAIL 'phUSD delivered + banked != earned: 30493518518517712000 != 15246759259258856000' (exactly 2x = double-pay detected)"
+    },
+    {
+      "id": "INV-PRINCIPAL-LIVE",
+      "name": "invariant_principalSafety",
+      "type": "liveness / no-brick",
+      "statement": "A user's principal is NEVER frozen by a failing phUSD mint. withdraw() succeeds even while phUSD.mint reverts unconditionally.",
+      "result": "HELD",
+      "ledgerRelevance": "This is the invariant that adjudicates V3-M-05 (fix-pending) and V3-M-07 (wont-fix).",
+      "evidence": "13 withdrawals executed with phUSD.mint actively reverting in a single 500-call sequence (ghost_withdrawsUnderMintRevert=13); 0 bricks across 128k + 500k Foundry calls and 1.51M Medusa calls.",
+      "mutationCaught": "M1 (story-031 reverted to the bare propagating `phUSD.mint(beneficiary, pendingPhUSDAmount)`) -> FAIL 'withdraw bricked by a failing reward leg (mint or transfer)'. This is a DIFFERENTIAL result: the invariant goes RED on the pre-fix code and GREEN on f279c62, so its green carries real information rather than being an untested assertion."
+    },
+    {
+      "id": "INV-BANK-DRAINABLE",
+      "name": "invariant_pullExactness (phUSD legs)",
+      "type": "retrievability + recoverability",
+      "statement": "Once phUSD.mint succeeds again, every banked balance is fully retrievable via claimUnclaimablePhUSD(), exactly once, and the bank zeroes. While mint still fails, the pull MUST revert and leave the bank exactly intact.",
+      "result": "HELD",
+      "method": "Both directions asserted: mint-works => pull must SUCCEED delivering exactly `owed` and zero the bank; mint-fails => pull must REVERT with the bank unchanged (INV-06 recoverability).",
+      "evidence": "9 successful drains + 4 correctly-reverted blocked pulls in one 500-call sequence; plus deterministic test_sanity_phUSDBankRoundTrip (bank -> failed pull leaves intact -> authority restored -> exact full drain -> second pull reverts 'Nothing to claim', i.e. no double-drain).",
+      "mutationCaught": "M2, M3 both -> FAIL 'phUSD pull returned != owed / wrong success'"
+    },
+    {
+      "id": "INV-DEBT-ALIGN",
+      "name": "invariant_debtAlignment",
+      "type": "state-machine",
+      "statement": "Pending settles to zero identically on the paid path and the banked path. Profiler claim: _claimRewards writes NO debt; realignment is caller-side at :715/:761/:808.",
+      "result": "HELD - profiler claim CONFIRMED, attempts to break it failed",
+      "method": "After every successful stake/withdraw/claim, assert pendingPhUSD(user)==0 regardless of whether the leg paid or banked. Attack surface driven: per-recipient mint blocking so some actors bank while others are paid in the same campaign; actor0 seeded to bank on ALL THREE legs simultaneously (cross-leg interference) while actor2 banks on the phUSD leg ONLY (isolating the new leg). Also flags a REVERTING pendingPhUSD view (the debt>accrual underflow class) rather than swallowing it.",
+      "evidence": "No settlement residue and no view revert across 128k + 500k Foundry calls and 1.51M Medusa calls."
+    },
+    {
+      "id": "AUX-PRINCIPAL-BACKED",
+      "name": "invariant_principalBacked",
+      "type": "solvency",
+      "statement": "phUSD.balanceOf(phlimbo) >= totalStaked - a bank re-mint is never funded out of staked principal.",
+      "result": "HELD",
+      "rationale": "Added because the phUSD bank is UN-BACKED by design (RE-MINTS at :649). There is deliberately NO phUSD balance-backing invariant: contract-held phUSD is staked PRINCIPAL, not bank backing, so a `balance >= totalUnclaimablePhUSD` assertion would be wrong rather than merely redundant. This invariant checks the property that IS true."
+    },
+    {
+      "id": "REGRESSION-story-029",
+      "name": "invariant_stableBankConservation / invariant_promoBankConservation / invariant_stableBankSolvency / invariant_promoBankSolvency",
+      "type": "regression",
+      "statement": "The run-10 stable+promo bank invariants still hold with the new phUSD bank live in the same campaign.",
+      "result": "HELD",
+      "rationale": "Deliberately kept in ONE campaign rather than a separate phUSD harness: if the new phUSD leg corrupted the stable/promo legs, these catch it. All three banks are driven simultaneously."
+    }
+  ],
+
+  "harnessValidation": {
+    "method": "Mutation testing. A green campaign is only evidence if the harness CAN fail, so three plausible banking bugs were injected into PhlimboV3.sol and the suite was required to go red. Source restored byte-identical afterwards (verified: `git diff src/PhlimboV3.sol` empty, HEAD f279c62).",
+    "result": "3/3 CAUGHT - no blind spots among the mutations tried",
+    "mutations": [
+      { "id": "M1_no_try_catch", "models": "story-031 reverted (pre-fix bare reverting mint)", "status": "CAUGHT", "by": "invariant_principalSafety + the vacuity tripwire (with no try/catch the bank is never written, so the tripwire correctly reports the path as unexercised - internally consistent)" },
+      { "id": "M2_bank_sum_drift", "models": "totalUnclaimablePhUSD not incremented on bank", "status": "CAUGHT", "by": "invariant_phUSDBankConservation + pullExactness" },
+      { "id": "M3_pull_no_zero", "models": "per-user bank not zeroed on pull (re-drainable forever)", "status": "CAUGHT", "by": "invariant_phUSDBankConservation + invariant_phUSDNoDoublePay + pullExactness" }
+    ]
+  },
+
+  "handlerCallCounts": {
+    "note": "From the runs=1 depth=500 coverage-proof sequence (Foundry reports 0 reverts because every handler action wraps its target in try/catch and surfaces violations via flags - fail_on_revert=false would otherwise swallow in-handler asserts).",
+    "claim": 41, "promoBeginFlush": 43, "promoFinalize": 38, "promoAbort": 35,
+    "mintBlockToggle": 34, "pullPromo": 34, "mintAuthorityToggle": 33,
+    "promoBatchClaim": 32, "promoStart": 32, "collectReward": 27, "stake": 27,
+    "pullPhUSD": 25, "withdraw": 25, "pullStable": 24, "warp": 23,
+    "totalHandlerCalls": 500,
+    "broadCampaignDistribution": "~7,850-8,140 calls per action across the 128k-call campaign (even coverage, 0 reverts, 0 discards)"
+  },
+
+  "ghostCoverage": {
+    "phUSDBankEvents": 22,
+    "phUSDPullsDrained": 9,
+    "phUSDPullsCorrectlyBlocked": 4,
+    "maxTotalUnclaimablePhUSD": "154869419468962182214 (~154.9e18)",
+    "withdrawalsWhileMintReverting": 13,
+    "stableBankEvents": 22,
+    "promoBankEvents": 17,
+    "stablePullsExact": 10,
+    "promoPullsExact": 14,
+    "interpretation": "Every one of these is non-zero, so no phUSD invariant in this campaign is a vacuous 0==0."
+  },
+
+  "coverageGaps": [
+    {
+      "gap": "MIGRATOR-AS-BENEFICIARY (profile LOCAL-001 / ledger V3-L-15 class) is NOT covered.",
+      "detail": "The harness is deliberately self-service only (beneficiary == user), which is what makes the per-user INV-NO-DOUBLE-PAY equation well-formed. Under migrator delegation the bank credits the MIGRATOR (stake/withdraw/claim pass msg.sender as beneficiary at :708/:749/:806) while claimUnclaimablePhUSD() :644 is strictly msg.sender-keyed with no pull-on-behalf.",
+      "consequence": "These results say NOTHING about whether a migrator-credited phUSD bank is retrievable. This campaign must not be read as clearing LOCAL-001. Unlike stable/promo, the phUSD bank is un-minted, so it is not reachable by a balance-sweeping escape hatch either.",
+      "routing": "Interaction-level analysis, together with V3-L-15."
+    },
+    {
+      "gap": "Reverting IPhlimboHook not modelled (no hook set).",
+      "detail": "Per the profile, a reverting hook WOULD brick stake/withdraw/claim - the banking work does not protect the hook leg, which is invoked after state writes. INV-PRINCIPAL-LIVE here proves principal survives a failing REWARD leg, not a failing hook."
+    },
+    {
+      "gap": "emergencyTransfer interaction with a live bank not driven (owner ejector seat, excluded by project precedent).",
+      "detail": "Profile defers 'bank re-mints fresh supply post-sweep' to interaction analysis."
+    },
+    {
+      "gap": "Fuzzing is bug-finding, not proof.",
+      "detail": "An invariant worth a real proof (INV-NO-DOUBLE-PAY is the strongest candidate) should be handed to the symbolic-analyzer (Halmos). Only a Halmos [PASS] is a proof."
+    }
+  ],
+
+  "ledgerImplications": [
+    {
+      "finding": "V3-M-05 (fix-pending) - phUSD mint leg freezes principal",
+      "proposal": "PROPOSE fixed - NOT applied (only a human applies `fixed`; a fix that merely stops tripping the scanner is not a verified fix).",
+      "basis": "story-031 wraps the mint leg in try/catch + bank. INV-PRINCIPAL-LIVE holds across 500k Foundry + 1.51M Medusa calls with 13 withdrawals executed while mint reverted, AND the M1 mutation proves the same invariant goes RED on the pre-fix code. Differential, not merely green."
+    },
+    {
+      "finding": "V3-M-07 (wont-fix) - phUSD mint-leg :863 un-banked freezes ALL principal (incompleteFixOf V3-M-05)",
+      "proposal": "SURFACE FOR HUMAN TRIAGE: the root cause appears CLOSED by story-031 even though the entry is marked wont-fix. A wont-fix that has since been fixed is a status anomaly, not an agent decision - do not auto-flip.",
+      "basis": "Same evidence as V3-M-05. The exact condition V3-M-07 describes (mint leg propagating and bricking principal) is the M1 mutation, which the harness detects immediately and which is absent at f279c62."
+    }
+  ],
+
+  "honestyStatement": "A passing invariant campaign is 'no counterexample found', NOT proof of safety. These invariants held under 500,000 Foundry sequences-calls per invariant and 1,514,251 Medusa calls; that bounds the search, it does not verify the contract. The result is strengthened - but not converted into a proof - by two things absent from a naive green run: (1) the anti-vacuity tripwire and Medusa probes PROVE the banked and drained paths were actually exercised (22 bank events, 9 drains, 13 withdrawals under a reverting mint), and (2) mutation testing PROVES the harness detects the three most plausible banking bugs, including the pre-story-031 state itself. Results are evidence about the legacy-codegen (via_ir=false) build only."
+}
