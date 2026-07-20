@@ -1,0 +1,191 @@
+{
+  "project": "phoenix-nft-staking",
+  "commit": "0d1a0b2",
+  "scanTimestamp": "2026-07-20T00:00:00Z",
+  "scanType": "pattern-matching",
+  "patternDbVersion": "1.1",
+  "patternsChecked": 35,
+  "scope": [
+    "src/BatchNFTMinter.sol",
+    "src/NFTStakerPriceScaledMigrateReady.sol",
+    "src/NFTStaker.sol",
+    "src/NFTStakerPriceScaled.sol",
+    "src/NFTStakerDepletion.sol",
+    "src/NFTStakerMigrator.sol",
+    "src/InPlaceNFTStakerMigrator.sol",
+    "src/INFTStakerMigratable.sol",
+    "script/DeployBatchNFTMinter.s.sol"
+  ],
+  "findingsCount": 5,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "ROUNDING-DIRECTION+FEE-ON-TRANSFER-ACCOUNTING (duplicate-entry double-count in array loop)",
+      "type": "duplicate-entry-double-payout",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 452,
+      "function": "_payRewards / _snapshotRewards / batchMint",
+      "confidence": "high",
+      "description": "`rewardTokens` is deliberately NOT deduped (§4.5). A duplicate entry `[T, T]` snapshots the SAME pre-loop balance B twice, and both entries are paid out after the mint loop. The contract's own claim that the second transfer 'fails closed' is FALSE in the live configuration: the dispatcher donates reward token into this contract on EVERY mint (BalancerPoolerV2._dispatch -> ISkyPSM.buyGem(batchMinter, gemAmt) delivers USDC straight to this contract), so the post-loop balance is B + D where D is THIS batch's own donations. The second transfer therefore succeeds whenever D >= B, paying the batcher their own batch's donations. That is exactly the self-funded round-trip that the §4.2 pre-loop snapshot exists to prevent and that the code calls 'load-bearing'. Repeating the token k times extracts k*B while the balance allows, and can drain the entire post-loop balance so that nothing is seeded forward for the next claimant.",
+      "matchedSignatures": [
+        "for (uint256 i; i < tokenCount; ++i) { ... IERC20(rewardToken).safeTransfer(recipient, amount); }",
+        "uint256 available = qualifies ? IERC20(rewardToken).balanceOf(address(this)) : 0;",
+        "balanceOf(address(this))"
+      ],
+      "missingMitigations": [
+        "No dedupe of rewardTokens (explicitly declined as O(n^2))",
+        "No re-check that the cumulative payout for a token does not exceed its pre-loop snapshot",
+        "No per-token 'already paid' flag"
+      ],
+      "notes": "Cheapest fix that keeps O(n): zero out `snapshot[j]` for any j whose token equals an already-paid token during the payout pass would still be O(n^2); alternatively cap the total transferred per token at the pre-loop balance by tracking a running `paidSoFar` against the snapshot, or simply assert post-loop that `balanceOf(this) >= D` was not consumed. Escalation check for the severity tier: the loss is the NEXT claimant's seed plus a rebate of the batcher's own donation, and it is repeatable.",
+      "contradictedDocumentation": "docs/multi-token-nudge.md §4.5 ('the second either reverts on insufficient balance or transfers into a now-empty pot'); NatSpec on batchMint ('the second transfer fails closed')",
+      "references": [
+        "src/BatchNFTMinter.sol:416-461",
+        "lib/mutable/yield-claim-nft/src/dispatchers/BalancerPoolerV2.sol:259-263"
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "type": "eligibility-gate-bypass-via-residual-sweep",
+      "severity": "potential-high",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 381,
+      "function": "batchMint (step 10 dust sweep)",
+      "confidence": "medium",
+      "description": "Step 10 sweeps the ENTIRE residual payment-token balance to `msg.sender` with NO `nudgeSize` gate and no `qualifies` check. The payment token is DERIVED from `dispatcherIndex` at call time and `setDispatcherIndex` is owner-settable at any moment with no compatibility check against the contract's funding sources. If `dispatcherIndex` ever resolves to a dispatcher whose `primeToken()` is also one of this contract's funding tokens, the entire pot becomes (a) unclaimable through the nudge path, because the §4.1 exclusion reverts on listing it as a reward token, and (b) claimable in full by ANY caller with `count == 1`, through the ungated sweep. The concrete instantiation is live in the sibling repo: `NudgeRatchet.primeToken()` is USDC (6-decimal deploy guard) and `NudgeRatchet._dispatch` sweeps its full USDC balance to `batchMinter`, while `DeployBatchNFTMinter.s.sol` documents the PRIMARY funding path as a 30% USDC drip (`StableYieldAccumulator.setNudgeAddress(<this>)`) into this same contract. Under the intended `DISPATCHER_INDEX = 4` (BalancerPoolerV2, prime token USDS) the configuration is safe; a repoint to the ratchet index inverts it. The deploy script's `require`s check only that `DISPATCHER_INDEX != 0` and the story-022 change explicitly REMOVED the old deploy-time 'nudge token == payment token' guard, replacing it with a per-call revert that protects only the nudge path and does nothing about the sweep path.",
+      "matchedSignatures": [
+        "uint256 remaining = paymentToken.balanceOf(address(this));",
+        "paymentToken.safeTransfer(msg.sender, remaining);",
+        "qualifies = _nudgeSize != 0 && count >= _nudgeSize;"
+      ],
+      "missingMitigations": [
+        "Sweep is not bounded by the caller's own unspent `paymentAmount` (it sweeps third-party/dripped balances too)",
+        "No invariant tying `dispatcherIndex`'s primeToken to the set of funding tokens",
+        "Deploy-time collision guard was removed, and the replacement per-call guard does not cover the sweep",
+        "`setDispatcherIndex` has no re-validation of the funding configuration"
+      ],
+      "notes": "Law 3 footgun test: a competent, non-malicious owner repointing `dispatcherIndex` to the USDC-primed NudgeRatchet would be SURPRISED that the nudge pot becomes both unclaimable and free-for-all, and that (if this contract is also the ratchet's `batchMinter`) mint payments round-trip back into this contract and are refunded by the same sweep, making batched mints effectively free while mint-debt still accrues. In-scope hazard, not owner-malice. Even in the safe USDS configuration the sweep hands any stranded/donated payment token to the first `count == 1` caller with no gate; that narrower reading is documented ('a griefer who pre-deposits payment-token simply donates to the next caller') and is parked at MR-BNM-08.",
+      "references": [
+        "src/BatchNFTMinter.sol:380-387",
+        "script/DeployBatchNFTMinter.s.sol:56-114",
+        "lib/mutable/yield-claim-nft/src/dispatchers/NudgeRatchet.sol:43-103",
+        "lib/mutable/yield-claim-nft/src/dispatchers/BalancerPoolerV2.sol:102-112"
+      ]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "type": "migration-state-gating-gap",
+      "severity": "potential-medium",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "line": 617,
+      "function": "stake / unstake / claim / emergencyWithdraw vs poolState",
+      "confidence": "medium",
+      "description": "`stake` (617), `unstake` (645), `claim` (666) and `emergencyWithdraw` (735) carry no `poolState` gate, so they stay open while the pool is `Migrating`. Two consequences specific to the PRICE-SCALED model, where `R = totalStaked * latestPrice * targetAPY / SECONDS_PER_YEAR` depends on `totalStaked`: (1) a permissionless `stake(1)` during `Migrating` re-populates `totalStaked` while the tail `_recomputeScheduleIfActive()` deliberately no-ops, so the frozen snapshot's `rewardRate` no longer corresponds to the live pool, and any caller can indefinitely block `finalizeAndReset` (which requires `totalStaked == 0`) for one ERC1155 unit; (2) an unstake/emergencyWithdraw during `Migrating` shrinks `totalStaked` without re-sizing R for the same reason. Accrual itself is safe (`_updatePool` early-returns while `Migrating`), so this is availability/state-consistency rather than over-emission.",
+      "matchedSignatures": [
+        "accRewardPerShare",
+        "rewardDebt",
+        "_updatePool",
+        "_recomputeSchedule",
+        "poolState == PoolState.Migrating"
+      ],
+      "missingMitigations": [
+        "No `require(poolState == PoolState.Active)` on stake/unstake/claim",
+        "No auto-pause on `initiateMigration` (the freeze relies on the operator separately pausing)",
+        "`finalizeAndReset`'s `totalStaked == 0` precondition is griefable by any staker"
+      ],
+      "priorArt": "Recurrence of ledger entry L-03 (open, Low) 'stake/unstake/claim not poolState-gated during Migrating (no auto-pause) - asymm...' filed against src/NFTStakerDepletion.sol in run-18. NEW CONTRACT, so it mints a new fingerprint and dedup will not link it automatically. The price-scaled variant is materially different from the depletion variant because R depends on totalStaked here, per the contract's own 'PRICE-SCALED DELTA 6a' note.",
+      "references": [
+        "src/NFTStakerPriceScaledMigrateReady.sol:475-486, 617-664, 735-758, 920-934"
+      ]
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "caller-controlled-unbounded-loop",
+      "severity": "potential-low",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 363,
+      "function": "batchMint mint loop + _snapshotRewards + _payRewards",
+      "confidence": "medium",
+      "description": "Three caller-controlled unbounded loops: `count` iterations of `nftMinter.mint` (line 363), and two passes over the caller-supplied `rewardTokens` array (424, 454). No cap on `count` and no cap on `rewardTokens.length`; the only bound is the block gas limit. All gas is paid by the caller and the failure mode is self-DoS, so the impact is confined. Recorded because story-022 ADDED a second and third caller-sized loop to a function that already carried an open finding for the first.",
+      "matchedSignatures": [
+        "for (uint256 i; i < count; ++i)",
+        "for (uint256 i; i < tokenCount; ++i)"
+      ],
+      "missingMitigations": ["No MAX_COUNT", "No MAX_REWARD_TOKENS", "No pagination"],
+      "priorArt": "Ledger L-02 (submitted, Low) 'Uncapped count loop in batchMint'. The rewardTokens loops are new surface on the same root cause.",
+      "references": ["src/BatchNFTMinter.sol:362-365, 424-435, 454-460"]
+    },
+    {
+      "id": "PATTERN-005",
+      "source": "pattern-db",
+      "patternId": "FEE-ON-TRANSFER-ACCOUNTING",
+      "type": "amount-vs-received-skew",
+      "severity": "potential-low",
+      "contract": "src/BatchNFTMinter.sol",
+      "line": 429,
+      "function": "_snapshotRewards / _payRewards",
+      "confidence": "medium",
+      "description": "The payout amount is a balance SNAPSHOT taken before the mint loop and transferred verbatim afterwards; `minRewards` is a floor on the contract's pre-transfer balance, not on what `recipient` actually receives. Two skews follow. (a) Fee-on-transfer: the delivered amount is below the declared floor, so `minRewards` does not do what a caller reading it as slippage protection would assume - explicitly documented as caller-discretion. (b) NEGATIVE-REBASING or otherwise shrinking token: if the balance falls between the snapshot and the payout, `safeTransfer(snapshot[i])` reverts and the WHOLE batch (all mints, all other reward tokens) rolls back - a one-token DoS on the entire batch. The token set here is fully permissionless, which is exactly the condition under which this pattern's `notVulnerableWhen` ('token set restricted to known non-fee, non-rebasing tokens') does not hold; the mitigating factor is that the caller selects the tokens and only harms themselves.",
+      "matchedSignatures": [
+        "balanceOf(address(this))",
+        "safeTransfer(",
+        "amount"
+      ],
+      "missingMitigations": [
+        "No balanceAfter - balanceBefore measurement on the payout leg",
+        "No allowlist of reward tokens",
+        "Snapshot amount is not clamped to `min(snapshot[i], currentBalance)` at payout time"
+      ],
+      "notes": "Clamping the payout to `min(snapshot[i], balanceOf(this))` would also close PATTERN-001's second-transfer window and remove this revert-DoS in one change. Note the two findings pull in the same direction, so a fix should be evaluated jointly.",
+      "references": ["src/BatchNFTMinter.sol:416-461", "docs/multi-token-nudge.md §4.4"]
+    }
+  ],
+  "manualReviewCount": 9,
+  "manualReviewFile": "manual-review.json",
+  "patternsSkipped": [
+    {
+      "id": "FRONTRUN-APPROVE",
+      "reason": "Pattern `note` explicitly states C4 treats this as QA/known issue. Checked anyway: the only approvals are `forceApprove(minter, type(uint256).max)` / `forceApprove(minter, 0)` inside a single atomic `nonReentrant` call, and the OZ forceApprove pattern is used. No plausible HM twist, so nothing routed to manualReview under the skip rule. The adjacent question - whether the max-approval window is exploitable from the attacker-controlled ERC1155 receive hook fired mid-loop - was checked separately and REFUTED against source; parked at MR-BNM-05."
+    }
+  ],
+  "patternsCheckedNoMatch": [
+    {"id": "ERC4626-INFLATION", "reason": "no ERC4626 vault, no share/asset conversion"},
+    {"id": "ORACLE-STALE", "reason": "0 hits for latestRoundData; price comes from nftMinter.configs(), not an oracle feed"},
+    {"id": "ORACLE-ROUNDID", "reason": "no Chainlink integration"},
+    {"id": "REENTRANCY-ERC777", "reason": "reward/payment tokens are USDC/USDS/phUSD; no ERC777 hooks. Arbitrary-callback risk is covered by PATTERN-005 / MR-BNM-06 instead"},
+    {"id": "SIGNATURE-REPLAY", "reason": "0 hits for ecrecover; no signature-authorised path"},
+    {"id": "FLASH-LOAN-PRICE", "reason": "no spot-price read; emission price is the dispatcher's configured mint price"},
+    {"id": "UNSAFE-DOWNCAST", "reason": "0 hits for uint128/uint96/uint64 casts"},
+    {"id": "DIVISION-PRECISION", "reason": "checked: accrual uses mulDiv / multiply-before-divide; `priceScale` multiply precedes the division in _recomputeSchedule. Magnitude risk is already ledger L-08 (open)"},
+    {"id": "UNPROTECTED-INIT", "reason": "0 hits for initialize(; constructor-based, non-upgradeable"},
+    {"id": "STORAGE-COLLISION", "reason": "no proxy, 0 hits for delegatecall"},
+    {"id": "CENTRALIZATION-ADMIN", "reason": "single-owner setters present but Law 3 suppresses obvious owner-trust findings; the NON-obvious owner footgun is filed as PATTERN-002"},
+    {"id": "MISSING-SLIPPAGE", "reason": "0 hits for swap(/exchange(. The analogous protection (minRewards floor) EXISTS but is snapshot-based - see PATTERN-005 and MR-BNM-04"},
+    {"id": "RETURN-VALUE-IGNORE", "reason": "SafeERC20 used throughout; nftMinter.mint returns bool that is ignored, but NFTMinterV2 reverts rather than returning false - parked at MR-BNM-06 context"},
+    {"id": "SELFDESTRUCT-FORCE-ETH", "reason": "0 hits for selfdestruct; no ETH accounting in either changed file"},
+    {"id": "DOUBLE-VOTING", "reason": "no governance token / voting"},
+    {"id": "PERMIT-FRONTRUN", "reason": "no permit() path"},
+    {"id": "FIRST-DEPOSITOR-ATTACK", "reason": "no share minting; staking is 1:1 ERC1155 units"},
+    {"id": "INCORRECT-OPERATOR", "reason": "checked the changed boundaries: `count >= nudgeSize`, `remaining / DUST_THRESHOLD != 0` (equivalent to >= DUST_THRESHOLD), `poolState == Active && block.timestamp > lastRewardTime && totalStaked > 0`. All consistent with their NatSpec"},
+    {"id": "CROSS-CHAIN-REPLAY", "reason": "single-chain"},
+    {"id": "TIMELOCK-BYPASS", "reason": "no timelock"},
+    {"id": "REWARD-RUNWAY-DEPLETION", "reason": "checked: runway V/R re-derived on every recompute; the frozen-window behaviour is intentional and gated - see PATTERN-003 for the gating gap"},
+    {"id": "EMISSION-WINDOW-BOUNDARY", "reason": "_updatePool caps elapsed at min(now, windowEnd); finalizeAndReset fast-forwards lastRewardTime so the frozen gap is not retro-accrued. Verified correct in the new copy"},
+    {"id": "MINT-ON-DEMAND-OVERMINT", "reason": "this repo consumes mint-debt via the hook, it does not mint phUSD itself. The mint-debt-vs-payment coupling raised by PATTERN-002's ratchet scenario is noted there"},
+    {"id": "YIELD-PRINCIPAL-ACCOUNTING-SKEW", "reason": "no yield-strategy unwind; initiateMigration NatSpec confirms 'NO yield-strategy unwind'"},
+    {"id": "TWO-STEP-COMMIT-WINDOW", "reason": "setMigrator/setNudgeSize/setDispatcherIndex are single-step owner setters; checked for a harmful window - setMigrator(0) during Migrating still leaves permissionless userMigrate and onlyOwner finalizeAndReset, so no brick"},
+    {"id": "REENTRANCY-ERC721-RECEIVE", "reason": "CHECKED AND MITIGATED THIS CYCLE: batchMint now carries nonReentrant, closing ledger L-01 (the ERC1155 onERC1155Received hook firing mid-loop on a caller-controlled recipient). Staker side: unstake/emergencyWithdraw/userMigrate zero state before the outbound ERC1155 transfer and all carry nonReentrant; depositFor's inbound transfer lands on this contract (ERC1155Holder), not on an attacker. Residual is parked at MR-BNM-05/MR-BNM-06"},
+    {"id": "REENTRANCY-READONLY", "reason": "no value-reporting view is consumed by an external integrator as an oracle. pendingReward/runwaySeconds/totalBudget are informational; during the payout callback window batchMint holds no user-visible share price"},
+    {"id": "REENTRANCY-CROSS-FUNCTION", "reason": "checked the sibling set: OZ ReentrancyGuard is contract-wide, and every non-owner state-changing entrypoint on both changed files carries nonReentrant. Owner/pauser/migrator setters are permissioned. Parked residual at MR-BNM-06"},
+    {"id": "WEAK-PRNG", "reason": "0 hits for blockhash/prevrandao; no randomness"}
+  ],
+  "errors": []
+}

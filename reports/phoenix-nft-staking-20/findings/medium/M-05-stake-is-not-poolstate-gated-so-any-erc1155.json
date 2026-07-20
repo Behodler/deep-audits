@@ -1,0 +1,72 @@
+{
+  "id": "M-05",
+  "project": "phoenix-nft-staking",
+  "status": "ready",
+  "severity": "medium",
+  "title": "stake() is not poolState-gated, so any ERC1155 holder can block finalizeAndReset and wedge the in-place migration",
+  "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+  "function": "stake",
+  "line": 617,
+  "lineStart": 617,
+  "lineEnd": 927,
+  "entryPoint": null,
+  "fingerprint": "bdf84579b6fff2404fbf17c2e5f5972deaf306b52fa2fb79bf4fe92f3ee902a5",
+  "rootCauseClass": "no-poolstate-gate-on-stake-during-migrating",
+  "origin": "new",
+  "description": "`stake` carries no poolState guard, so a stake during `Migrating` makes `totalStaked > 0` and reverts `finalizeAndReset`'s `require(totalStaked == 0)`. `finalizeAndReset` is the ONLY transition back to Active and `depositFor` requires Active, so this blocks `InPlaceNFTStakerMigrator.migrateIn` for every other parked user for as long as the staking continues.",
+  "impact": "Two impacts. (1) AVAILABILITY: finalizeAndReset requires totalStaked == 0 and is the ONLY transition back to Active; depositFor requires Active. A single permissionless stake during Migrating therefore blocks InPlaceNFTStakerMigrator.migrateIn for EVERY other parked user, for as long as the staking continues. (2) SILENT USER VALUE LOSS: accRewardPerShare is frozen during Migrating, so the contract ACCEPTS a stake it will never pay on — pendingReward == 0 is asserted in the PoC. The staker is not warned and not refused.",
+  "attackPath": [
+    "1. Operator calls initiateMigration; poolState becomes Migrating.",
+    "2. Any holder of the ERC1155 calls stake() — ungated, permissionless, a legitimate documented user action.",
+    "3. totalStaked > 0, so finalizeAndReset reverts.",
+    "4. The pool cannot return to Active, so no parked user can be migrated in.",
+    "5. ECON-02's 6-step PoC shows the re-park re-arms the timeout clock, so the loop repeats.",
+    "6. The staker who did it earns nothing — the position accrues against a frozen accRewardPerShare."
+  ],
+  "likelihood": "medium-to-high, and MORE LIKELY ACCIDENTAL THAN ADVERSARIAL — the timeout hatch and the stake button are both legitimate documented user actions, so an ordinary user can wedge the migration without intending to. Pure-cost griefing with zero attacker profit.",
+  "assumptions": "The pool is in Migrating and at least one ERC1155 unit is outside the migrator's custody.",
+  "externalRequirements": "None. Fully permissionless.",
+  "justification": "C4 Medium: assets are not at direct risk, but the availability of a core protocol operation (the in-place migration) is impacted by an unprivileged action, and a second leg silently costs an uninvolved user their yield for the duration. Escalated from the scanner's Low per D-10; the dedup record pre-authorised a `medium` severityCeiling. The sanctioned 'pause first' remedy is PROVEN COMPLETE by execution (PoC_Local001 testPauseRemedyIsComplete: stake/unstake/claim are whenNotPaused while every migration primitive and every user escape remains callable while paused) — but that remedy carries an ecosystem-wide halt cost, filed separately as CLASS-014. A remedy that costs a whole-ecosystem outage is not a reason to call the defect Low.",
+  "recommendation": "Add require(poolState == PoolState.Active) to stake(). Free, behaviour-preserving, and removes the need to reach for the ecosystem-wide pause at all.",
+  "poc": {
+    "file": "workspace/phoenix-nft-staking/test/PoC_Local001_StakeGriefBlocksReset.t.sol",
+    "status": "passing",
+    "lastRun": "2026-07-20T00:00:00Z",
+    "note": "2/2 PASS (grief proven; pause remedy proven complete)"
+  },
+  "labelCollisionWarning": "⚠ LABEL-COLLISION GUARD (orchestrator ruling R-3). Run-20 labels are RUN-SCOPED. Run-20 H-01 is NOT ledger H-01 (858e9e80…) and run-20 M-01 is NOT ledger M-01 (521c20ad… or b58b172e…). Every reference to either MUST be disambiguated by fingerprint, never by label.",
+  "provenance": {
+    "classificationOrigin": "CLASS-006",
+    "dedupOrigin": "DEDUP-20-011",
+    "classifierProposedLabel": "M-05",
+    "convergence": "Three agents: code-scanner (CODE-003, 2/2 PoC, verified the pause remedy by EXECUTION not assertion), econ-scanner (ECON-02, cross-contract escalation via claimTimedOut turning 'a griefer could' into 'an ordinary impatient user will', 6-step PoC asserting the re-park re-arms the timeout clock so the loop repeats) and pattern-matcher (PATTERN-003, REWARD-ACCRUAL-ORDER, adding the price-scaled-specific consequence that R depends on totalStaked here).",
+    "run": "phoenix-nft-staking-20",
+    "commit": "0d1a0b2187bb980f1ac6c6b54d0b01e6410a2e54",
+    "baselineCommit": "321d0a96d7da9f261517fc53e2d14bf2b49f41c1"
+  },
+  "metadata": {
+    "createdAt": "2026-07-20T00:00:00Z",
+    "updatedAt": "2026-07-20T00:00:00Z",
+    "scanOrigin": "code-stk:CODE-003",
+    "classificationOrigin": "CLASS-006",
+    "autonomousRun": true,
+    "note": "Operator absent; every fork resolved by the pipeline is recorded in DECISION-LOG.md."
+  },
+  "disputeFlag": {
+    "flagged": true,
+    "dispute": "Scanner proposed Low (ceiling Medium); classified Medium per D-10 on the availability leg plus the silent zero-accrual acceptance.",
+    "humanMustPick": false
+  },
+  "disclosedAgainst": {
+    "fingerprint": "a18927e1d90109b2f9d43904eaa7fcb3f6677680cf5fb072ab8030131893766e",
+    "label": "L-03 (open, src/NFTStakerDepletion.sol)",
+    "basis": "D-15 inherited-disclosure — new contract, new fingerprint. MATERIALLY NARROWER here (only `stake` is harmful; unstake and claim settle against the frozen accRewardPerShare and are benign) and SHARPER (it wedges the migration). Disclosed, NOT collapsed, NOT silently inherited."
+  },
+  "evidence": [
+    "PoC_Local001_StakeGriefBlocksReset.t.sol 2/2 PASS (grief proven; pause remedy proven complete)",
+    "three-agent convergence: code-scanner CODE-003 (2/2 PoC), econ-scanner ECON-02 (6-step), pattern-matcher PATTERN-003",
+    "InvariantMigrateReady test_finalizeReachability_griefedByPermissionlessStake PASS"
+  ],
+  "faithfulness": false,
+  "plausibility": "n/a"
+}

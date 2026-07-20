@@ -1,0 +1,191 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-07-20T00:00:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "submoduleHead": "0d1a0b2",
+  "storyUnderReview": "story-021 @ f65aec9 (NFTStakerPriceScaledMigrateReady)",
+  "contractsScanned": 5,
+  "scannedFiles": [
+    "src/NFTStakerPriceScaledMigrateReady.sol",
+    "src/NFTStakerDepletion.sol",
+    "src/NFTStakerMigrator.sol",
+    "src/InPlaceNFTStakerMigrator.sol",
+    "src/INFTStakerMigratable.sol"
+  ],
+  "pocFile": "/home/justin/code/audits/workspace/phoenix-nft-staking/test/PoC_EconMigrateReady.t.sol",
+  "pocResult": "10 tests, 10 passed (forge test --match-path test/PoC_EconMigrateReady.t.sol)",
+  "knownIssuesSuppressionApplied": false,
+  "knownIssuesNote": "phoenix-nft-staking/CLAUDE.md cached known-issues predate stories 017-022 and were NOT used to suppress anything on copy #4 or the migrators, per the task guardrail.",
+  "findings": [
+    {
+      "id": "ECON-01",
+      "type": "mechanism-design / ordering-dependent value transfer",
+      "severity": "potential-low",
+      "severityCeiling": "medium",
+      "confidence": "high",
+      "contract": "src/InPlaceNFTStakerMigrator.sol",
+      "function": "migrateIn",
+      "line": 186,
+      "lineStart": 186,
+      "lineEnd": 232,
+      "relatedSites": [
+        "src/NFTStakerPriceScaledMigrateReady.sol:901 (depositFor tail _recomputeSchedule)",
+        "src/NFTStakerPriceScaledMigrateReady.sol:925 (finalizeAndReset, requires totalStaked == 0)",
+        "src/NFTStakerMigrator.sol:81 (migrate, same class cross-staker)"
+      ],
+      "description": "A migration necessarily drains the pool to zero (finalizeAndReset requires totalStaked == 0) and then refills it one operator-chosen slice at a time. Emissions resume the instant slice 1 lands, but slice-N users are still parked in the migrator's custody and earn nothing. Because the budget is shared, the emissions slice-1 users collect during the staggered re-injection are drawn from the same rewardBudget that funds every later user's runway. Time-in-pool - and therefore payout - is decided entirely by which migrateIn slice the operator puts a user in, a variable no user controls and no user can observe in advance.",
+      "codeSnippet": "// InPlaceNFTStakerMigrator.migrateIn(start, end) -> staker.depositFor(user, amt)\n// NFTStakerPriceScaledMigrateReady.depositFor L901: _recomputeSchedule();  // emissions resume for whoever is already in",
+      "economicImpact": "Value transfer between users, bounded by targetAPY * (gap between first and last slice) * slice-1 notional. Protocol solvency is unaffected (asserted in PoC).",
+      "attackScenario": "1. Alice and Bob hold identical 10-unit positions, parked at the same instant by one migrateOut.\n2. Operator runs finalizeAndReset, then migrateIn(0,1) -> Alice back in.\n3. Three days of operational lag (rewire, multisig, gas window).\n4. migrateIn(0,1) -> Bob back in.\n5. Both sit staked a further 30 days and claim.\nPoC test_ECON_A_migrateInOrderingIsAValueTransfer: Alice 40.685 phUSD vs Bob 36.986 phUSD - a 1000 bps (10.00%) gap over identical wall-clock exposure, exactly targetAPY(45%) * 3 days * 1000 phUSD notional = 3.699 phUSD.",
+      "profitability": "Not an attacker-profit vector; it is an operator-ordering footgun (Law 3: a competent non-malicious owner would be surprised that slice order decides payout). At MAX_TARGET_APY (50%) and a 7-day staggered migration the transfer reaches ~0.96% of the migrated notional.",
+      "affectedParties": "Users placed in later migrateIn slices (and, cross-staker, later migrate() batches).",
+      "worseOnSibling": "The same class is worse on src/NFTStakerDepletion.sol, where rate = budget/windowSeconds is independent of totalStaked, so slice-1 users split the ENTIRE pool-wide emission stream among themselves. PoC test_ECON_G_depletionMigrateInOrderingOverPaysSliceOne: slice-1 user earns 120% of the slice-2 user (48.98 vs 40.76 phUSD) vs 110% on the price-scaled copy. This is the migration-path reachability of the phlimbo-ea Linear-Depletion / run-18 M-01 rate-drift class; story-020's fix addressed the unstake path, not this one.",
+      "recommendation": "Set targetAPY to 0 immediately after finalizeAndReset and restore it only after the final migrateIn slice lands - emissions are then zero for the whole staggered window and slice order carries no economic weight. (Alternatively re-inject in a single transaction; ECON-04 shows gas permits ~400 users per block.) Document whichever is chosen as a mandatory runbook step.",
+      "possiblyIntentional": "Partially - 'you are not staked, you do not earn' is defensible. What makes it reportable is that the operator, not the user, chose the un-staked interval, via a migrate-on-behalf primitive."
+    },
+    {
+      "id": "ECON-02",
+      "type": "cross-contract griefing / state-machine livelock + silent zero-yield stake",
+      "severity": "potential-low",
+      "severityCeiling": "medium",
+      "confidence": "high",
+      "contract": "src/InPlaceNFTStakerMigrator.sol",
+      "function": "claimTimedOut",
+      "line": 242,
+      "lineStart": 242,
+      "lineEnd": 256,
+      "relatedSites": [
+        "src/NFTStakerPriceScaledMigrateReady.sol:617 (stake - no poolState gate)",
+        "src/NFTStakerPriceScaledMigrateReady.sol:927 (finalizeAndReset require totalStaked == 0)",
+        "src/NFTStakerPriceScaledMigrateReady.sol:881 (depositFor require poolState == Active)"
+      ],
+      "description": "This is the cross-contract escalation of profile LOCAL-001, and it changes that finding's character from 'a griefer could' to 'an ordinary impatient user will, using the migrator's own documented escape hatch'. claimTimedOut hands the ERC1155 back to a parked user while the staker is still Migrating. stake() carries no poolState gate, so the user can immediately re-stake. That makes totalStaked > 0, which permanently blocks finalizeAndReset - the ONLY transition back to Active - which in turn blocks depositFor and therefore migrateIn for EVERY other parked user. Evicting the re-staker via batchMigrate re-parks their stake and RESTARTS their migrationTimeout clock, so the loop can repeat. Separately, the re-staker earns exactly zero for as long as the pool stays frozen: accRewardPerShare is pinned, so the contract silently accepts a stake it will never pay on.",
+      "codeSnippet": "// staker L617:\nfunction stake(uint256 amount) external nonReentrant whenNotPaused {\n    require(amount > 0, \"NFTStaker: zero stake\");   // <-- no poolState check\n// staker L927:\n    require(totalStaked == 0, \"NFTStaker: stake outstanding\");",
+      "economicImpact": "Migration availability: the in-place rewire cannot complete. Plus a silent per-user yield loss for anyone who re-stakes into a frozen pool.",
+      "attackScenario": "1. Operator initiateMigration + migrateOut(alice, bob). The rewire runs long (migrationTimeout floor is only MIN_TIMEOUT = 1 day).\n2. Alice claimTimedOut -> receives her 10 units back.\n3. Alice re-stakes 10 units. Succeeds: totalStaked = 10.\n4. Ten days pass; pendingReward(alice) == 0 (asserted).\n5. finalizeAndReset reverts 'NFTStaker: stake outstanding'; migrateIn(0,1) for Bob reverts 'NFTStaker: not active'.\n6. Operator migrateOut(alice) to evict - claimableAt(alice) is reset to now + TIMEOUT, re-arming the loop.\nPoC test_ECON_B_timeoutHatchRestakeLivelocksFinalizeAndReset (all six steps asserted).",
+      "profitability": "Zero attacker profit (the re-staker earns nothing). Pure cost griefing, or - more likely - accidental, since the hatch and the stake button are both legitimate documented user actions.",
+      "affectedParties": "All other parked users (re-injection blocked); the re-staker (silent zero yield).",
+      "recommendation": "Primary: pause() for the whole migration - stake is whenNotPaused while every migration primitive and every user escape is deliberately callable while paused, so this closes the vector completely and traps nobody. Make it a mandatory runbook step. Structural alternative: add require(poolState == PoolState.Active) to stake(), which also removes the silent zero-yield surprise.",
+      "possiblyIntentional": "The freeze semantics are intentional; the unguarded stake() during Migrating appears to be an oversight inherited from the depletion copy (its ledgered L-03)."
+    },
+    {
+      "id": "ECON-03",
+      "type": "MEV / informational edge across the migration seam",
+      "severity": "potential-low",
+      "severityCeiling": "low",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "userMigrate",
+      "line": 827,
+      "lineStart": 827,
+      "lineEnd": 833,
+      "description": "userMigrate is permissionless by design (the frozen-state escape hatch). A user who is watching can self-exit the frozen source staker and immediately stake into the Active target staker themselves, jumping the operator's batch queue and capturing the APY that ECON-01 denies to users who wait for their batch. Same root economic cause as ECON-01 (unequal time-in-pool during a migration funded from a shared budget) but a distinct actor and a distinct mechanism, so it is filed separately: mitigating ECON-01 by re-ordering slices does not touch this, and mitigating this by removing userMigrate would break the escape hatch.",
+      "economicImpact": "Sophisticated users systematically out-earn passive users across every migration, out of the shared reward budget.",
+      "attackScenario": "1. Operator initiateMigration on the source (cross-staker or cross-model).\n2. Alice front-runs the operator: userMigrate() -> stake() on the target.\n3. Operator's batch for Bob lands 5 days later.\n4. Both sit 30 further days and claim.\nPoC test_ECON_H_selfAdvanceBeatsOperatorBatchOrder: Alice 43.151 phUSD vs Bob 36.986 phUSD - a 1666 bps (16.66%) edge.",
+      "profitability": "Profitable for any user with a watcher; cost is two transactions. Requires the target staker to be Active and to share stakedToken/stakedId (which the migrator's own wiring requires anyway).",
+      "affectedParties": "Passive users in later batches.",
+      "recommendation": "The ECON-01 remedy (targetAPY = 0 across the migration window) neutralises this too. Otherwise disclose the self-advance option to all users so the edge is not informational."
+    },
+    {
+      "id": "ECON-04",
+      "type": "gas / DoS ceiling - QUANTIFIED REFUTATION",
+      "severity": "informational",
+      "confidence": "high",
+      "contract": "src/InPlaceNFTStakerMigrator.sol",
+      "function": "migrateIn",
+      "line": 226,
+      "description": "Profile LOCAL-006 flagged that depositFor on the price-scaled copy makes 3 external calls per user per loop iteration (dispatcherHook.pull() via _syncBudget, plus nftMinter.configs() + dispatcherHook.mintDebt() via the tail _recomputeSchedule) versus 1 storage-only recompute on the depletion copy, and warned that migrateIn slices must be 'substantially smaller'. MEASURED: the premium is 1.27x, not an order of magnitude, and there is NO realistic DoS ceiling.",
+      "measurement": "PoC test_ECON_C_migrateInGasCeiling / test_ECON_C2_depletionMigrateInGasBaseline, N = 40 users, live mock dispatcher hook with non-zero pendingMint: price-scaled 70,312 gas/user (2,812,503 total), depletion 55,565 gas/user. 30M block / 70,312 = 426 users per transaction.",
+      "verdict": "REFUTED as a DoS. The real BalancerPoolerMintDebtHook.pull() is a no-op after the first iteration of a loop (mintDebt is zeroed on the first pull), so the mock is representative; allow ~1.5x headroom for the real hook's nonReentrant + guard and for calldata.",
+      "recommendation": "Size migrateIn slices at <= 100 users. That is a comfortable margin, not a constraint - a 1,000-user migration completes in 10 transactions. No code change needed."
+    },
+    {
+      "id": "ECON-05",
+      "type": "budget conservation across finalizeAndReset - VERIFIED CLEAN",
+      "severity": "informational",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "finalizeAndReset",
+      "line": 925,
+      "lineStart": 925,
+      "lineEnd": 932,
+      "description": "Task item 3: does the drained-pool re-derive leave a surplus or deficit behind, and can the pool be revived with a stale or over-generous budget? Answer: NO on all counts.",
+      "measurement": "PoC test_ECON_D_finalizeAndResetConservesBudget: pre-migration rewardRate 14,269,406,392,694 -> 0 after reset; windowEnd == block.timestamp exactly; rewardBudget + committedDebt == balance (999,987.67 phUSD) to the wei; committedDebt == 0. Every undistributed wei is recycled into rewardBudget for the revived pool.",
+      "verdict": "The story-021 PS-3 delta is correct and is a genuine fix-forward. Because poolState flips to Active BEFORE _recomputeSchedule, and totalStaked == 0 is a hard precondition, the re-derive lands on S == 0 -> rate 0 -> windowEnd == now, byte-identical to an unstake-to-zero. The stale-over-generous-rate revival that the depletion copy's ledgered L-02 leaves open is structurally impossible here. No finding."
+    },
+    {
+      "id": "ECON-06",
+      "type": "transient solvency window (ledgered L-06) - NOT WIDENED",
+      "severity": "informational",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "finalizeAndReset",
+      "line": 930,
+      "description": "Task item 4: finalizeAndReset newly calls _recomputeSchedule, which reads V = rewardToken.balanceOf(this) + dispatcherHook.mintDebt() WITHOUT a preceding pull(), so rewardBudget provably over-states held phUSD across the reset. CONFIRMED but INERT.",
+      "measurement": "PoC test_ECON_E_finalizeAndResetCountsUnpulledMintDebt: after finalizeAndReset with 500,000 phUSD of un-pulled mintDebt, balance = 1,000,000 phUSD but rewardBudget = 1,500,000 phUSD.",
+      "verdict": "L-06 is NOT widened by copy #4. The over-statement cannot be converted into accrual: finalizeAndReset requires totalStaked == 0, so the same recompute sets rewardRate = 0 and windowEnd = now, and _updatePool accrues nothing against the inflated budget. The first Active interaction (stake or depositFor) runs _syncBudget -> pull() BEFORE its tail recompute, restoring balance == rewardBudget + committedDebt (asserted in the PoC after migrateIn). The only observable effect in the window is that the totalBudget() and runwaySeconds() views over-report. Rounding checklist re-walked across every migration path: no direction flips - _updatePool floors accrual (protocol-favouring), _recomputeSchedule floors latestPrice/F/newRate/runway (protocol-favouring), _exitPosition floors pending, and the _safePayTo dust branch is bounded at ~1 wei/user (profile LOCAL-007, unchanged). No round-trip lets a user end above where they started."
+    },
+    {
+      "id": "ECON-07",
+      "type": "wont-fix premise re-check (M-02 emergencyWithdraw over-emission) - DISCLOSURE, NOT A RE-FILE",
+      "severity": "informational",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "emergencyWithdraw",
+      "line": 735,
+      "priorEntry": "ledger M-02 (NFTStaker.emergencyWithdraw over-emission), owner-triaged WONT-FIX 2026-06-09",
+      "priorTriageReasonQuoted": "'deployed + no migrate-on-behalf, pullAndRefresh mitigation'",
+      "description": "The task correctly flagged that one prong of the owner's acceptance rationale ('no migrate-on-behalf') is falsified on copy #4, which adds batchMigrate/depositFor. Per the 'disclose when re-filing an owner wont-fix' rule this was re-examined against source and empirically. FINDING: the premise change makes the exposure STRICTLY SMALLER, not larger.",
+      "measurement": "PoC test_ECON_F_emergencyWithdrawDuringMigratingCausesNoOverEmission: Alice emergencyWithdraws mid-migration (totalStaked 20 -> 10, no recompute, rate still sized for the pre-exit pool). Ten days pass. Bob's pendingReward is UNCHANGED from the freeze snapshot, and userMigrate pays him exactly that snapshot. Solvency holds.",
+      "verdict": "The M-02 class requires _updatePool to settle accrual at a stale over-sized rate. While Migrating, _updatePool early-returns (L498), so the class is SUPPRESSED on precisely the paths migrate-on-behalf introduces. On the Active path the drift window is identical to NFTStaker's - _updatePool always runs before _recomputeSchedule on every interaction, exactly as on copy #1 - so batchMigrate/depositFor add no new persistence. Combined with the other two prongs (copy #4 is not deployed, and it has pullAndRefresh PLUS a full migration block, so the corrective surface is strictly larger), the wont-fix rationale still holds. NOT re-filed. Recorded so the falsified prong is visible rather than silently carried."
+    },
+    {
+      "id": "ECON-08",
+      "type": "operator footgun / availability - hook recipient wiring",
+      "severity": "potential-low",
+      "severityCeiling": "low",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "_syncBudget",
+      "line": 467,
+      "relatedSites": [
+        "lib/mutable/yield-claim-nft/src/hooks/BalancerPoolerMintDebtHook.sol:56-61 (onlyOwnerOrRecipient)",
+        "lib/mutable/yield-claim-nft/src/hooks/BalancerPoolerMintDebtHook.sol:120-121 (pull, RecipientUnset)"
+      ],
+      "description": "BalancerPoolerMintDebtHook.pull() is onlyOwnerOrRecipient and additionally reverts RecipientUnset when recipient == address(0). The staker calls dispatcherHook.pull() with msg.sender == itself, so a staker wired to a hook on which it is NOT the recipient reverts on EVERY _syncBudget path - stake, unstake, claim, depositFor, initiateMigration, pullAndRefresh - unconditionally, even when mintDebt is zero. In a cross-staker migration the target staker is by construction not yet the hook's recipient, so wiring its dispatcherHook before flipping hook.setRecipient bricks the entire migration at the first depositFor. The in-repo orchestrator tests never wire a real (or recipient-guarded) hook to the target, so this ordering constraint is untested and undocumented.",
+      "economicImpact": "Availability only - no value at risk. emergencyWithdraw and userMigrate never call pull(), so principal always escapes.",
+      "attackScenario": "Operator sequence: deploy new staker -> setDispatcherHook(sharedHook) -> setMigrator -> migrate(users). The batchMigrate leg succeeds (no _syncBudget), then depositFor reverts OnlyOwnerOrRecipient with the batch's ERC1155 already pulled into the migrator - a partially-executed migration.",
+      "recommendation": "Runbook: either leave the target's dispatcherHook unset until hook.setRecipient(target) has landed, or flip the recipient first. Note the reciprocal hazard: once the recipient is flipped, the SOURCE staker's stake/unstake/claim/pullAndRefresh brick too (userMigrate and emergencyWithdraw still work), so the flip must come after initiateMigration. This also compounds profile LOCAL-002: finalizeAndReset now calls mintDebt(), so an unhealthy hook additionally blocks the revival path - run setDispatcherHook(address(0)) before finalizeAndReset if in doubt.",
+      "possiblyIntentional": "The single-recipient hook design is intentional; the un-documented interaction with a two-staker migration is the footgun (Law 3: non-obvious second-order consequence)."
+    },
+    {
+      "id": "ECON-09",
+      "type": "mid-batchMint intermediate-price recompute - REFUTED (coordinator handoff)",
+      "severity": "informational",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "_recomputeSchedule",
+      "line": 567,
+      "relatedSites": [
+        "lib/mutable/yield-claim-nft/src/NFTMinterV2.sol:188 (price bump)",
+        "src/NFTStaker.sol / src/NFTStakerPriceScaled.sol (identical _recomputeSchedule)"
+      ],
+      "description": "Handoff from the BatchNFTMinter code-scanner: an attacker-controlled recipient's onERC1155Received fires `count` times mid-batchMint and can re-enter the staker (stake / pullAndRefresh / claim -> _recomputeSchedule) at any chosen intermediate, settled price, rather than the end-of-batch price. VERDICT: REFUTED - the direction of the deviation is structurally wrong for an attacker, and it is fully self-correcting.",
+      "answersToPosedQuestions": {
+        "q1_deviation_magnitude": "rewardRate is exactly linear in latestPrice, so the deviation ratio is r^(k-count) where r = 1 + growthBasisPoints/1e4 and k is the chosen iteration. The bound is the first-iteration observation: 1 - r^-(count-1). Measured at gbp = 100 (1%) and count = 20: p_first 101e6 vs p_final 122.019e6, a maximum 1723 bps UNDER-size (rate 28,538,812,785,388 vs the honest 34,477,993,436,073). With the dispatcher's growthBasisPoints == 0 - the configuration used throughout the repo's own tests and the case CLAUDE.md describes as 'every staker earns exactly targetAPY' - the price does not move during a batch and the deviation is EXACTLY ZERO.",
+        "q2_durable_over_earn": "NO, in either direction. NFTMinterV2.sol:188 computes config.price = price + (price * growthBasisPoints)/10000 with an UNSIGNED growthBasisPoints, so within one batchMint the price is monotone NON-DECREASING. Every intermediate observation is therefore <= the end-of-batch price, and the attacker can only UNDER-size rewardRate - never over-size it. There is no route to over-earn. It is also self-correcting: the very next recompute by ANY user (stake/unstake/claim, all permissionless) restores the honest rate bit-for-bit (measured: 34,477,993,436,073 == the control rate exactly). And _updatePool always settles accrual at the OLD rate before the recompute, so nothing is re-priced retroactively.",
+        "q3_materiality": "Immaterial, and it back-fires. PoC test_ECON_I_midBatchIntermediatePriceCannotOverEarn: the attacker who pins the schedule at the first intermediate price earns 36.986 phUSD over the following 30 days versus 44.683 phUSD in the control that recomputes at the final price - i.e. the attacker pays 17.2% of their own yield for the privilege, having also paid for a full 20-mint batch. The residual is a pure griefing vector (the pool under-emits until the next recompute); the un-emitted budget stays in rewardBudget and recycles (see ECON-05's conservation proof), so nothing is lost, and any user can restore the rate for the cost of one claim(). Solvency (balance == rewardBudget + committedDebt) held exactly in both arms.",
+        "q4_price_scaled_interaction": "No new exposure. On the price-scaled models rate = totalStaked * latestPrice * priceScale * targetAPY / SECONDS_PER_YEAR, so the PER-UNIT emission is latestPrice * priceScale * targetAPY / SECONDS_PER_YEAR - independent of totalStaked. That is the audit M-03 fix, and it means an attacker who stakes freshly-minted units mid-loop to inflate totalStaked raises the aggregate rate strictly in proportion to the aggregate stake and gains nothing per unit. priceScale is a constant multiplier that scales both arms identically. On NFTStakerPriceScaledMigrateReady specifically, the vector is additionally suppressed outright while poolState == Migrating, because _recomputeScheduleIfActive (L482) early-returns."
+      },
+      "verdict": "REFUTED. No finding. Recorded here so it is not re-derived on the next run. The only residual is a zero-profit, self-correcting under-emission grief whose cost to the attacker exceeds its cost to anyone else."
+    }
+  ],
+  "refutationsAndClearances": [
+    "M-01 depletion rate-drift has NO price-scaled analogue on the accrual path: R = totalStaked * latestPrice * A / yr is re-derived from live state on every mutation, and repeated recomputes are idempotent (budget = V - committedDebt shrinks as accrual commits while the rate is constant), so windowEnd cannot be re-extended for free. The class DOES reappear via the migration path on the depletion copy - see ECON-01 worseOnSibling.",
+    "Cross-model Depletion -> PriceScaled (task item 2) transfers stake value correctly: batchMigrate returns exact ERC1155 amounts and depositFor credits exactly those amounts with rewardDebt set at the current acc, so no retroactive credit and no haircut. The only cross-seam gain/loss is the time-in-pool asymmetry already filed as ECON-01/ECON-03; there is no arbitrage in the accounting itself.",
+    "No double-earning across the seam: batchMigrate zeroes the source position and pays the frozen pending before the ERC1155 leaves, and depositFor sets rewardDebt at the target's live acc. The same stake can never accrue on two stakers at once.",
+    "story-021's PS-4 delta is correct: depositFor pays _safePayTo(user, ...) at L887, so the migrator cannot capture a migrating user's phUSD. (The sibling defect at NFTStakerDepletion.sol:756 is code-scanner/parity territory - see FORK-PARITY-4WAY DRIFT-01 - not re-filed here.)",
+    "Owner-only mid-migration schedule writes (setTargetAPY / topUp / rescueERC20) are economically inert while Migrating, confirmed by inspection: _updatePool no-ops so nothing accrues at any rate they set, and finalizeAndReset re-derives the whole schedule on the way out."
+  ]
+}

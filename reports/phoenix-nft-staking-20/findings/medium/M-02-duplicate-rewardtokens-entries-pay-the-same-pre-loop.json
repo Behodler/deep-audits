@@ -1,0 +1,84 @@
+{
+  "id": "M-02",
+  "project": "phoenix-nft-staking",
+  "status": "ready",
+  "severity": "medium",
+  "title": "Duplicate rewardTokens entries pay the same pre-loop snapshot k times and recapture the batch's own donations",
+  "contract": "src/BatchNFTMinter.sol",
+  "function": "_payRewards",
+  "line": 434,
+  "lineStart": 434,
+  "lineEnd": 458,
+  "entryPoint": null,
+  "fingerprint": "a62fe01a25e28fe7c327b65728e15408017525d9611a92d3363b7066c6c437ad",
+  "rootCauseClass": "duplicate-reward-token-uncapped-cumulative-payout",
+  "origin": "new",
+  "description": "`_payRewards` transfers `snapshot[i]` once per array element with no cumulative per-token cap, while `_snapshotRewards` writes the same pre-loop balance B into every duplicate slot. The mint loop meanwhile raises the live balance by the batch's own donation D, so k transfers succeed whenever k*B <= B+D.",
+  "impact": "Protocol-directed incentive funds (StableYieldAccumulator nudgeSplit drip + BalancerPoolerV2 per-mint cut) leak back to the batcher that generated them. The donate-forward mechanic that docs/multi-token-nudge.md §4.2 calls load-bearing is defeated: a batcher recaptures up to ~100% of their own batch's donation and can drive the next claimant's seed to zero. No user principal is at risk.",
+  "attackPath": [
+    "1. _snapshotRewards writes the same pre-loop balance B into every duplicate slot of the caller-supplied rewardTokens array.",
+    "2. The mint loop raises the live balance by the batch's own donation D (the pinned dispatcher donates on every mint).",
+    "3. _payRewards transfers snapshot[i] once per array element with no cumulative per-token cap.",
+    "4. k transfers succeed whenever k*B <= B+D, so the caller is paid k times out of a pot that was counted once.",
+    "5. Back-to-back batches nullify donate-forward permanently: prior pot 77.64 USDC, paid out 155.28, 0 left behind."
+  ],
+  "likelihood": "medium — permissionless (any caller supplies the array), no privilege, no timing. Bounded by the batch's own donation size: at count=400 the mainnet shape gives k=9 and 704.53 of 776.40 USDC clawed back (≈90.7% self-recapture). Honest bound: at the CURRENTLY OBSERVED mainnet shape the duplicate path still fails closed (test_AtObservedShape_DuplicateStillFailsClosed) — it needs a large batch to bite.",
+  "assumptions": "The pinned dispatcher donates a legal reward asset to the batcher on each mint. True today: DISPATCHER_INDEX=4, BalancerPoolerV2, primeToken()==USDS, forwards a USDC cut, so USDC is simultaneously a legal reward token and a per-mint donation.",
+  "externalRequirements": "A batch large enough that k*B <= B+D. Corroborating incident lineage recorded at tx 0x6d71d6fd, block 25242986.",
+  "justification": "C4 Medium. Assets are not at direct risk in the user-principal sense, but the function of the protocol IS impacted — the incentive-forwarding mechanism the spec calls load-bearing is defeated, and value leaks to a party that did not earn it. Three independent agents converged at Medium (pattern-matcher PATTERN-001 high-confidence, econ-scanner ECON-002 with mainnet magnitude, story-faithfulness F-20-01), and convergence is recorded as corroboration raising confidence, not as three findings. NOT escalated to High: no user principal, no theft of third-party deposits, and the currently observed mainnet shape still fails closed.",
+  "recommendation": "Clamp to min(snapshot[i], balanceOf(this) - paidThisPass), or dedupe the array.",
+  "poc": {
+    "file": "workspace/phoenix-nft-staking/test/PoC_DuplicateRewardWithDonations.t.sol",
+    "status": "passing",
+    "lastRun": "2026-07-20T00:00:00Z",
+    "note": "3/3 PASS + PoC_DuplicateMagnitudeMainnetShape 3/3; invariant_nudgeSolvency and invariant_nudgeNoSelfFund both BROKEN"
+  },
+  "labelCollisionWarning": "⚠ LABEL-COLLISION GUARD (orchestrator ruling R-3). Run-20 labels are RUN-SCOPED. Run-20 H-01 is NOT ledger H-01 (858e9e80…) and run-20 M-01 is NOT ledger M-01 (521c20ad… or b58b172e…). Every reference to either MUST be disambiguated by fingerprint, never by label.",
+  "provenance": {
+    "classificationOrigin": "CLASS-003",
+    "dedupOrigin": "DEDUP-20-001",
+    "classifierProposedLabel": "M-02",
+    "convergence": "THREE independent agents converged: pattern-matcher (PATTERN-001, high confidence, from the ROUNDING-DIRECTION+FEE-ON-TRANSFER duplicate-entry signature), econ-scanner (ECON-002, with mainnet magnitude and the story-016 incident lineage) and story-faithfulness (F-20-01, story-unsafe: §4.5 contradicts §4.2 in the same normative document). Convergence is recorded as CORROBORATION and RAISES confidence to high; it does not reduce the finding.",
+    "run": "phoenix-nft-staking-20",
+    "commit": "0d1a0b2187bb980f1ac6c6b54d0b01e6410a2e54",
+    "baselineCommit": "321d0a96d7da9f261517fc53e2d14bf2b49f41c1"
+  },
+  "metadata": {
+    "createdAt": "2026-07-20T00:00:00Z",
+    "updatedAt": "2026-07-20T00:00:00Z",
+    "scanOrigin": "econ-bm:ECON-002",
+    "classificationOrigin": "CLASS-003",
+    "autonomousRun": true,
+    "note": "Operator absent; every fork resolved by the pipeline is recorded in DECISION-LOG.md."
+  },
+  "disputeFlag": {
+    "flagged": false
+  },
+  "doNotCollapseWith": [
+    "DEDUP-20-008"
+  ],
+  "fixTrap": {
+    "warning": "⚠ D-16 / F-20-01 rec (c) — MUST LAND IN THE FINDING TEXT.",
+    "wrongFix": "Re-reading balanceOf at payout. That is EXACTLY the §4.2 refactor the spec warns against, at BOTH the snapshot site and the payout site.",
+    "correctFix": "Clamp to min(snapshot[i], balanceOf(this) - paidThisPass), or dedupe the array.",
+    "jointFixNote": "The correct clamp ALSO fixes the FoT payout-vs-delivered gap (CLASS-018 / DEDUP-20-006), so the two must be evaluated jointly."
+  },
+  "evidence": [
+    "PoC_DuplicateRewardWithDonations.t.sol 3/3 PASS",
+    "PoC_DuplicateMagnitudeMainnetShape 3/3 PASS (776.40 donated, 704.53 recaptured, 71.87 left to seed the next claimant)",
+    "invariant_nudgeSolvency BROKEN — paid=6000000 prePot=3000000 count=8 listLen=3 (paid 2× the snapshot pot), 1-call counterexample",
+    "invariant_nudgeNoSelfFund BROKEN — excess=21000000 (caller paid out of their own donation), 1-call counterexample",
+    "census proves non-vacuity: batchMint-ok 234, qualified 69, REWARD-ACTUALLY-MOVED 61, duplicateList 112"
+  ],
+  "faithfulness": true,
+  "faithfulnessLabel": "F-20-01 (story-unsafe — §4.5 contradicts §4.2 inside the same normative document; Law-1 override applies)",
+  "witnessGap": "CLASS-020 (DEDUP-20-008) — the §6 witness that is supposed to encode this property runs with donations D == 0 and passes vacuously. Fix both or the coverage regression vanishes the moment the code fix lands.",
+  "plausibility": "n/a",
+  "orchestratorRuling": {
+    "id": "R-7",
+    "verdict": "MEDIUM CONFIRMED. The stated bound is CORRECTED.",
+    "boundRetracted": "DO NOT report 'the currently observed mainnet shape still fails closed' (test_AtObservedShape_DuplicateStillFailsClosed) as the thing keeping this off High. That bound is weak: the bite condition is k·B <= B + D, and D scales with `count`, which the ATTACKER CHOOSES (the reported bite point count=400 sits well inside the ~426-users-per-30M-gas-block ceiling measured elsewhere this run). A precondition the attacker can create for themselves does not cap severity.",
+    "boundSubstituted": "The load-bearing bound is DONATE-FORWARD DEFEAT, not third-party theft: an honest single claim already takes B by design, so the INCREMENTAL extraction is capped at D — the caller recapturing their OWN batch's donation. That is a real leak of protocol-directed incentive funds and a defeat of a spec-load-bearing mechanic (Medium), but it is not theft of anyone's principal (not High).",
+    "why": "Same label, sounder footing. If the report ships the weaker bound, the first reviewer to notice `count` is caller-supplied reads the Medium as under-argued."
+  }
+}

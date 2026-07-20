@@ -1,0 +1,224 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-07-20T00:00:00Z",
+  "scanType": "code",
+  "scanner": "code-scanner (Tier 2, interaction-level)",
+  "submoduleHead": "0d1a0b2",
+  "workspace": "/home/justin/code/audits/workspace/phoenix-nft-staking",
+  "contractsScanned": 7,
+  "scope": [
+    "src/NFTStaker.sol",
+    "src/NFTStakerPriceScaled.sol",
+    "src/NFTStakerDepletion.sol",
+    "src/NFTStakerPriceScaledMigrateReady.sol",
+    "src/NFTStakerMigrator.sol",
+    "src/InPlaceNFTStakerMigrator.sol",
+    "src/INFTStakerMigratable.sol"
+  ],
+  "pocFiles": [
+    "workspace/phoenix-nft-staking/test/PoC_Drift01_DepositForPaysMigrator.t.sol",
+    "workspace/phoenix-nft-staking/test/PoC_Local001_StakeGriefBlocksReset.t.sol",
+    "workspace/phoenix-nft-staking/test/PoC_Local002_005_MigrationFootguns.t.sol"
+  ],
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "cross-contract-accounting/misrouted-funds",
+      "severity": "potential-medium",
+      "severityDispute": "Plausible HIGH for the NFTStakerMigrator orchestrator: user funds are permanently lost with no recovery path of any kind. Filed Medium because (a) no attacker is required or benefits, (b) magnitude is bounded by pending accrued on the TARGET pool for the subset of users already holding a position there, (c) solvency invariant is not broken, (d) neither migrator is deployed. Requires severity-auditor arbitration.",
+      "confidence": "high",
+      "contract": "src/NFTStakerDepletion.sol",
+      "function": "depositFor",
+      "line": 756,
+      "lineStart": 748,
+      "lineEnd": 762,
+      "description": "NFTStakerDepletion.depositFor settles an existing staker's pending phUSD with `_safePay(pending)`, which forwards to `_safePayTo(msg.sender, ...)`. depositFor is `onlyMigrator`, so msg.sender is ALWAYS an orchestrator contract, never the user. The user's earned phUSD is transferred to the migrator while `Claimed(user, pending)` is emitted naming the user — the event lies about where the money went. The contract already defines and correctly uses `_safePayTo` in `_exitPosition` (L733); this is a missed call-site, not a missing primitive. The sibling copy NFTStakerPriceScaledMigrateReady.sol:887 uses `_safePayTo(user, pending)` — the fix was written by story-021, explicitly named in its commit message, and not mirrored back.",
+      "codeSnippet": "if (info.amount > 0) {\n    uint256 pending = (info.amount * accRewardPerShare) / ACC_PRECISION - info.rewardDebt;\n    if (pending > 0) {\n        pending = _safePay(pending);           // pays msg.sender == the MIGRATOR\n        if (pending > 0) emit Claimed(user, pending);\n    }\n}",
+      "attackVector": "No attacker required. Precondition: the depositFor target already holds a non-zero position with non-zero pending on the TARGET staker. Two proven-reachable orchestrator paths:\n(1) NFTStakerMigrator (cross-staker) — the new staker is deployed, wired and LIVE before migration, and `stake` on it is permissionless. Any user who staked directly in the new staker before the operator migrates them across accrues pending there; `migrate([user])` then routes that pending to the migrator. NFTStakerMigrator has NO rescue function → permanently stranded.\n(2) InPlaceNFTStakerMigrator (in-place rewire) — after `finalizeAndReset` the pool returns to Active and `stake` is permissionless again; a parked user holding spare ERC1155 units who re-stakes while waiting for their `migrateIn` slice (slices run over hours/days) has their re-accrued pending routed to the migrator. Recoverable there via `rescueERC20` (onlyOwner), requiring manual off-chain hand-distribution.",
+      "reachabilityVerdict": "REACHABLE in realistic migrations for both orchestrators, via ordinary unprivileged user behaviour with no contrivance. NOT reachable on a first-ever migration into a freshly-deployed, never-staked target pool.",
+      "recoverability": {
+        "InPlaceNFTStakerMigrator": "RECOVERABLE — rescueERC20(IERC20,address,uint256) at InPlaceNFTStakerMigrator.sol:268, onlyOwner, unconditional ERC20 sweep (parked principal is ERC1155 and structurally out of reach). Owner must hand-distribute. Proven in PoC testC.",
+        "NFTStakerMigrator": "UNRECOVERABLE — grep-verified: NFTStakerMigrator.sol declares exactly two functions, `initiateMigration()` (L70) and `migrate(address[])` (L81). No rescue, sweep, withdraw or recover of any kind, no fallback, no receive. PoC testD probes six plausible rescue selectors; all revert. phUSD is permanently stranded."
+      },
+      "solvencyImpact": "None. `_safePayTo` decrements committedDebt/rewardBudget identically regardless of recipient, so `balance == rewardBudget + committedDebt` is preserved. The loss is entirely to the individual user.",
+      "recommendation": "One-line mirror at src/NFTStakerDepletion.sol:756 — `pending = _safePayTo(user, pending);`. Independently, add a rescueERC20 to NFTStakerMigrator (see CODE-002) so the class is recoverable rather than terminal.",
+      "poc": "test/PoC_Drift01_DepositForPaysMigrator.t.sol — testA_DepositForPaysMigratorNotUser (mechanism: 82191.78 phUSD owed to alice, alice receives 0, migrator receives 82191.78), testB_BatchMigratePaysUserCorrectly (control: batchMigrate pays the user via _safePayTo), testC_InPlaceMigrateInCapturesReward_RecoverableViaRescue, testD_CrossStakerMigrateStrandsRewardPermanently. 4/4 PASS.",
+      "source": "FORK-PARITY-4WAY.md §3.1 DRIFT-01 — proven, not inherited on assertion",
+      "affectsOtherCopies": false,
+      "ledgerStatus": "NEW — no existing ledger entry for this root cause"
+    },
+    {
+      "id": "CODE-002",
+      "type": "missing-recovery-path",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/NFTStakerMigrator.sol",
+      "function": "contract-level",
+      "line": 33,
+      "lineStart": 33,
+      "lineEnd": 112,
+      "description": "NFTStakerMigrator has no ERC20 or ERC1155 recovery function of any kind, no fallback and no receive. Its sibling InPlaceNFTStakerMigrator has both rescueERC20 (L268) and floor-guarded rescueERC1155 (L281). Any ERC20 that lands in NFTStakerMigrator — the CODE-001 misroute, a donation, an airdrop, a fat-fingered transfer — is permanently unrecoverable.",
+      "attackVector": "Not an attack. This is the factor that converts CODE-001 from a recoverable accounting misroute into permanent user-fund loss on the cross-staker path.",
+      "recommendation": "Port InPlaceNFTStakerMigrator.rescueERC20 (onlyOwner + zero-recipient guard). The ERC1155 needs no floor here because NFTStakerMigrator's custody window is atomic within `migrate` (batchMigrate pull and depositFor push occur in one transaction), so it should never hold ERC1155 across transactions.",
+      "poc": "test/PoC_Drift01_DepositForPaysMigrator.t.sol::testD — six rescue-like selectors probed, all revert.",
+      "note": "Distinct from ledgered Q-01 (dead immutable stakedId on the same contract) — different root cause, do not collapse."
+    },
+    {
+      "id": "CODE-003",
+      "type": "state-machine/griefing-dos",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "stake / finalizeAndReset",
+      "line": 617,
+      "lineStart": 617,
+      "lineEnd": 644,
+      "relatedLine": 927,
+      "description": "`stake()` carries no poolState guard. Any ERC1155 holder can stake while poolState == Migrating, making totalStaked > 0 and reverting finalizeAndReset's `require(totalStaked == 0)`. finalizeAndReset is the ONLY transition back to Active and depositFor requires Active, so this blocks InPlaceNFTStakerMigrator.migrateIn for as long as the griefer keeps re-staking. Copy-#4 analogue of the OPEN ledgered L-03 on src/NFTStakerDepletion.sol, but narrower: only `stake` is harmful here — `unstake` and `claim` during Migrating settle against the frozen accRewardPerShare and are benign (unstake actively helps the drain).",
+      "attackVector": "Griefer buys/holds 1 ERC1155 unit and front-runs each finalizeAndReset with a stake. Operator evicts via migrateOut (which parks the unit and re-zeroes totalStaked) but the two calls live on different contracts and cannot be atomically batched by an EOA owner, so the griefer can wedge between them each round. Cost is gas plus capital lockup of one unit per round (returned via claimTimedOut after >= 1 day); no principal is burned. The griefer earns nothing — accRewardPerShare is frozen, so a Migrating-window stake accrues zero. Pure-cost griefing, cheap per round.",
+      "remedyVerdict": "The profile's 'pause first' remedy is GENUINELY COMPLETE and was verified by execution, not accepted: stake/unstake/claim are whenNotPaused (L617/645/666) while initiateMigration (L774), batchMigrate (L797), depositFor (L879), finalizeAndReset (L925), emergencyWithdraw (L735) and userMigrate (L827) all carry no whenNotPaused. A full pause -> initiateMigration -> migrateOut -> finalizeAndReset -> migrateIn cycle completes while paused with the user fully round-tripped, and stake reverts throughout. See CODE-004 for the operational cost of that remedy.",
+      "recommendation": "Add `require(poolState == PoolState.Active, \"NFTStaker: not active\")` to `stake`. This is strictly better than the pause remedy: it is granular, costs the ecosystem nothing, and removes the dependency on operator discipline. Owner-batching migrateOut+finalizeAndReset via a Safe multicall is a partial mitigation only.",
+      "poc": "test/PoC_Local001_StakeGriefBlocksReset.t.sol — testGrieferBlocksFinalizeAndReset (finalizeAndReset reverts 'NFTStaker: stake outstanding'; migrateIn reverts 'NFTStaker: not active'; pendingReward(griefer) == 0), testPauseRemedyIsComplete. 2/2 PASS.",
+      "source": "profile LOCAL-001",
+      "ledgerStatus": "NEW contract, analogue of OPEN L-03 (src/NFTStakerDepletion.sol). Disclosed, not collapsed — different contract, different narrowness."
+    },
+    {
+      "id": "CODE-004",
+      "type": "operational-hazard/owner-footgun",
+      "severity": "potential-qa",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "pause / setPauser",
+      "line": 344,
+      "lineStart": 330,
+      "lineEnd": 350,
+      "description": "CODE-003's sanctioned remedy is 'pause for the duration of the migration', but `pause()` is onlyPauser and the registered pauser is the ecosystem-wide Pauser contract (lib/mutable/pauser/src/Pauser.sol), whose `pause()` halts EVERY registered Phoenix contract at once and whose `unpause()` is onlyOwner. Pausing this staker for a multi-slice migration therefore means halting the whole ecosystem for hours or days. The alternative — temporarily repointing `pauser` via setPauser to an operator address for granular control — disables the global circuit breaker for this staker during exactly the window in which its most sensitive operations run, and also breaks the Pauser's register/unregister invariant (Pauser.register validates `pausable.pauser() == address(this)`).",
+      "attackVector": "None. This is a Law-3 footgun: a competent non-malicious owner following the documented 'pause first' runbook step would be surprised to learn it is an ecosystem-wide halt, and the granular workaround silently removes a safety mechanism.",
+      "recommendation": "Fix CODE-003 at source with the poolState guard on `stake`, which removes the need for the pause remedy entirely. If the runbook keeps the pause step, state explicitly which of the two costs the operator is accepting.",
+      "source": "code-scanner interaction analysis (not in profile) — the profile asserts the pause remedy is complete without costing it"
+    },
+    {
+      "id": "CODE-005",
+      "type": "operational-hazard/owner-footgun",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "setMigrator",
+      "line": 339,
+      "lineStart": 339,
+      "lineEnd": 342,
+      "description": "setMigrator has no lifecycle gate — it is callable while poolState == Migrating and while an InPlaceNFTStakerMigrator holds users' parked ERC1155. Because depositFor is onlyMigrator, rotating the pointer immediately bricks the old migrator's migrateIn: parked stake can then leave only via claimTimedOut, which returns STAKE ONLY and drops the user out of the pool with no re-accrual and no automatic re-entry. The new migrator cannot reach the parked ERC1155 either — it sits in the old migrator behind the totalParked floor enforced by rescueERC1155 (L281-289).",
+      "attackVector": "No attacker. Law-3 footgun test: the second-order effect (N users' stake is now stuck in a contract that can no longer return it to the pool) is a step removed from the action (rotating a pointer). A competent, non-malicious owner WOULD be surprised — in scope.",
+      "boundedness": "Principal is never lost: claimTimedOut always returns stake to its owner, and the rotation is fully reversible by pointing `migrator` back before any timeout elapses. Setting migrator to address(0) mid-migration is likewise non-terminal — users self-exit via the permissionless userMigrate (Migrating-only) or emergencyWithdraw. This bounds the finding at Low.",
+      "recommendation": "Gate setMigrator on `poolState == PoolState.Active`, or document the rotation hazard in the migration runbook. Note the Active gate alone is insufficient for the in-place migrator, whose parked custody persists after finalizeAndReset returns the pool to Active — the PoC exercises exactly that window.",
+      "poc": "test/PoC_Local002_005_MigrationFootguns.t.sol::testSetMigratorMidMigrationOrphansParkedStake — migrateIn reverts 'NFTStaker: caller is not migrator'; 10 units remain in the old migrator; only claimTimedOut recovers them; alice ends out of the pool. PASS.",
+      "source": "profile LOCAL-005 — confirmed and tightened"
+    },
+    {
+      "id": "CODE-006",
+      "type": "availability/external-call-dependency",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "finalizeAndReset",
+      "line": 931,
+      "lineStart": 925,
+      "lineEnd": 934,
+      "description": "The story-021 price-scaled delta adds `_recomputeSchedule()` to finalizeAndReset — correct for the emission model (it closes the depletion copy's ledgered L-02 on this copy), but it introduces two external calls into the revival path: `nftMinter.configs(dispatcherIndex)` and `dispatcherHook.mintDebt()`. NFTStakerDepletion.finalizeAndReset makes none. A reverting hook or minter therefore newly wedges the pool in Migrating, which in turn blocks InPlaceNFTStakerMigrator.migrateIn (depositFor requires Active). This is a widening of the run-19 L-01 in-place-migrator narrative.",
+      "attackVector": "No attacker; a dependency failure. The dispatcherHook is owner-settable and live-rotatable, so a bad rotation or an upstream yield-claim-nft incident is the realistic trigger.",
+      "boundedness": "Non-terminal and unwedgeable. Verified by execution: setDispatcherHook(address(0)) is ungated and performs NO recompute (L356-359), so it always succeeds and immediately un-wedges finalizeAndReset. setNFTMinter is legal once drained (totalStaked == 0 is already a finalizeAndReset precondition). Parked stake exits via claimTimedOut regardless, the totalParked floor holds, and emergencyWithdraw bypasses the hook entirely (proven).",
+      "recommendation": "Runbook only: if either dependency is unhealthy, run setDispatcherHook(0) and/or setNFTMinter(good) BEFORE finalizeAndReset. Do NOT repoint the migrator at a fresh staker id — that was the run-19 incomplete-fix trap and it still applies (and would now also trip CODE-005).",
+      "poc": "test/PoC_Local002_005_MigrationFootguns.t.sol — testBrokenHookWedgesFinalizeAndResetButIsRecoverable, testEmergencyWithdrawSurvivesBrokenHook. 2/2 PASS.",
+      "source": "profile LOCAL-002 — confirmed, remedy verified by execution rather than assertion"
+    },
+    {
+      "id": "CODE-007",
+      "type": "read-only-reentrancy",
+      "severity": "potential-qa",
+      "confidence": "medium",
+      "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+      "function": "unstake",
+      "line": 657,
+      "lineStart": 645,
+      "lineEnd": 664,
+      "description": "unstake sends the ERC1155 out to msg.sender at L657, handing an arbitrary contract recipient control via onERC1155Received, and only then runs the tail `_recomputeScheduleIfActive()` at L663. During that callback window totalStaked has already shrunk (L655) while rewardRate/windowEnd are still sized for the pre-unstake, larger pool, so pendingReward / currentRewardRate / runwaySeconds read inflated values.",
+      "attackVector": "No in-protocol exploit — nonReentrant blocks every state-mutating re-entry, and a grep of src/ finds NO on-chain consumer of these views. The exposure is integrator-facing only: a future protocol that prices against this staker's rate/runway views could be fed an inflated read mid-callback. That is why this is QA and not Medium.",
+      "recommendation": "Move `_recomputeScheduleIfActive()` above the L657 transfer — nothing between them depends on the transfer, so the change is free and behaviour-preserving, and it restores strict CEI. Note stake, claim, emergencyWithdraw, batchMigrate, userMigrate and _exitPosition are all already clean (position zeroed and debt settled before any outbound send, no post-transfer writes), so this is a single isolated call-site, not a pattern.",
+      "source": "SAST-008 (Slither), adjudicated REAL. Copy-#4 recurrence of the OPEN ledgered L-03 on src/NFTStaker.sol ('unstake performs outbound ERC1155 transfer before tail _recomputeSchedule; read-only reentrancy'). Disclosed as a recurrence on a new contract, not collapsed.",
+      "ledgerStatus": "RECURRENCE of open L-03 (src/NFTStaker.sol) on a new contract"
+    }
+  ],
+  "safePayCallSiteAudit": {
+    "method": "grep of every `_safePay(` and `_safePayTo(` call site across all four staker copies at 0d1a0b2",
+    "verdict": "DRIFT-01 (CODE-001) is the ONLY instance of the missed-call-site class. Complete classification below.",
+    "sites": [
+      {"file": "src/NFTStaker.sol", "lines": [441, 465, 484], "context": "stake / unstake / claim", "callerIsUser": true, "verdict": "CORRECT — msg.sender IS the user. No migration block on this copy, no _safePayTo defined."},
+      {"file": "src/NFTStakerPriceScaled.sol", "lines": [480, 504, 523], "context": "stake / unstake / claim", "callerIsUser": true, "verdict": "CORRECT — same as above."},
+      {"file": "src/NFTStakerDepletion.sol", "lines": [549, 567, 582], "context": "stake / unstake / claim", "callerIsUser": true, "verdict": "CORRECT"},
+      {"file": "src/NFTStakerDepletion.sol", "lines": [733], "primitive": "_safePayTo", "context": "_exitPosition (batchMigrate / userMigrate)", "verdict": "CORRECT — pays `account`"},
+      {"file": "src/NFTStakerDepletion.sol", "lines": [756], "context": "depositFor (onlyMigrator)", "callerIsUser": false, "verdict": "*** DEFECT — CODE-001. _safePay pays msg.sender == the migrator. ***"},
+      {"file": "src/NFTStakerPriceScaledMigrateReady.sol", "lines": [627, 652, 671], "context": "stake / unstake / claim", "callerIsUser": true, "verdict": "CORRECT"},
+      {"file": "src/NFTStakerPriceScaledMigrateReady.sol", "lines": [855], "primitive": "_safePayTo", "context": "_exitPosition", "verdict": "CORRECT"},
+      {"file": "src/NFTStakerPriceScaledMigrateReady.sol", "lines": [887], "primitive": "_safePayTo", "context": "depositFor (onlyMigrator)", "verdict": "CORRECT — this is the fix that was not mirrored back to copy #3"}
+    ]
+  },
+  "staticAnalysisAdjudication": {
+    "entriesReviewed": 46,
+    "real": 1,
+    "noise": 45,
+    "collapsingFacts": [
+      "stakedToken and rewardToken are IMMUTABLE (NFTStakerPriceScaledMigrateReady.sol:115-116) — the 'first-party, no transfer hooks' trust assumption cannot be broken by a later owner rotation, closing every transfer-before-accounting surface in _safePayTo.",
+      "ERC1155 safeTransferFrom invokes onERC1155Received on the RECIPIENT only. Every finding citing an INBOUND transfer (..., address(this), ...) as an attacker-control point is mis-modelled — control goes to the staker's own inert ERC1155Holder, never to the sender."
+    ],
+    "reentrancyModifierOrderCluster": [
+      {"id": "SAST-007", "loc": "NFTStakerPriceScaledMigrateReady.sol:774 initiateMigration", "detector": "slither", "verdict": "NOISE", "why": "Flagged write is poolState = Migrating after dispatcherHook.pull(). nonReentrant + onlyMigrator; every function reachable in the callback is nonReentrant or onlyOwner/onlyPauser (the hook is not the owner). The transient inconsistency is that pull() raised balance before rewardBudget was resized — i.e. transiently OVER-collateralised. Conservative direction, nothing extractable."},
+      {"id": "SAST-010", "loc": "NFTStakerPriceScaledMigrateReady.sol:879 depositFor", "detector": "slither", "verdict": "NOISE", "why": "Cited writes are committedDebt/rewardBudget at L711-714, after rewardToken.safeTransfer at L710 inside _safePayTo — a genuine transfer-then-account ordering, inert because rewardToken is immutable first-party phUSD with no hooks and the function is nonReentrant onlyMigrator."},
+      {"id": "SAST-102", "loc": "NFTStakerPriceScaledMigrateReady.sol:891 depositFor", "detector": "aderyn", "verdict": "NOISE", "why": "Cites writes after the INBOUND ERC1155 pull — control goes to address(this), not the user."},
+      {"id": "SAST-101", "loc": "NFTStakerPriceScaledMigrateReady.sol:631 stake", "detector": "aderyn", "verdict": "NOISE", "why": "Inbound ERC1155 pull, same mis-model."},
+      {"id": "SAST-005/013/022", "loc": "stake:617 / _syncBudget:460 / claim:666", "detector": "slither", "verdict": "NOISE"},
+      {"id": "SAST-029", "loc": "batchMigrate:807", "detector": "slither", "verdict": "NOISE", "why": "uninitialized loop accumulator"},
+      {"id": "SAST-109", "loc": "batchMigrate:808", "detector": "aderyn", "verdict": "NOISE — advice is ACTIVELY HARMFUL", "why": "Aderyn advises 'forgive on fail and return failed elements'. Adopting that on batchMigrate would be a REGRESSION: silently skipping a user mid-migration strands them instead of failing the batch loudly. The underlying dust-revert concern is profile LOCAL-007 (remedy: 1-wei topUp) and the batch is idempotent and re-runnable. Do not action."},
+      {"id": "SAST-008", "loc": "NFTStakerPriceScaledMigrateReady.sol:645 unstake", "detector": "slither", "verdict": "REAL", "promotedTo": "CODE-007"}
+    ],
+    "uninitializedLocal": {
+      "verdict": "ALL NOISE — every cited line is a loop accumulator, written via += / ++ before any meaningful read, deterministically zero-initialised by Solidity value-type semantics.",
+      "dualCorroborationCaveat": "Slither and Aderyn agreeing adds no independent weight here: both implement the same syntactic 'declared without initialiser' rule, so the agreement is correlated by construction. Verified line-by-line instead.",
+      "sites": [
+        {"id": "SAST-027", "loc": "InPlaceNFTStakerMigrator.sol:156", "decl": "uint256 count;", "detectors": ["slither", "aderyn"], "verdict": "NOISE"},
+        {"id": "SAST-028", "loc": "InPlaceNFTStakerMigrator.sol:209", "decl": "uint256 count;", "detectors": ["slither", "aderyn"], "verdict": "NOISE"},
+        {"id": "SAST-032", "loc": "NFTStakerMigrator.sol:99", "decl": "uint256 migratedCount;", "detectors": ["slither", "aderyn"], "verdict": "NOISE"},
+        {"id": "SAST-031/026/025/029", "loc": "InPlace:155, InPlace:208, NFTStakerMigrator:84, MigrateReady:807", "decl": "uint256 total; / totalAmount;", "detectors": ["slither"], "verdict": "NOISE"}
+      ]
+    },
+    "remainingNoise": [
+      {"ids": "SAST-018/094/095/096/043", "loc": "migrateOut:152-153, migrateIn:186/205/226", "verdict": "NOISE", "why": "Loop-unrolling artifacts. In migrateIn all four state writes (L217-220) precede depositFor (L226); the tools flag iteration n+1's writes as 'after' iteration n's call. In migrateOut the writes RECORD what the call returned and structurally cannot precede it. Both onlyOwner nonReentrant; callee is the immutable first-party staker."},
+      {"ids": "SAST-104/105", "loc": "incorrect-modifier order (external onlyOwner nonReentrant)", "verdict": "NOISE", "why": "The preceding modifier is OZ onlyOwner — a storage read plus revert, no external call — so ordering is immaterial. The staker's own primitives already order nonReentrant first."},
+      {"ids": "SAST-002", "loc": "claimableAt:315 (begin == 0)", "verdict": "NOISE", "why": "Sentinel mapping check, not a balance/timestamp equality."},
+      {"ids": "SAST-033", "verdict": "NOISE", "why": "Deliberate tuple destructuring of configs(), not an ignored return."},
+      {"ids": "SAST-038/041/042", "loc": "calls-loop", "verdict": "NOISE", "why": "Batch sizes are operator-controlled and off-chain sliced. Already captured as profile LOCAL-006."},
+      {"ids": "SAST-046..092 (17x)", "loc": "block.timestamp", "verdict": "NOISE", "why": "Accrual clock and a 1-30 day timeout anchor; ~12s validator drift immaterial against both."}
+    ]
+  },
+  "reentrancyChecklistCleared": {
+    "classicSingleFn": "CLEARED — every value-handling external is nonReentrant; CEI holds on all outbound sends except CODE-007's tail-recompute ordering.",
+    "crossContract": "CLEARED — A->B->A paths (staker <-> migrator, staker -> dispatcherHook) all terminate at nonReentrant or owner-gated functions. Migrator entry points are onlyOwner nonReentrant; the hook is not the owner.",
+    "crossFunction": "CLEARED — Slither's 'can be used in cross function reentrancies' lists (rewardBudget, committedDebt, poolState, _parkedUsers, totalParked) enumerate readers, not reachable paths. Every listed state-mutating reader is nonReentrant or owner-gated.",
+    "readOnly": "ONE surface: CODE-007 (unstake). All others clean — pendingReward/totalDebt short-circuit on totalStaked == 0 and on poolState == Migrating; during finalizeAndReset's external calls totalStaked == 0 is a hard precondition so the projection branches are unreachable. InPlaceNFTStakerMigrator views are fully clean: parked / migrationBegin / totalParked / _parkedUsers are all updated (L217-220) before staker.depositFor (L226), and _removeParked contains no external call, so parkedUserCount / parkedUsersRange / claimableAt are consistent at every call boundary.",
+    "erc721Hook": "N/A — no ERC721 in scope.",
+    "erc1155Hook": "CLEARED — outbound sends (unstake, userMigrate, emergencyWithdraw, claimTimedOut) all zero the position/parked state first and are nonReentrant; batchMigrate zeroes every position in the loop before a single aggregate send with no writes after it. Inbound sends call back only address(this) (inert ERC1155Holder).",
+    "erc777": "N/A — rewardToken is phUSD, a standard 18dp ERC20 with no hooks (immutable, first-party)."
+  },
+  "notFiled": [
+    {"item": "priceScale magnitude unchecked on copy #4 (profile LOCAL-003)", "reason": "Inherited verbatim from src/NFTStakerPriceScaled.sol. Collapse into OPEN ledger entry L-08, adding src/NFTStakerPriceScaledMigrateReady.sol to its affected-file list. No new root cause."},
+    {"item": "emergencyWithdraw over-emission on copy #4 (profile LOCAL-004)", "reason": "Structurally identical to M-02 (src/NFTStaker.sol), owner-triaged WONT-FIX 2026-06-09. Disclosed as inherited-unchanged; both prongs of the original triage reason ('deployed + no migrate-on-behalf; pullAndRefresh mitigation') hold MORE strongly here. Not re-filed."},
+    {"item": "batchMigrate unbounded array loop (profile LOCAL-006)", "reason": "onlyMigrator, operator-batched off-chain, idempotent. Informational. The operational note (3 external calls per user per migrateIn iteration on copy #4 vs 1 storage-only recompute on copy #3 — size migrateIn slices far smaller here) is worth a runbook line."},
+    {"item": "rescueERC20 to the exact committedDebt floor bricks a dust-affected exit (profile LOCAL-007)", "reason": "Pre-existing in all four copies via the shared _safePay dust branch, requires the owner to rescue to the exact floor, recoverable by a 1-wei topUp. Informational."},
+    {"item": "NFTStakerMigrator dead immutable stakedId", "reason": "Already ledgered as OPEN Q-01."}
+  ],
+  "crossAgentSignals": [
+    {
+      "signal": "invariant_bothSolvent replay failure",
+      "detail": "workspace/phoenix-nft-staking/test/InvariantForkParity.t.sol (untracked Tier-3 harness authored by invariant-generator in this run) reports `[FAIL: invariant_bothSolvent replay failure]` — a cached counterexample replay, 2 failing of 361 with all first-party in-repo tests and all code-scanner PoCs green. Surfaced here rather than dropped (Law 1); adjudication belongs to invariant-generator / the Tier-3 pass, not to this Tier-2 scan."
+    }
+  ]
+}
