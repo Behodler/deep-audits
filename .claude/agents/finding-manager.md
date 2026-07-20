@@ -28,10 +28,11 @@ reports/<project>-XX/
 │   └── faithfulness/ F-01-*.json   # Law-2 story/spec deviations
 ├── submissions/
 │   ├── H-01-submission.md
+│   ├── M-01-C1.md          # H/M carryover: FULL COPY of a prior run's report (see CARRYOVER)
 │   ├── qa-report.md
 │   ├── spec-conformance.md   # Law-2 faithfulness report (F-XX) — separate from the QA bundle
-│   ├── carryover/          # thin stubs for prior-run findings still open (see CARRYOVER STUBS)
-│   │   └── M-01-CARRYOVER.md
+│   ├── carryover/          # QA (Low/Centralization) carryover ONLY — one file per originating run
+│   │   └── qa-report-09.md
 │   └── rejected/
 └── analysis-<timestamp>.json
 ```
@@ -96,40 +97,71 @@ Ledger entry shape:
 ```
 Never silently overwrite a human-set status (`fix-pending`/`acknowledged`/`wont-fix`/`false-positive`) — those are triage decisions set via `/ledger`.
 
-**`fix-pending` is the one human-set status that is NOT a disposal.** It means "valid finding, human committed to fixing it, fix not yet verified". It behaves like `open` everywhere that matters — never suppressed by the sanitizer, always gets a carryover stub, always rescanned — and differs from `open` only in that it records an owner commitment. Do not auto-flip it to `fixed` even when the code changed and the scan no longer flags it: *propose* the flip, print the `/ledger <project> fixed <fingerprint>` command, and let the human confirm. A fix that merely stops tripping the scanner is not a verified fix, and this status exists precisely because someone is relying on the fix landing correctly (Law 1).
+**`fix-pending` is the one human-set status that is NOT a disposal.** It means "valid finding, human committed to fixing it, fix not yet verified". It behaves like `open` everywhere that matters — never suppressed by the sanitizer, always carried over into the current run, always rescanned — and differs from `open` only in that it records an owner commitment. Do not auto-flip it to `fixed` even when the code changed and the scan no longer flags it: *propose* the flip, print the `/ledger <project> fixed <fingerprint>` command, and let the human confirm. A fix that merely stops tripping the scanner is not a verified fix, and this status exists precisely because someone is relying on the fix landing correctly (Law 1).
 
-## CARRYOVER STUBS
-A finding that stays **`open`** or **`fix-pending`** in the ledger across runs (the sanitizer marked it `still-open`) is **not** re-reported with a full submission, but it must remain visible in the run you actually review. So for **every** still-open ledger entry — **all severities** (H/M/L/C) — write a thin stub to the current run's `submissions/carryover/<label>-CARRYOVER.md`. The stub carries no new analysis; it points back to the authoritative report.
+## CARRYOVER (FULL COPY, NOT STUBS)
+A finding that stays **`open`** or **`fix-pending`** in the ledger across runs (the sanitizer marked it `still-open`), or one that has **become valid again** (a `fixed`/closed entry that is live once more — a regression or an expired closure), is **not** re-analysed, but it must be readable **in the run you are reviewing, without following a link**. Carryover is therefore a **verbatim copy of the original report file** with a metadata header prepended — never a pointer stub.
 
-The sanitizer passes the still-open list (with each entry's ledger record); generate one stub per entry. Do **not** write stubs for `fixed`, `acknowledged`, `wont-fix`, or `false-positive` entries — only `open` and `fix-pending` ones that are still flagged by the current scan.
+The sanitizer passes the carryover list (each with its ledger record). Do **not** carry over `acknowledged`, `wont-fix`, or `false-positive` entries — the human already triaged those.
 
-For a `fix-pending` entry, set the stub's **Status** line to `fix-pending (fix owed, not yet verified)` and, when the sanitizer reported `⚠ FIX-PENDING STILL LIVE (possible incomplete fix)` — i.e. the code changed but the finding survived — replace the stub's blockquote with:
+### High / Medium (and any reopened H/M) — full copy, alongside new findings
+- Write to the **same directory as this run's new submissions**: `submissions/<label>-C<n>.md`. **No `carryover/` subdirectory.**
+- `<label>` is the finding's **original** label (`M-01`), so it stays recognisable across runs.
+- `<n>` disambiguates same-label carryovers from different audits: order all carryovers sharing a label by **originating run number ascending** and number from 1 — so a bigger `n` always means a **later** originating audit (`M-01-C1` = the M-01 from run 09, `M-01-C2` = the M-01 from run 15). Always append the digit, even when there is only one (`M-01-C1`).
+- **Copy the original report body verbatim.** Do not re-write, re-severity, or re-summarise it — the header carries all new information.
+- The finding may be given a **new fingerprint** for this run; the **original fingerprint is preserved in the header metadata** so the ledger lineage is never lost.
+- A **reopened** finding uses this exact naming too. Do **not** put `REOPEN` in the filename — say it in the metadata.
 
+Header prepended to the copy (then `---`, then the untouched original body):
 ```markdown
-> **⚠ FIX-PENDING STILL LIVE — possible incomplete fix.** This finding was triaged
-> `fix-pending` (a fix was owed). The code has since changed, but the finding is
-> **still flagged**. Either the fix has not landed yet, or it is incomplete.
-> Verify with `/recheck <project> <label>` before assuming it is resolved.
-```
+# [C] M-01 — _skimSurplus over-skim via duplicate clients[] under-backs principal
 
-Stub format:
-```markdown
-# [CARRYOVER] M-01 — _skimSurplus over-skim via duplicate clients[] under-backs principal
+> **Carryover — copied in full from `reflax-yield-vault-05`.** This issue originally
+> appeared in **audit 05** as **M-01**, was **not triaged**, and is **still valid** as
+> of audit 08. Triage it with `/ledger <project>`.
 
-> **This is a carryover stub, not new analysis.** This finding was reported in a
-> prior run and is **still open** (not fixed, not triaged). It is reproduced here so
-> it is not lost between runs. Triage it with `/ledger <project>`.
-
-- **Severity:** Medium
-- **Status:** open (still-open)
-- **Location:** `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L413-L441` (`_skimSurplus`)
+- **Carryover file:** `M-01-C1.md`  ·  **Original label:** M-01 (run reflax-yield-vault-05)
+- **Severity:** Medium (unchanged since first report)
+- **Status:** open (untriaged)
+- **Original fingerprint:** `9addc259…`  ·  **This-run fingerprint:** `4f1ab0c2…`
 - **First seen:** reflax-yield-vault-05  ·  **Still present as of:** reflax-yield-vault-08
+- **Location:** `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L413-L441` (`_skimSurplus`)
 - **Original report:** [reports/reflax-yield-vault-05/submissions/M-01-skim-overskim.md](../../reflax-yield-vault-05/submissions/M-01-skim-overskim.md)
-- **Fingerprint:** `9addc259…`
 
-See the original report for the full description, impact, attack path, PoC, and recommendation.
+*The text below is a verbatim copy of the original report. Line numbers and links were accurate at the originating commit; re-verify against current HEAD before acting.*
+
+---
 ```
-The link is **relative** from the current `submissions/carryover/` dir to the entry's `reportPath` (`../../<original-run>/submissions/<file>.md`). "First seen" = ledger `firstSeenRun`; "Still present as of" = current run.
+
+Header variants — same file naming in every case, only the wording of the blockquote and **Status** line changes:
+
+| Situation | Blockquote wording | Status line |
+|---|---|---|
+| Never triaged, still live | "was **not triaged**, and is **still valid**" | `open (untriaged)` |
+| `fix-pending`, code unchanged | "was triaged **fix-pending** (a fix is owed) and the fix has **not landed yet**" | `fix-pending (fix owed, not yet verified)` |
+| `fix-pending`, code changed but finding survived | "**⚠ FIX-PENDING STILL LIVE — possible incomplete fix.** The code has since changed but the finding is **still flagged**: either the fix has not landed, or it is incomplete. Verify with `/recheck <project> <label>`." | `fix-pending (⚠ possible incomplete fix)` |
+| Was closed, now live again | "was previously closed but has **become valid again** — the patch regressed / the closure rationale expired" | `reopened (was fixed in run NN; regressed \| closure rationale expired)` |
+| Reopened at a higher severity than originally filed | add "…and is **reopened at Medium** (originally filed Low)" | `reopened at Medium (originally Low)` |
+
+Preserve the *expired closure vs regression* distinction in the wording — an expired closure is not a code regression, and the reader must not be sent to restore an intact patch.
+
+### Low / QA / Centralization — one QA file per originating audit, in `carryover/`
+QA-severity carryover stays in **`submissions/carryover/`** and is **never** written as one file per finding. Unlike an H/M carryover (copied whole), a QA carryover is **pruned to the still-live entries**.
+- Each audit produces exactly **one** QA report, so carry it over as exactly **one** file: `submissions/carryover/qa-report-<NN>.md`, where `<NN>` is the **originating run number** (`qa-report-09.md` = the QA report from audit 09). Multiple originating audits ⇒ multiple such files, one each.
+- The file is a **cut-down copy** of that run's `qa-report.md`: keep the original structure, headings, and per-finding text **verbatim**, but **delete the entries that are no longer live** — anything now `fixed`, `acknowledged`, `wont-fix`, or `false-positive`. What remains is exactly the still-open (and `fix-pending`) QA findings.
+- **Never renumber the survivors.** `L-04` stays `L-04` even if `L-01`–`L-03` were dropped; the gaps are how a reader traces a finding back to the original report.
+- Update the summary counts to the retained set, and **name every dropped entry in the header** with its disposition. Deletion must be visible, never silent (Law 1) — a reader must be able to tell "not shown" from "never existed".
+- If **every** entry in an originating audit's QA report has been disposed of, write **no** file for that audit.
+
+```markdown
+> **Carryover QA report — audit 09** (cut down from `reports/<project>-09/submissions/qa-report.md`).
+> Retained below (still open / untriaged as of audit 20): **L-02, L-04, C-01**.
+> Removed as no longer live: L-01 (fixed, run 14), L-03 (acknowledged), L-05 (wont-fix).
+> Labels are the originals — gaps in the sequence are the removals above, not omissions.
+> Line numbers were accurate at the originating commit; re-verify against current HEAD.
+
+---
+```
 
 ## ERROR HANDLING
 - Duplicate label → reject, suggest next available.
@@ -143,5 +175,5 @@ The link is **relative** from the current `submissions/carryover/` dir to the en
 3. **Validate before transitions** — PoC must exist before `ready`.
 4. **Sequential labeling** — never reuse or skip labels.
 5. **Respect human ledger statuses** — never auto-overwrite fix-pending/acknowledged/wont-fix/false-positive.
-6. **Never drop an open finding from view** — every still-open ledger entry gets a carryover stub in the current run's `submissions/carryover/`; reusing its original label.
-7. **`fix-pending` is never a disposal** — it is rescanned, stubbed, and surfaced exactly like `open`. Never suppress it, and never auto-flip it to `fixed` — propose the flip and let the human confirm.
+6. **Never drop an open finding from view** — every still-open (or re-validated) ledger entry is carried over into the current run: H/M as a full copy at `submissions/<label>-C<n>.md`, QA as `submissions/carryover/qa-report-<NN>.md`. Never a bare pointer stub, never one file per Low finding, never `REOPEN` in a filename.
+7. **`fix-pending` is never a disposal** — it is rescanned, carried over, and surfaced exactly like `open`. Never suppress it, and never auto-flip it to `fixed` — propose the flip and let the human confirm.

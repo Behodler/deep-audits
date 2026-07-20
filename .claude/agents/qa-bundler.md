@@ -15,6 +15,12 @@ cd tools/4naly3er && yarn analyze ../../lib/<submodule>/src > <reportDir>/submis
 ```
 If 4naly3er is unavailable, note the gap and proceed with the manual QA bundle.
 
+## ONE QA FILE PER AUDIT (HARD RULE)
+
+An audit run emits **exactly one** QA report: `<reportDir>/submissions/qa-report.md`. **Never** write Low/Centralization findings as one file per finding — every L-XX and C-XX for the run lives inside that single bundle. (The per-severity JSON records under `findings/low/` are the machine-readable layer and are unaffected; the *submission* layer is one file.)
+
+Carryover QA from earlier audits is **not** merged into this run's bundle. It is copied — pruned to the entries still open, with the disposed ones deleted and named in the header — one file per originating audit, to `<reportDir>/submissions/carryover/qa-report-<NN>.md` by finding-manager (see finding-manager → CARRYOVER). Do not restate those findings here and do not renumber around them — this run's L-XX/C-XX sequence covers only this run's new findings.
+
 ## PRIMARY RESPONSIBILITIES
 
 ### Finding Collection

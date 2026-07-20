@@ -109,7 +109,7 @@ After removing known/OOS issues, reconcile each surviving finding against the pe
 
 Only `new` and `regression` findings proceed to classification/reporting; `still-open` and suppressed findings are logged for the audit trail and passed to finding-manager for ledger bookkeeping. In a `--full` cold run, still treat human statuses (`acknowledged`/`wont-fix`/`false-positive`) as suppressions — but **`fix-pending` is never suppressed, in cold runs or regression runs.**
 
-**Still-open carryover.** A `still-open` finding is not re-reported, but it must not silently vanish from the run's `submissions/` dir. Pass the full list of `still-open` entries (each with its ledger record: label, fingerprint, severity, title, contract/lines, `firstSeenRun`, `reportPath`) to finding-manager so it writes a thin **carryover stub** per entry (see finding-manager → CARRYOVER STUBS). This applies to all severities, and to both `open` and `fix-pending` entries. Suppressed (`acknowledged`/`wont-fix`/`false-positive`) entries get **no** stub — the human already triaged them.
+**Still-open carryover.** A `still-open` finding is not re-analysed, but it must not silently vanish from the run's `submissions/` dir. Pass the full list of `still-open` entries (each with its ledger record: label, fingerprint, severity, title, contract/lines, `firstSeenRun`, `reportPath`) to finding-manager so it **copies the original report forward in full** (see finding-manager → CARRYOVER): H/M as `submissions/<label>-C<n>.md` beside the new findings, QA as one `submissions/carryover/qa-report-<NN>.md` per originating audit. Never a pointer stub. This applies to all severities, to both `open` and `fix-pending` entries, and to entries that have become valid again (regression / expired closure). Suppressed (`acknowledged`/`wont-fix`/`false-positive`) entries are **not** carried over — the human already triaged them.
 
 ### FIX-PENDING (`status: "fix-pending"`)
 
@@ -118,7 +118,7 @@ Only `new` and `regression` findings proceed to classification/reporting; `still
 Treat `fix-pending` **exactly like `open`** for reconciliation. It is NOT a known issue. Specifically:
 
 - **Never** fold it into the "Known Issues Sources" list below (source #5 covers findings marked `acknowledged` — `fix-pending` is *not* `acknowledged` and must not be semantically matched to it, to a sponsor "we are aware that…" note, or to any "Acknowledged: …" known-issue pattern). If you find yourself reasoning "the human already knows about this, so suppress it" — **stop**. That reasoning is exactly what `fix-pending` exists to prevent.
-- **Never** suppress it. **Never** omit its carryover stub.
+- **Never** suppress it. **Never** omit its carryover copy.
 - Report its reconciliation outcome under one of two headings, based on whether the finding's code changed since `lastAuditedCommit`:
   - **still flagged, code unchanged** → `FIX-PENDING (fix not yet landed)` — expected, low signal.
   - **still flagged, code CHANGED** → `⚠ FIX-PENDING STILL LIVE (possible incomplete fix)` — **flag prominently, second only to REGRESSION.** Someone edited this code intending to fix it and the finding survived. Under Law 1 an incomplete fix is more dangerous than an unfixed bug, because it reads as done.

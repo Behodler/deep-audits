@@ -82,7 +82,7 @@ Run the standard back half on the candidate findings:
 - Invoke **deduplicator**: collapse duplicates/common issues.
 - Invoke **sanitizer**: filter known issues, then reconcile against the ledger by `fingerprint` (which now folds in `entryPoint`, so reconciliation is per-script). Mark new / still-open / regression / suppressed.
 - Invoke **severity-classifier**: C4 severity on new + regressed findings.
-- Invoke **finding-manager**: write `reports/<project>-XX/findings/<sev>/`, set `entryPoint` on each record, upsert the ledger (carryover stubs for still-open).
+- Invoke **finding-manager**: write `reports/<project>-XX/findings/<sev>/`, set `entryPoint` on each record, upsert the ledger (full carryover copies for still-open: H/M as `submissions/<label>-C<n>.md`, QA as `submissions/carryover/qa-report-<NN>.md`).
 
 ## 7. Narrative review
 Invoke **report-writer** (script-review mode): assemble `script-audits/<entryPoint>/review.md` from `intent.md`, `side-effects.json`, the cluster analysis, and the classified findings — structured around the three questions (intent / side effects / knock-on), linking each structured finding and its location.

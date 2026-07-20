@@ -110,7 +110,9 @@ Submissions ready:
   Medium: 2 reports
   QA:     1 report (Low + Centralization + 4naly3er output)
   Spec-conformance: 2 faithfulness findings (F-01, F-02) — submissions/spec-conformance.md (Law 2)
-  Carryover: 3 still-open from prior runs (M-01, L-02, L-04) — stubs in submissions/carryover/
+  Carryover: 3 still-open from prior runs — full copies, not stubs
+             M-01 (audit 09) → submissions/M-01-C1.md
+             L-02, L-04 (audit 09) → submissions/carryover/qa-report-09.md
 
 Reports:  reports/phoenix-nft-staking-12/submissions/*.md
 PoCs:     workspace/phoenix-nft-staking/test/poc-*.t.sol

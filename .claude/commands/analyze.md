@@ -137,7 +137,7 @@ Invoke **sanitizer**: "Remove known issues, then reconcile against the ledger"
 - First filter against the project's documented known issues.
 - Then reconcile each remaining finding against `reports/ledgers/<project>.json` by fingerprint:
   - matches an `open` entry → mark **still-open**, bump `lastSeenRun`, do not regenerate a report
-  - matches a `fix-pending` entry → **never suppress**; treat exactly like `open` (still-open + carryover stub). If the code changed since `lastAuditedCommit` and the finding survived, flag **⚠ FIX-PENDING STILL LIVE (possible incomplete fix)** — second only to REGRESSION in signal.
+  - matches a `fix-pending` entry → **never suppress**; treat exactly like `open` (still-open + full carryover copy). If the code changed since `lastAuditedCommit` and the finding survived, flag **⚠ FIX-PENDING STILL LIVE (possible incomplete fix)** — second only to REGRESSION in signal.
   - matches `acknowledged` / `wont-fix` / `false-positive` → suppress (like a known issue)
   - matches a `fixed` entry but reappears → flag **REGRESSION** (high priority)
   - no match → genuinely **new** finding
@@ -152,12 +152,14 @@ Invoke **severity-classifier**: "Classify findings by C4 severity"
 Invoke **finding-manager**: "Create finding records and upsert the ledger"
 - Write findings to `<report-dir>/findings/<severity>/` with labels `H-01`, `M-01`, `L-01`, `C-01`, and **`F-01` faithfulness** (Law-2 deviations → `findings/faithfulness/`, compiled into `submissions/spec-conformance.md`, kept out of the QA bundle).
 - Status `draft` or `needs-poc`. Tag new vs regressed vs still-open.
-- For each **still-open** entry (all severities), write a thin carryover stub to `<report-dir>/submissions/carryover/<label>-CARRYOVER.md` linking back to its original report — so untriaged-but-unfixed findings never disappear from the run you review.
+- For each **still-open** (or re-validated) entry, **copy its original report forward in full** — never a pointer stub (see finding-manager → CARRYOVER):
+  - **High/Medium** (including reopened ones) → `<report-dir>/submissions/<label>-C<n>.md`, in the **same dir** as the new submissions, with a metadata header naming the originating audit, the original fingerprint, and why it is still/again valid. `<n>` ascends with the originating audit number; no `REOPEN` in filenames.
+  - **Low/QA/Centralization** → `<report-dir>/submissions/carryover/qa-report-<NN>.md`, one whole-QA-report copy per originating audit `<NN>` — never one file per Low finding.
 - Upsert `reports/ledgers/<project>.json`: add new entries, bump `lastSeenRun` for still-open, mark entries whose code changed and are no longer flagged as `fixed` at the current commit, set `lastAuditedCommit = HEAD`.
 
 ## 11. Save Analysis Report
 Save raw analysis to `<report-dir>/analysis-<timestamp>.json` (scan metadata, counts, filtering + reconciliation stats).
-- If a regression run surfaced no new/regressed findings, write a one-line `<report-dir>/NO-NEW-FINDINGS.md` instead of the full empty tree. **Carryover stubs are still written** in this case (step 10) — "no new findings" does not mean "no open findings"; the `NO-NEW-FINDINGS.md` note should point to `submissions/carryover/` when stubs exist.
+- If a regression run surfaced no new/regressed findings, write a one-line `<report-dir>/NO-NEW-FINDINGS.md` instead of the full empty tree. **Carryover copies are still written** in this case (step 10) — "no new findings" does not mean "no open findings"; the `NO-NEW-FINDINGS.md` note should list the `<label>-C<n>.md` copies and any `submissions/carryover/qa-report-<NN>.md` when they exist.
 
 ## 12. Present Summary
 ```
@@ -176,8 +178,9 @@ Pipeline:
 Classified (new + regressed only):
   High: 1 (1 REGRESSION)   Medium: 2   Low: 1
 
-Carried over (still open from prior runs):  M-01, L-02, L-04
-  → reports/phoenix-nft-staking-12/submissions/carryover/  (stubs link to original reports)
+Carried over (still open from prior runs):  M-01 (run 09), L-02 + L-04 (run 09)
+  → submissions/M-01-C1.md                    (full copy, beside the new findings)
+  → submissions/carryover/qa-report-09.md     (whole QA report from audit 09)
 
 Output:  reports/phoenix-nft-staking-12/
 Ledger:  reports/ledgers/phoenix-nft-staking.json (updated)
