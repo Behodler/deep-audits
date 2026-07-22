@@ -1,0 +1,264 @@
+{
+  "project": "phoenix-nft-staking",
+  "run": "phoenix-nft-staking-21",
+  "submoduleHead": "c881a42",
+  "scanTimestamp": "2026-07-21T02:10:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "contractsScanned": 11,
+  "scopeNote": "Interaction-level only. Local/arithmetic/single-contract access-control conclusions from Tier 1 are trusted where tagged `verified`. Nudge payout economics, duplicate-rewardTokens arithmetic, the step-10 sweep, and the depletion rate-drift class are explicitly LEFT to econ-scanner and are not re-derived here. SAST-103/104/105 modifier-ordering is NOT re-filed (D-21 refutation inherited).",
+
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "cross-contract-reentrancy",
+      "severity": "potential-medium",
+      "confidence": "high",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 287,
+      "lineStart": 238,
+      "lineEnd": 312,
+      "title": "DEPLOYED BatchNFTMinter has no ReentrancyGuard while nftMinter.mint hands control to a caller-named `recipient` mid-loop; a hostile recipient steals the caller's unspent payment surplus and mints itself a free NFT at the caller's expense",
+      "description": "`contract BatchNFTMinter is Ownable, Pausable, IPausable` (src/BatchNFTMinter.sol:62) — no `ReentrancyGuard`. `batchMint` is `whenNotPaused` only (:243). Inside the mint loop (:286-288) each `nftMinter.mint(_dispatcherIndex, recipient)` reaches `NFTMinterV2._executeMint`, which finishes with `_mint(recipient, resolvedTokenId, 1, \"\")` (lib/mutable/yield-claim-nft/src/NFTMinterV2.sol:196). OZ ERC1155 `_mint` performs the acceptance check, so `recipient.onERC1155Received(...)` executes ARBITRARY CODE once per iteration, while the contract is holding the caller's pulled `paymentAmount` (:283) and while `forceApprove(nftMinter, type(uint256).max)` (:284) is live. D-21 already established this hook is 'real and attacker-controlled' — but it did so against the guarded (multi-token) version. story-022 Stage 7 reverted this file to its pre-guard state, so on the DEPLOYED contract the hook is unguarded.\n\nThe re-entrant frame is a full second `batchMint`, whose step-10 sweep (:305-311) sends the ENTIRE payment-token balance of the contract to the INNER `msg.sender` — i.e. to the attacker — not to the outer caller. It also mints for the attacker using the outer caller's money (the minter pulls from the batcher under the live max approval).",
+      "codeSnippet": "contract BatchNFTMinter is Ownable, Pausable, IPausable {   // :62  <- no ReentrancyGuard\n...\n) external whenNotPaused returns (uint256 totalPaid) {       // :243\n    paymentToken.safeTransferFrom(msg.sender, address(this), paymentAmount); // :283\n    paymentToken.forceApprove(address(nftMinter), type(uint256).max);        // :284\n    for (uint256 i; i < count; ++i) {\n        nftMinter.mint(_dispatcherIndex, recipient);          // :287 -> recipient.onERC1155Received\n    }\n    ...\n    uint256 remaining = paymentToken.balanceOf(address(this)); // :305\n    if (remaining / DUST_THRESHOLD != 0) {\n        paymentToken.safeTransfer(msg.sender, remaining);      // :307  <- inner msg.sender == attacker",
+      "attackVector": "Alice (an integrator/relayer/ops account) calls batchMint(count=N, recipient=Mallory, paymentAmount=P, minReward=0). The dispatcher price GROWS per mint (`config.price = price + price*growthBasisPoints/10000`, NFTMinterV2.sol:188), and the NatSpec at :217-220 requires `paymentAmount` to cover the cumulative cost — so overpaying is the DOCUMENTED, REQUIRED usage pattern and the surplus P-C is a normal, non-exotic quantity (the dust refund at :305-311 exists precisely for it).\n\nOn the FINAL mint's `onERC1155Received`, Mallory re-enters `batchMint(count=k, recipient=Mallory, paymentAmount=0, minReward=0)` with `k < nudgeSize`:\n  1. :283 pulls 0 from Mallory (no cost).\n  2. :284 re-sets the max approval; :286-288 mints k NFTs to Mallory, paid out of the CONTRACT's balance == Alice's money.\n  3. :296 `nudgeAmount(inner)=0 < minReward(inner)=0` is false, so no revert; nudge untouched (k < nudgeSize).\n  4. :305-307 sweeps the WHOLE remaining payment-token balance to `msg.sender` == Mallory.\nControl returns to Alice's frame: :290 revokes, :296 passes (outer nudgeAmount was snapshotted pre-loop and is intact), :301 pays the nudge to `recipient` == Mallory as Alice intended, then :305 reads `remaining == 0` so `remaining / DUST_THRESHOLD == 0` and the refund branch is SKIPPED — no revert. Alice's transaction SUCCEEDS. Alice paid P, received no refund, and Mallory holds (P - C) plus k free NFTs.",
+      "preconditions": [
+        "The caller passes a `recipient` they do not control (the whole reason `recipient` is a parameter distinct from `msg.sender`).",
+        "The caller supplies `paymentAmount` above the exact cumulative mint cost — which the contract's own NatSpec (:217-220) instructs them to do, since the per-mint price grows.",
+        "Mallory fires the re-entrant sweep on the LAST loop iteration. Firing earlier is self-defeating rather than dangerous: the inner frame's `forceApprove(nftMinter, 0)` at :290 runs on the unwind BEFORE the outer loop resumes, so the outer's next mint reverts and the whole tx rolls back (verified: allowance revoke is unconditional at the end of every frame). `count` is public calldata in the mempool, so targeting the last iteration is trivial.",
+        "`nudgeSize > k` (else the inner frame drains the nudge pot and the outer :301 `safeTransfer` reverts on insufficient balance — fail-closed)."
+      ],
+      "impact": "Direct theft of the caller's in-flight funds by a third party the caller only named as an NFT recipient. Bounded by the caller's surplus plus any payment-token already sitting in the contract.",
+      "reasoning": "Severity proposed Medium rather than High because the loss ceiling is the caller's own overpayment buffer and the precondition is a caller-chosen hostile recipient — it is not an unconditional drain of protocol funds. It is proposed Medium rather than Low because (a) the surplus is a required, structural part of correct usage, not a mistake; (b) the theft is silent — the victim's transaction succeeds; (c) the value moves to a party that had no claim on it. Severity-auditor should settle whether third-party-recipient minting is a real operational flow; if it is not, this collapses to Low.",
+      "frozenFileStatus": "This file is DEPLOYED and declared FROZEN (:14-19). There is no in-place fix. Remediation is operational only: pause via `pause()` (:164) and route batch minting through `BatchNFTMinterMultiToken`, which carries `nonReentrant` at src/BatchNFTMinterMultiToken.sol:300 and is structurally immune to this exact path. NOTE the prerequisite hazard: ledger L-01 (`src/BatchNFTMinter.sol`, open) reports that neither live BatchNFTMinter instance has a pauser set — if that is still true, the documented mitigation is unavailable.",
+      "ledgerDisclosure": "MUST NOT be filed as a clean new finding. Ledger already carries (i) `L-01` src/BatchNFTMinter.sol, status `submitted`, Low — 'batchMint lacks nonReentrant; ERC1155 onERC1155Received fires mid-loop', and (ii) `Q-02` src/BatchNFTMinter.sol, status `open`, QA — 'The mid-loop onERC1155Received attacker surface is real and attacker-controlled; the guard holds but ...'. Re-file basis, stated explicitly: Q-02's premise ('the guard holds') was true of the file as it stood at run-20, when it inherited `ReentrancyGuard`. story-022 Stage 7 (fba4991) reverted this file to its pre-guard state, so Q-02's mitigating clause NO LONGER APPLIES to `src/BatchNFTMinter.sol` — this is an EXPIRED CLOSURE, not a regression (nobody removed a patch; the rationale lapsed). L-01 was rated Low as a hardening gap with no articulated exploit; this run supplies a concrete, silent-success theft path with a named beneficiary and a quantified loss, which is the new evidence justifying a severity re-weigh. Adjacent-but-distinct ledger entries whose composition this finding exploits: `M-01` (step-10 sweep sends the entire payment balance to msg.sender) and `M-07` (max forceApprove lets an under-funded batch spend the contract's balance). This finding is the reentrancy COMPOSITION of those two; do not collapse it into either, and do not double-count the two legs.",
+      "verified": true,
+      "verificationEvidence": "Guard absence read from source (:62). Hook reachability read from NFTMinterV2.sol:196 `_mint(recipient, resolvedTokenId, 1, \"\")` (OZ ERC1155 acceptance check). Allowance-revoke unwind ordering read from :284/:290. Sweep recipient read from :307. NOT PoC'd this run — recommend poc-generator wire a hostile ERC1155 receiver against the real NFTMinterV2 (note ledger Q-01: `MockERC1155.mint()` skips `_checkOnERC1155Received`, so the existing mocks cannot reach this hook)."
+    },
+
+    {
+      "id": "CODE-002",
+      "type": "incomplete-fix",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/NFTStakerMigrator.sol",
+      "function": "migrate",
+      "line": 171,
+      "lineStart": 170,
+      "lineEnd": 200,
+      "alsoAffects": [{ "contract": "src/InPlaceNFTStakerMigrator.sol", "function": "migrateOut", "line": 220 }],
+      "title": "story-023's settlement-capture forwarding covers the `depositFor` leg only; the `batchMigrate` exit leg is called with no snapshot, so a source staker that settled to msg.sender would strand value as owner-sweepable surplus — the pns20h1 root cause reproduced on the sibling leg",
+      "description": "`migrate` opens with `uint256[] memory amounts = oldStaker.batchMigrate(users);` (:171) with NO `pre`/`post` reward-token measurement around it. `batchMigrate` is where the SOURCE staker settles each exiting user's frozen pending reward. Any reward-token that landed on the migrator during that call is absorbed into the FIRST per-iteration `pre` snapshot at :216, is therefore never counted as `captured`, is never forwarded, and sits ABOVE the `totalUnforwarded` floor — so `rescueERC20` (:268-276) moves it freely. That is exactly `pns20h1`, on the leg the fix does not cover.\n\nINDEPENDENTLY CONFIRMED NOT LIVE TODAY, and this is the precise boundary of what is guaranteed:\n- The only two contracts implementing `INFTStakerMigratable` in this repo are `NFTStakerDepletion` and `NFTStakerPriceScaledMigrateReady`. `NFTStaker.sol` and `NFTStakerPriceScaled.sol` have NO `batchMigrate`, NO `depositFor`, and NO `_safePayTo` at all (symbol census over all four files), so they cannot occupy the `oldStaker` slot.\n- Both migration-capable stakers route the exit settlement through `_exitPosition`, which pays `_safePayTo(account, pending)` — `NFTStakerDepletion.sol:733`, `NFTStakerPriceScaledMigrateReady.sol:855`. `batchMigrate` itself (`NFTStakerDepletion.sol:675-696`) makes no other reward transfer.\n- The divergent `_safePay` site is `NFTStakerDepletion.sol:756`, and it is on the `depositFor` leg, which IS wrapped.\nSo the *implementation* is safe. What is NOT guaranteed is the *claim*: the contract NatSpec at :44-50 advertises itself as 'version-agnostic across every staker exposing `depositFor`'. That claim is broader than the protection shipped, and it is exactly the drift class that produced pns20h1 in the first place.",
+      "codeSnippet": "function migrate(address[] calldata users) external onlyOwner nonReentrant {\n    uint256[] memory amounts = oldStaker.batchMigrate(users);   // :171 — no pre/post snapshot\n    ...\n    for (...) { _depositForAndForward(users[i], amounts[i]); }  // :191 — this leg IS wrapped",
+      "attackVector": "Not an attacker-driven path. Failure mode: the owner deploys `NFTStakerMigrator` against a future or third-party `oldStaker` whose `_exitPosition` equivalent settles with a `msg.sender`-paying helper. `migrate` completes with no revert and no event anomaly; every user is credited their principal on the new staker but silently loses the exit-settlement phUSD, which becomes owner-sweepable surplus. Nothing in the contract detects or reports it.",
+      "preconditions": ["A source staker whose migration-exit settlement pays `msg.sender`. No such staker exists in this repo today."],
+      "reasoning": "Low, not Medium: no live exploit path and no user funds currently at risk. It is filed rather than dropped (Law 1, recall over tidiness) because it is an INCOMPLETE-FIX shape on the run-20 fix-pending High — the mechanism is asymmetric across two structurally identical legs, and the NatSpec asserts a coverage guarantee the code does not deliver. An incomplete fix reads as done, which is the danger.",
+      "recommendation": "Either (a) wrap `:171` / `InPlaceNFTStakerMigrator.sol:220` in the identical snapshot/delta/forward treatment — but note `batchMigrate` returns an aggregate so per-user attribution is not recoverable, making (b) the cheaper option; or (b) narrow the NatSpec claim to 'version-agnostic with respect to the `depositFor` settlement leg; the `batchMigrate` exit leg is assumed to pay the user directly', and add a regression assertion that `rewardToken.balanceOf(migrator)` is unchanged across `batchMigrate`. No such test exists today (test/MigratorRewardForwarding.t.sol has no batchMigrate-leg case).",
+      "verified": true
+    },
+
+    {
+      "id": "CODE-003",
+      "type": "callback-value-leak",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/NFTStakerMigrator.sol",
+      "function": "_depositForAndForward",
+      "line": 221,
+      "lineStart": 214,
+      "lineEnd": 241,
+      "alsoAffects": [{ "contract": "src/InPlaceNFTStakerMigrator.sol", "function": "_depositForAndForward", "line": 318 }],
+      "title": "The tripwire bounds capture at `owed`, not at the staker's actual settlement; against a correctly-paying staker the expected capture is exactly ZERO, so any foreign inflow up to `owed` is silently forwarded to a user instead of reverting",
+      "description": "`require(captured <= owed, \"Migrator: capture exceeds owed\")` (:221 / :318) is documented as a tripwire against foreign value landing on the migrator mid-call. It only trips when the foreign inflow EXCEEDS `owed`. Below that threshold it is a pass-through.\n\nThat matters because `owed` is not the expected capture for every staker — it is the expected capture only for a `_safePay`-settling staker. For `NFTStakerPriceScaledMigrateReady` (the intended `newStaker`) `depositFor` pays `_safePayTo(user, pending)` at :887, so the correct measured capture is ZERO (profile guarantee G2). Any non-zero `captured` on that path is by construction foreign value, yet the check accepts anything up to `owed` and forwards it. The user is then paid TWICE for the same accrual: once by the staker directly, once by the migrator out of foreign funds.",
+      "codeSnippet": "uint256 owed = IStakerViews(address(newStaker)).pendingReward(user);  // :215\nuint256 pre  = rewardToken.balanceOf(address(this));                  // :216\nnewStaker.depositFor(user, amount);                                   // :218\nuint256 captured = rewardToken.balanceOf(address(this)) - pre;        // :220\nrequire(captured <= owed, \"Migrator: capture exceeds owed\");          // :221",
+      "attackVector": "Owner footgun, not attacker-driven. The owner wires a dispatcher/`BalancerPoolerMintDebtHook` whose `recipient` is the migrator address rather than the staker (the exact misconfiguration the NatSpec at :57-60 anticipates). During `depositFor`, `_syncBudget` (NFTStakerDepletion.sol:423-435) calls `dispatcherHook.pull()`, whose proceeds now land on the MIGRATOR. If that per-iteration inflow is <= the current user's `pendingReward`, the tripwire is silent and the migrator forwards protocol emission budget to that user as an undeserved bonus, iteration after iteration. Only an inflow LARGER than one user's pending trips the wire — and the operator's mental model (pinned by testE2_MispointedHookRecipientRevertsInsteadOfOverCrediting) is that the mispointed hook always reverts, so the sub-threshold leak is exactly the case they would not expect.",
+      "preconditions": [
+        "Dispatcher-hook `recipient` mis-set to the migrator address (an owner wiring error with a non-obvious consequence — Law 3 footgun, in scope).",
+        "Per-iteration hook inflow <= the current user's `pendingReward` on the destination staker."
+      ],
+      "reasoning": "Low. Requires an owner misconfiguration to reach, the value leaked is protocol emission budget rather than user principal, and the leak is per-iteration bounded by one user's pending. Filed because the existing test suite certifies the OPPOSITE behaviour (revert) and will not catch the sub-threshold case, so the operator has a false negative.",
+      "recommendation": "Where the destination staker is known to settle with `_safePayTo`, the honest bound is `captured == 0`. A version-agnostic version of the same tightening: read `userInfo(user).rewardDebt`/balance-delta on the STAKER to determine whether it actually paid out, or at minimum emit a loud event when `captured` is non-zero and the destination is a `_safePayTo` staker. Cheapest: document that the tripwire is a ceiling, not an equality check.",
+      "verified": true
+    },
+
+    {
+      "id": "CODE-004",
+      "type": "state-desync-dos",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/NFTStakerMigrator.sol",
+      "function": "rescueERC20",
+      "line": 272,
+      "lineStart": 268,
+      "lineEnd": 276,
+      "alsoAffects": [{ "contract": "src/InPlaceNFTStakerMigrator.sol", "function": "rescueERC20", "line": 394 }],
+      "title": "`balance - totalUnforwarded` is unguarded subtraction: any desync bricks BOTH recovery paths at once (rescueERC20 underflow-reverts and claimForwarded reverts), with no administrative remedy",
+      "description": "`uint256 surplus = balance - totalUnforwarded;` (:272 / :394) is checked arithmetic on `^0.8.20`. If the held reward-token balance ever falls below `totalUnforwarded`, this PANICS rather than clamping, permanently disabling reward-token rescue; `claimForwarded`'s `safeTransfer` (:254 / :352) fails on the same shortfall. The two independent recovery paths fail simultaneously and for the same reason.\n\nI re-derived the reachability census independently of the profiler and confirm its conclusion, plus close the gaps it left open:\n- `false`-returning-but-moving `transfer`: DESYNC (:227-234 credits the escrow while the tokens left). Confirmed.\n- Fee-on-transfer reward token: DESYNC. Confirmed. (FoT is a permanently known-invalid class for this suite, so this leg is informational only.)\n- DOUBLE-CREDIT via a duplicated user in one batch: REFUTED. In `NFTStakerMigrator.migrate` a duplicate address returns `amounts[i] == 0` on its second occurrence (`_exitPosition` returns (0,0) for an already-zeroed position, NFTStakerDepletion.sol:723-725) and is skipped by the `amounts[i] > 0` guard at :190. In `InPlaceNFTStakerMigrator.migrateIn` the slice comes from `_parkedUsers`, a set with a 1-based index, so it cannot contain duplicates.\n- REENTRANCY into `claimForwarded` from the `rewardToken.transfer` at :227/:324: REFUTED. OZ `ReentrancyGuard` is contract-wide (a single `_status`), and `migrate`/`migrateIn`/`claimForwarded` all carry `nonReentrant`, so the cross-FUNCTION sibling path is closed, not just the same-function one.\n- ROUNDING: REFUTED. There is no division, scaling, or truncation anywhere in the mechanism; `captured` is an exact balance delta and every escrow write is `+= captured` / `-= amount` on the identical quantity.\nSo: exactly the two token-behaviour paths the profiler named, and no others.",
+      "codeSnippet": "if (address(token) == address(rewardToken)) {\n    uint256 balance = rewardToken.balanceOf(address(this));\n    uint256 surplus = balance - totalUnforwarded;   // :272 — panics if balance < totalUnforwarded\n    require(amount <= surplus, \"Migrator: cannot touch unforwarded\");\n}",
+      "attackVector": "Not reachable with phUSD (standard ERC20: reverts on failure, no fee, no rebase). Reachable only if a future deployment names a reward token that returns `false` while still moving tokens, or a fee-on-transfer token. Outcome: every remaining user's escrow is permanently unclaimable AND the owner cannot rescue even the genuinely-surplus portion.",
+      "preconditions": ["Reward token that is not a plain revert-on-failure, no-fee ERC20. Not the case for phUSD."],
+      "reasoning": "Low / hardening. Token-conditional and not reachable at today's configuration, but the failure is total and irreversible, and the one-line fix is free.",
+      "recommendation": "Clamp instead of revert, identically in both files to preserve the D-6 parity invariant: `uint256 surplus = balance > totalUnforwarded ? balance - totalUnforwarded : 0;`",
+      "verified": true
+    },
+
+    {
+      "id": "CODE-005",
+      "type": "unrecoverable-escrow",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/NFTStakerMigrator.sol",
+      "function": "claimForwarded",
+      "line": 254,
+      "lineStart": 247,
+      "lineEnd": 256,
+      "alsoAffects": [{ "contract": "src/InPlaceNFTStakerMigrator.sol", "function": "claimForwarded", "line": 352 }],
+      "title": "Asymmetric transfer semantics: the forward tolerates a `false`-returning token via try/catch, but `claimForwarded` uses `safeTransfer` — so the very token behaviour that CREATES the escrow makes the escrow permanently unclaimable, and the `totalUnforwarded` floor blocks any owner remedy",
+      "description": "`_depositForAndForward` deliberately uses raw `transfer` inside `try`/`catch` (:227, annotated at :224-226) so that a reverting OR `false`-returning recipient escrows rather than taking the batch down. `claimForwarded` then pays that escrow out with `rewardToken.safeTransfer(msg.sender, amount)` (:254 / :352) — SafeERC20, which REVERTS on a `false` return. The two halves of the same mechanism disagree about what constitutes a failed transfer.\n\nConsequence: a user whose transfer failed because the token returned `false` (blocklist, or a token that soft-fails per-recipient) has value escrowed under the lenient rule and can only withdraw it under the strict rule. The escrow is unclaimable by the user, and `rescueERC20`'s `totalUnforwarded` floor (:270-274 / :392-396) — correctly — prevents the owner from ever reclaiming it. The floor that protects honest users makes genuinely-unrecoverable escrow permanent. Same outcome for an address that reverts on receipt (contract with no fallback, or a token-level blocklist).",
+      "attackVector": "Not attacker-driven. A single permanently-unpayable address locks its slice of phUSD forever, with no administrative remedy and no expiry. The owner's surprise is the finding: `rescueERC20` is presented (:260-267) as the primitive that fixes 'permanently stranded' value, and here it is structurally prevented from doing so.",
+      "preconditions": ["A migrating user address that cannot receive the reward token (reverting receiver, or token-level blocklist)."],
+      "reasoning": "Low / operational hazard. It is a deliberate trade — the alternative (an owner override) reintroduces exactly the 'owner can redirect user value' property the floor exists to prevent — but it is a NON-OBVIOUS consequence of a design the owner would read as fully-recoverable, which puts it in scope as a Law-3 footgun rather than out of scope as a trusted-owner issue.",
+      "recommendation": "Do not add an owner override. Options that preserve G6: (a) let the user nominate a substitute payout address for their own escrow (`claimForwardedTo(address)` keyed on `msg.sender`); or (b) at minimum, document the permanence and emit the `RewardForwardFailed` event with enough context that ops can chase the user off-chain before the migration window closes. Also consider aligning `claimForwarded` with the forward's own semantics (raw `transfer` + explicit `require(ok)`), so the same token behaviour is judged the same way on both sides.",
+      "verified": true
+    },
+
+    {
+      "id": "CODE-006",
+      "type": "interface-conformance",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/InPlaceNFTStakerMigrator.sol",
+      "function": "constructor",
+      "line": 168,
+      "lineStart": 163,
+      "lineEnd": 170,
+      "alsoAffects": [{ "contract": "src/NFTStakerMigrator.sol", "function": "constructor", "line": 133 }],
+      "title": "The constructor cross-check probes `IStakerViews.rewardToken()` but never `pendingReward()`, so a non-conforming staker deploys cleanly and fails only mid-migration — which for the in-place migrator strands already-parked users behind the timeout hatch",
+      "description": "Both constructors validate the reward token by hard-casting and calling `IStakerViews(address(staker)).rewardToken()` (NFTStakerMigrator.sol:133-140 — and I confirm the task's premise: it does check BOTH stakers, `_newStaker` at :134 and `_oldStaker` at :138; InPlaceNFTStakerMigrator.sol:167-170 checks its single staker). That probe exercises ONE of the interface's two members. `pendingReward(address)` — the member the entire forwarding mechanism depends on (:215 / :312) — is never probed at deploy time.\n\nBehaviour against a non-conforming target: a staker with `rewardToken()` but no `pendingReward(address)` and no fallback deploys successfully and reverts on the first `migrate`/`migrateIn`. A staker with a fallback returning garbage passes the cast and feeds an arbitrary `owed` into the tripwire — under-reporting garbage reverts the batch, over-reporting garbage silently widens the CODE-003 leak window. `rewardToken()` returning a mismatched address is correctly caught by the `require` (verified, and pinned by testH_ConstructorRejectsWrongRewardToken).",
+      "attackVector": "Owner deployment error. Blast radius differs sharply between the two migrators, and this asymmetry is the reason to file it: `NFTStakerMigrator.migrate` is atomic, so a `pendingReward` revert simply rolls back and nothing is lost. `InPlaceNFTStakerMigrator` is NOT atomic across the flow — `migrateOut` runs in an earlier transaction and PARKS user stake in the migrator's custody. If `migrateIn` then always reverts at :312, every parked user is stuck until `migrationTimeout` elapses and they individually call `claimTimedOut` (:364). Principal is recoverable (stake only; their phUSD was already paid at `migrateOut` via `_safePayTo`, NFTStakerDepletion.sol:733), so this is a liveness/UX failure, not a loss.",
+      "preconditions": ["A `staker` address that satisfies `rewardToken()` but not `pendingReward(address)`. Both in-repo migration-capable stakers conform (NFTStakerDepletion.sol:799, NFTStakerPriceScaledMigrateReady.sol:947), so this is deployment-conditional."],
+      "reasoning": "Low. Recoverable, owner-triggered, and mitigated by the timeout hatch. Filed because the constructor's cross-check gives an explicit impression of interface validation that it only half-delivers, and the closing fix is one line.",
+      "recommendation": "Add `IStakerViews(address(staker)).pendingReward(address(0));` to both constructors (discard the result — the call reverting IS the assertion). Alternatively type the staker parameter as `IStakerViews` alongside `INFTStakerMigratable` so conformance is compile-time.",
+      "verified": true
+    },
+
+    {
+      "id": "CODE-007",
+      "type": "maintenance-footgun",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/NFTStakerDepletion.sol",
+      "function": "depositFor",
+      "line": 756,
+      "lineStart": 748,
+      "lineEnd": 768,
+      "title": "`NFTStakerDepletion.sol` carries no DEPLOYED/FROZEN banner while its known-buggy `_safePay(pending)` line is left unfixed — a fresh deployment inherits an already-audited High, and the compensating fix lives in a different contract entirely",
+      "description": "`NFTStakerDepletion.depositFor` settles the incoming user's re-accrued pending with `pending = _safePay(pending);` (:756), and `_safePay` forwards to `_safePayTo(msg.sender, amount)` (:593-594) — paying the MIGRATOR, not the user. This is the root cause of ledger `H-01` (src/NFTStakerDepletion.sol, status `fix-pending`, High). story-023 remediated it MIGRATOR-SIDE, which is legitimate for the already-deployed instance, but it left the defective line in the source tree with no marker.\n\nContrast with the treatment `BatchNFTMinter.sol` received in the same story cycle: an explicit six-line `DEPLOYED — FROZEN` banner at :14-19 telling a future maintainer not to touch it and where the live work lives. `NFTStakerDepletion.sol` has no such banner, and its sibling `NFTStakerPriceScaledMigrateReady.sol` — the file a maintainer would diff against — settles CORRECTLY at :887 with `_safePayTo(user, pending)`. A maintainer reading only `NFTStakerDepletion.sol` has no signal that :756 is a known defect rather than intended behaviour.",
+      "attackVector": "Maintainer footgun. Any fresh deployment of `NFTStakerDepletion` — or any orchestrator that is not one of the two story-023-patched migrators calling `depositFor` on it — reproduces the pns20h1 loss in full: the incoming user's re-accrued phUSD is paid to the calling contract and, absent a rescue primitive on that caller, permanently stranded. Nothing in the source warns of this.",
+      "preconditions": ["A new deployment of NFTStakerDepletion, OR any `migrator`-role contract other than NFTStakerMigrator/InPlaceNFTStakerMigrator calling `depositFor`."],
+      "reasoning": "Low as a code finding — it does not describe new live risk on top of the existing `fix-pending` H-01 entry, and the deployed instance is compensated. It is filed as a distinct maintenance/operational hazard because the CURRENT state (a known-buggy line, unmarked, in a live source tree, with the fix living in a different contract) is precisely the maintenance-coupling condition WATCH-17 exists to track, and because the same story cycle demonstrated the team knows how to mark a frozen file.",
+      "recommendation": "Pick one, but pick: (a) change :756 to `_safePayTo(user, pending)` — a source-only change that cannot affect the deployed instance and makes any future deployment safe by construction; or (b) add a `DEPLOYED — FROZEN` banner naming pns20h1, the compensating migrators, and the constraint that any new orchestrator must implement the same capture-and-forward. (a) is strictly better: it removes the trap rather than labelling it.",
+      "ledgerDisclosure": "Related to ledger `H-01` src/NFTStakerDepletion.sol (status `fix-pending`, High). This is NOT a proposal to close H-01, and NOT a claim that H-01 is unfixed on the deployed instance. It is the residual source-tree hazard that survives the migrator-side fix. Do not collapse the two: closing H-01 as fixed while :756 stays unmarked leaves this hazard with no ledger representation at all.",
+      "verified": true
+    },
+
+    {
+      "id": "CODE-008",
+      "type": "interface-assumption",
+      "severity": "qa",
+      "confidence": "high",
+      "contract": "src/NFTStakerMigrator.sol",
+      "function": "migrate",
+      "line": 190,
+      "lineStart": 171,
+      "lineEnd": 194,
+      "title": "`migrate` consumes the array returned by an external contract without asserting `amounts.length == users.length`, mixing the two lengths as loop bounds and index",
+      "description": "`amounts` comes from `oldStaker.batchMigrate(users)` (:171). The summation loop bounds on `amounts.length` (:174) while the redeposit loop bounds on `users.length` (:189) and indexes `amounts[i]` (:190). A short return panics with an array-OOB (undiagnosable in a batch context); a long return silently drops the tail from the redeposit while `total` counted it, producing a `Migrated(count, total)` event that does not describe what happened. Both in-repo stakers return `new uint256[](accounts.length)` (NFTStakerDepletion.sol:685, NFTStakerPriceScaledMigrateReady.sol:807), so this is unreachable today — it is a cross-contract interface assumption left unasserted at the trust boundary.",
+      "reasoning": "QA. Not reachable; one-line hardening at a trust boundary the contract otherwise validates carefully.",
+      "recommendation": "`require(amounts.length == users.length, \"Migrator: length mismatch\");` immediately after :171.",
+      "verified": true,
+      "note": "Duplicates contract-profiler LOCAL-201 in substance; recorded here so it survives to triage, not as an independent discovery."
+    }
+  ],
+
+  "refuted": [
+    {
+      "candidate": "Cross-function reentrancy into `claimForwarded` from the reward-token `transfer` inside `_depositForAndForward`",
+      "evidence": "OZ `ReentrancyGuard` uses a single contract-wide `_status`, and `migrate` (:170), `migrateIn` (:253), `migrateOut` (:219), `claimForwarded` (:247/:345) and `claimTimedOut` (:364) all carry `nonReentrant`. The sibling-function path is closed by the same lock as the same-function path. Additionally `claimForwarded` is strict CEI (zero at :251, decrement :252, transfer :254), so it would be safe even without the lock. Killed.",
+      "class": "cross-function reentrancy"
+    },
+    {
+      "candidate": "Read-only reentrancy on the migrators' view surface",
+      "evidence": "Enumerated every external/public view on both migrators: `unforwarded`, `totalUnforwarded`, `parked`, `migrationBegin`, `totalParked`, `parkedUserCount` (:421), `parkedUsersRange` (:426), `claimableAt` (:442), plus the immutable getters. None is a price, share-price, exchange-rate or NAV, and no in-repo or nested-lib contract consumes any of them. The only transient window is inside `_depositForAndForward` between the `transfer` at :227/:324 and the escrow write at :231/:328 — and in that window the two sides are consistent by construction: if the transfer succeeded there is nothing to credit, and if it failed (revert or `false`) the balance did not move. Killed.",
+      "class": "read-only reentrancy"
+    },
+    {
+      "candidate": "ERC1155 receive-hook reentrancy on the migrators (`ERC1155Holder.onERC1155Received` reachable permissionlessly and mid-`migrate`)",
+      "evidence": "The inbound 1155 transfers are `oldStaker.batchMigrate` pushing stake in (NFTStakerDepletion.sol:694) and `claimTimedOut` pushing it out (:376). The pushing token is `stakedToken`, an owner-configured immutable, not attacker-supplied. The inherited handler is stateless and returns the selector. `NFTStakerMigrator` keeps no ERC1155 accounting at all (custody is intra-transaction, :280-285). `InPlaceNFTStakerMigrator` DOES hold cross-transaction custody, and every 1155 egress is preceded by complete state settlement — `migrateIn` zeroes `parked`, deletes `migrationBegin`, decrements `totalParked` and removes the set entry at :284-287 BEFORE `_depositForAndForward` at :294; `claimTimedOut` does the same at :370-373 before :376. Strict CEI plus `nonReentrant`. Killed.",
+      "class": "ERC1155 receive-hook reentrancy"
+    },
+    {
+      "candidate": "Hostile caller-supplied ERC20 in `BatchNFTMinterMultiToken._payRewards` as an arbitrary-code hook (:458)",
+      "evidence": "The window is real but has nothing to reach. `batchMint` is `nonReentrant` (:300) and every other state-changing function is `onlyOwner` or `onlyPauser`, so there is no reachable re-entrant target. The minter allowance is already revoked — `forceApprove(nftMinter, 0)` at :368 runs BEFORE `_payRewards` at :378 — so no ERC20 approval is outstanding during the window. The contract holds no per-user accounting to corrupt, and the post-payout dust sweep (:381-387) routes to `msg.sender`, i.e. the attacker's own caller. The hostile token cannot smuggle itself into the payment-token slot: the exclusion at :426-428 runs unconditionally inside `_snapshotRewards`, before any funds move. Killed. NOTE the ordering at :368-vs-:378 is load-bearing — a refactor moving the revoke after the payout re-opens this.",
+      "class": "callback exploitation"
+    },
+    {
+      "candidate": "Reentrancy double-payout of the nudge pot on the frozen `BatchNFTMinter` (inner frame drains the pot, outer frame pays it again)",
+      "evidence": "Fails closed. The outer frame snapshots `nudgeAmount` pre-loop at :280 and pays it at :301 with `safeTransfer`. If a re-entrant inner frame took the pot first, the outer transfer reverts on insufficient balance and the whole transaction rolls back. The inner frame cannot qualify for the nudge without the outer also qualifying, because the gate is `count >= nudgeSize` (:279) and the inner `count` cannot exceed the outer's. So the nudge cannot be paid twice — CODE-001's viable variant is specifically the one where the attacker AVOIDS the nudge gate. Killed as a separate finding.",
+      "class": "call-sequence attack"
+    },
+    {
+      "candidate": "`captured` can exceed `owed` on a legitimate migration, hard-reverting a whole batch (the exact-equality brittleness probe)",
+      "evidence": "Re-derived from source rather than inherited. In `NFTStakerDepletion`, `depositFor` (:748) calls `_syncBudget()` (:751) which runs `_updatePool()` FIRST (:424) and only then `dispatcherHook.pull()` (:429). `_updatePool` (:448-472) computes `end = min(now, windowEnd)`, `elapsed`, `reward = elapsed * rewardRate`, clamps `reward > rewardBudget`, and folds `(reward * ACC_PRECISION) / totalStaked` into `accRewardPerShare` — the byte-identical expression on the byte-identical pre-pull operands that `pendingReward` (:799-813) projects. If `pull()` yields inflow, `_recomputeSchedule()` (:512-533) rewrites `rewardRate`/`rewardBudget`/`windowEnd`/`lastRewardTime` but NEVER `accRewardPerShare`, so no further accrual occurs before `pending` is computed at :754 against the unchanged `info.amount`. Therefore `captured == owed` exactly. Two further probes: (i) `_safePayTo` (:603-615) `require`s sufficient balance and then transfers the FULL `amount` — it never partial-pays, so it cannot produce a residual; (ii) across a multi-user batch, iteration 0's `_updatePool` sets `lastRewardTime = block.timestamp`, so every later iteration accrues `elapsed == 0` and the changed `totalStaked` is multiplied by zero. `owed` cannot change between the read at :215 and the settle at :218 — there is no external call, no hook, and no second entry in between (`nonReentrant`). Killed: the tripwire cannot fire on a legitimate migration against either in-repo staker. Retained as an INTERFACE ASSUMPTION for any future staker: the bound is met with zero slack, so a `pendingReward` view that under-reports by one wei reverts the ENTIRE batch (blast radius is the whole `migrate` / whole `migrateIn` slice, not one user — the `require` sits inside the loop at :189-194 / :277-295). Fail-closed and preferable to mis-attribution; recovery is owner re-slicing.",
+      "class": "cross-contract invariant"
+    },
+    {
+      "candidate": "`finalizeAndReset` zeroing `accRewardPerShare` would make `pendingReward` underflow-revert and permanently brick `InPlaceNFTStakerMigrator.migrateIn`",
+      "evidence": "Read the function: `finalizeAndReset` (NFTStakerDepletion.sol:770-776) sets only `lastRewardTime = block.timestamp` and `poolState = Active`, gated on `totalStaked == 0`. `accRewardPerShare` is never reset and is monotonically non-decreasing (only `+=` at :469), while `rewardDebt` is always written as `amount * accRewardPerShare / ACC_PRECISION` at the same or an earlier `acc`. The subtraction at :812 cannot underflow. Killed.",
+      "class": "cross-contract state consistency"
+    },
+    {
+      "candidate": "`rescueERC20` / `rescueERC1155` lack `nonReentrant` and make an arbitrary-code call (owner-supplied `token`, owner-supplied 1155 `to`)",
+      "evidence": "Both are `onlyOwner` (:268/:286, :390/:408). A hostile donated token re-entering during `token.safeTransfer` has `msg.sender == token`, so every `onlyOwner` entrypoint is closed to it, and `claimForwarded` would read `unforwarded[token] == 0` and revert on the `require(amount > 0)`. The `to` address's `onERC1155Received` during `rescueERC1155` is in the same position. The reward-token branch's floor check reads `balanceOf` before the transfer, but that branch's callee is phUSD, which is trusted. No reachable target. Killed. (Also refutes SAST-132/133 'state change after external call' on `NFTStakerMigrator`: the writes at :231-232/:236-237 follow a trusted-token `transfer` under `nonReentrant`.)",
+      "class": "untrusted external call"
+    },
+    {
+      "candidate": "`setApprovalForAll(staker, true)` is a blanket operator grant, so during `InPlaceNFTStakerMigrator.migrateIn` the staker could pull the parked stake of users NOT in the current slice",
+      "evidence": "Structurally true — the NatSpec's claim that the grant is 'bounded by `total`' (NFTStakerMigrator.sol:182-185) is a statement about intended behaviour, not an enforced bound, and unlike `NFTStakerMigrator` (intra-call custody only) the in-place migrator holds OTHER users' parked ERC1155 across the window. But `depositFor` pulls exactly `amount`: `stakedToken.safeTransferFrom(msg.sender, address(this), stakedId, amount, \"\")` (NFTStakerDepletion.sol:760, NFTStakerPriceScaledMigrateReady.sol:892), with no other 1155 pull anywhere in either staker. The staker is owner-configured and immutable. Killed for today's configuration; recorded because an over-pull would silently desync `totalParked` from custody and brick `claimTimedOut` for the un-processed users — i.e. permanent principal loss — so it belongs on the WATCH list if the staker slot is ever re-pointed.",
+      "class": "privilege escalation via call chain"
+    },
+    {
+      "candidate": "Duplicate users in a `migrate` batch double-credit `unforwarded` / `totalUnforwarded`",
+      "evidence": "See CODE-004 description. `_exitPosition` returns (0,0) for an already-zeroed position (NFTStakerDepletion.sol:723-725), the second occurrence yields `amounts[i] == 0`, and the `amounts[i] > 0` guard at :190 skips it. `migrateIn` draws from a 1-based-indexed set that cannot hold duplicates. Killed.",
+      "class": "shared state corruption"
+    },
+    {
+      "candidate": "SAST-103/104/105 — modifier ordering leaves an unguarded window before `_status` is armed",
+      "evidence": "NOT re-derived. Inherited refutation from run-20 DECISION-LOG D-21 and re-confirmed by the static tier this run. `whenNotPaused` expands to one SLOAD plus a conditional revert — no external call and no user code executes before the guard arms.",
+      "class": "inherited refutation"
+    },
+    {
+      "candidate": "ERC777 `tokensReceived` / `tokensToSend` path",
+      "evidence": "No ERC777 registry lookup anywhere in scope. The migrators' reward token is phUSD (immutable, ctor-validated against both stakers). `BatchNFTMinterMultiToken`'s caller-supplied `rewardTokens` COULD be ERC777, but the payout site is inside a `nonReentrant` function with the minter allowance already revoked — see the `_payRewards` refutation above. Killed.",
+      "class": "ERC777 hook reentrancy"
+    }
+  ],
+
+  "reentrancyChecklistCoverage": {
+    "classic-single-fn": "BatchNFTMinter.batchMint — NOT cleared, see CODE-001 (deployed contract, no guard, exploitable). BatchNFTMinterMultiToken.batchMint — cleared by nonReentrant :300. Migrators — cleared by nonReentrant on all five value-handling entrypoints.",
+    "cross-contract": "Migrator -> staker -> migrator: cleared. `depositFor`'s only outbound calls are `_safePay*` (to the user or the migrator, a trusted-token transfer) and `stakedToken.safeTransferFrom(migrator -> staker)`, whose acceptance hook fires on the STAKER, not the migrator. Batcher -> NFTMinterV2 -> recipient -> batcher: NOT cleared on the frozen file (CODE-001).",
+    "cross-function": "Cleared — OZ ReentrancyGuard is contract-wide; migrate/migrateIn/migrateOut/claimForwarded/claimTimedOut share one `_status`. See refuted list.",
+    "read-only": "Cleared for the migrators (full view enumeration, no oracle consumer, no inconsistent window). Staker-side read-only reentrancy on `unstake` is already ledger L-03/Q-05 and is not re-filed.",
+    "erc721-receive-hook": "N/A — no ERC721 anywhere in scope.",
+    "erc1155-receive-hook": "Migrators: cleared (CEI + guard + trusted pusher). Batch minters: this IS the CODE-001 vector on the frozen file; cleared on the multi-token sibling.",
+    "erc777": "Cleared — see refuted list."
+  },
+
+  "notesForDownstream": [
+    "CODE-001 requires a PoC against the REAL NFTMinterV2 acceptance-check path. Ledger Q-01 records that `MockERC1155.mint()` skips `_checkOnERC1155Received`, so the existing mock cannot reach the hook — poc-generator must wire a hook-firing minter (run-20 already built one for the guarded case).",
+    "CODE-001's stated mitigation (pause, then route through BatchNFTMinterMultiToken) is blocked if ledger L-01 ('Neither live BatchNFTMinter instance has a pauser') is still true. Recommend a mainnet read of `pauser()` on both instances before the report asserts the mitigation is available.",
+    "Deliberately NOT covered here, per task scope: nudge payout economics, duplicate-rewardTokens arithmetic (ledger M-02), the step-10 sweep (ledger M-01), and the depletion rate-drift class (ledger M-01/M-03). CODE-001 touches the step-10 sweep only as the exfiltration leg of a reentrancy composition; the sweep's standalone economics remain econ-scanner's.",
+    "The D-6 line-for-line parity between the two `_depositForAndForward` bodies means every CODE-003/004/005 recommendation must be applied to BOTH files in the same change, or the parity invariant that story-023 was built on is broken."
+  ]
+}
