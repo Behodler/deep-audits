@@ -1,0 +1,70 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-07-23T00:00:00Z",
+  "scanType": "economic",
+  "tier": "Tier-2 protocol-wide economic / design-intent / value-flow",
+  "regressionWindow": "c881a42..bb4fea0",
+  "commit": "bb4fea0",
+  "contractsScanned": 6,
+  "scopeNote": "NEW NFTStakerDepletionV2; reworked BatchNFTMinterMultiToken (story-025); stake()-gated NFTStakerPriceScaledMigrateReady (story-027). Interaction partners: NFTStakerMigrator, InPlaceNFTStakerMigrator.",
+  "findings": [
+    {
+      "id": "ECON-22-01",
+      "type": "owner-over-funding-footgun-amplified",
+      "severity": "low",
+      "contract": "src/BatchNFTMinterMultiToken.sol",
+      "function": "batchMint / setNudgeTokenWhitelist",
+      "line": 434,
+      "lineStart": 405,
+      "lineEnd": 550,
+      "description": "story-025 pays the ENTIRE pre-loop pot of EVERY whitelisted nudge token to the qualifying recipient in a single count>=nudgeSize batch (_payRewards walks the full whitelist). The known nudge-snipe footgun (run-21, 858e9e80, wont-fix) was reasoned per single token: the pot must be a fraction of the nudgeSize mint cost so a snipe stays net-negative. Under the multi-token whitelist the snipe now sweeps the SUM of all whitelisted pots for one fixed qualifying cost (nudgeSize real mints). The profitability threshold is therefore the AGGREGATE pot across the whole whitelist, not per token: an owner who funds five tokens each safely under the per-token margin can breach the margin in aggregate and unknowingly make a front-run snipe profitable.",
+      "economicImpact": "If aggregate whitelisted pot > nudgeSize mint-cost margin, a bot can mint nudgeSize NFTs and sweep all pots at a net profit, draining the seeded nudge incentive from the intended organic minter.",
+      "attackScenario": "1. Owner whitelists N nudge tokens, each individually funded below the per-token margin.\n2. Dispatcher donations accumulate across all N.\n3. Bot observes aggregate pot exceed nudgeSize mint cost.\n4. Bot front-runs an organic batch, mints exactly nudgeSize, sweeps every pot in one tx for net profit.",
+      "profitability": "Profitable only when SUM(whitelisted pots) > nudgeSize * effective-mint-cost (net of any NFT value). Owner-funding-dependent; not otherwise reachable.",
+      "affectedParties": "Protocol (seeded incentive), intended organic minters (griefed out of the nudge).",
+      "confidence": "medium",
+      "footgunFraming": "Law-3 non-obvious owner footgun: a competent owner reasoning per-token would be surprised the safe threshold is now the whitelist AGGREGATE. Same wont-fix class as 858e9e80 (over-funding), amplified by multi-token payout; surfaced not silently folded. Structural fix would cap per-batch payout or pay only the qualifying token's pot.",
+      "relatedLedger": "858e9e80 (over-funding footgun, wont-fix run-21)"
+    }
+  ],
+  "verificationRecords": [
+    {
+      "id": "ECON-VER-01",
+      "focus": "Focus 1 - DepletionV2 emission solvency, over-emission, survivor dilution, runway drift",
+      "contract": "src/NFTStakerDepletionV2.sol",
+      "verdict": "SOLVENT, NO OVER-EMISSION, NO VALUE LEAK vs depletion story",
+      "detail": "Independently re-derived at source: rate=budget/windowSeconds floors (537), budget=V-committedDebt with V=balance+mintDebt clamped at 0 (527-535) — protocol-favoured, never over-promises. _updatePool (460-484) NEVER recomputes rate inside accrual (phlimbo V1 rate-drift class structurally avoided), caps reward at rewardBudget (477) guaranteeing clean depletion, no-ops on totalStaked==0 and while Migrating. _safePayTo (620-632) preserves balance==rewardBudget+committedDebt with wei dust-escape into rewardBudget. depositFor tail _recomputeSchedule (793) RESETS windowEnd=now+window on every migrator deposit — this only SLOWS emission (lower rate over longer window, budget conserved), never a value leak; existing stakers earn the same total over a longer runway, totalStaked-independent rate means no per-share dilution. emergencyWithdraw (639-654) recycles forfeited pending to rewardBudget without recompute = the KNOWN M-02 survivor-over-emission class (ledger wont-fix, present verbatim, NOT a regression, not re-reported). finalizeAndReset (804) leaves stale rate/windowEnd but totalStaked==0 gate + _updatePool totalStaked==0 no-op means zero emission until next recompute — availability nuance, not over-emission."
+    },
+    {
+      "id": "ECON-VER-02",
+      "focus": "Focus 3 - depositFor re-injection/haircut economics (stable-staker ss12m1 class)",
+      "contract": "src/NFTStakerDepletionV2.sol",
+      "function": "depositFor",
+      "line": 774,
+      "verdict": "NO ss12m1 HAIRCUT — code-scanner economic argument INDEPENDENTLY CONFIRMED",
+      "detail": "ss12m1 requires a deposit that injects per-share reward value diluting existing stakers. Here the deposited asset (786) is the staked ERC1155 NFT, NOT phUSD reward — it carries zero reward tokens into the pool. Reward rate = budget/window is totalStaked-INDEPENDENT (537), so adding stake does not shrink any existing staker's owed accrual. Pre-credit settle pays the target's own pending to the target via _safePayTo(user) (782) reducing committedDebt by pending while V drops by the same pending (phUSD leaves), so tail budget=V-committedDebt is net-unchanged. New/added stake has rewardDebt re-pinned to full accRewardPerShare (789) — no retroactive claim. No re-injection, no haircut, no cross-staker value transfer. Double-pay across migrator round-trip impossible: batchMigrate/userMigrate zero the position, so a later depositFor hits info.amount==0 and skips the settle."
+    },
+    {
+      "id": "ECON-VER-03",
+      "focus": "Focus 2 - story-025 whitelist rework MEV / owner-management economics",
+      "contract": "src/BatchNFTMinterMultiToken.sol",
+      "verdict": "NO NEW UNBOUNDED MEV VECTOR; residual = known over-funding footgun (now aggregated, see ECON-22-01) + local index-race BMT-LOCAL-01",
+      "detail": "Donate-forward is sound: snapshot read PRE-loop (410), paid POST-loop (434), so a batch's own dispatcher donations stay behind — a caller cannot self-fund their reward in one tx (test_OwnDonationsDoNotRefundToBatcher). Winner-take-all whole-pot payout gated on count>=nudgeSize with nudgeSize genuine paid mints — the snipe cost floor is real. minRewards floors protect the loser from minting into a drained pot but do NOT prevent the front-run winner-take-all (documented, intended). Caller-supplied rewardTokens[] removed + minter owner-pinned closes the audit-21 fake-mint drain and M-02 duplicate classes structurally. Owner whitelist add/remove is swap-and-pop reorder → the ONLY new management hazard is BMT-LOCAL-01 (minRewards index-rebind race, Tier-1 Low). The genuinely-new economic wrinkle is the aggregate-over-funding amplification captured as ECON-22-01."
+    },
+    {
+      "id": "ECON-VER-04",
+      "focus": "Focus 2b - NFT-has-no-redemption-value premise under V2",
+      "contract": "src/BatchNFTMinterMultiToken.sol + NFTStakerDepletionV2.sol",
+      "verdict": "PREMISE HOLDS",
+      "detail": "The minted ERC1155 is stakeable in the DepletionV2 family to earn phUSD emissions, so it is NOT literally value-less — but its staking yield is drawn from a CAPPED depletion budget V=balance+mintDebt that is itself funded BY mint payments (dispatcher pull realises mint-debt as phUSD). Staking merely returns a bounded fraction of what minters already paid; it is a closed loop, not exogenous value. A staker's lifetime emission is floored by budget/window and can never exceed their pro-rata share of a budget the mints funded. Therefore minting nudgeSize NFTs to snipe the nudge pot remains net-negative EXCEPT via the over-funding footgun (ECON-22-01) — the sunk-cost / 6.7x-margin reasoning survives V2. No NFT redemption leg exists; the yield-bearing angle does not overturn the premise."
+    }
+  ],
+  "summary": {
+    "newEconFindings": 1,
+    "focus1_depletionV2Solvency": "SOLVENT, no over-emission, no survivor dilution, no runway-drift value leak; rate totalStaked-independent and floor-rounded protocol-favoured; M-02 emergencyWithdraw over-emission present verbatim (known wont-fix, not re-reported)",
+    "focus2_batchMintStory025": "No new unbounded MEV; donate-forward sound, snipe cost-floored; residual is aggregated over-funding footgun (ECON-22-01, Low) + local BMT-LOCAL-01 index race",
+    "focus3_depositForHaircut": "NO ss12m1 re-injection/haircut — economic argument independently confirmed (deposit carries no reward token, rate totalStaked-independent, rewardDebt re-pinned, budget net-neutral)",
+    "nftNoRedemptionPremise": "HOLDS — staking yield is a capped, mint-funded closed loop, not exogenous value; sunk-cost margin survives V2",
+    "criticalCaveat": "M-03 (b3243f42) migrator-side capture-and-forward remains load-bearing for DEPLOYED-FROZEN V1 stakers (EYE/SCX/FLX); V2 source fix is additive — do NOT collapse the ledger entry."
+  }
+}

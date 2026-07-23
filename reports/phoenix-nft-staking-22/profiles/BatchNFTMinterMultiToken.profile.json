@@ -1,0 +1,74 @@
+{
+  "contract": "src/BatchNFTMinterMultiToken.sol",
+  "profileTimestamp": "2026-07-23T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "run": "phoenix-nft-staking-22",
+  "regressionWindow": "c881a42..bb4fea0",
+  "changeStatus": "REWORKED by story-025 (51f0fbc): caller-supplied rewardTokens[] parameter REMOVED, replaced by owner-managed nudge-token whitelist (setNudgeTokenWhitelist, _nudgeTokens ordered set + 1-based index map). batchMint signature is now (count, recipient, paymentAmount, minRewards[]) with minRewards parallel to getNudgeTokens().",
+  "cloneRelationship": {"isManualClone": false, "relatedTo": "BatchNFTMinter (predecessor single-token nudge helper; separate contract, not a staker-family clone)"},
+  "story025Model": {
+    "eligibility": "count >= nudgeSize (nudgeSize==0 disables); qualifier receives ENTIRE pre-loop balance of every whitelisted token (winner-take-all, intended)",
+    "donateForward": "reward balances SNAPSHOTTED BEFORE mint loop, paid AFTER -- batch's own dispatcher donations stay behind to seed next claimant (load-bearing; test_OwnDonationsDoNotRefundToBatcher pins it)",
+    "paymentTokenExclusion": "admin-time: setNudgeTokenWhitelist derives payment token via _resolvePaymentPath (same path as batchMint) and reverts on match; runtime: _snapshotRewards SKIPs an entry equal to derived payment token (repoint tolerance, keeps batchMint live)",
+    "duplicates": "structurally impossible (set semantics, loud revert on re-add) -- closes audit-21 M-02 class",
+    "minterPinned": "tokenMinter + dispatcherIndex owner-set state (story-014 heritage); caller cannot supply minter -- fake-mint nudge drain closed",
+    "minRewards": "per-token floor vs PRE-LOOP snapshot, checked before any pull/mint; protects loser from minting into a drained pot; does NOT prevent front-run winner-take-all"
+  },
+  "verifiedProperties": {
+    "checkedArithmetic": "verified (0.8.20, no unchecked, no assembly)",
+    "noUnboundedLoops": "caveat: mint loop bounded by caller count (caller pays own gas -- self-bounded); whitelist loops bounded by owner-managed _nudgeTokens length (owner-trusted)",
+    "reentrancyGuarded": ["batchMint"],
+    "accessControlled": {
+      "onlyOwner": ["setTokenMinter", "setDispatcherIndex", "setNudgeSize", "setNudgeTokenWhitelist", "setPauser", "rescueERC20"],
+      "onlyPauser": ["pause", "unpause"],
+      "permissionless": ["batchMint", "getNudgeTokens"]
+    },
+    "pausable": "only batchMint is whenNotPaused; all admin + rescueERC20 callable while paused",
+    "approvalHygiene": "forceApprove(max) before loop, forceApprove(0) after -- no lingering approval",
+    "swapAndPop": "setNudgeTokenWhitelist removal REORDERS list (documented; callers must re-fetch)",
+    "weakRandomness": "none",
+    "custodyWarning": "contract is deliberately NOT custody: whitelisted balances sweepable by next qualifier; non-whitelisted tokens inert, recoverable only via rescueERC20"
+  },
+  "localFindings": [
+    {
+      "id": "BMT-LOCAL-01",
+      "type": "ordering-race-footgun",
+      "severity": "local-low",
+      "function": "batchMint / setNudgeTokenWhitelist",
+      "description": "minRewards[] binds to whitelist entries by INDEX. The length check (ArrayLengthMismatch) catches an owner add/remove that changes length, but an owner REMOVE+ADD pair (same length, different order via swap-and-pop) landing between the caller's getNudgeTokens() fetch and their batchMint binds the caller's floors to the WRONG tokens -- floors can silently under-protect. Requires an owner admin tx in the race window (non-malicious-owner footgun, ceiling Low/QA). Mitigation already documented ('re-fetch before every batchMint'); a (token,minReward) pair encoding would close it structurally."
+    },
+    {
+      "id": "BMT-LOCAL-02",
+      "type": "dust-sweep-note",
+      "severity": "informational",
+      "function": "batchMint (step 10)",
+      "description": "Post-loop payment-token sweep sends the contract's ENTIRE remaining payment-token balance (>= DUST_THRESHOLD=1e6) to msg.sender -- including pre-existing donations/griefer deposits (documented as intended: 'donates to the next caller'). totalPaid uses saturating subtraction so a sweep larger than paymentAmount reports 0, not negative."
+    }
+  ],
+  "interfaceAbstraction": {
+    "implements": ["IPausable"],
+    "externalEntryPoints": [
+      {"function": "batchMint(uint256 count, address recipient, uint256 paymentAmount, uint256[] minRewards)", "access": "public, whenNotPaused, nonReentrant", "stateChanges": ["none persistent (stateless looper; balances only)"], "externalCalls": ["INFTMinterV2.configs(dispatcherIndex)", "ITokenDispatcherV2.primeToken()", "whitelisted tokens balanceOf (pre-loop)", "paymentToken.safeTransferFrom(caller->this)", "paymentToken.forceApprove(minter, max/0)", "nftMinter.mint(index, recipient) x count -- MINTS ERC1155 TO CALLER-CHOSEN recipient => potential onERC1155Received callback on ATTACKER-CONTROLLED recipient inside the loop (guarded by nonReentrant here; mint/supply state lives in the minter, not this contract)", "whitelisted tokens safeTransfer(recipient) post-loop", "paymentToken.safeTransfer(msg.sender) dust sweep"]},
+      {"function": "setNudgeTokenWhitelist(address,bool)", "access": "onlyOwner", "externalCalls": ["_resolvePaymentPath (configs + primeToken) on ADD only"]},
+      {"function": "rescueERC20(IERC20,address,uint256)", "access": "onlyOwner", "notes": "UNCONDITIONAL (no floor) -- owner-trusted; escape hatch for non-whitelisted tokens"}
+    ],
+    "externalCalls": [
+      {"target": "ITokenMinterV2 tokenMinter (NFTMinterV2)", "methods": ["mint", "configs"], "trustLevel": "trusted (owner-pinned)"},
+      {"target": "ITokenDispatcherV2 (derived)", "methods": ["primeToken"], "trustLevel": "trusted (derived from pinned minter config)"},
+      {"target": "IERC20 paymentToken (derived primeToken)", "methods": ["safeTransferFrom", "forceApprove", "balanceOf", "safeTransfer"], "trustLevel": "semi-trusted (protocol-configured; USDC/USDS class)"},
+      {"target": "whitelisted nudge tokens", "methods": ["balanceOf", "safeTransfer"], "trustLevel": "owner-vetted but EXECUTES ARBITRARY CODE if a bad token is whitelisted; nonReentrant fails it closed"},
+      {"target": "address recipient (caller-chosen)", "methods": ["onERC1155Received via minter's mint, ERC20 receives"], "trustLevel": "untrusted"}
+    ],
+    "stateVariables": [
+      {"name": "tokenMinter/dispatcherIndex/nudgeSize/pauser", "mutators": "owner"},
+      {"name": "_nudgeTokens/_nudgeTokenIndex", "mutators": "setNudgeTokenWhitelist (owner)"}
+    ]
+  },
+  "trustAssumptions": [
+    "Owner whitelists only sane ERC20s (FoT/rebasing at owner's discretion, documented)",
+    "Nudge pot is by construction a fraction of nudgeSize mint cost -- every claim net-positive for protocol (run-21: NFT has NO redemption value, 6.7x margin; over-funding + bot snipe = sender error, wont-fix 858e9e80)",
+    "Dispatcher donates reward token here on every mint (funding mechanic)"
+  ],
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPausable"],
+  "complexity": {"loc": 551, "functions": 13, "externalCallTargets": 5, "stateVariables": 6}
+}

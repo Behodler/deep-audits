@@ -22,7 +22,7 @@ Invoke **project-manager**: "Check if workspace exists, create if needed"
 - If `workspace/<project>/` is absent: shallow-clone from the submodule URL and remove the remote.
 - **Why**: source repos in `lib/` are read-only, but PoCs and Tier-3 tests need project infrastructure (harnesses, mocks, fork config). PoCs/tests are written to `workspace/<project>/test/`.
 
-Present a summary and confirm:
+Present a summary and proceed immediately — do NOT pause for user confirmation (the user has standing approval for full-audit runs). Continue straight into step 2 after printing the summary:
 ```
 Full Audit: phoenix-nft-staking
 ━━━━━━━━━━━━━━━━━━━━━━━
@@ -36,7 +36,7 @@ Run mode:    REGRESSION (2 files changed) — pass --full for a cold scan
 
 This will: analyze → generate PoCs (High/Medium) → write reports → compile QA → final review.
 New first-party contracts are always scanned — triage away anything you don't care about with /ledger.
-Proceed? (Invoke to continue, or provide feedback)
+Proceeding with analysis...
 ```
 
 ## 2. Run Analysis

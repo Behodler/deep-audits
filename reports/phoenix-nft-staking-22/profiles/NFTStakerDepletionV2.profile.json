@@ -1,0 +1,91 @@
+{
+  "contract": "src/NFTStakerDepletionV2.sol",
+  "profileTimestamp": "2026-07-23T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "run": "phoenix-nft-staking-22",
+  "regressionWindow": "c881a42..bb4fea0",
+  "changeStatus": "NEW contract (story-026 ae63aba adds file; story-027 bb4fea0 adds stake() Active gate)",
+  "cloneRelationship": {
+    "isManualClone": true,
+    "cloneOf": "src/NFTStakerDepletion.sol",
+    "cloneChain": "NFTStaker -> NFTStakerDepletion (V1, DEPLOYED-FROZEN: EYE/SCX/FLX mainnet) -> NFTStakerDepletionV2",
+    "verifiedCodeDeltasVsV1": [
+      "depositFor pre-credit settlement: `_safePayTo(user, pending)` instead of V1's `_safePay(pending)` (= _safePayTo(msg.sender=MIGRATOR,...)) -- the audit-21 M-03 / fingerprint b3243f42 fix, at source level",
+      "stake(): `require(poolState == PoolState.Active)` -- the audit-20 M-05 / fingerprint bdf84579 gate (blocks stake-while-Migrating wedge of finalizeAndReset)"
+    ],
+    "deltaVerificationMethod": "name-normalized full-file diff vs NFTStakerDepletion.sol: ONLY the two code lines above differ (all other diffs are NatSpec). No unintended drift.",
+    "forkDriftWatch": "THIRD manual clone in the family. Future fixes to NFTStaker/NFTStakerDepletion/PriceScaledMigrateReady must be mirrored by hand; next runs must diff all clones."
+  },
+  "verifiedProperties": {
+    "checkedArithmetic": "verified (0.8.20, no unchecked blocks, no assembly)",
+    "noUnboundedLoops": "verified with caveat: batchMigrate loops over onlyMigrator-supplied accounts[] (permissioned, batched off-chain) -- not attacker-controllable",
+    "reentrancyGuarded": ["stake", "unstake", "claim", "emergencyWithdraw", "initiateMigration", "batchMigrate", "userMigrate", "depositFor"],
+    "notReentrancyGuarded": ["finalizeAndReset (onlyOwner, no external calls)", "owner setters", "rescueERC20", "topUp", "pullAndRefresh"],
+    "accessControlled": {
+      "onlyOwner": ["setPauser", "setMigrator", "setDispatcherHook", "setStakedId", "setDispatcherIndex", "setNFTMinter", "setDepletionWindow", "topUp", "pullAndRefresh", "rescueERC20", "finalizeAndReset"],
+      "onlyPauser": ["pause", "unpause"],
+      "onlyMigrator": ["initiateMigration", "batchMigrate", "depositFor"],
+      "permissionless": ["stake", "unstake", "claim", "emergencyWithdraw", "userMigrate", "all views"]
+    },
+    "pausable": "stake/unstake/claim are whenNotPaused; emergencyWithdraw, userMigrate, batchMigrate, depositFor, finalizeAndReset, rescueERC20 deliberately usable while paused",
+    "solvencyInvariant": "balance == rewardBudget + committedDebt maintained by _updatePool/_safePayTo/_recomputeSchedule/emergencyWithdraw; rescueERC20(rewardToken) guarded by post-transfer balance >= committedDebt then recompute",
+    "roundingDirection": "floor everywhere, protocol-favoured (rate = budget/windowSeconds floors; per-user pending floors; _safePayTo dust escape into rewardBudget)",
+    "rateRecomputeDiscipline": "rewardRate re-derived ONLY in setDepletionWindow/_syncBudget/_recomputeSchedule, never inside _updatePool (phlimbo V1 rate-drift class structurally avoided)",
+    "migrationFreeze": "verified: _updatePool no-ops while Migrating (fast-forwards lastRewardTime); pendingReward/totalDebt return frozen snapshot; stake AND depositFor gated on Active; unstake/claim/emergencyWithdraw deliberately ungated (drain path to finalizeAndReset)",
+    "weakRandomness": "none (no entropy usage)",
+    "initializers": "n/a (constructor-deployed, not upgradeable)"
+  },
+  "localFindings": [
+    {
+      "id": "V2-LOCAL-01",
+      "type": "clone-asymmetry-note",
+      "severity": "informational",
+      "function": "depositFor",
+      "line": 793,
+      "description": "stake()/unstake() have NO tail _recomputeSchedule while depositFor DOES (its 'parity with stake' comment is inaccurate -- stake has none). Benign for the depletion model (rate = budget/windowSeconds is totalStaked-independent); effect is only that depositFor re-pins windowEnd/lastRewardTime while stake does not. Inherited byte-for-byte from V1; not a regression."
+    },
+    {
+      "id": "V2-LOCAL-02",
+      "type": "known-class-carryover",
+      "severity": "informational",
+      "function": "emergencyWithdraw / finalizeAndReset",
+      "description": "emergencyWithdraw recycles forfeited pending into rewardBudget WITHOUT recomputing the schedule -- survivor over-emission class (ledger M-02, owner wont-fix on V1); present verbatim in V2. finalizeAndReset also does not recompute the schedule (rate/windowEnd stay at pre-freeze values until the next recompute trigger) -- depletion-model-acceptable but flag for interaction review since V2 is the NEW deploy target. Also inherited: _syncBudget only recomputes on inflow>0 (unlike MigrateReady's unconditional recompute) -- intended, rate is budget/window."
+    }
+  ],
+  "interfaceAbstraction": {
+    "implements": ["INFTStakerMigratable", "IPausable", "ERC1155Holder"],
+    "externalEntryPoints": [
+      {"function": "stake(uint256)", "access": "public, whenNotPaused, nonReentrant, requires poolState==Active (NEW story-027)", "stateChanges": ["users", "totalStaked", "accrual state via _syncBudget"], "externalCalls": ["dispatcherHook.pull()", "rewardToken transfer (pending settle to msg.sender)", "stakedToken.safeTransferFrom(caller->this)"]},
+      {"function": "unstake(uint256)", "access": "public, whenNotPaused, nonReentrant, UNGATED by poolState (deliberate drain path)", "stateChanges": ["users", "totalStaked"], "externalCalls": ["dispatcherHook.pull()", "rewardToken transfer", "stakedToken.safeTransferFrom(this->caller) => onERC1155Received on caller"]},
+      {"function": "claim()", "access": "public, whenNotPaused, nonReentrant", "stateChanges": ["users.rewardDebt", "committedDebt/rewardBudget"], "externalCalls": ["dispatcherHook.pull()", "rewardToken transfer"]},
+      {"function": "emergencyWithdraw()", "access": "public, works while paused, nonReentrant, skips _syncBudget", "stateChanges": ["users zeroed", "totalStaked", "committedDebt->rewardBudget forfeit"], "externalCalls": ["stakedToken.safeTransferFrom(this->caller) => onERC1155Received on caller"]},
+      {"function": "userMigrate()", "access": "public, requires Migrating, nonReentrant", "stateChanges": ["users zeroed", "totalStaked"], "externalCalls": ["rewardToken transfer (frozen pending to caller)", "stakedToken.safeTransferFrom(this->caller) => onERC1155Received on caller"]},
+      {"function": "initiateMigration()", "access": "onlyMigrator, requires Active, nonReentrant", "stateChanges": ["poolState=Migrating, accrual settled+frozen"], "externalCalls": ["dispatcherHook.pull()"]},
+      {"function": "batchMigrate(address[])", "access": "onlyMigrator, requires Migrating, nonReentrant, idempotent, works while paused", "stateChanges": ["users zeroed", "totalStaked"], "externalCalls": ["rewardToken transfer per user (_safePayTo(user))", "one aggregate stakedToken.safeTransferFrom(this->migrator)"]},
+      {"function": "depositFor(address,uint256)", "access": "onlyMigrator, requires Active, nonReentrant, works while paused", "stateChanges": ["users credited", "totalStaked", "tail _recomputeSchedule"], "externalCalls": ["dispatcherHook.pull()", "FIXED: rewardToken transfer of pre-existing pending to USER (not migrator)", "stakedToken.safeTransferFrom(migrator->this)"]},
+      {"function": "finalizeAndReset()", "access": "onlyOwner, requires Migrating && totalStaked==0, works while paused", "stateChanges": ["poolState=Active", "lastRewardTime=now"], "externalCalls": []},
+      {"function": "rescueERC20(IERC20,address,uint256)", "access": "onlyOwner, works while paused", "notes": "rewardToken path guarded by committedDebt floor + recompute; other tokens free"}
+    ],
+    "externalCalls": [
+      {"target": "IUniboostMintDebtHook dispatcherHook", "methods": ["pull()", "mintDebt()"], "trustLevel": "semi-trusted (owner-set; staker must be hook recipient)", "notes": "pull() inside every user interaction; a broken hook bricks stake/unstake/claim but NOT emergencyWithdraw"},
+      {"target": "IERC20 rewardToken (phUSD)", "methods": ["balanceOf", "safeTransfer", "safeTransferFrom"], "trustLevel": "trusted (phUSD, no transfer callbacks)"},
+      {"target": "IERC1155 stakedToken (NFTMinterV2)", "methods": ["safeTransferFrom"], "trustLevel": "semi-trusted contract, but transfers TO user addresses fire onERC1155Received on ATTACKER-CONTROLLED recipients (unstake/emergencyWithdraw/userMigrate). All such sites are under nonReentrant and post-effects (CEI). Surface for interaction scanner."},
+      {"target": "INFTSupply nftMinter", "methods": ["(identity only -- depletion rate does not read configs)"], "trustLevel": "semi-trusted"}
+    ],
+    "stateVariables": [
+      {"name": "stakedId/dispatcherIndex/nftMinter", "mutators": "owner, empty-pool-gated (totalStaked==0)"},
+      {"name": "dispatcherHook/pauser/migrator/depletionWindowMonths", "mutators": "owner, NO empty-pool gate"},
+      {"name": "rewardRate/rewardBudget/windowEnd/committedDebt/accRewardPerShare/lastRewardTime", "mutators": "accrual machinery"},
+      {"name": "users(mapping)/totalStaked", "mutators": "stake/unstake/emergencyWithdraw/migration primitives"},
+      {"name": "poolState", "mutators": "initiateMigration (->Migrating), finalizeAndReset (->Active)"}
+    ]
+  },
+  "trustAssumptions": [
+    "phUSD is a standard non-callback ERC20 minted by trusted protocol",
+    "dispatcherHook.pull() is owner-wired correctly (staker set as hook recipient); mispointed hook degrades to zero inflow",
+    "migrator address is an audited orchestrator (NFTStakerMigrator/InPlaceNFTStakerMigrator); onlyMigrator surface assumes it",
+    "Owner non-malicious (Law 3); rescueERC20(rewardToken) is committedDebt-floored so even owner cannot strip owed reward"
+  ],
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "ERC1155Holder", "IPausable", "INFTStakerMigratable"],
+  "complexity": {"loc": 880, "functions": 30, "externalCallTargets": 4, "stateVariables": 16}
+}

@@ -1,0 +1,76 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-07-23T00:00:00Z",
+  "scanType": "code",
+  "tier": "Tier-2 interaction / implementation-bug",
+  "regressionWindow": "c881a42..bb4fea0",
+  "commit": "bb4fea0",
+  "contractsScanned": 6,
+  "scopeNote": "Changed/new contracts: NFTStakerDepletionV2 (NEW), BatchNFTMinterMultiToken (reworked story-025), NFTStakerPriceScaledMigrateReady (stake gate story-027), NFTStakerDepletion + INFTStakerMigratable (comment-only). Interaction partners reasoned across: NFTStakerMigrator, InPlaceNFTStakerMigrator.",
+  "findings": [],
+  "verificationRecords": [
+    {
+      "id": "CODE-VER-01",
+      "focus": "story-026 depositFor settlement fix on V2 (audit-21 M-03 / b3243f42 at source)",
+      "contract": "src/NFTStakerDepletionV2.sol",
+      "function": "depositFor",
+      "line": 782,
+      "lineStart": 774,
+      "lineEnd": 794,
+      "verdict": "FIX COMPLETE, NO NEW BUG",
+      "detail": "Pre-credit settlement of an existing position now pays `_safePayTo(user, pending)` (line 782) instead of V1's `_safePay(pending)` == `_safePayTo(msg.sender=MIGRATOR, ...)`. Routes the staker's earned phUSD to the staker. Confirmed not weaponizable: (a) onlyMigrator (774) + Active gate (776) — no unprivileged/forced call; (b) no re-injection haircut vs stable-staker ss12m1 — the ERC1155 deposit (786) brings no reward tokens, committedDebt is reduced by the settled pending, budget re-derived as V-committedDebt in tail _recomputeSchedule (793); rate = budget/window is totalStaked-independent so no dilution of other stakers' owed debt; (c) no double-pay across a migrator round-trip — batchMigrate/userMigrate zero the position (amount=0/rewardDebt=0), so a subsequent depositFor takes the info.amount==0 branch and SKIPS the settle; the settle only fires on a genuinely-earned delta and rewardDebt is re-pinned to full accRewardPerShare (789); (d) reentrancy-safe — nonReentrant, phUSD is trusted non-callback ERC20, and the only inbound ERC1155 transfer (786) has receiver=this (ERC1155Holder, benign selector return)."
+    },
+    {
+      "id": "CODE-VER-02",
+      "focus": "M-03 (b3243f42) migrator-side capture-and-forward guard MUST NOT be collapsed",
+      "contract": "src/NFTStakerDepletion.sol (V1, DEPLOYED-FROZEN) + NFTStakerMigrator/InPlaceNFTStakerMigrator",
+      "verdict": "GUARD STILL LOAD-BEARING — DO NOT PROPOSE CLOSING",
+      "detail": "V2 fixes the misroute at source, but the three live mainnet depletion stakers (EYE/SCX/FLX) run V1, whose depositFor still pays the migrator (line 778, retained by design + NatSpec warning). Any orchestrator driving a V1 instance still relies on the migrator-side capture-and-forward (_depositForAndForward). The V2 source fix is ADDITIVE, not a replacement for the migrator guard; ledger entry b3243f42 stays open/relied-upon for V1. Recorded per run brief to prevent a downstream agent collapsing it."
+    },
+    {
+      "id": "CODE-VER-03",
+      "focus": "story-027 stake() Active gate on V2 + MigrateReady (audit-20 M-05 / bdf84579)",
+      "contract": "src/NFTStakerDepletionV2.sol",
+      "function": "stake",
+      "line": 557,
+      "verdict": "WEDGE CLOSED FOR NEW DEPLOYMENTS, NO LEGITIMATE FLOW WEDGED",
+      "detail": "`require(poolState == PoolState.Active)` added to stake() ONLY (name-normalized diff confirms this is the sole stake-side delta). A permissionless stake can no longer push totalStaked>0 during Migrating and wedge finalizeAndReset (require totalStaked==0). All drain paths stay OPEN while Migrating: unstake (577, ungated), claim (594, ungated), emergencyWithdraw (639, ungated+works-paused), userMigrate (722, requires Migrating), batchMigrate (692, requires Migrating). depositFor is also Active-gated (776) — correct: it seeds the healthy/Active target, never the frozen pool; the in-place round-trip re-enters Active via finalizeAndReset before any depositFor. After finalizeAndReset the pool is Active and stake() resumes. Same gate verified present in NFTStakerPriceScaledMigrateReady per story-027."
+    },
+    {
+      "id": "CODE-VER-04",
+      "focus": "DepletionV2 drift vs Depletion V1 beyond the two intended deltas",
+      "contract": "src/NFTStakerDepletionV2.sol",
+      "verdict": "NO SECURITY-RELEVANT DRIFT",
+      "detail": "Name-normalized full-file diff (sed DepletionV2->Depletion) yields ONLY two code-line differences: stake() Active gate (557) and depositFor _safePayTo (782); every other hunk is NatSpec. Security-relevant slices confirmed byte-identical to V1: _updatePool (460-484, rate NOT recomputed in accrual — phlimbo rate-drift class avoided), _recomputeSchedule (524-545, budget=V-committedDebt clamp, floor rate, no ceiling), _syncBudget (435-447, _updatePool before pull(), inflow via balance-diff), emergencyWithdraw (639-654, CEI + forfeit-to-budget), batchMigrate/_exitPosition (692-753, CEI zero-before-transfer), _safePayTo (620-632, solvency decrement + dust-escape). Solvency invariant balance==rewardBudget+committedDebt preserved."
+    },
+    {
+      "id": "CODE-VER-05",
+      "focus": "New-contract reentrancy-class checklist (DepletionV2 auto-in-scope, Law 1)",
+      "contract": "src/NFTStakerDepletionV2.sol",
+      "verdict": "ALL ROWS CLEAR",
+      "detail": "Classic single-fn: nonReentrant + CEI + phUSD non-callback. Cross-function: OZ ReentrancyGuard lock is contract-wide, blocks sibling re-entry across stake/unstake/claim/emergencyWithdraw/depositFor/batchMigrate/userMigrate/initiateMigration. Cross-contract: the only non-guarded functions are onlyOwner (finalizeAndReset, setters, rescueERC20, topUp, pullAndRefresh) — an attacker in an onERC1155Received callback cannot reach them. Read-only reentrancy: every outbound ERC1155 transfer that fires onERC1155Received on an attacker recipient (unstake 590, emergencyWithdraw 652, userMigrate 726, batchMigrate 710) executes AFTER all state settlement (CEI), so views (pendingReward/totalDebt/runwaySeconds/totalBudget) read consistent state during the callback window. ERC1155 inbound hooks (stake 570, depositFor 786) have receiver=this (ERC1155Holder). ERC777/ERC721: N/A. dispatcherHook.pull() (441) is a semi-trusted head-of-fn call under nonReentrant; a broken hook bricks stake/unstake/claim but emergencyWithdraw escape hatch is hook-free (by design, owner-trusted)."
+    },
+    {
+      "id": "CODE-VER-06",
+      "focus": "Slither/Aderyn Tier-1 leads re-examined at interaction level",
+      "contract": "src/NFTStakerDepletionV2.sol",
+      "verdict": "NO INTERACTION-LEVEL FINDING",
+      "detail": "batchMigrate:702 `uint256 totalAmount;` — uninitialized-local defaults to 0, accumulator pattern, benign (false positive). runwaySeconds:875 strict-equality `rewardRate==0` — div-by-zero guard, benign. state-change-after-external-call 570/786 — both are inbound stakedToken.safeTransferFrom(->this) with receiver=this, followed by user.amount/totalStaked/rewardDebt updates, under nonReentrant; no attacker callback (ERC1155Holder), standard masterchef pattern. All flagged pull-on-interaction reentrancy (_syncBudget/stake/unstake/claim/depositFor) covered by contract-wide guard + CEI above."
+    },
+    {
+      "id": "CODE-VER-07",
+      "focus": "BatchNFTMinterMultiToken story-025 whitelist rework (interaction surface)",
+      "contract": "src/BatchNFTMinterMultiToken.sol",
+      "verdict": "NO NEW INTERACTION-LEVEL FINDING (local index-race is Tier-1 BMT-LOCAL-01)",
+      "detail": "swap-and-pop remove (224-246) maintains _nudgeTokenIndex correctly (lastToken moved to oneBasedIndex-1, its 1-based index rewritten, pop, delete). minRewards is length-checked against _nudgeTokens (373) preventing OOB, and binds by identical storage index i in _snapshotRewards and payout — no wrong-token OOB payout. Caller-supplied rewardTokens[] removed; minter pinned (owner-set), so the audit-21 fake-mint nudge-drain and M-02 duplicate classes are structurally closed. The only residual is the owner-remove+add-in-race-window index rebind (already captured Tier-1 as BMT-LOCAL-01, ceiling Low/QA, non-malicious-owner footgun) — a local ordering concern, not a cross-contract vulnerability."
+    }
+  ],
+  "summary": {
+    "newInteractionFindings": 0,
+    "focus1_depositForFix": "COMPLETE + SAFE (no forced-settlement, no ss12m1 haircut, no double-pay, reentrancy-safe)",
+    "focus2_stakeActiveGate": "COMPLETE + SAFE (stake-only gate; all drain paths open; no legitimate flow wedged)",
+    "focus3_v2Drift": "NONE beyond the two intended deltas (name-normalized diff + slice review)",
+    "focus4_newContractScan": "CLEAN (full reentrancy checklist clears; Slither leads are false positives)",
+    "criticalCaveat": "M-03 (b3243f42) migrator-side capture-and-forward remains load-bearing for the DEPLOYED-FROZEN V1 stakers — the V2 source fix is additive, DO NOT collapse the ledger entry."
+  }
+}

@@ -1,0 +1,138 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-07-23T02:10:00Z",
+  "scanType": "pattern-matching",
+  "regressionWindow": "c881a42..bb4fea0",
+  "scope": [
+    "src/NFTStakerDepletionV2.sol",
+    "src/BatchNFTMinterMultiToken.sol",
+    "src/NFTStakerDepletion.sol",
+    "src/NFTStakerPriceScaledMigrateReady.sol",
+    "src/NFTStakerMigrator.sol",
+    "src/InPlaceNFTStakerMigrator.sol",
+    "src/INFTStakerMigratable.sol"
+  ],
+  "patternsChecked": 35,
+  "patternDbVersion": "1.1",
+  "findingsCount": 1,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "type": "count-gated-pot-decoupled-from-value",
+      "severity": "potential-medium",
+      "contract": "src/BatchNFTMinterMultiToken.sol",
+      "line": 364,
+      "description": "batchMint pays the contract's ENTIRE pre-loop balance of every whitelisted nudge token to a caller-chosen `recipient` on a count-only gate (`count >= nudgeSize`), decoupled from the value the caller contributed. This is the historical BatchNFTMinter nudge class: a permissionless caller who clears the size gate front-runs / sweeps a legitimately-funded pot (valid MEV finding under Law 1), and over-funding the pot is an owner footgun (Law 3).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "count >= _nudgeSize (line 408)",
+        "nudgeSize (line 115)",
+        "IERC20(rewardToken).balanceOf(address(this)) (line 516)",
+        "batchMint (line 364)",
+        "caller-chosen recipient paid full pot (_payRewards line 547)"
+      ],
+      "presentMitigations": [
+        "Pot snapshotted BEFORE the mint loop (_snapshotRewards line 410, paid line 434) — closes the donation self-refund leg (notVulnerableWhen: 'pot snapshotted BEFORE the loop'). test_OwnDonationsDoNotRefundToBatcher pins this.",
+        "Caller must genuinely pay for >= nudgeSize real mints (payment pulled line 413, mint loop line 419) — the pot is not free; per memory the minted NFT has NO redemption value, so the qualifying spend is a real sunk cost (~6.7x margin)."
+      ],
+      "missingMitigations": [
+        "Recipient is still caller-chosen (not pinned to a non-caller address)",
+        "Payout still gated on count only, not compared to the value the caller contributed"
+      ],
+      "reconciliation": "KNOWN / previously-triaged class — reconciles to the BatchNFTMinter nudge ledger history (H-01 story-014 fix; 858e9e80 wont-fix, run-21). This is a regression-anchor match on the story-025 multi-token whitelist rework, NOT a claim of a new vulnerability. Sanitizer to reconcile by fingerprint against the ledger; do not re-report as novel if already dispositioned.",
+      "references": [
+        "memory: phoenix-nft-staking-batchminter-nudge",
+        "patterns/vulnerability-patterns.json#BATCH-PAYOUT-FIXED-POT note"
+      ]
+    }
+  ],
+  "manualReviewCount": 2,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "EMISSION-WINDOW-BOUNDARY",
+      "type": "emergencyWithdraw-skips-recompute (M-02 class)",
+      "severity": "potential-medium",
+      "contract": "src/NFTStakerDepletionV2.sol",
+      "line": 639,
+      "description": "emergencyWithdraw() skips _syncBudget/_updatePool and does not recompute the schedule; it moves the exiting user's pending from committedDebt back into rewardBudget (forfeit recycles). This is the standard masterchef escape hatch and matches the historical M-02 'survivor over-emission' class. In the depletion model rewardRate = budget/window is totalStaked-INDEPENDENT, so a leaver does not directly re-rate survivors, but the forfeited-pending recycle + no in-place accRewardPerShare re-bake warrants a reconcile against the M-02 wont-fix disposition rather than silent acceptance.",
+      "confidence": "low",
+      "matchedSignatures": ["emergencyWithdraw (line 639)", "does not call _updatePool/_syncBudget", "committedDebt/rewardBudget rebalance (lines 648-650)"],
+      "reconciliation": "Reconcile to NFTStaker emergencyWithdraw over-emission M-02 (memory: phoenix-nft-staking-emergencywithdraw-overemission, WON'T-FIX 2026-06-09). V2 inherits the same escape-hatch design. Routed for human/higher-tier adjudication, not dropped.",
+      "references": ["memory: phoenix-nft-staking-emergencywithdraw-overemission"]
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "type": "whitelist-swap-and-pop-reorder footgun",
+      "severity": "potential-low",
+      "contract": "src/BatchNFTMinterMultiToken.sol",
+      "line": 224,
+      "description": "setNudgeTokenWhitelist uses swap-and-pop on remove, REORDERING _nudgeTokens (documented lines 202-204, 218-220). batchMint binds minRewards[i] positionally to _nudgeTokens[i]; a caller using a stale ordering supplies a per-token floor against the wrong token. Value impact is bounded — minRewards is only a floor and the whole balance is paid regardless — so this is a UI/ordering footgun, not a protocol value leak. Surfaced (not dropped) for triage completeness.",
+      "confidence": "low",
+      "matchedSignatures": ["setNudgeTokenWhitelist swap-and-pop (line 224)", "positional minRewards[i] <-> _nudgeTokens[i]"],
+      "reconciliation": "No prior ledger entry located; low value-impact ordering hazard. Route to human triage.",
+      "references": []
+    }
+  ],
+  "noHitNotesForHistoricalClasses": [
+    {
+      "class": "Linear-Depletion rate-drift (phlimbo; run-18 M-01)",
+      "patternId": "REWARD-ACCRUAL-ORDER / EMISSION-WINDOW-BOUNDARY",
+      "result": "NO HIT (mitigated)",
+      "evidence": "NFTStakerDepletionV2._updatePool (lines 460-484) does NOT recompute rewardRate inside per-interaction accrual — rate is re-derived only in setDepletionWindow/_syncBudget/_recomputeSchedule (explicit comment lines 456-459: 'Recomputing the rate inside per-interaction accrual was phlimbo's V1 bug'). elapsed capped at min(now,windowEnd)-lastRewardTime (line 474-475); reward clamped to rewardBudget (line 477). All notVulnerableWhen conditions present."
+    },
+    {
+      "class": "depositFor misroute / settlement-to-wrong-party (run-20 High, run-21 M-03, fp b3243f42)",
+      "patternId": "REWARD-ACCRUAL-ORDER (settlement leg)",
+      "result": "NO HIT of a NEW variant — V2 fix confirmed correct",
+      "evidence": "NFTStakerDepletionV2.depositFor (line 774-794) settles a pre-existing position via _safePayTo(user, pending) (line 782), paying the USER, matching NFTStakerPriceScaledMigrateReady and the _exitPosition leg. No forced-settlement griefing variant: depositFor is onlyMigrator (line 774) + poolState==Active gate (line 776), so only the migrator triggers it and settlement flows to the rightful user. V1 NFTStakerDepletion.depositFor retains the KNOWN misroute (documented deployed-frozen, orchestrators capture-and-forward via _depositForAndForward in NFTStakerMigrator/InPlaceNFTStakerMigrator) — that is the existing ledger finding, not re-flagged as new."
+    },
+    {
+      "class": "emergencyWithdraw skips schedule recompute (survivor over-emission, M-02 class)",
+      "patternId": "EMISSION-WINDOW-BOUNDARY",
+      "result": "MATCH routed to manualReview (PATTERN-MR-001), reconciles to M-02 wont-fix",
+      "evidence": "V2 emergencyWithdraw (line 639) is the standard escape hatch (skips _updatePool). Depletion rate is totalStaked-independent so the classic re-rate is attenuated; routed for reconcile, not silently dropped."
+    },
+    {
+      "class": "MEV front-run on batch minter nudge paths",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "result": "HIT (PATTERN-001) — known/triaged nudge class, self-refund leg mitigated (pre-loop snapshot); residual is the known legit-pot front-run + owner over-funding footgun."
+    },
+    {
+      "class": "migration slice-ordering (M-03/M-04/M-08 cluster)",
+      "patternId": "REWARD-ACCRUAL-ORDER / dust-ordering",
+      "result": "NO NEW HIT",
+      "evidence": "V2 batchMigrate (line 692) loops accounts via _exitPosition (CEI: position zeroed lines 746-748 before ERC1155 transfer), settles pending to each user via _safePayTo(account,...) (line 750). This is the existing known migration cluster (memory: phoenix-nft-staking-migration-cluster-triage); no new slice-ordering signature introduced by the V2 clone. Reconcile to existing cluster, do not re-file as novel."
+    }
+  ],
+  "patternsSkipped": [
+    {"id": "FRONTRUN-APPROVE", "reason": "DB note: C4 treats as QA/known-issue. No HM twist present — batchMint uses internal forceApprove(minter, max)+revoke inside nonReentrant (lines 416/424), not a user-facing approve race. Not emitted as primary finding per skip rule."},
+    {"id": "CENTRALIZATION-ADMIN", "reason": "Owner-trusted (Law 3); many onlyOwner setters but no non-obvious rug path introduced by the change. DB note: C4 Low/QA unless rug. Not emitted."}
+  ],
+  "patternsNoMatch": [
+    "ERC4626-INFLATION", "ORACLE-STALE", "ORACLE-ROUNDID", "REENTRANCY-ERC777",
+    "SIGNATURE-REPLAY", "FLASH-LOAN-PRICE", "UNSAFE-DOWNCAST", "DIVISION-PRECISION",
+    "UNPROTECTED-INIT", "STORAGE-COLLISION", "MISSING-SLIPPAGE", "RETURN-VALUE-IGNORE",
+    "SELFDESTRUCT-FORCE-ETH", "DOS-UNBOUNDED-LOOP", "DOUBLE-VOTING", "PERMIT-FRONTRUN",
+    "FIRST-DEPOSITOR-ATTACK", "INCORRECT-OPERATOR", "CROSS-CHAIN-REPLAY", "TIMELOCK-BYPASS",
+    "REWARD-ACCRUAL-ORDER", "REWARD-RUNWAY-DEPLETION", "MINT-ON-DEMAND-OVERMINT",
+    "YIELD-PRINCIPAL-ACCOUNTING-SKEW", "TWO-STEP-COMMIT-WINDOW", "REENTRANCY-ERC721-RECEIVE",
+    "REENTRANCY-READONLY", "REENTRANCY-CROSS-FUNCTION", "ROUNDING-DIRECTION", "WEAK-PRNG",
+    "FEE-ON-TRANSFER-ACCOUNTING"
+  ],
+  "noMatchNotes": {
+    "REWARD-ACCRUAL-ORDER": "_updatePool/_syncBudget runs at head of stake/unstake/claim/depositFor before share mutation; setDepletionWindow settles at OLD rate (line 378) before mutating; accPerShare bounded to [lastRewardTime, min(now,windowEnd)]. All notVulnerableWhen present.",
+    "REWARD-RUNWAY-DEPLETION": "elapsed capped at min(now,windowEnd)-lastRewardTime (V2 lines 474-475); reward clamped to rewardBudget (line 477); _safePayTo reverts on shortfall (line 621, no silent cap); solvency invariant balance==rewardBudget+committedDebt maintained.",
+    "MINT-ON-DEMAND-OVERMINT": "Single _updatePool writer folds in exactly elapsed*rate; mint path is dispatcherHook.pull() measured by balance delta (line 440-442), recompute uses V-committedDebt (line 535). No double-mint path.",
+    "REENTRANCY-ERC721-RECEIVE / CROSS-FUNCTION": "All stake/unstake/claim/depositFor/batchMigrate/userMigrate/emergencyWithdraw are nonReentrant; _exitPosition zeroes position before ERC1155 transfer (CEI). batchMint is nonReentrant; payout after mint loop. Contract-wide guard covers the sibling set.",
+    "WEAK-PRNG": "The 20 block.timestamp references in V2 are all accrual/window math (windowEnd, elapsed, lastRewardTime) — no value-bearing random outcome derived from block state.",
+    "YIELD-PRINCIPAL-ACCOUNTING-SKEW": "No yield-strategy exit / requested-vs-received balance-delta principal path; depletion budget is idle rewardToken + hook mintDebt (settle-and-freeze migration, no strategy unwind).",
+    "FEE-ON-TRANSFER-ACCOUNTING": "rewardToken is phUSD (protocol token, non-fee); staked asset is a single ERC1155 id counted by units, not ERC20 wei. dispatcherHook.pull() inflow measured by balance delta (line 440-442)."
+  },
+  "errors": []
+}

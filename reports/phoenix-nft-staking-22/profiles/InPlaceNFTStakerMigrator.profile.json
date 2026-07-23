@@ -1,0 +1,68 @@
+{
+  "contract": "src/InPlaceNFTStakerMigrator.sol",
+  "profileTimestamp": "2026-07-23T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "run": "phoenix-nft-staking-22",
+  "regressionWindow": "c881a42..bb4fea0",
+  "changeStatus": "UNCHANGED in window (interaction-coupled orchestrator; the depositFor round-trip on a SINGLE staker is exactly the path the audit-21 M-03/V2 fix targets).",
+  "cloneRelationship": {"isManualClone": false, "twin": "_depositForAndForward line-for-line identical to NFTStakerMigrator's (plan D-6)"},
+  "role": "Single-staker in-place rewire orchestrator: migrateOut parks ERC1155 in own custody (cross-TRANSACTION custody, unlike NFTStakerMigrator), owner rewires the empty staker (finalizeAndReset + setters), migrateIn re-injects parked stake via depositFor. Timeout hatch returns stake to users if the operator stalls.",
+  "verifiedProperties": {
+    "checkedArithmetic": "verified",
+    "noUnboundedLoops": "migrateIn slices [start,end) with end clamped; parked set paged via parkedUsersRange; owner-driven",
+    "reentrancyGuarded": ["migrateOut", "migrateIn", "claimForwarded", "claimTimedOut"],
+    "accessControlled": {
+      "onlyOwner": ["initiateMigration", "migrateOut", "migrateIn", "rescueERC20", "rescueERC1155"],
+      "permissionless": ["claimForwarded (self-only)", "claimTimedOut (self-only, after migrationTimeout)"]
+    },
+    "custodyExits": "parked stake has exactly TWO exits: migrateIn -> staker.depositFor(user, amount) (immutable staker, original user) and claimTimedOut -> user themselves. No owner redirect path. staker/timeout immutable by design.",
+    "timeoutBounds": "1 day <= migrationTimeout <= 30 days (immutable; rejects instant-hatch and infinite-hatch)",
+    "floors": "rescueERC1155(stakedId) floored by totalParked; rescueERC20(rewardToken) floored by totalUnforwarded -- owner cannot reach parked principal or escrowed reward",
+    "cei": "migrateIn zeroes parked/migrationBegin/totalParked BEFORE depositFor; claimTimedOut and claimForwarded strict CEI",
+    "setSemantics": "manual swap-remove parked set (1-based index map), idempotent add/remove; migrateIn snapshots slice to memory before mutating (index-shift safe)",
+    "captureAndForward": "same verified mechanism as NFTStakerMigrator; owed read on `staker` (source == target)",
+    "weakRandomness": "none"
+  },
+  "localFindings": [
+    {
+      "id": "IPM-LOCAL-01",
+      "type": "known-cluster-pointer",
+      "severity": "informational",
+      "description": "Migration-cluster triage (2026-07-23 memory): M-03/M-04/M-08 slice-ordering findings -> conditional wont-fix (dust for minutes-long migration); M-05 stake()-wedge -> fix-pending as load-bearing backstop -- story-027's stake() Active gate on V2/MigrateReady is the candidate fix for that backstop; downstream agents should evaluate whether bdf84579/M-05 reopen-triggers are now satisfied for NEW deployments (V1 mainnet instances remain ungated)."
+    },
+    {
+      "id": "IPM-LOCAL-02",
+      "type": "race-note",
+      "severity": "informational",
+      "description": "claimTimedOut vs migrateIn race is bounded: both zero parked[user] first under nonReentrant+CEI, so double-pay is impossible; whichever lands first wins, the other no-ops/skips. Timeout hatch returns STAKE ONLY (pending was settled at migrateOut) -- correct, no reward stranding."
+    }
+  ],
+  "interfaceAbstraction": {
+    "implements": ["ERC1155Holder"],
+    "externalEntryPoints": [
+      {"function": "initiateMigration()", "access": "onlyOwner", "externalCalls": ["staker.initiateMigration()"]},
+      {"function": "migrateOut(address[])", "access": "onlyOwner, nonReentrant", "stateChanges": ["parked", "migrationBegin", "_parkedUsers", "totalParked"], "externalCalls": ["staker.batchMigrate(users)"]},
+      {"function": "migrateIn(uint256 start, uint256 end)", "access": "onlyOwner, nonReentrant", "stateChanges": ["parked zeroed per user pre-call", "totalParked"], "externalCalls": ["stakedToken.setApprovalForAll(staker, true/false)", "per user: staker.pendingReward, rewardToken.balanceOf, staker.depositFor, rewardToken.transfer(user) try/catch"], "notes": "requires staker back in Active (finalizeAndReset + rewire done) or depositFor reverts"},
+      {"function": "claimTimedOut()", "access": "public self-only, nonReentrant, requires timeout elapsed", "externalCalls": ["stakedToken.safeTransferFrom(this->caller) => onERC1155Received on caller (post-CEI)"]},
+      {"function": "claimForwarded()", "access": "public self-only, nonReentrant, CEI", "externalCalls": ["rewardToken.safeTransfer(caller)"]},
+      {"function": "rescueERC20 / rescueERC1155", "access": "onlyOwner", "notes": "floored (totalUnforwarded / totalParked for stakedId)"}
+    ],
+    "externalCalls": [
+      {"target": "INFTStakerMigratable staker (immutable, single)", "methods": ["initiateMigration", "batchMigrate", "depositFor", "pendingReward/rewardToken via IStakerViews"], "trustLevel": "trusted protocol staker"},
+      {"target": "IERC20 rewardToken (phUSD)", "methods": ["balanceOf", "transfer (raw, try/catch)", "safeTransfer"], "trustLevel": "trusted"},
+      {"target": "IERC1155 stakedToken", "methods": ["setApprovalForAll", "safeTransferFrom"], "trustLevel": "semi-trusted; claimTimedOut transfer fires onERC1155Received on attacker-controlled caller (post-CEI, nonReentrant)"},
+      {"target": "address user (forward recipient)", "methods": ["rewardToken.transfer"], "trustLevel": "untrusted, contained by escrow"}
+    ],
+    "stateVariables": [
+      {"name": "parked/migrationBegin/_parkedUsers/_parkedIndex/totalParked", "mutators": "migrateOut (add), migrateIn/claimTimedOut (remove)"},
+      {"name": "unforwarded/totalUnforwarded", "mutators": "_depositForAndForward (add), claimForwarded (remove)"}
+    ]
+  },
+  "trustAssumptions": [
+    "Operator completes rewire + finalizeAndReset within migrationTimeout or users take the hatch (intended pressure)",
+    "staker's stakedToken/stakedId match constructor args (wiring assumption; rewardToken IS cross-checked)",
+    "Against V1 staker: capture-and-forward compensates the depositFor misroute; against V2/MigrateReady: self-disables"
+  ],
+  "inheritanceChain": ["Ownable", "ReentrancyGuard", "ERC1155Holder"],
+  "complexity": {"loc": 449, "functions": 13, "externalCallTargets": 4, "stateVariables": 12}
+}

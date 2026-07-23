@@ -1,0 +1,68 @@
+{
+  "contract": "src/NFTStakerPriceScaledMigrateReady.sol",
+  "profileTimestamp": "2026-07-23T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "run": "phoenix-nft-staking-22",
+  "regressionWindow": "c881a42..bb4fea0",
+  "changeStatus": "ONE code change in window (story-027 bb4fea0): stake() gains `require(poolState == PoolState.Active)` (audit-20 M-05 / bdf84579 gate). Verified via git diff: no other code changes.",
+  "cloneRelationship": {
+    "isManualClone": true,
+    "cloneOf": "src/NFTStakerPriceScaled.sol",
+    "cloneChain": "NFTStaker -> NFTStakerPriceScaled (DEPLOYED RatchetNFTStaker 0x299b0071def42d35eaf5ea24cc0a71cf10655a64) -> NFTStakerPriceScaledMigrateReady",
+    "intendedDeltasVsPriceScaled": [
+      "INFTStakerMigratable + story-019 migration block (PoolState/migrator/primitives/_safePayTo)",
+      "Freeze hooks: _updatePool no-op while Migrating; pendingReward/totalDebt frozen while Migrating",
+      "rescueERC20 ported from NFTStakerDepletion",
+      "PRICE-SCALED-SPECIFIC: accrual-path recomputes routed through _recomputeScheduleIfActive (rate depends on totalStaked, so the frozen snapshot must be pinned); depositFor tail _recomputeSchedule is LOAD-BEARING; finalizeAndReset DOES recompute (unlike depletion variants)",
+      "story-027: stake() Active gate"
+    ],
+    "keyDifferenceVsDepletionFamily": "rate = S*targetAPY/SECONDS_PER_YEAR with S = totalStaked * latestPrice * priceScale -- rate DEPENDS on totalStaked and dispatcher price; priceScale (immutable, e.g. 1e12 for 6dp USDC prime token) normalizes price into phUSD units (run-17 L-08 magnitude footgun)"
+  },
+  "verifiedProperties": {
+    "checkedArithmetic": "verified (0.8.20; mulDiv floor paths; documented overflow bound totalStaked*latestPrice*priceScale < 2^256 for priceScale <= 1e12)",
+    "noUnboundedLoops": "verified (batchMigrate loop is onlyMigrator-supplied)",
+    "reentrancyGuarded": ["stake", "unstake", "claim", "emergencyWithdraw", "initiateMigration", "batchMigrate", "userMigrate", "depositFor"],
+    "accessControlled": {
+      "onlyOwner": ["setPauser", "setMigrator", "setDispatcherHook", "setStakedId", "setDispatcherIndex", "setNFTMinter", "setTargetAPY", "topUp", "pullAndRefresh", "rescueERC20", "finalizeAndReset"],
+      "onlyPauser": ["pause", "unpause"],
+      "onlyMigrator": ["initiateMigration", "batchMigrate", "depositFor"],
+      "permissionless": ["stake", "unstake", "claim", "emergencyWithdraw", "userMigrate"]
+    },
+    "depositForSettlement": "CONFORMING: pays pre-existing pending via _safePayTo(user, ...) (line ~901) -- migrators' capture-and-forward self-disables against this contract",
+    "migrationFreeze": "verified and STRONGER than depletion family: _recomputeScheduleIfActive pins rate/windowEnd/rewardBudget while Migrating on ALL accrual-path recomputes (user unstake-while-Migrating cannot move the snapshot); finalizeAndReset flips Active FIRST then recomputes (S==0 -> rate 0, mirrors unstake-to-zero)",
+    "solvencyInvariant": "balance == rewardBudget + committedDebt (same machinery)",
+    "targetAPYBound": "targetAPY <= 0.5e18 (MAX_TARGET_APY); settles at OLD rate before mutation",
+    "weakRandomness": "none"
+  },
+  "localFindings": [
+    {
+      "id": "PSMR-LOCAL-01",
+      "type": "gate-consistency-verified",
+      "severity": "informational",
+      "description": "Story-027 gate audit: stake() now requires Active; unstake/claim deliberately ungated (unstake is the totalStaked drain path to finalizeAndReset; both settle against frozen accRewardPerShare and their tail recomputes are suppressed by _recomputeScheduleIfActive, so they cannot disturb the snapshot). claim-while-Migrating pays the frozen pending early but identically to what _exitPosition would settle -- no over/under-payment identified locally. Gate is faithful to the M-05 intent."
+    },
+    {
+      "id": "PSMR-LOCAL-02",
+      "type": "clone-carryover",
+      "severity": "informational",
+      "description": "Carries priceScale magnitude footgun (run-17 L-08, immutable ctor arg -- wrong power of ten silently mis-scales APY) and the emergencyWithdraw no-recompute survivor over-emission class. Both known/triaged on ancestors; listed for drift-watch continuity. Fork-drift watch-note now spans THREE hand-maintained clones."
+    }
+  ],
+  "interfaceAbstraction": {
+    "implements": ["INFTStakerMigratable", "IPausable", "ERC1155Holder"],
+    "note": "Entry-point surface identical in shape to NFTStakerDepletionV2.profile.json with these deltas: constructor takes extra immutable priceScale (!=0); setTargetAPY replaces setDepletionWindow; _syncBudget recompute is UNCONDITIONAL but Active-guarded; stake/unstake carry tail _recomputeScheduleIfActive; depositFor tail recompute unconditional (requires Active anyway); finalizeAndReset recomputes.",
+    "externalCalls": [
+      {"target": "IBalancerPoolerMintDebtHook dispatcherHook", "methods": ["pull()", "mintDebt()"], "trustLevel": "semi-trusted (owner-set)"},
+      {"target": "INFTSupply nftMinter", "methods": ["configs(dispatcherIndex) -- LOAD-BEARING: price/growthBasisPoints drive the emission rate"], "trustLevel": "semi-trusted; a mispriced/repointed config swings APY (empty-pool gates on setDispatcherIndex/setNFTMinter defend)"},
+      {"target": "IERC20 rewardToken (phUSD)", "methods": ["balanceOf", "safeTransfer", "safeTransferFrom"], "trustLevel": "trusted"},
+      {"target": "IERC1155 stakedToken", "methods": ["safeTransferFrom"], "trustLevel": "transfers to user addresses fire onERC1155Received on attacker-controlled recipients (unstake/emergencyWithdraw/userMigrate); nonReentrant + CEI"}
+    ]
+  },
+  "trustAssumptions": [
+    "priceScale set correctly at deploy (10**(rewardDecimals-priceDecimals)); immutable by design",
+    "nftMinter.configs price is the honest next-mint price (dispatcher ramp); rate derives from it",
+    "Same hook/phUSD/migrator/owner assumptions as depletion family"
+  ],
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "ERC1155Holder", "IPausable", "INFTStakerMigratable"],
+  "complexity": {"loc": 1019, "functions": 31, "externalCallTargets": 4, "stateVariables": 17}
+}
