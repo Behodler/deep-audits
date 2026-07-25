@@ -1,0 +1,198 @@
+{
+  "project": "yield-claim-nft",
+  "run": "yield-claim-nft-19",
+  "commit": "d4cc563",
+  "scanTimestamp": "2026-07-25T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "contractsScanned": 7,
+  "stories": ["story-046", "story-047"],
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "liveness-coupling / invalidated-escape-hatch",
+      "contract": "src/dispatchers/NudgeRatchet.sol",
+      "function": "_dispatch",
+      "line": 158,
+      "lineStart": 156,
+      "lineEnd": 161,
+      "relatedLines": [112, 133, 96, 97],
+      "description": "NudgeRatchet is the only donor with neither a donation-disable switch nor a try/catch AND the only one without rescueERC20. The absent rescue hatch is justified in NatSpec by a 'self-cleaning' property (stray USDC is forwarded on the next dispatch) that story-046 made conditional on the state of a contract in another repository. While the streamer path is broken, every mint through this dispatcher index reverts and any USDC resident on the ratchet is unreachable by any actor.",
+      "codeSnippet": "if (bal > 0) {\n    address streamer = nudgeStreamer;\n    require(streamer != address(0), \"NudgeRatchet: nudgeStreamer unset\");\n    IERC20(_token).forceApprove(streamer, bal);\n    INudgeStreamer(streamer).collectNudge(batchMinter, _token, bal);\n}",
+      "attackVector": "Not attacker-driven. Triggers: (a) nudgeStreamer unset (post-deploy default, re-armed by NFTMinterV2.replaceDispatcher); (b) NudgeStreamer__NotRegistered after setBatchMinter to an unregistered sink; (c) NEW third-party trigger - a USDC blacklist on the streamer itself, a failure point that did not exist when the donation was a leaf safeTransfer, and which bricks every donor sharing that streamer at once. Recovery spans three contracts and up to three owner keys.",
+      "preconditions": ["dispatcher holds a non-zero USDC balance", "any one of the trigger conditions"],
+      "impact": "Mint availability halted at the dispatcher index; USDC on the dispatcher permanently unreachable while the condition persists.",
+      "crossContract": true,
+      "callChain": "user -> NFTMinterV2._executeMint:191 -> ATokenDispatcherV2.dispatch:124 -> NudgeRatchet._dispatch:160 -> NudgeStreamer.collectNudge",
+      "ownerFootgun": true,
+      "footgunBasis": "Three of four structurally-similar donors degrade gracefully; the fourth halts minting. The NatSpec pre-declares the wedge accepted, but does not address the second-order consequence that the rescue hatch was omitted on a now-invalid rationale.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-002",
+      "type": "config-coupled value misdirection",
+      "contract": "src/dispatchers/NudgeRatchet.sol|Uniboost.sol|PromotionUniV2_Eth.sol",
+      "rootCauseContract": "lib/phoenix-nft-staking/src/BatchNFTMinterMultiToken.sol",
+      "function": "batchMint / _snapshotRewards",
+      "line": 480,
+      "lineStart": 479,
+      "lineEnd": 486,
+      "relatedLines": [558, 434, 253, 509, 445],
+      "description": "If a whitelisted nudge token later becomes the derived payment token (owner repoints setDispatcherIndex/tokenMinter), _snapshotRewards skips it so it is never paid as a nudge, while the donors keep feeding collectNudge for the still-registered pair. The accumulated pot then becomes indistinguishable from payment-token residue and step 10 sweeps the FULL balance to msg.sender.",
+      "codeSnippet": "uint256 remaining = paymentToken.balanceOf(address(this));\nif (remaining / DUST_THRESHOLD != 0) {\n    paymentToken.safeTransfer(msg.sender, remaining);",
+      "attackVector": "Permissionless first-come race: any caller invokes batchMint with count=1 and a trivial payment and receives the entire accumulated nudge pot as a 'dust refund'. The sweep is NOT gated on `qualifies`, so the nudgeSize earn-your-nudge gate is bypassed entirely, and the pot goes to msg.sender rather than recipient. Repeatable each time the pot refills.",
+      "preconditions": [
+        "token X on the batchMinter nudge whitelist (mandatory for registerStream)",
+        "owner repoints dispatcherIndex/tokenMinter so X becomes the derived payment token",
+        "highly reachable: NudgeRatchet, Uniboost and PromotionUniV2_Eth are all USDC-prime dispatchers, so pinning the batchMinter to any of them makes USDC the payment token",
+        "pot >= DUST_THRESHOLD (1e6 = 1 USDC)"
+      ],
+      "impact": "Entire accumulated nudge pot captured by an arbitrary caller, bypassing the nudgeSize gate.",
+      "crossContract": true,
+      "rootCauseInScope": false,
+      "rootCauseNote": "Root-cause lines are in phoenix-nft-staking (a nested lib/ dependency of this repo). Filed as an integration hazard because the reachability is created by this repo's USDC-prime dispatcher set. Not created by stories 046/047, but the change enlarges the quiet-accumulation window and moves value through a streamer that has no owner rescue of its own.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-003",
+      "type": "incomplete invariant coverage / MEV",
+      "contract": "src/dispatchers/NudgeRatchetDelayRelease.sol",
+      "function": "release",
+      "line": 109,
+      "lineStart": 107,
+      "lineEnd": 110,
+      "description": "Stories 046/047 route four donors through the NudgeStreamer to prevent a batchMint caller capturing a donation burst. NudgeRatchetDelayRelease - the one donor whose entire design is to emit discrete admin-timed lumps - was left on a direct safeTransfer to the batchMinter, bypassing the streamer's metering entirely.",
+      "codeSnippet": "function release(uint256 amount) external onlyReleaser nonReentrant {\n    IERC20(_token).safeTransfer(batchMinter, amount);\n    emit Released(msg.sender, amount);\n}",
+      "attackVector": "release() is onlyReleaser and therefore an identifiable public mempool transaction. Because batchMint snapshots the pot pre-loop, a searcher back-runs release() with a qualifying batchMint in the same block and captures the entire released lump - exactly the burst-capture the streamer exists to prevent.",
+      "preconditions": ["DelayRelease and the streamed donors share a batchMinter (implied by the identical batchMinter field and 6-dp USDC guard)", "released amount is material"],
+      "impact": "Whole released lump captured by one back-running batcher instead of streaming to honest batchers over the window.",
+      "crossContract": true,
+      "confidence": "medium-high"
+    },
+    {
+      "id": "CODE-004",
+      "type": "observability regression / quiet misconfiguration",
+      "contract": "src/dispatchers/BalancerPoolerV2.sol",
+      "function": "_psmDonate",
+      "line": 329,
+      "lineStart": 329,
+      "lineEnd": 350,
+      "relatedLines": [287, 295, 56, 58],
+      "description": "story-047 replaced `require(gemAmt > 0, \"donation dust\")` with `if (gemAmt > 0)`. The require used to revert into the caller's catch and emit DonationSkipped; the if returns silently emitting nothing. The contract NatSpec still tells operators to monitor DonationSkipped. Simultaneously the caught region widened from PSM-only to PSM + streamer wiring + the streamer's outbound settle transfer, so DonationSkipped became the sole signal for a strictly larger failure set at the moment it stopped covering one of them.",
+      "codeSnippet": "if (gemAmt > 0) {\n    ...\n}  // no else, no event",
+      "attackVector": "Not attacker-driven. A streamer misconfiguration (unset, NotRegistered, blacklisted settle target, PSM gem drift) runs indefinitely with the nudge incentive dead while hook.onDispatch keeps accruing mint-debt on the gross amount.",
+      "preconditions": ["donation enabled", "gemAmt floors to zero (dust sweep) OR any newly-swallowed streamer revert"],
+      "impact": "Observability only. _psmDonate is atomic so nothing is stranded mid-route, and phUSD backing is unimpaired (the un-donated USDS remains protocol-held on the pooler). What dies silently is the batch-minter reward incentive.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-005",
+      "type": "config-coupling / recoverability",
+      "contract": "src/dispatchers/BalancerPoolerV2.sol",
+      "function": "_dispatch / _psmDonate / setPSM",
+      "line": 287,
+      "lineStart": 287,
+      "lineEnd": 295,
+      "relatedLines": [345, 227, 231, 437],
+      "description": "(a) The sweep-and-retry that recovers parked USDS lives inside `if (donationEnabled)`. Disabling the donation while USDS is parked takes that USDS out of the retry loop; it is never re-swept and never wrapped to sUSDS, so it stops contributing to pool(). Recoverable only via rescueERC20, which the NatSpec does not present as the fallback. (b) `gem` is read live from ISkyPSM(psm).gem() every call, so a setPSM repoint to a different-gem PSM silently yields an unregistered (batchMinter, newGem) pair -> caught -> USDS parks with only a DonationSkipped event.",
+      "codeSnippet": "if (donationEnabled) {\n    uint256 remainingUSDS = IERC20(_primeToken).balanceOf(address(this));\n    ...\n}\n// and, at :345\naddress gem = ISkyPSM(psm).gem();",
+      "attackVector": "Not attacker-driven; owner-configuration footgun with a non-obvious consequence.",
+      "preconditions": ["USDS parked from a prior skipped donation", "owner disables the donation OR repoints setPSM to a different-gem PSM"],
+      "impact": "Idle, non-productive collateral on the pooler; fully recoverable but silent. No unbacked phUSD.",
+      "ownerFootgun": true,
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-006",
+      "type": "widened trust surface on an unvalidated token",
+      "contract": "src/dispatchers/Uniboost.sol",
+      "function": "_dispatch",
+      "line": 250,
+      "lineStart": 246,
+      "lineEnd": 251,
+      "relatedLines": [115, 130],
+      "description": "Uniboost takes primeToken_ as a free constructor argument with no decimals/standard guard, unlike NudgeRatchet and NudgeRatchetDelayRelease which both require decimals() == 6. Post-story-046 the donation branch has no try/catch, so a live donation makes mint success depend on TWO token movements inside a foreign contract (safeTransferFrom donor->streamer and safeTransfer streamer->recipient) instead of one leaf transfer.",
+      "codeSnippet": "if (donationAmount > 0) {\n    address streamer = nudgeStreamer;\n    require(streamer != address(0), \"Uniboost: nudgeStreamer unset\");\n    IERC20(_primeToken).forceApprove(streamer, donationAmount);\n    INudgeStreamer(streamer).collectNudge(recipient, _primeToken, donationAmount);\n}",
+      "attackVector": "A blacklisting prime token that blocks either the streamer or the recipient bricks every mint through this dispatcher. Fee-on-transfer would make collectNudge's `buffer += amount` overstate the held balance for that pair (shortfall lands on the last claimant of that pair; _accrued's buffer cap preserves other pairs' solvency) - noted only for completeness, FoT is a C4 known-invalid class.",
+      "preconditions": ["Uniboost deployed with a non-plain prime token", "donation branch live (recipient != 0 && donationSplit > 0)"],
+      "impact": "Mint availability at this dispatcher index; the missing deploy-time guard is the in-scope defect.",
+      "confidence": "medium"
+    },
+    {
+      "id": "CODE-007",
+      "type": "unbounded input to a slippage-floored swap",
+      "contract": "src/dispatchers/PromotionUniV2_Eth.sol",
+      "function": "_legB",
+      "line": 509,
+      "lineStart": 509,
+      "lineEnd": 512,
+      "relatedLines": [589, 582, 586],
+      "description": "_legB swaps address(this).balance in full rather than the ETH produced by the preceding swapExactTokensForETH. receive() is open to anyone and rescueETH's own NatSpec acknowledges a failed/partial Leg B can leave resident ETH. minPromoOut is calibrated by the pooler for the expected 30%-leg ETH only, so resident or donated ETH inflates the swapped amount without inflating the floor.",
+      "codeSnippet": "uint256 ethBal = address(this).balance;\nIUniswapV2Router02(UNIV2_ROUTER).swapExactETHForTokens{value: ethBal}(\n    minPromoOut, ethToPromotionPath(), address(this), block.timestamp\n);",
+      "attackVector": "A griefer front-sends ETH to inflate the swap beyond the priced floor and sandwiches it (cost-bearing, they fund the excess). More realistically, a stale residual from a prior partial pool reaches the same miscalibrated state with no attacker at all.",
+      "preconditions": ["non-zero resident ETH at pool() time"],
+      "impact": "The slippage floor stops bounding Leg B's swap; larger-than-priced sandwich exposure.",
+      "carryover": "run-17 L-13 (whole-balance ETH sweep + receive() footgun) - CONFIRMED still live after the story-045 six-arg pool() rework",
+      "scopeNote": "PromotionUniV2_Eth was absent from the cached scope array; this run gave it a full first-pass read.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-008",
+      "type": "accounting basis mismatch",
+      "contract": "src/dispatchers/PromotionUniV2_Eth.sol",
+      "function": "pool / _addPhusdPromoLiquidity",
+      "line": 451,
+      "lineStart": 451,
+      "lineEnd": 467,
+      "description": "phusdBurned = phusdAcquired / 2 uses Leg A's return value, but _addPhusdPromoLiquidity pools IERC20(phUSD).balanceOf(address(this)) and IERC20(promotionToken).balanceOf(address(this)). Residual phUSD from a prior pool()'s router refund, or a third-party donation, is pooled without a matching burn, so the documented 'half burned, halves value-matched' property holds only when the contract starts each pool() at a zero phUSD balance.",
+      "codeSnippet": "uint256 phusdBurned = phusdAcquired / 2;\nIPhusdBurnable(phUSD).burn(address(this), phusdBurned);\n...\nuint256 phusdBal = IERC20(phUSD).balanceOf(address(this));",
+      "attackVector": "Not attacker-driven; minLP bounds the outcome.",
+      "preconditions": ["non-zero resident phUSD or promotion token at pool() time"],
+      "impact": "Documentation-fidelity / accounting drift in the 30/30 value match. No value leak identified.",
+      "confidence": "high"
+    }
+  ],
+  "refuted": [
+    {
+      "hypothesis": "Lead 4 - residual streamer allowance is exploitable",
+      "verdict": "REFUTED (untidy only)",
+      "basis": "All four donors forceApprove the exact amount and collectNudge pulls exactly that amount (NudgeStreamer.sol:149) in the same call, so the standing allowance is zero on success and rolled back on any failure. A residual requires an under-pulling collectNudge, i.e. an owner repointing nudgeStreamer at a hostile contract - an obvious owner action, suppressed under Law 3. The asymmetry with the adjacent forceApprove(psm, 0) is style, not a vector."
+    },
+    {
+      "hypothesis": "Lead 5 - batchMinter's own nudgeStreamer unset means donations accumulate in the streamer and never flush into the pot",
+      "verdict": "LARGELY REFUTED (delay, not strand)",
+      "basis": "collectNudge calls _settle on every donor deposit (NudgeStreamer.sol:146), which transfers the accrued amount to the batchMinter whether or not the batchMinter knows about the streamer. With BatchNFTMinterMultiToken.nudgeStreamer == 0 the step-3.5 flush is skipped, but funds still arrive - they land after the current batch's pre-loop snapshot rather than before it. Net effect is a one-batch delay. A true strand needs donor dispatches to cease entirely AND the pointer to stay zero, and is cured by one setNudgeStreamer call. Recorded as an ops note."
+    },
+    {
+      "hypothesis": "Lead 3 - widened catch lets mint-debt accrue against value that never arrives (unbacked phUSD)",
+      "verdict": "PARTIALLY REFUTED",
+      "basis": "hook.onDispatch fires on the gross amount regardless, but the un-donated USDS stays on the pooler, so phUSD backing is not impaired - the protocol still holds the asset, as raw USDS rather than sUSDS or a nudge payout. The real gap is incentive availability, folded into CODE-004/CODE-005. No unbacked-phUSD path found."
+    }
+  ],
+  "driftWatches": [
+    {
+      "class": "M-03 decimal under-mint",
+      "status": "CLEAN (independently confirmed)",
+      "basis": "No new conversion on any donation path; the amount handed to collectNudge is byte-identical to the amount computed one line earlier in all four (NudgeRatchet:160 bal, Uniboost:250 and PromotionUniV2_Eth:396 donationAmount, BalancerPoolerV2:347 gemAmt). NudgeStreamer.PRECISION=1e18 cancels between rate and accrual, so buffers and transfers stay in native units."
+    },
+    {
+      "class": "M-04 unwired-hook zero-debt",
+      "status": "CLEAN",
+      "basis": "NudgeRatchet:137-140 and NudgeRatchetDelayRelease retain the hookTypeId() guard; ATokenDispatcherV2.setHook:95 still rejects zero and hook is never null. Stories 046/047 touched no hook wiring."
+    },
+    {
+      "class": "L-09 / L-10 hook-scale",
+      "status": "CLEAN",
+      "basis": "No new hook-scaled arithmetic in this range."
+    }
+  ],
+  "reentrancyChecklist": [
+    {"class": "classic-single-fn", "verdict": "cleared", "basis": "No donor writes local state after collectNudge; only an emit follows. dispatch is nonReentrant (ATokenDispatcherV2:120)."},
+    {"class": "cross-contract", "verdict": "cleared", "basis": "OZ ReentrancyGuard is contract-wide, so pool() on all three poolers is locked for the duration of dispatch. _psmDonate is external but self-gated (BalancerPoolerV2:310)."},
+    {"class": "cross-function-sibling", "verdict": "cleared", "basis": "Same contract-wide guard; getIdealBPT/primeToken/withdrawBPT/rescueERC20 mutate no shared accounting."},
+    {"class": "read-only", "verdict": "cleared with stated precondition", "basis": "No donor exposes a price/share view consumed as an oracle. More decisively there is no inbound callback window in the donation path at all: USDC/USDS have no transfer hooks, so neither _settle's outbound transfer nor collectNudge's pull yields control. The clearance rests on the token being hook-free - see CODE-006 for Uniboost, the one donor whose token is unpinned."},
+    {"class": "erc721-receive-hook", "verdict": "n/a", "basis": "No ERC721 in the flow."},
+    {"class": "erc1155-receive-hook", "verdict": "cleared (non-trivially)", "basis": "NFTMinterV2._executeMint:196 invokes onERC1155Received on an attacker-controlled recipient after dispatch, and inside batchMint that happens while paymentToken.forceApprove(nftMinter, type(uint256).max) is live (BatchNFTMinterMultiToken:459). Not exploitable: _executeMint:183 always pulls via safeTransferFrom(msg.sender, ...), so a re-entering attacker spends their own funds, and mintFor is authorizedMinters-gated. batchMint is nonReentrant. The hook can reach the permissionless collectNudge, but the batcher's payout was snapshotted pre-loop, so a mid-loop donation cannot be recovered in the same batch."},
+    {"class": "erc777-hooks", "verdict": "cleared", "basis": "Neither donor nor recipient nor streamer registers an ERC-1820 interface, so the hooks would not fire even with an ERC777 prime token."}
+  ]
+}

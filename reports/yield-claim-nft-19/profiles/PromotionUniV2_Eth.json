@@ -1,0 +1,85 @@
+{
+  "contract": "src/dispatchers/PromotionUniV2_Eth.sol",
+  "commit": "d4cc563",
+  "story": "story-046 (nudge donation routed through INudgeStreamer); contract itself landed in story-044/045",
+  "scopeNote": "NEW-IN-SCOPE for this run -- absent from the cached `scope` array in registered-projects.json. Scanned under the default-in-scope denylist policy.",
+  "profileTimestamp": "2026-07-25T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "inheritanceChain": ["ATokenDispatcherV2", "IUnlockCallback", "ITokenDispatcherV2", "Pausable", "Ownable", "ReentrancyGuard"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["dispatch (base)", "pool"],
+    "accessControlled": ["setPool", "setDonationSplit", "setBatchMinter", "setNudgeStreamer", "setPSM", "setMaxTin", "setEthToPromotionPath", "setUsdcToWbtcPath", "setInsurer", "setAuthorizedPooler", "incrementAuthVersion", "setMinter", "setHook"],
+    "roleSeparation": "withdrawWBTC is onlyInsurer, and `insurer` starts address(0) (locked until an owner sets it). Distinct from onlyOwner.",
+    "weakRandomness": "none",
+    "inboundCallbackSurface": "unlockCallback (Balancer-vault gated); receive() for native ETH -- carryover watch from run-17 L-13 (whole-balance ETH sweep + receive() footgun). Unchanged this range."
+  },
+
+  "newState": [
+    {"name": "nudgeStreamer", "type": "address", "init": "address(0), setter-only", "mutators": ["setNudgeStreamer (onlyOwner, require != 0)"], "readers": ["_dispatch"], "event": "NudgeStreamerUpdated"}
+  ],
+
+  "donationCallGraph": [
+    "donationEnabled = batchMinter != address(0) && donationSplit > 0",
+    "donationAmount = donationEnabled ? amount * donationSplit / 100 : 0     [FLOOR]",
+    "if (donationAmount > 0) {",
+    "  streamer = nudgeStreamer; require(streamer != 0, 'PromotionUniV2_Eth: nudgeStreamer unset')",
+    "  IERC20(USDC).forceApprove(streamer, donationAmount)   [EXACT; NOT zeroed afterwards]",
+    "  INudgeStreamer(streamer).collectNudge(batchMinter, USDC, donationAmount)",
+    "}",
+    "// remainder stays as the prime balance the next pool() consumes (60/30/10 split)"
+  ],
+  "removedBehaviour": "IERC20(USDC).safeTransfer(batchMinter, donationAmount) -- REMOVED, no fallback.",
+
+  "preconditionsAndInvariants": {
+    "disableSwitch": "batchMinter == address(0) OR donationSplit == 0 -> no streamer required. VERIFIED.",
+    "zeroGuard": "if (donationAmount > 0) prevents NudgeStreamer__ZeroAmount and scopes the streamer requirement. LOAD-BEARING.",
+    "noTryCatch": "A streamer failure reverts dispatch -> reverts the mint. Same shape as Uniboost.",
+    "tokenIsHardcoded": "USDC is a `address public constant` on this contract, so unlike BalancerPoolerV2 (which reads psm.gem() live) the token handed to collectNudge cannot drift with a setPSM re-point. The (batchMinter, USDC) stream pair is stable.",
+    "mintDebtDecoupling": "hook.onDispatch fires with the GROSS `amount`. Unchanged.",
+    "poolPathUnaffected": "pool() -- Leg A (60% USDC -> USDS via PSM sellGem -> sUSDS -> phUSD via Balancer, half burned), Leg B (30% -> ETH -> promotion, LP add), Leg C (10% -> WBTC insurance reserve) -- is NOT touched by story-046. Its inputs are the retained (non-donated) balance, which is numerically identical to before."
+  },
+
+  "decimalAndScale": {
+    "donationToken": "USDC, 6 dp, hardcoded constant",
+    "conversions": "none on the donation path; donationAmount is passed verbatim",
+    "streamerScale": "PRECISION=1e18 cancels; native 6-dp preserved",
+    "driftWatchStatus": "M-03 decimal-under-mint class: CLEAN on the donation path. The 8-dp WBTC and 18-dp phUSD legs are inside pool(), untouched this range."
+  },
+
+  "valueFlow": {
+    "successBranch": "minter -> promotion dispatcher; donationSplit% USDC -> NudgeStreamer buffer[(batchMinter, USDC)] -> batchMinter linearly. Remainder retained for pool()'s 60/30/10.",
+    "failureBranch": "whole dispatch reverts -> mint reverts -> nothing moves, nothing stranded here.",
+    "whoHoldsTokens": "NudgeStreamer holds the donation during the window; the dispatcher holds the retained USDC (and, post-pool, LP + WBTC).",
+    "strandOrDoublePay": "No double-pay. Strand risk is streamer-side (setBatchMinter re-point orphans the old buffer, no rescue on NudgeStreamer). The dispatcher itself has an insurer-gated withdrawWBTC but no generic rescueERC20 for USDC -- retained USDC is only spendable through pool()."
+  },
+
+  "externalCalls": [
+    {"target": "IERC20 USDC (constant)", "methods": ["forceApprove", "balanceOf", "safeTransfer"], "trustLevel": "trusted"},
+    {"target": "INudgeStreamer nudgeStreamer (owner-settable)", "methods": ["collectNudge"], "trustLevel": "semi-trusted, cross-repo, NOT try/catch'd"},
+    {"target": "ISkyPSM psm (owner-settable, hardcoded default)", "methods": ["tin", "sellGem"], "trustLevel": "semi-trusted", "notes": "pool() path only"},
+    {"target": "IUniswapV2Router02", "methods": ["swap*", "addLiquidity"], "trustLevel": "trusted", "notes": "pool() path only"},
+    {"target": "IBalancerVault", "methods": ["unlock", "swap", "settle"], "trustLevel": "trusted", "notes": "pool() path only"},
+    {"target": "phUSD (self-allowance type(uint256).max set in constructor)", "methods": ["burn via transferFrom-style"], "trustLevel": "trusted", "notes": "infinite SELF-allowance -- pre-existing, unchanged"},
+    {"target": "IDispatchHook hook", "methods": ["onDispatch"], "trustLevel": "semi-trusted"}
+  ],
+
+  "wiringRequirements": {
+    "orderedOpsSequence": [
+      "1. batchMinter.setNudgeTokenWhitelist(USDC, true)",
+      "2. nudgeStreamer.registerStream(batchMinter, USDC, duration)",
+      "3. dispatcher.setNudgeStreamer(nudgeStreamer)",
+      "ALSO: batchMinter.setNudgeStreamer(nudgeStreamer)"
+    ],
+    "contractCheckedPreconditions": "ONLY `streamer != address(0)`. Steps 1, 2 and the batchMinter-side pointer are entirely unenforced on-chain from this contract's side."
+  },
+
+  "localObservations": [
+    {"id": "OBS-PE-1", "type": "liveness-coupling", "function": "_dispatch", "note": "Same as Uniboost: live-donation branch has no failure isolation; a streamer-side revert reverts the mint."},
+    {"id": "OBS-PE-2", "type": "residual-allowance", "note": "forceApprove(streamer, donationAmount) never reset to zero. Common to all four donors."},
+    {"id": "OBS-PE-3", "type": "config-coupling", "note": "CONDITIONAL wiring hazard. BatchNFTMinterMultiToken.setNudgeTokenWhitelist rejects (BatchMint__RewardTokenIsPaymentToken) the token equal to the batchMinter's OWN pinned dispatcher's primeToken(). So the donation branch is un-wireable exactly when a donor's nudge token equals the recipient batchMinter's payment token. Expected live config (batchMinter pinned to the BalancerPooler, prime = USDS; nudge token = USDC) does NOT collide. But the collision is reachable if a batchMinter is ever pinned to a USDC-prime dispatcher. Worse: if the owner LATER repoints tokenMinter/dispatcherIndex so an already-whitelisted token becomes the payment token, batchMint SKIPS that entry at runtime -- so the streamer keeps accepting donations for that pair via collectNudge while the batchMinter's snapshot silently ignores the balance. Value accumulates un-payable. DEFERRED to interaction analysis; applies identically to Uniboost, NudgeRatchet, and BalancerPoolerV2's USDC gem."},
+    {"id": "OBS-PE-4", "type": "scope", "note": "This contract was absent from the cached scope array. Carryover watches from run-17 (L-13 whole-balance ETH sweep, receive() footgun) and run-18 (60/30/10 rework, Q-16 burn under-explanation) are unaffected by this range's diff."}
+  ]
+}

@@ -1,0 +1,137 @@
+{
+  "contract": "src/dispatchers/BalancerPoolerV2.sol",
+  "commit": "d4cc563",
+  "story": "story-047 (PSM donation routed through INudgeStreamer)",
+  "profileTimestamp": "2026-07-25T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "inheritanceChain": ["ATokenDispatcherV2", "IUnlockCallback", "ITokenDispatcherV2", "Pausable", "Ownable", "ReentrancyGuard"],
+  "complexity": {"loc": 441, "externalEntryPoints": 15, "externalCallTargets": 6},
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["dispatch (base)", "pool"],
+    "accessControlled": ["setPool", "setAuthorizedPooler", "incrementAuthVersion", "setBatchDonationSize", "setBatchMinter", "setPSM", "setMaxTout", "setNudgeStreamer", "withdrawBPT", "rescueERC20", "setMinter", "setHook", "setMetadata"],
+    "initializerProtected": "n/a (constructor-only, non-upgradeable)",
+    "selfGateOnPseudoInternal": "_psmDonate is `external` but require(msg.sender == address(this)) -- verified",
+    "weakRandomness": "none",
+    "inboundCallbackSurface": "unlockCallback(bytes) gated to msg.sender == _vault. No ERC721/1155 receive hooks."
+  },
+
+  "newState": [
+    {
+      "name": "nudgeStreamer",
+      "type": "address",
+      "init": "address(0) -- NOT a constructor arg (streamer deployed after the pooler)",
+      "mutators": ["setNudgeStreamer (onlyOwner, require != 0, no un-set path)"],
+      "readers": ["_psmDonate"],
+      "event": "NudgeStreamerUpdated(old, new)"
+    }
+  ],
+
+  "wiringRequirements": {
+    "orderedOpsSequence": [
+      "1. batchMinter.setNudgeTokenWhitelist(gem /* USDC */, true)",
+      "2. nudgeStreamer.registerStream(batchMinter, gem, duration)",
+      "3. pooler.setNudgeStreamer(nudgeStreamer)",
+      "ALSO (not in the NatSpec): batchMinter.setNudgeStreamer(nudgeStreamer) -- otherwise the batchMinter never flushes and the buffer is never counted into the nudge pot."
+    ],
+    "unwiredBehaviour": "Donation attempt reverts inside the try/catch -> DonationSkipped, USDS parks. Mint still succeeds."
+  },
+
+  "donationCallGraph": {
+    "entry": "_dispatch(address, amount, bytes) [internal, called from ATokenDispatcherV2.dispatch which is nonReentrant/onlyMinter/whenNotPaused; minter is NFTMinterV2:191]",
+    "steps": [
+      "donationEnabled = batchMinter != 0 && psm != 0 && batchDonationSize > 0",
+      "donationUSDS = amount * batchDonationSize / 100 (floor); poolingUSDS = amount - donationUSDS",
+      "if poolingUSDS > 0: forceApprove(_sUSDS, poolingUSDS); IERC4626(_sUSDS).deposit(...)  [approval EXACT, consumed]",
+      "if donationEnabled: remainingUSDS = USDS.balanceOf(this)  [SWEEP -- includes USDS parked by prior failures]",
+      "  if remainingUSDS > 0: try this._psmDonate(remainingUSDS) {} catch { emit DonationSkipped(remainingUSDS) }"
+    ],
+    "psmDonateBody": [
+      "require self-call",
+      "tout = ISkyPSM(psm).tout(); require(tout <= maxTout)",
+      "conv = ISkyPSM(psm).to18ConversionFactor()",
+      "gemAmt = usdsAmount * 1e18 / (conv * (1e18 + tout))   [FLOOR]",
+      "if (gemAmt > 0) {                                       <-- CHANGED from `require(gemAmt > 0, 'donation dust')`",
+      "  usdsSpent = gemAmt * conv * (1e18 + tout) / 1e18",
+      "  USDS.forceApprove(psm, usdsSpent)                      [EXACT]",
+      "  ISkyPSM(psm).buyGem(address(this), gemAmt)             <-- CHANGED: was buyGem(batchMinter, gemAmt)",
+      "  USDS.forceApprove(psm, 0)                              [tidied to zero]",
+      "  streamer = nudgeStreamer; require(streamer != 0)       <-- NEW, inside the caught region",
+      "  gem = ISkyPSM(psm).gem()                               <-- NEW, read live from the PSM each call",
+      "  IERC20(gem).forceApprove(streamer, gemAmt)             [EXACT; NOT reset to 0 afterwards]",
+      "  INudgeStreamer(streamer).collectNudge(batchMinter, gem, gemAmt)",
+      "  emit BatchDonatedViaPSM(usdsSpent, gemAmt, batchMinter)",
+      "}"
+    ],
+    "approvals": [
+      {"spender": "_sUSDS", "amount": "exact poolingUSDS", "residual": "zero (deposit consumes it)", "resetOnFailure": "whole dispatch reverts"},
+      {"spender": "psm", "amount": "exact usdsSpent", "residual": "explicitly forceApprove(psm, 0)", "resetOnFailure": "atomic rollback of _psmDonate"},
+      {"spender": "nudgeStreamer", "amount": "exact gemAmt", "residual": "NOT explicitly zeroed -- relies on collectNudge pulling the FULL gemAmt", "resetOnFailure": "atomic rollback of _psmDonate"}
+    ]
+  },
+
+  "tryCatchEnvelope": {
+    "shape": "try this._psmDonate(remainingUSDS) {} catch { emit DonationSkipped(remainingUSDS); }",
+    "insideCaughtRegionBEFORE_story047": ["tout read + maxTout ceiling", "to18ConversionFactor read", "gemAmt == 0 -> require 'donation dust' (REVERTED, so it emitted DonationSkipped)", "USDS approve", "PSM buyGem (delivering to batchMinter)", "USDS approve 0"],
+    "insideCaughtRegionAFTER_story047": ["everything above EXCEPT the dust require", "PSM buyGem delivering to address(this)", "require(nudgeStreamer != 0)", "ISkyPSM(psm).gem() read", "gem forceApprove(streamer, gemAmt)", "NudgeStreamer.collectNudge -> which itself can revert NudgeStreamer__NotRegistered, NudgeStreamer__ZeroAmount, plus any revert from the streamer's outbound _settle transfer to batchMinter, plus USDC transferFrom failure"],
+    "newlySwallowedReverts": [
+      "\"BalancerPoolerV2: nudgeStreamer unset\"",
+      "NudgeStreamer__NotRegistered() -- (batchMinter, gem) pair never registered, or batchMinter/psm re-pointed so the pair no longer matches",
+      "any revert inside NudgeStreamer._settle's outbound transfer to batchMinter (e.g. batchMinter blacklisted on USDC)",
+      "streamer address is an EOA or a non-conforming contract (call to a non-contract returns success with empty returndata for the low-level path, but here the high-level typed call reverts on empty returndata -> caught)"
+    ],
+    "behaviourDeltaOnDust": "gemAmt == 0 no longer REVERTS. _psmDonate returns successfully and emits NOTHING -- neither BatchDonatedViaPSM nor DonationSkipped. Previously the dust case reverted into the catch and DID emit DonationSkipped. The contract NatSpec instructs operators to 'watch DonationSkipped and the contract's USDS balance', but the dust branch is now event-silent.",
+    "valuePreservation": "Atomic: on any failure the buyGem is rolled back too, so no USDC is ever left stranded mid-route on the pooler. The USDS simply stays put and is re-swept next dispatch."
+  },
+
+  "preconditionsAndInvariants": {
+    "donationDisabledBranch": "batchMinter == 0 || psm == 0 || batchDonationSize == 0 -> the entire `amount` is wrapped into sUSDS; no streamer needed; contract fully deployable/dispatchable with nudgeStreamer == 0.",
+    "gemAmtGuard": "if (gemAmt > 0) -- prevents NudgeStreamer__ZeroAmount from entering the catch. VERIFIED load-bearing.",
+    "streamerGuard": "require(streamer != address(0)) sits INSIDE the caught region, so an unwired streamer is a silent skip, not a mint brick. Contrast with NudgeRatchet, where the same require bricks the mint.",
+    "mintDebtDecoupling": "hook.onDispatch(minter, amount) fires with the GROSS amount in the base class regardless of donation outcome. So mint-debt accrues even when the donation is skipped and the USDS parks. Unchanged by story-047, but the parked-USDS window is now WIDER (more failure modes), so the debt-vs-delivered-value gap can persist for longer.",
+    "sweepSemantics": "The donation sweeps balanceOf(USDS), not this dispatch's carve-out. Backlog self-heals on the next successful dispatch."
+  },
+
+  "decimalAndScale": {
+    "usdsIn": "18 dp",
+    "gemOut": "6 dp (USDC), via conv = to18ConversionFactor = 1e12",
+    "gemAmtRounding": "FLOOR -> protocol-favouring (never over-credits the batchMinter)",
+    "usdsSpentRounding": "gemAmt * conv * (WAD+tout) / WAD -- reconstructed exactly; <= usdsAmount; the remainder is sub-1e12 dust that stays on the contract",
+    "streamerScaleInteraction": "NudgeStreamer PRECISION=1e18 cancels; the 6-dp gemAmt is held and released in native 6-dp units. rewardPerSecond = gemAmt*1e18/duration -- for a 1 USDC (1e6) buffer over a 1e6-second window this is 1e18, i.e. 1 unit/sec, no truncation to zero. No decimal drift introduced.",
+    "driftWatchStatus": "Standing decimal-under-mint watch (M-03 class): the streamer hop does NOT introduce a new decimal conversion. gem decimals are never read; the amount handed to collectNudge is byte-identical to the amount buyGem produced."
+  },
+
+  "valueFlow": {
+    "successBranch": "USDS(pooler) -> PSM -> USDC(pooler) -> NudgeStreamer buffer[(batchMinter, gem)] -> (linearly, later) batchMinter. The batchMinter holds NOTHING in this transaction.",
+    "skipBranch": "USDS stays on the pooler. Recoverable by (a) the next successful dispatch re-sweeping it, or (b) owner rescueERC20.",
+    "dustBranch": "USDS stays on the pooler, silently, no event.",
+    "strandRisk": "Once inside the streamer the USDC is addressable ONLY as buffer[(batchMinter, gem)]. The pooler's rescueERC20 cannot reach it. If batchMinter is later re-pointed via setBatchMinter, the OLD pair's residual buffer has no recovery path on NudgeStreamer (no rescue function there).",
+    "doublePay": "No double-pay path identified. gemAmt is transferred exactly once (buyGem -> pooler, collectNudge -> streamer). The `remainingUSDS` sweep is balance-derived, so a partially-consumed sweep cannot double-count."
+  },
+
+  "externalCalls": [
+    {"target": "IERC4626 _sUSDS (immutable)", "methods": ["asset (ctor)", "deposit"], "trustLevel": "trusted (Sky sUSDS)"},
+    {"target": "ISkyPSM psm (owner-settable)", "methods": ["tout", "to18ConversionFactor", "buyGem", "gem"], "trustLevel": "semi-trusted, owner-configured", "notes": "gem() is read INSIDE _psmDonate on every call, so a setPSM re-point silently changes the token identity handed to collectNudge"},
+    {"target": "INudgeStreamer nudgeStreamer (owner-settable)", "methods": ["collectNudge"], "trustLevel": "semi-trusted, owner-configured, cross-repo (phoenix-nft-staking)", "notes": "Inside try/catch; reverts are swallowed"},
+    {"target": "IBalancerVault _vault (immutable)", "methods": ["unlock", "addLiquidity", "settle"], "trustLevel": "trusted"},
+    {"target": "IBalancerRouter _router", "methods": ["queryAddLiquidityUnbalanced"], "trustLevel": "trusted"},
+    {"target": "IDispatchHook hook (owner-settable)", "methods": ["onDispatch"], "trustLevel": "semi-trusted, NOT try/catch'd -- a reverting hook bricks dispatch"}
+  ],
+
+  "trustAssumptions": [
+    "USDC/USDS are standard, hook-free, non-FoT ERC20s.",
+    "The Sky PSM's tout/to18ConversionFactor/gem are honest and gem() is stable for a given psm address.",
+    "The NudgeStreamer owner has registered (batchMinter, gem) BEFORE setNudgeStreamer is called here.",
+    "The batchMinter's own nudgeStreamer pointer matches this contract's, or the buffer is never flushed."
+  ],
+
+  "localObservations": [
+    {"id": "OBS-BP-1", "type": "observability", "function": "_psmDonate", "line": 329, "note": "gemAmt == 0 now returns silently; the previous `require(gemAmt > 0)` reverted into the catch and emitted DonationSkipped. The dust branch is now event-invisible while the NatSpec still tells operators to monitor DonationSkipped."},
+    {"id": "OBS-BP-2", "type": "residual-allowance", "function": "_psmDonate", "line": 346, "note": "The PSM allowance is explicitly zeroed (line 336) but the streamer allowance is not. Safe only under the assumption that collectNudge pulls the FULL gemAmt. An under-pulling streamer implementation would leave a standing USDC allowance to the streamer. Asymmetric with the adjacent PSM handling."},
+    {"id": "OBS-BP-3", "type": "config-coupling", "function": "setPSM / _psmDonate", "note": "gem is derived live from psm.gem(). A setPSM re-point to a PSM with a different gem silently produces an unregistered (batchMinter, newGem) pair -> NotRegistered -> caught -> USDS parks indefinitely with only a DonationSkipped event."},
+    {"id": "OBS-BP-4", "type": "widened-quiet-failure", "function": "_dispatch", "line": 290, "note": "The caught region grew from 'PSM-only' to 'PSM + streamer wiring + streamer's own outbound settle transfer'. Mint-debt still accrues on the gross amount, so a prolonged quiet donation outage widens the accrued-debt vs delivered-value gap. Documented as accepted by the author; recorded here so downstream agents can weigh it, not as an adjudicated finding."},
+    {"id": "OBS-BP-5", "type": "cross-contract-strand", "note": "Value that reaches the streamer is beyond the reach of this contract's rescueERC20 and NudgeStreamer has no rescue of its own. setBatchMinter after donations have accumulated orphans the old pair's buffer. DEFERRED to interaction analysis."}
+  ]
+}

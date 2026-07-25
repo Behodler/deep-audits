@@ -1,0 +1,61 @@
+{
+  "contract": "lib/phoenix-nft-staking/src/NudgeStreamer.sol (+ INudgeStreamer.sol)",
+  "role": "EXTERNAL DEPENDENCY of the four changed dispatchers. Vendored via the newly-flattened phoenix-nft-staking submodule; remapping `phoenix-nft-staking/=lib/phoenix-nft-staking/src/`. NOT first-party to yield-claim-nft — profiled here only to fix the semantics downstream agents must assume.",
+  "profileTimestamp": "2026-07-25T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "inheritanceChain": ["INudgeStreamer", "Ownable", "ReentrancyGuard"],
+
+  "collectNudgeSemantics": {
+    "signature": "collectNudge(address recipientBatchMinter, address token, uint256 amount)",
+    "msgSenderRole": "DONOR (the dispatcher). Not the recipient.",
+    "orderOfOperations": [
+      "1. s = streams[recipientBatchMinter][token]; if (s.duration == 0) revert NudgeStreamer__NotRegistered()",
+      "2. _settle(s, recipientBatchMinter, token)  -- pays the accrued-so-far buffer OUT to the batchMinter (outbound safeTransfer). Happens BEFORE the zero-amount check.",
+      "3. if (amount == 0) revert NudgeStreamer__ZeroAmount()",
+      "4. safeTransferFrom(msg.sender, address(this), amount)  -- pulls EXACTLY `amount` from the donor's allowance",
+      "5. s.buffer += amount",
+      "6. s.rewardPerSecond = s.buffer * 1e18 / s.duration   <-- FULL-WINDOW RATE RESET ON EVERY DEPOSIT"
+    ],
+    "isItAValueCap": false,
+    "whatItActuallyIs": "A TIMING THROTTLE. It meters the RATE at which a donation becomes visible in the batchMinter's ERC20 balance. It places NO ceiling on how much value any single batchMint can capture: the batchMinter flushes with pullPendingStream and then snapshots its whole balance. If the buffer has had time to drain, one caller still captures the entire accrued amount in one transaction.",
+    "asymptoticTail": "Because step 6 resets the window to the FULL `duration` over the WHOLE (old + new) buffer on every deposit, a stream that receives regular donations never depletes -- each deposit re-stretches the residual over a fresh full window. The buffer approaches a steady state, and the per-second release fraction of the *residual* falls as donation cadence rises. This is the intended phlimbo `_updatePool` port (recompute-on-deposit-only; recompute is deliberately absent from `pullPendingStream` and from views).",
+    "dustDirection": "`_accrued` floors (integer division) and is capped at `buffer`. Floor dust stays in the buffer and streams later. Never over-pays; never transfers more than held.",
+    "decimalNeutrality": "PRECISION = 1e18 is an internal fixed-point multiplier that CANCELS (rate = buf*1e18/dur, accrued = rate*elapsed/1e18). All buffers and transfers are in the token's NATIVE units. 6-dp USDC and 18-dp tokens both work. It exists only to stop `buffer/duration` truncating to zero for small-decimal tokens over long windows."
+  },
+
+  "otherEntryPoints": [
+    {
+      "function": "registerStream(address batchMinter, address token, uint256 duration)",
+      "accessControl": "onlyOwner (streamer owner -- a DIFFERENT owner from any yield-claim-nft dispatcher owner)",
+      "preconditions": ["duration != 0", "IMultiTokenNudgeWhitelist(batchMinter).isNudgeToken(token) == true -- this call also reverts for any target that is not a MultiToken batchMinter, which is the structural type guard"],
+      "effect": "settles at OLD rate, then s.duration = duration and rewardPerSecond = buffer*1e18/duration (full new window from now)"
+    },
+    {
+      "function": "pullPendingStream(address token)",
+      "accessControl": "none; msg.sender IS the recipient key",
+      "effect": "settles accrued to msg.sender. Unregistered (duration==0) is a silent no-op, so BatchNFTMinterMultiToken can loop blindly over getNudgeTokens().",
+      "noRateRecompute": true
+    },
+    {"function": "pendingStream(address,address) view", "notes": "min(rate*elapsed/1e18, buffer). Never recomputes."}
+  ],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["collectNudge", "pullPendingStream"],
+    "cei": "_settle updates buffer/lastUpdate BEFORE its outbound transfer; collectNudge pulls funds before the rate recompute.",
+    "solvency": "_accrued caps at s.buffer, so per-stream payout can never exceed that stream's buffer. There is NO cross-stream isolation check: all streams share one token balance, but since every buffer is only credited by an actual transferFrom of that same amount, sum(buffers) == held balance by construction."
+  },
+
+  "callerAssumptionDivergences": [
+    "Dispatcher NatSpec says the streamer means the batchMinter 'is paid over time rather than in a lump'. Correct for arrival RATE; it does NOT bound the total a single batchMint can take. Any downstream reasoning that treats the streamer as an anti-over-funding VALUE cap (cf. phoenix-nft-staking run-22 aggregate-nudge over-funding) is unsupported by this implementation.",
+    "There is NO owner rescue / sweep on NudgeStreamer. Buffers are addressable only by (batchMinter, token) and only drainable by that batchMinter calling pullPendingStream, or by a donor's collectNudge settling to it. If the batchMinter is ever REPLACED with a new address, the old pair's residual buffer has no recovery path.",
+    "The batchMinter's OWN `nudgeStreamer` field (BatchNFTMinterMultiToken.setNudgeStreamer) is a SEPARATE, independently-set pointer from each dispatcher's `nudgeStreamer`. If they disagree (or the batchMinter's is address(0)), donations accumulate in the streamer and are never flushed into the pot -- funds sit undistributed until the batchMinter is re-pointed.",
+    "collectNudge's `_settle` fires an outbound ERC20 transfer to the batchMinter BEFORE the donor's transferFrom. With USDC/USDS (no transfer hooks) this is inert; with a hook-bearing token it would be an inbound-callback surface into an nonReentrant-guarded streamer, re-entered from inside the dispatcher's own nonReentrant dispatch."
+  ],
+
+  "batchMinterIntegrationFacts": {
+    "flushSite": "BatchNFTMinterMultiToken.batchMint step 3.5 -- loops the whole whitelist calling pullPendingStream(_nudgeTokens[i]) BEFORE _snapshotRewards.",
+    "consequence": "Streamed funds settled at step 3.5 ARE counted in the pre-loop snapshot and paid to the CURRENT batcher. Donations generated by the same batch's own mint loop (step 7 -> dispatcher -> collectNudge) land AFTER the snapshot, so the 'donate forward' property survives the streamer change. Note that at step 3.5 and at the in-loop collectNudge the timestamp is identical, so the in-loop `_settle` accrues zero -- no self-refund leak."
+  }
+}

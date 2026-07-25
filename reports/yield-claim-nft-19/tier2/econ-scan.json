@@ -1,0 +1,211 @@
+{
+  "project": "yield-claim-nft",
+  "run": "yield-claim-nft-19",
+  "commit": "d4cc563",
+  "stories": ["story-046", "story-047"],
+  "scanTimestamp": "2026-07-25T08:05:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "contractsScanned": 4,
+  "dependenciesRead": [
+    "lib/phoenix-nft-staking/src/NudgeStreamer.sol",
+    "lib/phoenix-nft-staking/src/BatchNFTMinterMultiToken.sol"
+  ],
+  "primaryLeadVerdict": {
+    "question": "Is the NudgeStreamer resident buffer intended smoothing or an unintended value sink?",
+    "answer": "INTENDED SMOOTHING. Self-liquidating, throughput-neutral.",
+    "closedForm": "B* = d * duration / dt = rho * duration, where rho is the donation rate (value/second)",
+    "meanLatency": "Little's Law: W = B*/rho = duration, independent of cadence",
+    "drainAfterLastDonation": "exactly `duration` seconds to zero; rate frozen at last deposit (pullPendingStream never recomputes), accrued capped at buffer",
+    "steadyStateThroughput": "100% - inflow equals outflow at the fixed point; the nudge pot is NOT systematically under-funded",
+    "perBatchCaptureVsPreChange": "identical at steady state (rho*dt both before and after)",
+    "deltaVsPreChange": "one-off deferral of one duration's flow during ramp-up; permanent reduction of the STANDING pot balance by B*; mean latency 0 -> duration",
+    "simulationValidated": true,
+    "correctionToTier1": "pattern-matcher's '~168 donations permanently resident' over-states on two counts: arrival unit is the BATCH not the mint (a 40-batch is one arrival, dt=0 intra-batch), and residency is not permanent"
+  },
+  "realParameters": {
+    "nudgeSize": 40,
+    "batchDonationSizePct": 15,
+    "donationPer40BatchUSDC_at15pct": 77.6,
+    "donationPerMintUSDC_at15pct": 1.94,
+    "nftMintPriceUSDS": 12.94,
+    "observedPriorPotUSDC": 88.07,
+    "streamDurationMainnet": "NOT SET IN ANY REVIEWED REPO - live ops parameter",
+    "source": "phoenix-phase-2-staging docs/BatchNFTMint/self-refund-fix-and-migration-plan.md, tx 0x6d71d6fd...f14996 block 25242986"
+  },
+  "steadyStateBufferUSDC": {
+    "note": "B* = rho * duration, d = 77.6 USDC per 40-batch",
+    "grid": [
+      {"duration": "1 day",   "perWeek": 11,  "perDay": 78,   "twicePerDay": 155},
+      {"duration": "3 days",  "perWeek": 33,  "perDay": 233,  "twicePerDay": 466},
+      {"duration": "7 days",  "perWeek": 78,  "perDay": 543,  "twicePerDay": 1086},
+      {"duration": "30 days", "perWeek": 333, "perDay": 2328, "twicePerDay": 4656}
+    ]
+  },
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "cross-contract-stranded-value / owner-footgun",
+      "severity": "potential-medium",
+      "contract": "src/dispatchers/*.sol (all four) + NudgeStreamer buffer state",
+      "function": "setBatchMinter / setRecipient / setNudgeStreamer (retirement sequence)",
+      "line": 449,
+      "lineStart": 437,
+      "lineEnd": 453,
+      "description": "NudgeStreamer has no owner rescue or sweep. Once a dispatcher is repointed, the residual buffer B* = rho*duration is reachable only via BatchNFTMinterMultiToken.batchMint step 3.5 (the sole pullPendingStream call site). Four routine retirement actions each permanently close that path.",
+      "codeSnippet": "address _nudgeStreamer = nudgeStreamer;\nif (_nudgeStreamer != address(0)) {\n    for (uint256 i; i < nudgeCount; ++i) {\n        INudgeStreamer(_nudgeStreamer).pullPendingStream(_nudgeTokens[i]);\n    }\n}  // BatchNFTMinterMultiToken.sol:445-451 - the ONLY flush call site",
+      "pathClosers": [
+        "pause() - batchMint is whenNotPaused (:392)",
+        "setTokenMinter(0) - _resolvePaymentPath reverts at :500, BEFORE the :445 flush",
+        "setDispatcherIndex(0) - _resolvePaymentPath reverts at :505-508, BEFORE the :445 flush",
+        "setNudgeTokenWhitelist(USDC, false) - the flush loop iterates _nudgeTokens"
+      ],
+      "economicImpact": "Permanent loss of one duration's worth of donation flow (order 10^2-10^3 USDC at observed rates). Dispatchers' rescueERC20 cannot reach it (value left the dispatcher); NudgeRatchet has no rescueERC20 at all; the batch-minter's rescueERC20 only reaches tokens already IN the batch-minter.",
+      "attackScenario": "1. Streamer accumulates B* ~= rho*duration for (oldBatchMinter, USDC).\n2. Owner migrates: pooler.setBatchMinter(new). Donations feed the new pair; the donor-side _settle path stops.\n3. Owner tidies the retired instance (pause / setTokenMinter(0) / setDispatcherIndex(0) / unwhitelist USDC).\n4. B* is unreachable forever.",
+      "precedent": "MigrateBatchNFTMinter.s.sol already executes exactly this migration shape and recovers the pot with rescueERC20(USDC, new, balanceOf(old)) - a call structurally blind to the streamer buffer. That script predates the streamer.",
+      "recoverability": "CHEAP if done in the right order: after >= duration elapses, _accrued saturates at the full buffer, so ONE batchMint(1,...) on the old instance flushes everything, then rescueERC20. Cost ~ one NFT mint (~13 USDS) + gas. But nothing surfaces the buffer's existence: no event at retirement, no dispatcher view, only NudgeStreamer.pendingStream(old, token) which a migration operator has no reason to call.",
+      "safeConfigGuidance": "Before retiring a batch-minter or repointing batchMinter/recipient: (a) repoint the donor first so donations stop; (b) wait >= duration; (c) read pendingStream(oldBatchMinter, token); (d) run one batchMint(1,...) on the old instance to flush; (e) rescueERC20 the proceeds; ONLY THEN pause / unset tokenMinter / unset dispatcherIndex / unwhitelist.",
+      "profitability": "n/a - no attacker required; this is a maintenance sequence",
+      "affectedParties": ["nudge pot", "future batch-minters", "protocol incentive budget"],
+      "lawReference": "Law 3 - non-obvious owner footgun, in scope",
+      "confidence": "high on mechanism and irrecoverability; medium on operator likelihood"
+    },
+    {
+      "id": "ECON-002",
+      "type": "value-leak / config-collision",
+      "severity": "potential-medium",
+      "contract": "src/dispatchers/*.sol (topology) / BatchNFTMinterMultiToken.sol (root cause, nested dep)",
+      "function": "batchMint step 10 dust sweep",
+      "line": 480,
+      "lineStart": 479,
+      "lineEnd": 486,
+      "description": "A setDispatcherIndex/setTokenMinter repoint can make an already-whitelisted nudge token BECOME the derived payment token. _snapshotRewards then skips it (:558), but step 10 sweeps the WHOLE payment-token balance - including the accumulated nudge pot - to msg.sender of batchMint, who needs only count=1 and does NOT have to clear nudgeSize. collectNudge keeps settling into the batch-minter, so the leak is continuous, not one-off.",
+      "codeSnippet": "uint256 remaining = paymentToken.balanceOf(address(this));\nif (remaining / DUST_THRESHOLD != 0) {\n    paymentToken.safeTransfer(msg.sender, remaining);",
+      "economicImpact": "Full standing pot handed to an arbitrary caller, bypassing the nudgeSize gate the pot exists to reward; plus everything the streamer settles in afterwards.",
+      "likelihood": "Higher than it looks: whitelist is {USDC} and THREE of the four in-scope dispatchers prime in USDC (NudgeRatchet enforces 6-dp, PromotionUniV2_Eth pins USDC constant, Uniboost unrestricted-but-USDC-in-practice). One setDispatcherIndex to any of those NFT products - an ordinary product change - creates the collision.",
+      "documentationStatus": "The dep NatSpec (:335-343) documents the runtime SKIP and says the balance 'follows the normal dust-sweep path'. What is nowhere stated is the economic consequence: the sweep is a transfer to an arbitrary caller of a pot funded by prior minters.",
+      "attackScenario": "1. Owner repoints dispatcherIndex to a USDC-prime dispatcher.\n2. USDC is now both the derived payment token and a whitelisted nudge token.\n3. Any caller runs batchMint(1, self, tinyAmount, [0]) and receives the entire USDC pot as a 'surplus refund' (totalPaid reads 0).\n4. Repeatable every time the streamer settles more in.",
+      "profitability": "Profitable at any pot size above one mint price + gas; the caller also keeps the minted NFT.",
+      "affectedParties": ["prior minters who funded the pot", "incentive design"],
+      "guidance": "Treat 'primeToken() of the newly pinned dispatcher NOT IN getNudgeTokens()' as a hard pre-condition of every setDispatcherIndex/setTokenMinter; unwhitelist first if violated (and drain the streamer per ECON-001 before unwhitelisting).",
+      "rootCauseScope": "nested dep - filed as an operational hazard against first-party topology, not against the dep",
+      "confidence": "high on mechanism, medium on likelihood"
+    },
+    {
+      "id": "ECON-003",
+      "type": "liveness-coupling / dos-external-dependency",
+      "severity": "potential-medium",
+      "contract": "src/dispatchers/NudgeRatchet.sol",
+      "function": "_dispatch",
+      "line": 160,
+      "lineStart": 156,
+      "lineEnd": 161,
+      "description": "NudgeRatchet is the only one of the four with no try/catch and no disable path: batchMinter cannot be zeroed (constructor AND setBatchMinter both require non-zero), there is no donationSplit, and bal >= amount is already required - so any non-zero balance takes the streamer branch unconditionally.",
+      "codeSnippet": "if (bal > 0) {\n    address streamer = nudgeStreamer;\n    require(streamer != address(0), \"NudgeRatchet: nudgeStreamer unset\");\n    IERC20(_token).forceApprove(streamer, bal);\n    INudgeStreamer(streamer).collectNudge(batchMinter, _token, bal);\n}",
+      "economicImpact": "nudgeStreamer == 0, an unregistered (batchMinter, USDC) pair, or ANY revert inside collectNudge - including _settle's outbound USDC transfer to the batch-minter (NudgeStreamer.sol:187, e.g. a USDC blacklist) - reverts dispatch, which reverts NFTMinterV2.mint. The whole NFT sale bricks, not just the donation. Availability, not theft: no value lost, but the product cannot be sold until config is corrected.",
+      "deltaFromPreChange": "The removed safeTransfer made the deploy-to-wire window unreachable; it is now a live brick window. Required ordering (whitelist -> registerStream -> setNudgeStreamer) is enforced by convention only.",
+      "attackScenario": "n/a - misconfiguration / external state, not an attacker path",
+      "affectedParties": ["NFT buyers", "protocol revenue"],
+      "authorPreDeclaration": "NatSpec pre-declares this 'NOT an audit finding'. Recorded regardless per Law 1 - the reasoning tier adjudicates, not the author.",
+      "mitigation": "Mirror the other three: give NudgeRatchet a donation-disable, or wrap the hop, so a mis-wire degrades rather than bricks.",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-004",
+      "type": "accrued-debt-vs-delivered-value / observability",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/BalancerPoolerV2.sol",
+      "function": "_psmDonate / _dispatch",
+      "line": 329,
+      "lineStart": 290,
+      "lineEnd": 350,
+      "description": "Mint-debt accrues on the GROSS amount (ATokenDispatcherV2.sol:125) regardless of donation outcome, and the try/catch envelope now swallows a wider set of failures; the new `if (gemAmt > 0)` dust branch returns successfully and emits nothing. Re-derived from source: phUSD backing is NOT impaired and the DEDUP-001 >=2:1 over-backing cushion still holds.",
+      "economicImpact": "None on solvency. In every failure mode the value stays in-system: streamed successfully -> sits in the streamer buffer; caught and skipped -> USDS parks on the dispatcher and is re-swept next dispatch; dust branch -> sub-1-unit, stays put. Worst case is bounded by batchDonationSize = 15% of dispatched value (the other 85% is wrapped and pooled regardless), comfortably inside the >=2:1 cushion.",
+      "residualIssue": "Observability only: the dust branch lost its DonationSkipped event, and every distinct wiring failure collapses into one undifferentiated DonationSkipped, while the contract's own NatSpec still tells operators to 'watch DonationSkipped and the contract's USDS balance' - advice that no longer covers the dust branch.",
+      "dedup001CushionReDerived": true,
+      "affectedParties": ["operators (monitoring)"],
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-005",
+      "type": "refuted-static-finding",
+      "severity": "informational",
+      "contract": "src/dispatchers/BalancerPoolerV2.sol",
+      "function": "_psmDonate",
+      "line": 335,
+      "description": "SA-001 (buyGem return discarded) is BENIGN. ISkyPSM.buyGem is exact-output by construction (DssLitePsm transfers exactly gemAmt and returns the USDS pulled, not the gem amount), so sizing the streamer chain on the locally computed gemAmt is correct, not an assumption. If a non-conforming PSM ever delivered less, NudgeStreamer's safeTransferFrom (:149) reverts on insufficient balance, _psmDonate rolls back atomically, and the catch parks the USDS. Fails closed - not a revert of the mint, not a short donation, not a silent shortfall.",
+      "adjacentNote": "`address gem = ISkyPSM(psm).gem()` is read LIVE every call and psm is owner-settable; a setPSM to a PSM with a different gem yields an unregistered pair -> NotRegistered -> swallowed -> USDS parks. BalancerPoolerV2 is the only one of the four with this exposure. Pair any setPSM with a registerStream for the new gem.",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-006",
+      "type": "refuted-static-finding",
+      "severity": "informational",
+      "contract": "src/dispatchers/PromotionUniV2_Eth.sol",
+      "function": "_addPhusdPromoLiquidity",
+      "line": 468,
+      "description": "SA-017 (addLiquidity with 0,0 min-amounts) is ADEQUATELY guarded. minLP is the STRONGER guard, not a weaker substitute: for a UniV2 pair liquidity = min(amountA*ts/reserveA, amountB*ts/reserveB), so a ratio-skew sandwich mechanically reduces LP minted for fixed inputs, and a minLP floor from a fresh quote bounds the loss in shares-of-pool - the unit that matters - where amountMin would only bound the router refund leg. Reinforced by pool() being onlyAuthorizedPooler (minLP is permissioned, not public), by the per-leg minPhusdOut/minEthOut/minPromoOut/minWbtcOut floors, and by the sides being value-matched post-burn so the refund is small.",
+      "priorConclusion": "The project's prior 'amountIn is MEV-neutral so L-06 stays Low' calculus is UNCHANGED by the 6th minLP param; if anything it is now better supported.",
+      "confidence": "high"
+    }
+  ],
+  "roundingChecklist": {
+    "verdict": "CLEAN",
+    "note": "One-way donor paths with NO redemption leg - the classic round-trip drain has no surface. Every rounding decision floors against the recipient and for the protocol.",
+    "sites": [
+      {"site": "gemAmt = usdsAmount*WAD/(conv*(WAD+tout))", "direction": "floor", "verdict": "never over-buys; residual USDS re-swept"},
+      {"site": "usdsSpent = gemAmt*conv*(WAD+tout)/WAD", "direction": "floor, <= usdsAmount", "verdict": "protocol keeps the dust"},
+      {"site": "donationAmount = amount*split/100", "direction": "floor", "verdict": "donates less, retains more"},
+      {"site": "rewardPerSecond = buffer*1e18/duration", "direction": "floor", "verdict": "under-emits"},
+      {"site": "accrued = rate*elapsed/1e18, capped at buffer", "direction": "floor + capped", "verdict": "streamer can never pay more than it holds"}
+    ],
+    "decimalClass": "PRECISION=1e18 cancels exactly (rate*elapsed/1e18 = buffer*elapsed/duration); 6-dp USDC carried in native units. M-03 decimal class does NOT re-fire."
+  },
+  "crossCuttingNotes": [
+    {
+      "id": "NOTE-01",
+      "topic": "throttle covers only one of two funding paths",
+      "detail": "StableYieldAccumulator's 30% nudgeSplit on each claim() still transfers USDC DIRECTLY to the batch-minter, unbuffered. A claim()-funded spike remains instantaneously capturable by the next 40-batcher. Stated so the mitigation is not miscredited as protocol-wide."
+    },
+    {
+      "id": "NOTE-02",
+      "topic": "unpaired streamer allowance",
+      "detail": "All four forceApprove(streamer, exactAmount) and none reset to zero - in BalancerPoolerV2 directly asymmetric with the PSM allowance eleven lines earlier which IS zeroed. Safe today only because collectNudge:149 pulls exactly amount in the same tx; that safety rests entirely on an external cross-repo contract's implementation detail, not a local invariant. A setNudgeStreamer to an under-pulling implementation leaves a live residual allowance on USDC. Cheap fix: pair each approve with a zeroing reset, as every other forceApprove in these contracts already does."
+    },
+    {
+      "id": "NOTE-03",
+      "topic": "reentrancy premise on the new hop",
+      "detail": "collectNudge fires an OUTBOUND transfer to the batch-minter (_settle, :187) BEFORE pulling the donor's tokens (:149), inside the dispatcher's own dispatch. Defences verified adequate (dispatch contract-wide nonReentrant; collectNudge and pullPendingStream nonReentrant; _settle CEI-correct; token pinned for three of four). Uniboost is the exception - _primeToken is an unrestricted constructor arg with no allowlist or decimal guard, so the hook-free-token premise is a deployment policy there, not a contract guarantee."
+    }
+  ],
+  "tier1Corrections": [
+    {
+      "target": "PATTERN-001",
+      "claim": "~168 donations permanently resident",
+      "correction": "Over-stated twice. (a) Cadence is per BATCH not per mint - a 40-batch is one arrival with dt=0 intra-batch, so the multiplier is duration/dt_batch. (b) 'Permanently' is wrong: the buffer drains to exactly zero in exactly `duration` after the last donation, and steady-state throughput is 100%. Correct statement: B* = rho*duration, one duration's flow, self-liquidating. INTENDED SMOOTHING, not a finding on its own."
+    },
+    {
+      "target": "PATTERN-003",
+      "claim": "donations accumulate but are NEVER flushed if the batch-minter's pointer is unset",
+      "correction": "NOT CORRECT. collectNudge calls _settle on EVERY donation (NudgeStreamer.sol:146), paying the accrued stream to the batch-minter regardless of the batch-minter's own nudgeStreamer pointer. Step 3.5 is a freshness optimisation, not the delivery mechanism. With a divergent pointer, throughput and steady state are UNCHANGED; the batcher's snapshot is one donation staler and that value goes to a later batcher, not lost. There is also NO windfall-on-repair and NO back-run MEV on fixing the pointer. Only the retirement residue matters, already ECON-001. Downgraded to informational."
+    },
+    {
+      "target": "PATTERN-005",
+      "claim": "timing throttle, not a value cap",
+      "correction": "Half right. Correctly not a cap on what one caller can EVENTUALLY take; but it IS a hard cap on the RATE - a batcher's step-3.5 flush yields min(elapsed/duration, 1)*buffer, so capturing the whole buffer requires waiting a full duration with no intervening claimant. Correct framing: a RATE CAP - delay, not denial."
+    },
+    {
+      "target": "PATTERN-M04 / ROUNDING-DIRECTION",
+      "correction": "Confirmed CLEAN independently at system level."
+    }
+  ],
+  "positiveFindings": [
+    "The step-3.5 flush happens BEFORE the pre-loop snapshot (BatchNFTMinterMultiToken.sol:445-453) and a batcher's own donations enter the streamer only during the step-7 mint loop - AFTER that flush. The donate-forward property restored by story-057's self-refund fix is STRENGTHENED, not weakened, by the streamer hop. No regression of that class."
+  ],
+  "assumptionsAndGaps": [
+    "Mainnet stream `duration` is NOT set anywhere in the reviewed repos - it is a live ops parameter passed to registerStream. Every quantity in steadyStateBufferUSDC scales linearly with it. This single unknown sizes ECON-001 and should be pinned in the deploy runbook.",
+    "Batch cadence is not observable from source; a scenario grid is given instead of a point estimate.",
+    "NudgeStreamer and BatchNFTMinterMultiToken are nested third-party deps; their internal bugs are out of scope. They were read only to establish semantics the first-party dispatchers depend on."
+  ],
+  "errors": []
+}

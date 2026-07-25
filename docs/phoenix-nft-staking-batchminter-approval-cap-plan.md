@@ -1,5 +1,24 @@
 # Plan — Cap the minter approval at `paymentAmount` in `BatchNFTMinterMultiToken`
 
+> ## ⚠ SUPERSEDED 2026-07-25 — DO NOT IMPLEMENT THIS PLAN
+>
+> Replaced by **`docs/phoenix-nft-staking-payment-token-as-nudge-token-plan.md`**, whose §3.1 subsumes
+> the one-line cap below in a strictly tighter form: the allowance is held at a **single mint's exact
+> price**, re-asserted **absolutely** (never by delta) on every iteration and zeroed after the loop, so
+> correctness no longer depends on whether the ERC20 decrements allowance on `transferFrom`. The
+> caller's remaining budget is tracked in memory and becomes the **sole** source of the refund.
+>
+> **Implementing both would be a conflict, not belt-and-braces.** The successor plan also deletes the
+> runtime payment-token skip and replaces the step-10 balance sweep — changes this plan explicitly
+> declined to attempt (see §4 below, "*What this does NOT fix*"), and which its ledger rider anticipated.
+>
+> Ledger `ad36260f…` was raised **`wont-fix` → `fix-pending`** on 2026-07-25 on this plan's own rider
+> ("*IF THE TWO FIXES ARE EVER SPLIT INTO SEPARATE COMMITS, RAISE `ad36260f…` BACK TO `fix-pending`*") —
+> the approval leg no longer rides with the `a62fe01a…` dedupe commit.
+>
+> §2 ("*Why*"), §3 ("*Verification*") and the frozen-file scoping in §5 remain accurate and are carried
+> forward by reference; only the **remedy** in §1 is replaced.
+
 **Target repo:** `phoenix-nft-staking` (audited as `lib/phoenix-nft-staking`, **read-only** here — implement upstream)
 **Audited commit:** `c881a42`
 **Primary file:** `src/BatchNFTMinterMultiToken.sol` (`batchMint`, `:360`)

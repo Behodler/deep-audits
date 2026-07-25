@@ -1,0 +1,151 @@
+{
+  "project": "yield-claim-nft",
+  "run": "yield-claim-nft-19",
+  "commit": "d4cc563",
+  "runTimestamp": "2026-07-25T00:00:00Z",
+  "runners": { "forge": true, "medusa": false, "echidna": false },
+  "runnerNote": "Medusa/Echidna deliberately not used: all five targets are directed differentials with named counterexample sequences, not search problems. No random-sequence campaign was run, so no 'held under N sequences' claim is made either way.",
+  "testFiles": [
+    "workspace/yield-claim-nft/test/run19-Tier3Nudge.t.sol",
+    "workspace/yield-claim-nft/test/run19-T5-LegBUnboundedEth.t.sol"
+  ],
+  "totals": { "tests": 20, "passed": 20, "failed": 0 },
+  "honestyNote": "Passing tests here ASSERT the vulnerable behaviour; a green run is evidence the vulnerability reproduces, never evidence of safety. Nothing in this file is a proof.",
+  "targets": [
+    {
+      "id": "T1",
+      "finding": "CODE-002",
+      "title": "Payment-token collision converts the nudge pot into an ungated sweep",
+      "verdict": "CONFIRMED",
+      "severityShape": "high",
+      "testContract": "Run19_T1_PaymentTokenCollision",
+      "tests": 4,
+      "counterexample": {
+        "sequence": [
+          "20x NFTMinterV2.mint(index=1 NudgeRatchet) -> 200e6 USDC into NudgeStreamer",
+          "warp(STREAM_DURATION); NudgeStreamer.pullPendingStream(USDC) -> pot 200e6 on batchMinter",
+          "OWNER: BatchNFTMinterMultiToken.setDispatcherIndex(1)  // USDC-prime dispatcher",
+          "ATTACKER (unprivileged): batchMint(count=1, recipient=attacker, paymentAmount=1 wei, minRewards=[0])"
+        ],
+        "extractedRaw": 190000000,
+        "extractedHuman": "190.0 USDC of a 200.0 USDC pot",
+        "attackerCost": "1 wei USDC (the 10 USDC mint price is paid out of the pot itself via the unbounded step-6 allowance)",
+        "repeatable": true,
+        "secondSweepAfterRefill": 100000000
+      },
+      "amplifiersBeyondTier2": [
+        "The mint is funded from the pot, not from the caller: step 6 grants nftMinter an unbounded allowance over the whole balance, so paymentAmount need not cover the mint cost.",
+        "Value exits via the step-10 dust sweep, which is NOT gated on `qualifies`; _payRewards never runs and `recipient` receives nothing."
+      ],
+      "control": "test_T1_control_beforeRepoint_count1_capturesNothing — identical count=1 batch against the identical non-empty pot BEFORE the repoint yields the attacker 0.",
+      "nonVacuity": "Pot funded by 20 real NFTMinterV2.mint calls through the real NudgeRatchet into the real NudgeStreamer. Tripwires: buffer == 20*price, whole donation claimable, pot landed on batchMinter, assertGt(extracted, 0)."
+    },
+    {
+      "id": "T2",
+      "finding": "CODE-001",
+      "title": "NudgeRatchet mandatory-streamer wedge, no rescue, third-party blacklist trigger",
+      "verdict": "CONFIRMED",
+      "testContract": "Run19_T2_RatchetWedge",
+      "tests": 4,
+      "exactReverts": [
+        { "trigger": "nudgeStreamer == address(0) (post-deploy default)", "revert": "Error(\"NudgeRatchet: nudgeStreamer unset\")", "effect": "whole user mint reverts; balanceOf(user, idx) == 0" },
+        { "trigger": "(batchMinter, USDC) pair unregistered on the streamer", "revert": "NudgeStreamer__NotRegistered()", "matchedBy": "selector", "effect": "whole user mint reverts" },
+        { "trigger": "USDC blacklist on the STREAMER address, donor inbound leg", "revert": "Error(\"USDC: recipient blacklisted\")", "effect": "NudgeRatchet AND Uniboost both bricked by one blacklisting" },
+        { "trigger": "USDC blacklist on the STREAMER address, outbound settle leg", "revert": "Error(\"USDC: sender blacklisted\")", "effect": "pullPendingStream reverts — the pooled buffer already inside the streamer is permanently stranded; NudgeStreamer has no rescue" }
+      ],
+      "noRescueProof": {
+        "call": "rescueERC20(address,address,uint256) raw call from owner on NudgeRatchet",
+        "result": "false (selector absent)",
+        "positiveControl": "identical call on a fresh NudgeRatchetDelayRelease returns true",
+        "strandedAmountRaw": 500000000
+      },
+      "beyondTier2": "The streamer blacklist also strands the pooled buffer already held by NudgeStreamer, not just future donations — NudgeStreamer has no owner sweep.",
+      "nonVacuity": "Each brick is preceded either by a demonstrated-working donation path (T2d asserts buffer > 0 from both donors first) or by an asserted guarded-state precondition (nudgeStreamer()==0, duration==0, balanceOf(ratchet)==500e6). The no-rescue negative is paired with a positive control on a sibling contract."
+    },
+    {
+      "id": "T3",
+      "finding": "PATTERN-001",
+      "title": "Caller-side rate reset / buffer residency measurement",
+      "verdict": "MEASURED — no rate drift; residency bounded and fully draining",
+      "adjudicator": "econ-scanner",
+      "testContract": "Run19_T3_BufferResidency",
+      "tests": 6,
+      "streamWindowSeconds": 604800,
+      "donationPerMintRaw": 10000000,
+      "residencyByCadence14Days": [
+        { "cadence": "10m", "mints": 2016, "donatedRaw": 20160000000, "deliveredRaw": 11442825640, "residentRaw": 8717174360, "claimableNowRaw": 8647990, "residencyBps": 4323 },
+        { "cadence": "1h", "mints": 336, "donatedRaw": 3360000000, "deliveredRaw": 1906008505, "residentRaw": 1453991495, "claimableNowRaw": 8654711, "residencyBps": 4327 },
+        { "cadence": "6h", "mints": 56, "donatedRaw": 560000000, "deliveredRaw": 316532457, "residentRaw": 243467543, "claimableNowRaw": 8695269, "residencyBps": 4347 },
+        { "cadence": "24h", "mints": 14, "donatedRaw": 140000000, "deliveredRaw": 78088031, "residentRaw": 61911969, "claimableNowRaw": 8844566, "residencyBps": 4422 }
+      ],
+      "residencyByHorizonDailyCadence": [
+        { "horizonWindows": 1, "donatedRaw": 70000000, "residentRaw": 46205835, "residencyBpsOfDonated": 6600, "bpsOfOneWindowInflow": 6600 },
+        { "horizonWindows": 2, "donatedRaw": 140000000, "residentRaw": 61911969, "residencyBpsOfDonated": 4422, "bpsOfOneWindowInflow": 8844 },
+        { "horizonWindows": 4, "donatedRaw": 280000000, "residentRaw": 69065486, "residencyBpsOfDonated": 2466, "bpsOfOneWindowInflow": 9866 },
+        { "horizonWindows": 8, "donatedRaw": 560000000, "residentRaw": 69987527, "residencyBpsOfDonated": 1249, "bpsOfOneWindowInflow": 9998 }
+      ],
+      "conclusions": [
+        "Resident buffer is a first-order lag with time constant EXACTLY `duration`; it converges to D*duration/dt = one stream window's inflow (99.98% at 8 windows).",
+        "Residency as a fraction of cumulative donations is cadence-independent (43.2% +/- 1% at 2 windows across a 200x cadence range) and decays as duration/T.",
+        "NO rate drift: rewardPerSecond is recomputed over the full buffer on every deposit and _accrued caps at buffer. The phlimbo-V1 linear-depletion pathology does not reproduce.",
+        "Nothing is stranded: after 200 hourly mints leaving 1170.97 USDC resident, one window of silence drains the streamer to exactly 0.",
+        "Cumulative shortfall vs the pre-change immediate safeTransfer equals the resident amount at any instant — bounded, not cumulative.",
+        "Claimable-right-now is always ~one donation (~8.65 USDC) regardless of cadence or buffer size: the advertised anti-burst property does hold on the streamed donors."
+      ],
+      "nonVacuity": "Every donation is a real NFTMinterV2.mint through the real dispatcher, not a mock deposit. Tripwires: donated == n*price, rate > 0, and the conservation identity delivered + resident == donated asserted in every run."
+    },
+    {
+      "id": "T4",
+      "finding": "CODE-003",
+      "title": "NudgeRatchetDelayRelease.release() lump is back-runnable",
+      "verdict": "CONFIRMED",
+      "testContract": "Run19_T4_DelayReleaseBackrun",
+      "tests": 3,
+      "counterexample": {
+        "sequence": [
+          "releaser: NudgeRatchetDelayRelease.release(50_000e6)  // visible mempool tx, direct safeTransfer to batchMinter",
+          "SAME BLOCK, no warp — searcher: batchMint(count=5, recipient=searcher, paymentAmount=5e18 PAY, minRewards=[50_000e6])"
+        ],
+        "capturedRaw": 50000000000,
+        "capturedPct": 100,
+        "searcherCost": "5 mints of PAY (5e18)",
+        "honestBatcherAfterwards": 0
+      },
+      "contrast": "test_T4_contrast_streamedDonorIsNotBurstCapturable — the SAME 50,000 USDC routed via NudgeRatchet into the streamer yields the same-block back-runner exactly 0, with >= LUMP-1 still buffered. Direct empirical proof the story-046 invariant holds on the four streamed donors and not on the fifth path.",
+      "nonVacuity": "Pot asserted empty before the release and equal to the lump after it. The contrast arm demonstrates the harness CAN produce a zero-capture outcome, so 100% capture is not a wiring artifact."
+    },
+    {
+      "id": "T5",
+      "finding": "CODE-007 (run-17 L-13)",
+      "title": "PromotionUniV2_Eth._legB swaps address(this).balance, so minPromoOut stops bounding the swap",
+      "verdict": "CONFIRMED — still live after the 6-arg pool() rework",
+      "testContract": "Run19_T5_LegBUnboundedEth",
+      "tests": 3,
+      "environment": "mainnet fork @ block 25550000; live UniV2 router/factory, Sky PSM, sUSDS ERC4626, Balancer V3",
+      "rawProperty": {
+        "amountInRaw": 1000000000,
+        "legProducedEthWei": 161793981717043178,
+        "strayEthWei": 1617939817170431780,
+        "totalEthSwappedWei": 1779733798887474959,
+        "dispatcherBalanceAfterPool": 0,
+        "floorDilutionFactor": 11.0
+      },
+      "decisiveDifferential": {
+        "minPromoOut": "478314978128800584023 (promo expected for the leg's own ETH, 1% tolerance)",
+        "sandwichEthWei": 12000000000000000000,
+        "withoutStrayEth": { "outcome": "REVERT", "revert": "Error(\"UniswapV2Router: INSUFFICIENT_OUTPUT_AMOUNT\")", "meaning": "the floor correctly rejects the sandwiched trade" },
+        "withStrayEth": { "outcome": "SUCCESS", "sandwicherEthInWei": 12000000000000000000, "sandwicherEthOutWei": 12296774179654913980, "sandwicherProfitWei": 296774179654913980, "meaning": "identical floor, identical sandwich, now accepted" }
+      },
+      "note": "The stale-residual variant requires no attacker at all; rescueETH's own NatSpec concedes a partial Leg B leaves resident ETH.",
+      "nonVacuity": "Live-liquidity fork (a mocked router could not produce a price-impact differential). Asserted: receive() accepts, leg quote > 0, front-run output > 0, promo acquired > 0, dispatcher ETH balance == 0 after pool(). The T5b REVERT arm proves the floor is genuinely load-bearing in the harness, so T5c's success is a real relaxation."
+    }
+  ],
+  "incidental": {
+    "ledgerFinding": "Q-17",
+    "status": "partially-addressed",
+    "edit": "workspace/yield-claim-nft/test/Tier3PromotionInvariants.t.sol:120 — disp.pool(amountIn,0,0,0,0) -> disp.pool(amountIn,0,0,0,0,0) (trailing minLP), commented `// run-19: Q-17 bit-rot repair`.",
+    "impactBeforeEdit": "forge build FAILED at d4cc563, so the ENTIRE repo test suite was unrunnable, not just this file.",
+    "remainingBitRot": "With the arity fixed, test_guided_sequence_holdsAllInvariants compiles and then fails at runtime with `PromotionUniV2_Eth: nudgeStreamer unset` — the harness predates story-046 and wires no NudgeStreamer (its batchMinter is a plain EOA, so registerStream cannot be called without also deploying a real BatchNFTMinterMultiToken). Left unrepaired deliberately; T5 covers the same property.",
+    "sideObservation": "That runtime failure is a fourth independent reproduction of the CODE-001 mandatory-streamer class, this time on PromotionUniV2_Eth."
+  }
+}

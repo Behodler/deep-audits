@@ -1,0 +1,114 @@
+{
+  "contract": "src/dispatchers/NudgeRatchet.sol",
+  "commit": "d4cc563",
+  "story": "story-046 (nudge donation routed through INudgeStreamer)",
+  "profileTimestamp": "2026-07-25T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "inheritanceChain": ["ATokenDispatcherV2", "ITokenDispatcherV2", "Pausable", "Ownable", "ReentrancyGuard"],
+  "complexity": {"loc": 163, "externalEntryPoints": 8, "externalCallTargets": 3},
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["dispatch (base, nonReentrant)"],
+    "accessControlled": ["setBatchMinter", "setNudgeStreamer", "setMinter", "setHook", "setMetadata"],
+    "weakRandomness": "none",
+    "inboundCallbackSurface": "none (no ERC721/1155/777 receive hooks)",
+    "decimalGuard": "constructor requires IERC20Metadata(token_).decimals() == 6 -- deploy-time USDC guard, unchanged"
+  },
+
+  "newState": [
+    {
+      "name": "nudgeStreamer",
+      "type": "address",
+      "init": "address(0) -- setter-only, deliberately NOT a constructor arg",
+      "mutators": ["setNudgeStreamer (onlyOwner, require != 0)"],
+      "readers": ["_dispatch"],
+      "event": "NudgeStreamerUpdated(old, new)"
+    }
+  ],
+
+  "criticalDistinction": "THIS is the one of the four with NO donation-disable switch and NO try/catch. `batchMinter` cannot be zeroed (setBatchMinter requires non-zero, and the constructor requires non-zero). There is no `donationSplit`. Therefore any balance > 0 forces the streamer path, and an unwired/misregistered streamer REVERTS `dispatch` -- which is called from NFTMinterV2.mint (NFTMinterV2.sol:191), so the whole MINT bricks, not just the donation.",
+
+  "wiringRequirements": {
+    "orderedOpsSequence": [
+      "1. batchMinter.setNudgeTokenWhitelist(_token /* USDC */, true)",
+      "2. nudgeStreamer.registerStream(batchMinter, _token, duration)",
+      "3. ratchet.setNudgeStreamer(nudgeStreamer)",
+      "ALSO: batchMinter.setNudgeStreamer(nudgeStreamer) for the pot flush at batchMint step 3.5"
+    ],
+    "deployToWireWindow": "Between deployment and step 3, every mint through this dispatcher reverts \"NudgeRatchet: nudgeStreamer unset\" (given any non-zero balance). Previously the legacy safeTransfer path made this window impossible.",
+    "rearmingActions": ["setBatchMinter to an address with no registered (newMinter, _token) stream -> every dispatch reverts NudgeStreamer__NotRegistered", "streamer owner un-registering / re-registering with duration 0 (reverts at registerStream, so not reachable)"]
+  },
+
+  "externalEntryPoints": [
+    {
+      "function": "dispatch(address minter, uint256 amount, bytes extraData) [base, non-virtual]",
+      "accessControl": "onlyMinter",
+      "modifiers": ["nonReentrant", "onlyMinter", "whenNotPaused"],
+      "stateChanges": ["none local; token allowance to streamer; token balance"],
+      "externalCalls": ["INudgeRatchetMintDebtHook(hook).hookTypeId()", "IERC20(_token).balanceOf", "IERC20(_token).forceApprove(streamer, bal)", "INudgeStreamer(streamer).collectNudge(batchMinter, _token, bal)", "hook.onDispatch(minter, amount, extraData)"]
+    },
+    {"function": "setBatchMinter(address)", "accessControl": "onlyOwner", "notes": "require non-zero"},
+    {"function": "setNudgeStreamer(address)", "accessControl": "onlyOwner", "notes": "require non-zero; no un-set path"},
+    {"function": "primeToken() view", "accessControl": "none"}
+  ],
+
+  "dispatchCallGraph": [
+    "require(INudgeRatchetMintDebtHook(hook).hookTypeId() == keccak256('NudgeRatchetMintDebtHook.v1'))  [M-04 guard, unchanged]",
+    "bal = IERC20(_token).balanceOf(address(this))                       [FULL-BALANCE SWEEP, not `amount`]",
+    "require(bal >= amount, 'NudgeRatchet: insufficient balance for dispatch')",
+    "if (bal > 0) {",
+    "  streamer = nudgeStreamer; require(streamer != 0, 'NudgeRatchet: nudgeStreamer unset')",
+    "  IERC20(_token).forceApprove(streamer, bal)        [EXACT; NOT zeroed afterwards]",
+    "  INudgeStreamer(streamer).collectNudge(batchMinter, _token, bal)",
+    "}",
+    "-- then base: hook.onDispatch(minter, amount, extraData)  [debt on `amount`, not `bal`]"
+  ],
+
+  "removedBehaviour": "IERC20(_token).safeTransfer(batchMinter, bal) -- REMOVED, no fallback retained.",
+
+  "preconditionsAndInvariants": {
+    "balGuard": "if (bal > 0) prevents NudgeStreamer__ZeroAmount. LOAD-BEARING: without it a zero-balance dispatch would revert and brick the mint. Note bal >= amount is already required, so bal == 0 implies amount == 0.",
+    "hookTypeGuard": "hookTypeId() must match EXPECTED_HOOK_TYPE_ID -- refuses to dispatch through a missing/wrong hook. Unchanged. Relevant to the standing 'unwired-hook zero-debt' drift-watch: on THIS contract a wrong hook is a loud revert, not a silent zero-debt.",
+    "overBackingInvariant": "bal >= amount, and the full bal is handed to the streamer. Debt accrues on `amount`. Surplus is over-backing (protocol-favouring). PRESERVED under the streamer change in aggregate terms, but see value-flow: the surplus now arrives at the batchMinter over time rather than immediately.",
+    "noRescue": "No rescueERC20 on this contract. Self-cleaning was the stated rationale (the sweep forwards stray USDC on the next dispatch). Under the mandatory-streamer design the self-cleaning property now depends on the streamer being correctly wired."
+  },
+
+  "decimalAndScale": {
+    "token": "USDC, 6 dp, enforced at construction",
+    "conversions": "NONE -- bal is passed through verbatim to collectNudge. No new decimal surface.",
+    "streamerScale": "PRECISION=1e18 cancels; native 6-dp units preserved. For a 1e6 (1 USDC) buffer, rewardPerSecond = 1e24/duration; only duration > 1e24 would truncate to zero, which is not a plausible configuration.",
+    "driftWatchStatus": "M-03 decimal-under-mint class: CLEAN, no new conversion introduced."
+  },
+
+  "valueFlow": {
+    "beforeStory046": "minter -> ratchet -> batchMinter (immediate, same tx)",
+    "afterStory046": "minter -> ratchet -> NudgeStreamer buffer[(batchMinter, USDC)] -> batchMinter linearly over `duration`",
+    "whoHoldsTokens": {
+      "successBranch": "NudgeStreamer holds the donation; batchMinter receives only the amount accrued since the previous settle (which, when the previous settle was in the same block, is zero).",
+      "failureBranch": "ENTIRE dispatch reverts -> the mint reverts -> the minter's transferFrom is rolled back -> no tokens move at all. Nothing is stranded on the ratchet, but user mints are unavailable."
+    },
+    "strandOrDoublePay": "No double-pay. Strand risk is the streamer-side one: value in buffer[(oldBatchMinter, USDC)] after a setBatchMinter re-point has no recovery path (NudgeStreamer has no rescue, and only the OLD batchMinter can pullPendingStream).",
+    "timingShift": "The batchMint 'donate forward' incentive is preserved and slightly strengthened: the streamer flush at batchMint step 3.5 and the in-loop collectNudge share a timestamp, so a batch cannot settle its own donations back to itself."
+  },
+
+  "externalCalls": [
+    {"target": "IERC20 _token (immutable USDC)", "methods": ["balanceOf", "forceApprove"], "trustLevel": "trusted"},
+    {"target": "INudgeStreamer nudgeStreamer (owner-settable)", "methods": ["collectNudge"], "trustLevel": "semi-trusted, cross-repo", "notes": "NOT wrapped in try/catch. A revert here reverts the mint."},
+    {"target": "INudgeRatchetMintDebtHook hook (owner-settable)", "methods": ["hookTypeId", "onDispatch"], "trustLevel": "semi-trusted"}
+  ],
+
+  "trustAssumptions": [
+    "USDC is standard, hook-free, non-FoT.",
+    "The streamer owner registers (batchMinter, USDC) before setNudgeStreamer / setBatchMinter.",
+    "Owner sequences the four wiring steps correctly; the contract enforces none of the cross-contract preconditions."
+  ],
+
+  "localObservations": [
+    {"id": "OBS-NR-1", "type": "liveness-coupling", "function": "_dispatch", "line": 158, "note": "Mandatory streamer with NO disable switch and NO try/catch. `nudgeStreamer == 0`, an unregistered (batchMinter, USDC) pair, or ANY revert inside collectNudge (including the streamer's outbound _settle transfer to batchMinter, e.g. a USDC blacklist on the batchMinter) reverts the whole mint via NFTMinterV2:191. This is a strictly wider mint-brick surface than the removed safeTransfer. The NatSpec pre-declares it 'NOT an audit finding'; recorded here as a fact for interaction/severity analysis to weigh, not adjudicated."},
+    {"id": "OBS-NR-2", "type": "residual-allowance", "function": "_dispatch", "line": 159, "note": "forceApprove(streamer, bal) is never reset to zero. Safe only while collectNudge pulls the full `bal`."},
+    {"id": "OBS-NR-3", "type": "asymmetry", "note": "Of the four donors this is the only one where the streamer requirement is unconditional. BalancerPoolerV2 catches it; Uniboost and PromotionUniV2_Eth scope it to a disable-able donation branch. Cross-check that this asymmetry is intended."},
+    {"id": "OBS-NR-4", "type": "doc-vs-code", "note": "The NatSpec still describes the sweep as making rescueERC20 unnecessary ('self-cleaning'). That property now holds only when the streamer is correctly wired; while unwired, stray USDC on this contract is unreachable (no rescue function exists)."}
+  ]
+}

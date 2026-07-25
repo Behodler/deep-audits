@@ -1,0 +1,522 @@
+diff --git a/test/run19-poc-M-03-retirement-strand.t.sol b/test/run19-poc-M-03-retirement-strand.t.sol
+new file mode 100644
+index 0000000..b7a3668
+--- /dev/null
++++ b/test/run19-poc-M-03-retirement-strand.t.sol
+@@ -0,0 +1,516 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.20;
++
++// =============================================================================
++// run-19 · M-03 / DEDUP-19-05 (ledger M-06) · fingerprint 25a9ab3e…
++//
++//   "Stream retirement strands one duration's donations — four routine owner
++//    tidy-up actions each close the only recovery path."
++//
++// Root cause locations:
++//   phoenix-nft-staking/src/NudgeStreamer.sol                (no owner rescue/sweep)
++//   phoenix-nft-staking/src/BatchNFTMinterMultiToken.sol:445-451 (sole pullPendingStream call site)
++//   phoenix-nft-staking/src/BatchNFTMinterMultiToken.sol:405     (_resolvePaymentPath runs BEFORE the flush)
++//   src/dispatchers/NudgeRatchet.sol setBatchMinter / setNudgeStreamer (retirement trigger)
++//
++// This file reuses the REAL-STACK harness `Run19Base` from run19-Tier3Nudge.t.sol
++// (real NudgeStreamer, real BatchNFTMinterMultiToken, real NFTMinterV2, real
++// NudgeRatchet + hook). No behaviour is mocked except the ERC20s.
++//
++// -----------------------------------------------------------------------------
++// ANTI-VACUITY POLICY
++// -----------------------------------------------------------------------------
++// Every test:
++//   (1) seeds the buffer through 400 REAL user mints across 50 simulated days
++//       and asserts the steady-state buffer is non-zero AND matches the
++//       closed form B* = rho*D to within 2% (`_assertSteadyState`);
++//   (2) runs a LIVE-PATH CONTROL first: the exact same batchMint call SUCCEEDS
++//       and flushes the whole buffer BEFORE the tidy-up action, so a later
++//       revert is attributable to the tidy-up and not to a broken harness
++//       (state is rolled back with vm.snapshotState/revertToState);
++//   (3) carries an explicit `TRIPWIRE:` assertion on every precondition.
++// The rescue-absence probe is validated by TWO POSITIVE CONTROLS that run the
++// byte-identical probe against contracts that DO have a working rescue.
++// =============================================================================
++
++import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
++import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
++import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
++
++import {Run19Base} from "./run19-Tier3Nudge.t.sol";
++
++import {NudgeStreamer} from "phoenix-nft-staking/NudgeStreamer.sol";
++import {BatchNFTMinterMultiToken} from "phoenix-nft-staking/BatchNFTMinterMultiToken.sol";
++import {NudgeRatchetDelayRelease} from "../src/dispatchers/NudgeRatchetDelayRelease.sol";
++import {ITokenMinterV2 as IStakingTokenMinterV2} from "yield-claim-nft/interfaces/ITokenMinterV2.sol";
++
++abstract contract M03Base is Run19Base {
++    // --- ECON-001 §1.2/§1.3 parameters, scaled to the harness's 10 USDC mint ---
++    uint256 internal constant D = 7 days; // stream duration
++    uint256 internal constant MINTS_PER_DAY = 8; // "batch" cadence: 8 mints/day
++    uint256 internal constant DAYS_RUN = 50; // 7.1 time constants -> converged
++    // rho = 8 * 10 USDC / day = 80 USDC/day  =>  B* = rho * D = 560 USDC
++    uint256 internal constant PREDICTED_BSTAR = 560e6;
++
++    uint256 internal userNonce;
++
++    function setUp() public virtual {
++        STREAM_DURATION = D;
++        _deployStack();
++        batch.setPauser(owner); // pause() is onlyPauser; wire it so arm C is exercisable
++    }
++
++    function _emptyMins() internal pure returns (uint256[] memory) {
++        return new uint256[](0);
++    }
++
++    /// @dev Drive the stack to the ECON-001 steady state with REAL user mints.
++    /// @return stranded the streamer's resident USDC buffer (== B*)
++    function _accumulateSteadyState() internal returns (uint256 stranded) {
++        uint256 donated;
++        for (uint256 d; d < DAYS_RUN; ++d) {
++            for (uint256 m; m < MINTS_PER_DAY; ++m) {
++                _mintThroughRatchet(address(uint160(0x100000 + userNonce++)));
++                donated += RATCHET_PRICE;
++            }
++            vm.warp(block.timestamp + 1 days);
++        }
++
++        // ---- TRIPWIRES: the donation path really ran and really moved value ----
++        assertEq(donated, DAYS_RUN * MINTS_PER_DAY * RATCHET_PRICE, "TRIPWIRE: all donations executed");
++        (, uint256 buffer, uint256 rate,) = streamer.streams(address(batch), address(usdc));
++        assertGt(rate, 0, "TRIPWIRE: a real stream rate is configured");
++        stranded = usdc.balanceOf(address(streamer));
++        assertEq(stranded, buffer, "TRIPWIRE: streamer balance == accounted buffer");
++        assertGt(stranded, 0, "TRIPWIRE: the buffer is NON-EMPTY (anti-vacuity)");
++        assertEq(
++            usdc.balanceOf(address(batch)) + stranded, donated, "TRIPWIRE: conservation - nothing lost in the harness"
++        );
++
++        // Closed form B* = rho*D, cadence-independent (ECON-001 §1.1). Converged
++        // within 2% after DAYS_RUN/7 = 7.1 time constants.
++        assertApproxEqRel(stranded, PREDICTED_BSTAR, 0.02e18, "TRIPWIRE: buffer matches closed form rho*D");
++    }
++
++    /// @dev Live-path control: prove the sole recovery path (batchMint step 3.5)
++    ///      WORKS right now, then roll the state back. Any later revert is then
++    ///      attributable solely to the owner tidy-up action under test.
++    function _assertFlushPathIsLive(uint256 stranded) internal {
++        uint256 snap = vm.snapshotState();
++
++        vm.warp(block.timestamp + D + 1); // saturate _accrued at the whole buffer
++        assertEq(streamer.pendingStream(address(batch), address(usdc)), stranded, "control: whole buffer is claimable");
++
++        uint256 before = usdc.balanceOf(address(batch));
++        payToken.mint(address(0xC0117201), MINT_PRICE);
++        vm.startPrank(address(0xC0117201));
++        payToken.approve(address(batch), MINT_PRICE);
++        batch.batchMint(1, address(0xC0117201), MINT_PRICE, _mins(0));
++        vm.stopPrank();
++
++        assertEq(usdc.balanceOf(address(batch)) - before, stranded, "CONTROL: flush path is LIVE and moves the buffer");
++        assertEq(usdc.balanceOf(address(streamer)), 0, "CONTROL: streamer fully drained by the live path");
++
++        assertTrue(vm.revertToState(snap), "control rollback");
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "TRIPWIRE: control rolled back cleanly");
++    }
++
++    /// @dev Fire a battery of plausible rescue/sweep entry points at `target` as
++    ///      the owner. Returns true if ANY of them succeeds.
++    function _probeForRescue(address target, address to, uint256 amount) internal returns (bool) {
++        bytes[] memory probes = new bytes[](8);
++        probes[0] = abi.encodeWithSignature("rescueERC20(address,address,uint256)", address(usdc), to, amount);
++        probes[1] = abi.encodeWithSignature("rescueERC20(address,uint256)", address(usdc), amount);
++        probes[2] = abi.encodeWithSignature("rescue(address,address,uint256)", address(usdc), to, amount);
++        probes[3] = abi.encodeWithSignature("sweep(address,address)", address(usdc), to);
++        probes[4] = abi.encodeWithSignature("withdraw(address,uint256)", address(usdc), amount);
++        probes[5] = abi.encodeWithSignature("emergencyWithdraw(address,address,uint256)", address(usdc), to, amount);
++        probes[6] = abi.encodeWithSignature("recoverERC20(address,uint256)", address(usdc), amount);
++        probes[7] = abi.encodeWithSignature("skim(address)", address(usdc));
++
++        for (uint256 i; i < probes.length; ++i) {
++            vm.prank(owner);
++            (bool ok,) = target.call(probes[i]);
++            if (ok) {
++                emit log_named_uint("  probe SUCCEEDED at index", i);
++                return true;
++            }
++        }
++        return false;
++    }
++}
++
++// =============================================================================
++// PART 1 — The buffer exists, is real, and is sized.
++// =============================================================================
++contract M03_BufferSizing is M03Base {
++    function test_M03_1_steadyStateBufferIsRealAndSized() public {
++        uint256 stranded = _accumulateSteadyState();
++
++        emit log_named_uint("M-03 stranded buffer B* (USDC 6dp)", stranded);
++        emit log_named_uint("M-03 closed-form prediction rho*D (USDC 6dp)", PREDICTED_BSTAR);
++        emit log_named_uint("M-03 stream duration D (seconds)", D);
++
++        // Exact measured value at this configuration (pinned so drift is loud).
++        // Exact measured steady state: 559.748325 USDC, i.e. 99.955% of rho*D.
++        assertEq(stranded, 559_748_325, "EXACT stranded amount");
++        _assertFlushPathIsLive(stranded);
++    }
++}
++
++// =============================================================================
++// PART 2 — Each of the four routine tidy-up actions closes the sole exit.
++//          Exact revert selectors, not "it reverts".
++// =============================================================================
++contract M03_TidyUpClosesTheExit is M03Base {
++    /// (A) setDispatcherIndex(0) — _resolvePaymentPath at step 2 (:405) reverts
++    ///     BEFORE the step-3.5 flush (:445) is ever reached.
++    function test_M03_2a_setDispatcherIndexZero_revertsBeforeTheFlush() public {
++        uint256 stranded = _accumulateSteadyState();
++        _assertFlushPathIsLive(stranded);
++
++        batch.setDispatcherIndex(0); // <-- the single routine owner tx
++        assertEq(batch.dispatcherIndex(), 0, "TRIPWIRE: tidy-up applied");
++
++        vm.warp(block.timestamp + D + 1);
++        assertEq(streamer.pendingStream(address(batch), address(usdc)), stranded, "TRIPWIRE: buffer fully accrued");
++
++        payToken.mint(address(0xBEEF), MINT_PRICE);
++        vm.startPrank(address(0xBEEF));
++        payToken.approve(address(batch), MINT_PRICE);
++        vm.expectRevert(BatchNFTMinterMultiToken.BatchMint__DispatcherNotConfigured.selector);
++        batch.batchMint(1, address(0xBEEF), MINT_PRICE, _mins(0));
++        vm.stopPrank();
++
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "buffer untouched: the flush was never reached");
++        emit log_named_bytes32(
++            "M-03 (A) selector BatchMint__DispatcherNotConfigured",
++            bytes32(BatchNFTMinterMultiToken.BatchMint__DispatcherNotConfigured.selector)
++        );
++    }
++
++    /// (B) setTokenMinter(0) — same step-2 abort, different selector.
++    function test_M03_2b_setTokenMinterZero_revertsBeforeTheFlush() public {
++        uint256 stranded = _accumulateSteadyState();
++        _assertFlushPathIsLive(stranded);
++
++        batch.setTokenMinter(IStakingTokenMinterV2(address(0)));
++        assertEq(address(batch.tokenMinter()), address(0), "TRIPWIRE: tidy-up applied");
++
++        vm.warp(block.timestamp + D + 1);
++        payToken.mint(address(0xBEEF), MINT_PRICE);
++        vm.startPrank(address(0xBEEF));
++        payToken.approve(address(batch), MINT_PRICE);
++        vm.expectRevert(BatchNFTMinterMultiToken.BatchMint__MinterNotConfigured.selector);
++        batch.batchMint(1, address(0xBEEF), MINT_PRICE, _mins(0));
++        vm.stopPrank();
++
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "buffer untouched");
++        emit log_named_bytes32(
++            "M-03 (B) selector BatchMint__MinterNotConfigured",
++            bytes32(BatchNFTMinterMultiToken.BatchMint__MinterNotConfigured.selector)
++        );
++    }
++
++    /// (C) pause() — whenNotPaused (:392) aborts before everything.
++    function test_M03_2c_pause_revertsBeforeTheFlush() public {
++        uint256 stranded = _accumulateSteadyState();
++        _assertFlushPathIsLive(stranded);
++
++        vm.prank(owner); // owner is the registered pauser (see setUp)
++        batch.pause();
++        assertTrue(batch.paused(), "TRIPWIRE: tidy-up applied");
++
++        vm.warp(block.timestamp + D + 1);
++        payToken.mint(address(0xBEEF), MINT_PRICE);
++        vm.startPrank(address(0xBEEF));
++        payToken.approve(address(batch), MINT_PRICE);
++        vm.expectRevert(Pausable.EnforcedPause.selector);
++        batch.batchMint(1, address(0xBEEF), MINT_PRICE, _mins(0));
++        vm.stopPrank();
++
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "buffer untouched");
++        emit log_named_bytes32("M-03 (C) selector Pausable.EnforcedPause", bytes32(Pausable.EnforcedPause.selector));
++    }
++
++    /// (D) setNudgeTokenWhitelist(USDC,false) — THE WORST VARIANT. batchMint does
++    ///     NOT revert; the step-3.5 flush loop iterates the (now empty) whitelist,
++    ///     so it silently skips USDC. The call succeeds, an NFT is minted, and
++    ///     nothing signals that a 560 USDC buffer was just orphaned.
++    function test_M03_2d_unwhitelist_silentlySkipsTheFlush_noRevertAtAll() public {
++        uint256 stranded = _accumulateSteadyState();
++        _assertFlushPathIsLive(stranded);
++
++        batch.setNudgeTokenWhitelist(address(usdc), false);
++        assertFalse(batch.isNudgeToken(address(usdc)), "TRIPWIRE: tidy-up applied");
++
++        vm.warp(block.timestamp + D + 1);
++        assertEq(
++            streamer.pendingStream(address(batch), address(usdc)),
++            stranded,
++            "TRIPWIRE: the streamer still says the whole buffer is claimable"
++        );
++
++        uint256 potBefore = usdc.balanceOf(address(batch));
++        payToken.mint(address(0xBEEF), MINT_PRICE);
++        vm.startPrank(address(0xBEEF));
++        payToken.approve(address(batch), MINT_PRICE);
++        batch.batchMint(1, address(0xBEEF), MINT_PRICE, _emptyMins()); // SUCCEEDS
++        vm.stopPrank();
++
++        assertEq(nftMinter.balanceOf(address(0xBEEF), PAY_INDEX), 1, "the batch mint really succeeded");
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "yet the buffer was silently skipped");
++        assertEq(usdc.balanceOf(address(batch)), potBefore, "and not one wei of the buffer reached the pot");
++    }
++}
++
++// =============================================================================
++// PART 3 — NudgeStreamer has NO rescue. Proved, not merely unobserved:
++//          the identical probe battery is run against two contracts that DO
++//          have a working rescue (positive controls).
++// =============================================================================
++contract M03_NoRescueOnStreamer is M03Base {
++    function test_M03_3_streamerHasNoRescue_withTwoPositiveControls() public {
++        uint256 stranded = _accumulateSteadyState();
++        batch.setDispatcherIndex(0); // retire the instance
++
++        // ---- NEGATIVE: the streamer holds the value and exposes no way out ----
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "TRIPWIRE: the streamer holds the value");
++        bool streamerRescued = _probeForRescue(address(streamer), treasury, stranded);
++        assertFalse(streamerRescued, "NudgeStreamer exposes NO rescue/sweep entry point");
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "not one wei left the streamer");
++        assertEq(usdc.balanceOf(treasury), 0, "TRIPWIRE: nothing was recovered");
++
++        // ---- POSITIVE CONTROL 1: BatchNFTMinterMultiToken.rescueERC20 (:312) ----
++        BatchNFTMinterMultiToken control1 = new BatchNFTMinterMultiToken(owner);
++        usdc.mint(address(control1), 1e6);
++        bool c1 = _probeForRescue(address(control1), treasury, 1e6);
++        assertTrue(c1, "POSITIVE CONTROL 1: the probe DOES detect a working rescue");
++        assertEq(usdc.balanceOf(treasury), 1e6, "control 1 actually moved funds");
++
++        // ---- POSITIVE CONTROL 2: NudgeRatchetDelayRelease.rescueERC20 ----
++        NudgeRatchetDelayRelease control2 = new NudgeRatchetDelayRelease(address(usdc), address(batch), owner);
++        usdc.mint(address(control2), 2e6);
++        bool c2 = _probeForRescue(address(control2), treasury, 2e6);
++        assertTrue(c2, "POSITIVE CONTROL 2: the probe DOES detect a working rescue");
++        assertEq(usdc.balanceOf(treasury), 3e6, "control 2 actually moved funds");
++
++        // ---- and pullPendingStream is keyed on msg.sender, so nobody else can pull ----
++        vm.prank(owner);
++        streamer.pullPendingStream(address(usdc)); // no stream for `owner` -> silent no-op
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "third-party pull is a no-op; buffer stays");
++    }
++}
++
++// =============================================================================
++// PART 4 — The aggravator: the repo's own MigrateBatchNFTMinter.s.sol template.
++//          `rescueERC20(USDC, new, balanceOf(old))` is structurally blind to the
++//          streamer buffer, so a by-the-book migration silently abandons B*.
++// =============================================================================
++contract M03_MigrationScriptStrandsIt is M03Base {
++    function test_M03_4_migrationTemplateSilentlyAbandonsTheBuffer() public {
++        uint256 stranded = _accumulateSteadyState();
++        uint256 potOnOldMinter = usdc.balanceOf(address(batch));
++        assertGt(stranded, 0, "TRIPWIRE: there is a buffer to abandon");
++
++        // ---------- MigrateBatchNFTMinter.s.sol, step by step ----------
++        BatchNFTMinterMultiToken newBatch = new BatchNFTMinterMultiToken(owner);
++        newBatch.setTokenMinter(IStakingTokenMinterV2(address(nftMinter)));
++        newBatch.setDispatcherIndex(PAY_INDEX);
++        newBatch.setNudgeSize(NUDGE_SIZE);
++        newBatch.setNudgeTokenWhitelist(address(usdc), true);
++        newBatch.setNudgeStreamer(address(streamer));
++        streamer.registerStream(address(newBatch), address(usdc), D);
++
++        // 1. Repoint the donor at the new instance.
++        ratchet.setBatchMinter(address(newBatch));
++
++        // 2. "Recover the pot": balanceOf(oldBatchMinter) — blind to the streamer.
++        uint256 recovered = usdc.balanceOf(address(batch));
++        batch.rescueERC20(IERC20(address(usdc)), address(newBatch), recovered);
++        assertEq(recovered, potOnOldMinter, "script recovers exactly balanceOf(old)");
++
++        // 3. "Neutralize the old instance."
++        batch.setDispatcherIndex(0);
++
++        // ---------- the damage ----------
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "EXACT stranded amount left behind by the script");
++        vm.warp(block.timestamp + D + 1);
++        assertEq(
++            streamer.pendingStream(address(batch), address(usdc)),
++            stranded,
++            "TRIPWIRE: the whole buffer is still owed to the dead address"
++        );
++
++        // The new instance never sees it: the stream is keyed (batchMinter, token).
++        (, uint256 newBuffer,,) = streamer.streams(address(newBatch), address(usdc));
++        assertEq(newBuffer, 0, "the new instance inherits NOTHING of the old buffer");
++
++        emit log_named_uint("M-03 recovered by the migration script (USDC 6dp)", recovered);
++        emit log_named_uint("M-03 ABANDONED by the migration script (USDC 6dp)", stranded);
++    }
++}
++
++// =============================================================================
++// PART 5 — CONTRAST ARM: the ECON-001 safe-config recipe recovers 100% of it.
++//          This is what makes the finding actionable.
++// =============================================================================
++contract M03_SafeConfigRecipeWorks is M03Base {
++    function test_M03_5_safeConfigRecipeRecoversTheWholeBuffer() public {
++        uint256 stranded = _accumulateSteadyState();
++        uint256 potBefore = usdc.balanceOf(address(batch));
++
++        BatchNFTMinterMultiToken newBatch = new BatchNFTMinterMultiToken(owner);
++        newBatch.setTokenMinter(IStakingTokenMinterV2(address(nftMinter)));
++        newBatch.setDispatcherIndex(PAY_INDEX);
++        newBatch.setNudgeTokenWhitelist(address(usdc), true);
++        newBatch.setNudgeStreamer(address(streamer));
++        streamer.registerStream(address(newBatch), address(usdc), D);
++
++        // (a) repoint the DONOR first, so donations stop feeding the old pair
++        ratchet.setBatchMinter(address(newBatch));
++
++        // (b) wait >= duration
++        vm.warp(block.timestamp + D + 1);
++
++        // (c) read pendingStream and confirm it is the whole buffer
++        uint256 pending = streamer.pendingStream(address(batch), address(usdc));
++        assertEq(pending, stranded, "(c) pendingStream == whole buffer");
++
++        // (d) ONE batchMint(1, ...) on the OLD instance flushes it
++        payToken.mint(address(0x0F5E), MINT_PRICE);
++        vm.startPrank(address(0x0F5E));
++        payToken.approve(address(batch), MINT_PRICE);
++        batch.batchMint(1, address(0x0F5E), MINT_PRICE, _mins(0));
++        vm.stopPrank();
++        assertEq(usdc.balanceOf(address(streamer)), 0, "(d) streamer fully drained");
++        assertEq(usdc.balanceOf(address(batch)), potBefore + stranded, "(d) whole buffer landed on the old pot");
++
++        // (e) rescueERC20 the proceeds
++        uint256 all = usdc.balanceOf(address(batch));
++        batch.rescueERC20(IERC20(address(usdc)), address(newBatch), all);
++        assertEq(usdc.balanceOf(address(newBatch)), potBefore + stranded, "(e) 100% recovered");
++
++        // ONLY THEN retire.
++        batch.setDispatcherIndex(0);
++        batch.setNudgeTokenWhitelist(address(usdc), false);
++
++        emit log_named_uint("M-03 recovered by the SAFE recipe (USDC 6dp)", all);
++        emit log_named_uint("M-03 delta vs the naive script (USDC 6dp)", stranded);
++    }
++}
++
++// =============================================================================
++// PART 6 — HONESTY / SCOPE CORRECTION (material to severity).
++//
++//   ECON-001 states the streamer buffer becomes "unreachable forever" once any
++//   ONE of the four tidy-ups lands. That is TOO STRONG. `registerStream`
++//   settles the accrued stream to the batchMinter BEFORE resetting the window
++//   (NudgeStreamer.sol:118 `_settle(s, batchMinter, token)`), so an owner who
++//   knows the trick can re-register with duration = 1, wait one second,
++//   re-register again, and the WHOLE buffer is pushed onto the old batch-minter
++//   — from where `rescueERC20` extracts it. No batchMint required.
++//
++//   That back-door survives (A) setDispatcherIndex(0), (B) setTokenMinter(0)
++//   and (C) pause(). It is closed by exactly ONE of the four: unwhitelisting,
++//   because registerStream gates on `isNudgeToken`. And once USDC is
++//   unwhitelisted AND a pointer is unset, RE-whitelisting also reverts, because
++//   the add-branch calls `_resolvePaymentPath` (:253).
++//
++//   So the true terminal state is the PAIR
++//       setNudgeTokenWhitelist(USDC,false) + setDispatcherIndex(0)/setTokenMinter(0)
++//   applied in that order — which is exactly the order the migration template
++//   ("neutralize the old instance") encourages.
++// =============================================================================
++contract M03_RecoveryBackdoorAndTheTrueTerminalState is M03Base {
++    /// The undocumented back-door DOES work after setDispatcherIndex(0).
++    function test_M03_6a_registerStreamBackdoorRecoversAfterDispatcherUnset() public {
++        uint256 stranded = _accumulateSteadyState();
++        uint256 potBefore = usdc.balanceOf(address(batch));
++        batch.setDispatcherIndex(0);
++
++        // batchMint is dead...
++        payToken.mint(address(0xBEEF), MINT_PRICE);
++        vm.startPrank(address(0xBEEF));
++        payToken.approve(address(batch), MINT_PRICE);
++        vm.expectRevert(BatchNFTMinterMultiToken.BatchMint__DispatcherNotConfigured.selector);
++        batch.batchMint(1, address(0xBEEF), MINT_PRICE, _mins(0));
++        vm.stopPrank();
++
++        // ...but USDC is still whitelisted, so registerStream is still callable.
++        assertTrue(batch.isNudgeToken(address(usdc)), "TRIPWIRE: whitelist intact");
++        streamer.registerStream(address(batch), address(usdc), 1); // rate = buffer/1s
++        vm.warp(block.timestamp + 1);
++        streamer.registerStream(address(batch), address(usdc), 1); // settles the LOT
++
++        assertEq(usdc.balanceOf(address(streamer)), 0, "BACK-DOOR: buffer fully evacuated");
++        assertEq(
++            usdc.balanceOf(address(batch)) - potBefore, stranded, "BACK-DOOR: it landed on the retired batch-minter"
++        );
++
++        batch.rescueERC20(IERC20(address(usdc)), treasury, stranded);
++        assertEq(usdc.balanceOf(treasury), stranded, "BACK-DOOR: 100% recovered without batchMint");
++    }
++
++    /// Unwhitelisting closes the back-door too — this is the one that bites.
++    function test_M03_6b_unwhitelistClosesTheBackdoor_exactSelector() public {
++        uint256 stranded = _accumulateSteadyState();
++        batch.setNudgeTokenWhitelist(address(usdc), false);
++
++        vm.expectRevert(
++            abi.encodeWithSelector(
++                NudgeStreamer.NudgeStreamer__NotWhitelisted.selector, address(batch), address(usdc)
++            )
++        );
++        streamer.registerStream(address(batch), address(usdc), 1);
++
++        assertEq(usdc.balanceOf(address(streamer)), stranded, "buffer still stranded");
++    }
++
++    /// THE TERMINAL STATE: unwhitelist + unset pointer. Every exit is shut and
++    /// re-opening the whitelist reverts on the payment-path derivation.
++    function test_M03_6c_terminalState_everyExitIsShut() public {
++        uint256 stranded = _accumulateSteadyState();
++        _assertFlushPathIsLive(stranded);
++
++        // The two-step "neutralize the old instance" tidy-up.
++        batch.setNudgeTokenWhitelist(address(usdc), false);
++        batch.setDispatcherIndex(0);
++
++        // 1. batchMint: reverts before the flush.
++        payToken.mint(address(0xBEEF), MINT_PRICE);
++        vm.startPrank(address(0xBEEF));
++        payToken.approve(address(batch), MINT_PRICE);
++        vm.expectRevert(BatchNFTMinterMultiToken.BatchMint__DispatcherNotConfigured.selector);
++        batch.batchMint(1, address(0xBEEF), MINT_PRICE, _emptyMins());
++        vm.stopPrank();
++
++        // 2. registerStream back-door: gated on isNudgeToken.
++        vm.expectRevert(
++            abi.encodeWithSelector(
++                NudgeStreamer.NudgeStreamer__NotWhitelisted.selector, address(batch), address(usdc)
++            )
++        );
++        streamer.registerStream(address(batch), address(usdc), 1);
++
++        // 3. Re-open the whitelist to restore either path? Also reverts.
++        vm.expectRevert(BatchNFTMinterMultiToken.BatchMint__DispatcherNotConfigured.selector);
++        batch.setNudgeTokenWhitelist(address(usdc), true);
++
++        // 4. No rescue on the streamer.
++        assertFalse(_probeForRescue(address(streamer), treasury, stranded), "no rescue on NudgeStreamer");
++
++        // 5. The donor path is gone: the ratchet now feeds a different pair.
++        BatchNFTMinterMultiToken newBatch = new BatchNFTMinterMultiToken(owner);
++        newBatch.setTokenMinter(IStakingTokenMinterV2(address(nftMinter)));
++        newBatch.setDispatcherIndex(PAY_INDEX);
++        newBatch.setNudgeTokenWhitelist(address(usdc), true);
++        newBatch.setNudgeStreamer(address(streamer));
++        streamer.registerStream(address(newBatch), address(usdc), D);
++        ratchet.setBatchMinter(address(newBatch));
++        _mintThroughRatchet(address(0xD00D));
++        assertEq(usdc.balanceOf(address(streamer)), stranded + RATCHET_PRICE, "new donations do not touch the old pair");
++
++        emit log_named_uint("M-03 TERMINAL stranded amount (USDC 6dp)", stranded);
++    }
++}

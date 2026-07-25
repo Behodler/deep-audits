@@ -1,0 +1,76 @@
+{
+  "contract": "src/dispatchers/Uniboost.sol",
+  "commit": "d4cc563",
+  "story": "story-046 (nudge donation routed through INudgeStreamer)",
+  "profileTimestamp": "2026-07-25T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "inheritanceChain": ["ATokenDispatcherV2", "ITokenDispatcherV2", "Pausable", "Ownable", "ReentrancyGuard"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": true,
+    "checkedArithmetic": true,
+    "reentrancyGuarded": ["dispatch (base)", "pool (see contract)"],
+    "accessControlled": ["setPool", "setDonationSplit", "setRecipient", "setNudgeStreamer", "setPrimeToPairPath", "setAuthorizedPooler", "incrementAuthVersion", "setMinter", "setHook", "setMetadata"],
+    "weakRandomness": "none",
+    "inboundCallbackSurface": "none"
+  },
+
+  "newState": [
+    {"name": "nudgeStreamer", "type": "address", "init": "address(0), setter-only", "mutators": ["setNudgeStreamer (onlyOwner, require != 0)"], "readers": ["_dispatch"], "event": "NudgeStreamerUpdated"}
+  ],
+
+  "donationCallGraph": [
+    "donationEnabled = recipient != address(0) && donationSplit > 0",
+    "donationAmount = donationEnabled ? amount * donationSplit / 100 : 0        [FLOOR]",
+    "if (donationAmount > 0) {",
+    "  streamer = nudgeStreamer; require(streamer != 0, 'Uniboost: nudgeStreamer unset')",
+    "  IERC20(_primeToken).forceApprove(streamer, donationAmount)   [EXACT; NOT zeroed afterwards]",
+    "  INudgeStreamer(streamer).collectNudge(recipient, _primeToken, donationAmount)",
+    "}",
+    "// remainder stays on the contract as the prime balance the next pool() consumes"
+  ],
+  "removedBehaviour": "IERC20(_primeToken).safeTransfer(recipient, donationAmount) -- REMOVED, no fallback.",
+
+  "preconditionsAndInvariants": {
+    "disableSwitch": "recipient == address(0) OR donationSplit == 0 -> donationAmount == 0 -> the streamer is never touched. A donation-disabled Uniboost is fully deployable and dispatchable with nudgeStreamer == 0. VERIFIED.",
+    "zeroGuard": "if (donationAmount > 0) prevents NudgeStreamer__ZeroAmount AND scopes the mandatory-streamer requirement. LOAD-BEARING on both counts.",
+    "dustEdge": "donationAmount floors to 0 when amount * donationSplit < 100. Then no donation occurs and NO event is emitted -- silent, and the full amount is retained for pool(). Same as pre-change behaviour (the old safeTransfer was also skipped), so this is not a delta.",
+    "noTryCatch": "There is no failure isolation. A streamer failure reverts dispatch -> reverts NFTMinterV2.mint. Scoped to the live-donation branch only.",
+    "mintDebtDecoupling": "hook.onDispatch fires with the GROSS `amount`; donation split does not reduce accrued debt. Unchanged.",
+    "retainedBalanceAccounting": "pool(amountIn, ...) spends the retained prime BALANCE, not a tracked ledger. Since the donation now leaves the contract in exactly the same amount as before (approve+pull vs transfer), the retained balance is unchanged by story-046."
+  },
+
+  "decimalAndScale": {
+    "primeToken": "generic (constructor arg) -- NO decimal guard on this contract, unlike NudgeRatchet",
+    "conversions": "none; donationAmount is a percentage of `amount` in native prime units and is passed verbatim to collectNudge",
+    "streamerScale": "PRECISION=1e18 cancels; native units preserved for any decimals",
+    "driftWatchStatus": "M-03 decimal-under-mint class: CLEAN. But note the (recipient, _primeToken) stream must be registered against the SAME token this contract's `_primeToken` is; and the recipient batchMinter must have that token on its nudge whitelist (setNudgeTokenWhitelist rejects the batchMinter's own payment token -- see OBS-UB-2)."
+  },
+
+  "valueFlow": {
+    "successBranch": "minter -> uniboost; donationSplit% -> NudgeStreamer buffer[(recipient, primeToken)] -> recipient linearly. Remainder retained on the uniboost for pool().",
+    "failureBranch": "whole dispatch (and therefore the mint) reverts; nothing moves; nothing stranded on the uniboost.",
+    "strandOrDoublePay": "No double-pay. Strand risk lives on the streamer (buffer keyed to a recipient that is later re-pointed via setRecipient has no recovery path).",
+    "whoHoldsTokens": "During the stream window the NudgeStreamer holds the donation. Uniboost holds only the retained (non-donated) prime."
+  },
+
+  "externalCalls": [
+    {"target": "IERC20 _primeToken (immutable)", "methods": ["forceApprove", "balanceOf", "safeTransfer (pool path)"], "trustLevel": "semi-trusted"},
+    {"target": "INudgeStreamer nudgeStreamer (owner-settable)", "methods": ["collectNudge"], "trustLevel": "semi-trusted, cross-repo, NOT try/catch'd"},
+    {"target": "IUniswapV2Router02 _router", "methods": ["swapExactTokensForTokens", "addLiquidity"], "trustLevel": "trusted"},
+    {"target": "IUniswapV2Pair _targetPool", "methods": ["token0", "token1"], "trustLevel": "semi-trusted"},
+    {"target": "IDispatchHook hook", "methods": ["onDispatch"], "trustLevel": "semi-trusted"}
+  ],
+
+  "callerContext": {
+    "dispatchCaller": "NFTMinterV2.sol:191 (ATokenDispatcherV2.dispatch, onlyMinter)",
+    "poolCaller": "MultiPooler.pool(PoolCall[]) forwards one pool() per row, ALL-OR-NOTHING (no try/catch). Unchanged by this story, but relevant: the streamer change touches _dispatch only, not pool(), so MultiPooler batching is unaffected."
+  },
+
+  "localObservations": [
+    {"id": "OBS-UB-1", "type": "liveness-coupling", "function": "_dispatch", "line": 248, "note": "With the donation live, any streamer-side revert (unset, NotRegistered, or a failure inside the streamer's outbound _settle to `recipient`) reverts the mint. The disable switch (setRecipient(0) / setDonationSplit(0)) is the only remedy, and it requires an owner transaction while mints are down."},
+    {"id": "OBS-UB-2", "type": "config-coupling", "note": "CONDITIONAL. BatchNFTMinterMultiToken.setNudgeTokenWhitelist rejects the token equal to the RECIPIENT batchMinter's own pinned dispatcher's primeToken(). If Uniboost's `_primeToken` collides, registerStream can never succeed for that pair and the live donation branch reverts every mint. A later repoint of the batchMinter's tokenMinter/dispatcherIndex can also make an already-whitelisted token become the payment token, after which batchMint SKIPS it at runtime while collectNudge keeps accepting donations -- value accumulates in the streamer with no payout path. Deferred to interaction analysis; flagged as a wiring precondition this contract cannot check."},
+    {"id": "OBS-UB-3", "type": "residual-allowance", "function": "_dispatch", "line": 249, "note": "forceApprove(streamer, donationAmount) is never reset to zero; relies on collectNudge pulling the full amount. Same pattern as the other three."},
+    {"id": "OBS-UB-4", "type": "missing-guard", "note": "No decimal guard on `_primeToken` (contrast NudgeRatchet's 6-dp require). Not a new issue and harmless for the streamer, which is decimal-neutral."}
+  ]
+}
