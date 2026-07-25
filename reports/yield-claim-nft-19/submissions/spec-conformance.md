@@ -18,7 +18,7 @@ story deviation is never lost in gas/style noise.
 A deviation that *also* carries asset, value, or availability impact gets an H/M label and its own
 report, with the `F-XX` record here as its faithfulness cross-reference. **Each such issue is
 counted once and cross-referenced, never double-filed.** Two of this run's three records are the
-Law-2 framing of findings already carried elsewhere (M-01, M-02 / L-01, L-03); they are recorded
+Law-2 framing of findings already carried elsewhere (M-01, L-01, L-03); they are recorded
 here for spec-conformance continuity, not as additional findings.
 
 Consistent with prior-run practice (F-01-043 in run-15, F-01-044 in run-17, F-01-045 in run-18), a
@@ -187,10 +187,10 @@ event's NatSpec and say so in the contract-level ops note. Confidence: high.
 ## F-02-046 — a story cannot pre-declare a hazard out of scope: the mandatory-streamer NatSpec's "NOT an audit finding" is correct for deploy-ordering, over-broad for repoint
 
 - **Type:** story-unsafe (Law-1 override check applied; `securityEscalation: false` after assessment) · **Law 3** disposition
-- **Severity:** accepted **operational hazard** (Law-3 footgun); **cross-references QA finding L-01** (ledger **L-16**) **and security finding M-02**
+- **Severity:** accepted **operational hazard** (Law-3 footgun); **cross-references QA finding L-01** (ledger **L-16**), which is now the sole security-side carrier — the Medium drafted as `M-02` was **withdrawn** and folded into `L-01` (see `M-02.md`)
 - **Contracts:** `src/dispatchers/NudgeRatchet.sol:155-160`, `src/dispatchers/Uniboost.sol:246-250`, `src/dispatchers/PromotionUniV2_Eth.sol:392-396`
 - **Story:** `[story-046]` (commit `1745e83`)
-- **Counting:** the availability impact is counted **once**, as M-02 (with L-01 in the QA bundle for the ops-guidance aspect). This record is the Law-2/Law-3 framing.
+- **Counting:** the availability impact is counted **once**, as QA `L-01` (ledger `L-16`). It was previously counted as `M-02`; that Medium was withdrawn on 2026-07-25 when its stranding argument was refuted by mint atomicity, and `L-01` absorbed it. This record is the Law-2/Law-3 framing and remains a single, non-double-counted cross-reference.
 
 ### Spec text
 
@@ -333,7 +333,7 @@ Recorded so that silence is not misread as an unchecked area.
 | **story-046** | `1745e83` | **FAITHFUL — 5/5 intent items** | — | — | verified this run |
 | **story-047** | `d4cc563` | **FAITHFUL — 8/8 code items**, 1 doc deviation | — | — | verified this run |
 | **F-01-047** | story-047 | Documentation / monitoring-fidelity deviation | informational | QA **L-03** (ledger L-18) | NEW |
-| **F-02-046** | story-046 | Story's blanket "NOT an audit finding" over-broad for the repoint case | accepted operational hazard | QA **L-01** (ledger L-16) + **M-02** | NEW |
+| **F-02-046** | story-046 | Story's blanket "NOT an audit finding" over-broad for the repoint case | accepted operational hazard | QA **L-01** (ledger L-16) — `M-02` withdrawn, folded into `L-01` | NEW |
 | **F-03-046** | story-046/047 | Coverage gap — fifth donor un-routed | informational (Law-2 framing of a Medium) | **M-01** | NEW |
 | F-01-045 | story-045 | FULLY FAITHFUL across 8 intent items; Law-1 safe | open (info) | — | **carried (full copy below)** |
 | F-01-043 | story-043 | FAITHFUL across 6 ACs | open (info) | — | **carried (full copy below)** |
@@ -344,7 +344,7 @@ acknowledged in both the commit body and the NatSpec. The throttle-vs-cap mental
 — the code was not written under a wrong model of `NudgeStreamer`. **No Law-1 escalation:** no
 story's own intent introduces an exploit. The three records above are a documentation deviation, an
 over-broad in-story scope disclaimer, and a coverage gap — the latter two cross-referencing findings
-already counted as M-02 and M-01.
+already counted as QA `L-01` (formerly `M-02`, withdrawn and folded in) and M-01.
 
 ---
 ---

@@ -2,9 +2,10 @@
 
 - **Project:** `yield-claim-nft` @ [`d4cc563`](https://github.com/Behodler/yield-claim-nft/tree/d4cc563264c7d57cf4c22e9ba561743484a305cd) (stories 046 / 047)
 - **Run:** `reports/yield-claim-nft-19/`
-- **Scope of this document:** every Low and QA finding of run-19. High/Medium findings are submitted individually (`H-01`, `M-01`, `M-02`); Law-2 spec deviations are filed in the spec-conformance report, not here.
+- **Scope of this document:** every Low and QA finding of run-19. High/Medium findings are submitted individually (`H-01`, `M-01`); Law-2 spec deviations are filed in the spec-conformance report, not here.
 - **Re-severity note:** the finding drafted as `M-03` was re-severed **Medium → Low** after two successive walk-backs and now appears here as **`L-06`**. Submission `M-03.md` has been deleted so no stale Medium survives; the ledger entry (**M-06**, fingerprint `25a9ab3e…`) is unchanged apart from severity.
 - **Retraction notice (third walk-back of this run):** two drafted QA items, `Q-02` and `Q-03`, have been **withdrawn as invalid** — both targeted **audit-authored test files that do not exist in the sponsor's repository at `d4cc563`**. See **Appendix D**, where the retraction evidence is recorded in full and the surviving audit-harness substance is preserved as tooling hygiene. Their labels are **retired, not reused**; no other label was renumbered.
+- **Retraction notice (fourth walk-back of this run):** `M-02` has been **withdrawn as a Medium**, re-severed **Medium → Low**, and **folded into `L-01`** below as the `NudgeRatchet`-specific rider. Its stranding argument is refuted by mint atomicity — `NFTMinterV2._executeMint` transfers the payment and dispatches in one transaction, so no user payment can ever be resident on the dispatcher, and only out-of-band strays can be. The proposed reopen of ledger entry **L-08** (`0b97f155…`) is **DECLINED**; L-08 stays `fixed`. `M-02.md` is retained as the retraction record (it is not a submission). The label `M-02` is **retired, not reused**; no ledger entry was minted for it, because its surviving half was already filed as ledger **L-16** = `L-01` here.
 
 ## Summary
 
@@ -15,6 +16,7 @@
 | Centralization | 0 |
 | **Total** | **7** |
 | *Withdrawn as invalid (Appendix D)* | *2* |
+| *Re-severed Medium → Low (`M-03` → `L-06` as its own label; `M-02` folded into `L-01`, no new label)* | *2* |
 
 **Centralization: none this run.** All 69 Tier-1 `centralization-risk` hits were suppressed under Law 3 (the owner is trusted for *knowing* actions). The three owner footguns this run (`L-06`, `L-01`, `L-02`) are **not** centralization findings — they are non-obvious operational hazards classified by the impact they unlock, and `H-01` is not centralization either because the value is taken by an *unprivileged third party*.
 
@@ -22,7 +24,7 @@
 
 | C4 | Ledger | Fingerprint |
 |---|---|---|
-| L-01 | L-16 | `b0aa0f58` |
+| L-01 | L-16 (also absorbs the withdrawn `M-02`; **no** entry minted under `03864c76`) | `b0aa0f58` |
 | L-02 | L-17 | `79a2cd4a` |
 | L-03 | L-18 | `482cefc3` |
 | L-04 | L-19 | `9fdcb0c6` |
@@ -66,7 +68,7 @@ IERC20(token).forceApprove(nudgeStreamer, 0); // add: match the PSM approval 11 
 
 Clearing the condition requires two calls in sequence: `setNudgeTokenWhitelist` on the batch minter, **then** `registerStream` on the `NudgeStreamer` — a contract in a **different repository**, potentially behind a different owner key.
 
-**Impact: availability only.** No value is at risk. The revert is transaction-atomic, so the user's payment rolls back in full; the failure is loud and visible on the very first mint after the repoint; and `NFTMinterV2`'s `config.disabled` is an owner backstop for taking the index out of service while the registration is arranged.
+**Impact: availability, plus temporarily unsweepable out-of-band funds on `NudgeRatchet`.** No *user* value is at risk: the revert is transaction-atomic, so the user's payment rolls back in full; the failure is loud and visible on the very first mint after the repoint; and `NFTMinterV2`'s `config.disabled` is an owner backstop for taking the index out of service while the registration is arranged. The one value-adjacent consequence is confined to strays already sitting on the contract — see the `NudgeRatchet`-specific rider below.
 
 **Why this stays in the report — and what was correctly suppressed**: the **repoint** sub-case is genuinely surprising (silent arming, cure in another repo), which is the Law-3 keep test. The **deploy-ordering** sub-case — a freshly deployed dispatcher whose stream was never registered — was **correctly suppressed as obvious under Law 3** (SUB-02): it fails on the very first dispatch, before any user traffic exists, so a competent non-malicious owner is not surprised by it. The shipped NatSpec pre-declaring this "NOT an audit finding" is accurate for deploy-ordering and over-broad for repoint.
 
@@ -85,7 +87,17 @@ function setBatchMinter(address newMinter) external onlyOwner {
 }
 ```
 
-**Do not merge** with `M-02` (which additionally leaves funds behind with no rescue path) or `L-06` (same `contract:function`, different root-cause class, different fingerprint).
+**`NudgeRatchet`-specific rider (folded in from the withdrawn `M-02`).** Of the three repointable dispatchers, `NudgeRatchet` is the only one with **no `rescueERC20`** (`BalancerPoolerV2`, `Uniboost`, `PromotionUniV2_Eth` and `NudgeRatchetDelayRelease` each have one). While the wedge is armed, the contract's `_dispatch` full-balance sweep — its only outbound path — cannot run, so any **out-of-band** USDC sitting on it (mis-send, airdrop, ops pre-funding) is unsweepable for the duration.
+
+That rider does **not** raise this above Low, and the reason is worth stating because a Medium was drafted on the opposite reading and withdrawn:
+
+- **No user payment can ever be resident.** `NFTMinterV2._executeMint` does the `safeTransferFrom(user, dispatcher, price)` and the `dispatch(...)` **in one transaction** (`src/NFTMinterV2.sol:181-190`); a reverting streamer leg reverts the inbound transfer with it.
+- **No successful dispatch leaves a remainder.** The sweep approves the full `bal` and `NudgeStreamer.collectNudge:149` pulls exactly that in a single `safeTransferFrom` — no partial pull.
+- **Out-of-band strays are therefore the only residency path, and they are not permanently stranded** — the owner cures the registration and the next dispatch sweeps them, exactly as ledger entry `L-08`'s story-038 closure intended.
+
+Permanent unreachability needs the shared streamer to fail permanently (e.g. a USDC blacklist on the streamer address, PoC `test_T2d`), which is out-of-protocol, unaffected by anything in this repo, and **owner-accepted**: `NudgeStreamer`'s liveness and registration promises are universal across every donor, not a `NudgeRatchet` defect. A `NudgeRatchet`-local `rescueERC20`, a `donationEnabled` degraded mode, and a streamer-side owner rescue were all considered and declined on that basis (see `M-02.md` §5).
+
+**Do not merge** with `L-06` (same `contract:function`, different root-cause class, different fingerprint). The previous "do not merge with `M-02`" instruction is **void** — `M-02` was withdrawn and its surviving substance is the rider above.
 
 ---
 
@@ -144,7 +156,7 @@ if (gemAmt > 0) {
 
 **(b) Lost failure isolation.** Post-story-046 the donation branch has **no try/catch**, so a live donation now depends on **two** token movements inside a foreign contract rather than one leaf transfer. The consequence claimed here is narrow and purely structural: a revert anywhere in the donation leg now **reverts the whole dispatch** instead of degrading it, where previously the leaf transfer was isolated. *No claim is made about token semantics* — hooks, transfer callbacks and fee-on-transfer behaviour are **out of scope** for this finding (see Impact).
 
-> **Cross-reference:** sub-part (b) overlaps `M-02`'s **recommendation 2** (restore degradation around the donation leg). One fix discharges both; they are counted once and should be scheduled together.
+> **Cross-reference:** sub-part (b) overlapped the degraded-mode recommendation of the withdrawn `M-02`. That recommendation has been **declined** (the mandatory-streamer coupling is accepted as universal), so this sub-part now stands on its own — `BalancerPoolerV2` already *has* the `try/catch` and the `donationEnabled` switch; the issue here is that the switch also disables the recovery sweep.
 
 **Impact**: no exploit at the live USDC topology, and none is asserted. The generic malicious-token vector (KI-2) and the fee-on-transfer claim (KI-3 / the C4 known-invalid rule) were **removed at sanitisation** (SUB-03 / SUB-04) and are **not** reintroduced here in any form. What survives is exactly two things, both independent of token semantics: the first-party constructor guard asymmetry against the two siblings, and the structural loss of revert isolation.
 
@@ -283,8 +295,8 @@ Reviewer notes on the automated output:
 Two drafted QA items were **pulled as invalid** after adversarial validity review. Both made the same
 mistake: they targeted **files authored by this audit**, not files in the sponsor's repository, while
 carrying upstream permalinks that implied otherwise. The retraction is recorded here rather than
-performed silently, matching the two earlier walk-backs this run (`L-06`'s severity history, `M-02`'s
-expired closure).
+performed silently, matching the other walk-backs this run (`L-06`'s severity history, and `M-02`'s
+withdrawal — its expired-closure basis was itself refuted; see `M-02.md`).
 
 ### ~~[Q-02]~~ WITHDRAWN — "the entire test suite did not compile at the audited commit"
 
@@ -346,4 +358,4 @@ upstream permalink — before it is filed against the project.
 
 ## Parked, not dropped
 
-Seven items remain in the visible manual-review channel awaiting a human decision at `/ledger` triage: **MR-01** (live stream `duration`, which sizes `L-06`), **MR-02** (cross-stream shared-balance solvency — *not* closed by `L-04`), **MR-03** (scope boundary for `H-01`'s nested-`lib/` root cause), **MR-04** (`StableYieldAccumulator.claim()`'s unbuffered nudge split — a cross-project lead), **MR-05** / **MR-06** (two unadjudicated static hits, both likely benign), and **MR-07** (the ledger-integrity alert behind `M-02`'s expired closure). None were quality-filtered out; see `manual-review.json`.
+Seven items remain in the visible manual-review channel awaiting a human decision at `/ledger` triage: **MR-01** (live stream `duration`, which sizes `L-06`), **MR-02** (cross-stream shared-balance solvency — *not* closed by `L-04`), **MR-03** (scope boundary for `H-01`'s nested-`lib/` root cause), **MR-04** (`StableYieldAccumulator.claim()`'s unbuffered nudge split — a cross-project lead), **MR-05** / **MR-06** (two unadjudicated static hits, both likely benign), and **MR-07** (the ledger-integrity alert behind the `M-02` expired-closure claim — **now adjudicated**: the reopen of ledger `L-08` was declined and the expired-closure basis refuted, see `M-02.md`). None were quality-filtered out; see `manual-review.json`.
