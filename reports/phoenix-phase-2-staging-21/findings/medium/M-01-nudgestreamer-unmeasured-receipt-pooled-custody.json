@@ -1,0 +1,209 @@
+{
+  "id": "M-01",
+  "sourceId": "DEV-01",
+  "project": "phoenix-phase-2-staging",
+  "status": "ready",
+  "severity": "medium",
+  "title": "NudgeStreamer.collectNudge credits the buffer with the amount SENT, not received, against a POOLED per-token balance — one taxed token drains sibling streams and bricks batchMint for every reward token",
+  "contract": "lib/nft-staking/src/NudgeStreamer.sol",
+  "function": "collectNudge / _settle / _accrued",
+  "line": 149,
+  "lineStart": 149,
+  "lineEnd": 150,
+  "entryPoint": "dev",
+  "fingerprint": "a753907e2a4c6261389ea642ede743e198b50741d4bcb43fa8bad900729174d1",
+  "fingerprintInput": "lib/nft-staking/src/NudgeStreamer.sol:collectNudge / _settle / _accrued:UnmeasuredTokenReceipt:dev",
+  "fingerprintFormula": "sha256(contract:function:rootCauseClass:entryPoint)",
+  "origin": "new",
+  "auditedCommit": "3fb4e34",
+  "rootCauseClass": "UnmeasuredTokenReceipt",
+  "category": "unintended-side-effect",
+  "propagation": "PROPAGATES-TO-MAINNET",
+  "plausibility": "plausible",
+  "regression": false,
+  "faithfulness": false,
+  "description": "`collectNudge` performs `IERC20(token).safeTransferFrom(msg.sender, address(this), amount); s.buffer += amount;` (:149-150) with no balance-delta measurement. The streamer holds a SINGLE POOLED balance per token across every `(batchMinter, token)` pair, while `_settle` caps payouts against the per-stream accounting buffer (`_accrued`, :193-200), not against real custody. The contract NatSpec at :194-196 asserts 'The buffer cap guarantees the streamer can never transfer more than it holds, even if elapsed is large' — that guarantee is PER-STREAM whereas custody is POOLED PER-TOKEN, so it does not hold across pairs. The deploy-script probe at DeployMocks.s.sol:1661 is the only defence anywhere and it is VACUOUS: it runs solely against MockKendu and MockPhUSD, both defined with no transfer fee, so it cannot fail locally. There is no on-chain guard.",
+  "impact": "For any reward token that is fee-on-transfer, taxed, or reflection-based: (1) the credited buffer immediately exceeds custody; (2) whichever `(batchMinter, token)` pair settles first is paid its full over-stated buffer out of the shared balance, consuming the backing of the other pairs; (3) the later pair's `pullPendingStream` REVERTS on insufficient balance; and (4) because `BatchNFTMinterMultiToken.batchMint` loops `pullPendingStream` over `getNudgeTokens()` inside one transaction (:539), a single tainted token bricks batchMint for ALL reward tokens — the entire mint path, not just the tainted reward. Kendu Inu is a memecoin whose real transfer semantics are unverified, and MockKendu's own NatSpec states the mock is deliberately fee-free because the streamer assumes exact delivery.",
+  "attackPath": [
+    "1. Owner whitelists a fee-on-transfer / taxed / reflection token as a nudge token via setNudgeTokenWhitelist (non-obvious footgun; Kendu Inu's real transfer semantics are unverified on-chain).",
+    "2. A donor calls collectNudge(batchMinter, token, amount); NudgeStreamer.sol:149-150 does safeTransferFrom then `s.buffer += amount` with no balance-delta measurement, so the credited buffer exceeds actual custody by the tax.",
+    "3. A second (batchMinter, token) pair is registered on the SAME token. Custody is pooled per token; the cap in _accrued is per STREAM, so total credited buffers now exceed the single pooled balance.",
+    "4. Whichever pair settles first is paid its full over-stated buffer out of the shared balance, consuming the other pair's backing.",
+    "5. The later pair's pullPendingStream reverts on insufficient balance.",
+    "6. batchMint, which loops pullPendingStream over all whitelisted tokens in one tx, now reverts for ALL reward tokens - the whole mint path is down, not just the tainted reward."
+  ],
+  "evidence": "PoC workspace/phoenix-phase-2-staging/test/AuditDevNudgeStreamerFoT.t.sol — 4/4 PASS against the REAL NudgeStreamer with a 5% fee-on-transfer ERC20. (A) buffer 100,000e18 vs custody 95,000e18. (B) two pairs of the same token: buffers 200,000e18 vs pooled custody 190,000e18; pair A settles and the streamer pays out its full 100,000, leaving 90,000 against pair B's 100,000 claim; B's pullPendingStream reverts. (C) a clean token settles fine in isolation while the tainted token reverts — and batchMint shares one transaction. (D) at feeBps==0 the divergence vanishes entirely, confirming the DeployMocks probe passes vacuously by construction. Also confirmed on the live local chain: streamer balance EXACTLY equals the credited buffer for all three tokens, i.e. the condition under which this finding is invisible.",
+  "recommendation": "Measure the receipt in `collectNudge`: `uint256 before = IERC20(token).balanceOf(address(this)); safeTransferFrom(...); uint256 received = IERC20(token).balanceOf(address(this)) - before; s.buffer += received;` and recompute the rate from `received`. If fee-on-transfer tokens are intended to be permanently out of scope, add an on-chain probe in `registerStream` (which is already owner-gated and is the natural admission point) rather than relying on a deploy-script assert against a mock that cannot fail. Independently, verify the real Kendu token's transfer semantics on-chain BEFORE `setNudgeTokenWhitelist` on mainnet.",
+  "classification": {
+    "c4Criterion": "C4 Medium - 'the function of the protocol or its availability could be impacted ... with stated assumptions, but external requirements'.",
+    "assetImpact": "No theft and no economic loss. Two distinct effects, deliberately rated on the availability axis only: (a) CROSS-PAIR CONSUMPTION - pair A's settlement is paid out of the pooled per-token balance that also backs pair B, so B's backing is consumed. Because Phoenix nudge pots are funded by yield on protocol-owned capital, this is MISALLOCATION between two legitimate recipient pots, NOT a value leak, and is expressly not scored as economic loss (repo rule: externally-derived yield is opportunity cost, not loss). (b) AVAILABILITY BRICK - the under-backed pair's pullPendingStream reverts, and because BatchNFTMinterMultiToken.batchMint loops pullPendingStream over the entire getNudgeTokens() whitelist inside one transaction (verified at top-level HEAD, BatchNFTMinterMultiToken.sol:527-532), a single tainted token bricks the ENTIRE mint path for every reward token. This is the load-bearing impact and it is a protocol-function failure.",
+    "attackPath": [
+      "1. Owner whitelists a fee-on-transfer / taxed / reflection token as a nudge token via setNudgeTokenWhitelist (non-obvious footgun; Kendu Inu's real transfer semantics are unverified on-chain).",
+      "2. A donor calls collectNudge(batchMinter, token, amount); NudgeStreamer.sol:149-150 does safeTransferFrom then `s.buffer += amount` with no balance-delta measurement, so the credited buffer exceeds actual custody by the tax.",
+      "3. A second (batchMinter, token) pair is registered on the SAME token. Custody is pooled per token; the cap in _accrued is per STREAM, so total credited buffers now exceed the single pooled balance.",
+      "4. Whichever pair settles first is paid its full over-stated buffer out of the shared balance, consuming the other pair's backing.",
+      "5. The later pair's pullPendingStream reverts on insufficient balance.",
+      "6. batchMint, which loops pullPendingStream over all whitelisted tokens in one tx, now reverts for ALL reward tokens - the whole mint path is down, not just the tainted reward."
+    ],
+    "likelihood": "medium-low as a trigger, high as a consequence once triggered. There is NO external attacker and no unauthorised actor anywhere in the path; the trigger is an owner whitelisting decision. It is nonetheless a genuine Law-3 footgun rather than trusted-owner noise: a competent, non-malicious owner would be surprised that whitelisting one memecoin bricks minting for every reward token, and the contract's own NatSpec at :193-195 tells them the opposite.",
+    "assumptions": "(1) A fee-on-transfer / taxed / reflection token is whitelisted as a nudge token. (2) For the cross-pair drain specifically, at least two (batchMinter, token) pairs share one token; the single-pair case yields under-delivery and a stuck residual rather than a revert. (3) FoT is IN SCOPE for this family - the C4 'weird ERC-20 / fee-on-transfer' known-invalid predicate does NOT fire, because phoenix-nft-staking story-022 s4.4 documents FoT explicitly and the defect is a first-party accounting bug in NudgeStreamer.sol, not a request for weird-token support.",
+    "externalRequirements": "Owner must admit a taxed token through setNudgeTokenWhitelist. No timing, MEV, price or third-party dependency."
+  },
+  "severityRationale": "MEDIUM, matching the auditor's proposal. Held AT medium from both directions. NOT ESCALATED TO HIGH: nothing is stolen and nothing leaves the protocol perimeter - there is no attacker, no external beneficiary, and the shortfall manifests as a REVERT plus a stranded residual, not as extraction. The cross-pair effect moves value between two legitimate protocol-owned pots, which under this repo's standing rule on externally-derived yield is misallocation and never a value leak. The condition is also owner-reversible (de-whitelist the tainted token, or top the streamer up by the accumulated tax) so the brick is not terminal. NOT DEFLATED TO LOW: the availability failure is PROVEN, not argued - PoC workspace/phoenix-phase-2-staging/test/AuditDevNudgeStreamerFoT.t.sol is 4/4 PASS against the REAL NudgeStreamer (case A over-credit, case B cross-pair drain + revert, case C one tainted token reverts the whole loop, case D the divergence vanishes at feeBps==0). Case D is what makes this reportable rather than theoretical: it proves the only defence in the system - the DeployMocks.s.sol:1661 probe - is VACUOUS BY CONSTRUCTION, since it runs solely against MockKendu and MockPhUSD which are both fee-free, so it cannot fail. There is no on-chain guard anywhere. SEVERITY-RAISING FACTOR: the contract NatSpec at NudgeStreamer.sol:193-195 affirmatively asserts 'The buffer cap guarantees the streamer can never transfer more than it holds' - the guarantee is per-STREAM while custody is POOLED PER-TOKEN, so it is false across pairs. Per this repo's standing principle, falsely-exhaustive documentation raises severity rather than lowering it: it is the reason an operator would never think to check, and it is why this does not settle at Low as a documented design constraint. PROPAGATES-TO-MAINNET and verified against top-level submodule HEAD (lib/phoenix-nft-staking/src/NudgeStreamer.sol is byte-identical to the nested pin lib/nft-staking, so this is not a stale-pin artefact).",
+  "severityAgreement": "AGREE with proposed medium",
+  "proposedSeverity": "medium",
+  "classifierNotes": "DISCLOSED RE-FILE, NOT AN OVERRIDE: phoenix-nft-staking bfdb50105e (Q-03, qa, WONT-FIX) accepted the FoT class on BatchNFTMinterMultiToken._payRewards on the express stated premise that 'there is NO path where A's token choice costs an unrelated B'. DEV-01 supplies exactly that path via POOLED per-token custody across (batchMinter, token) pairs. The prior human triage is preserved and untouched; recommend the human re-weigh bfdb50105e in light of PoC case B. Keep SEPARATE from phoenix-nft-staking 6f46ec80f1 (L-03), which attacks the same NatSpec block on the TIMING axis; DEV-01 is the CUSTODY axis with a different fix.",
+  "dedup": {
+    "dedupId": "DEDUP-DEV-001",
+    "dedupDisposition": "KEPT — genuinely new, cross-run verified",
+    "originalIds": [
+      "DEV-01"
+    ],
+    "dedupRationale": "Verified against all prior NudgeStreamer/collectNudge prior art in the family ledgers. NOT a duplicate of any of them: this is a custody-accounting defect (credited-vs-received amount against a POOLED per-token balance shared across (batchMinter,token) pairs), not a timing, wiring or re-key issue. Medium + PROPAGATES-TO-MAINNET: protected from collapse under Law 1.",
+    "crossRunLinks": [
+      {
+        "ledger": "phoenix-nft-staking",
+        "entry": "6f46ec80f1 (L-03)",
+        "status": "open",
+        "relation": "ADJACENT-NOT-DUPLICATE",
+        "note": "L-03 attacks the SAME NatSpec block (streamer 'cap' claims) but on the TIMING axis: 'time-throttle not value-cap'. DEV-01 attacks the CUSTODY axis: the per-stream buffer cap is not backed by per-stream custody. Different root cause, different fix (measure receipt / admission probe vs. NatSpec reword). Keep separate."
+      },
+      {
+        "ledger": "phoenix-nft-staking",
+        "entry": "4a1d8edc92 (L-01)",
+        "status": "open",
+        "relation": "SAME-CONTRACT-DIFFERENT-DEFECT",
+        "note": "L-01 = no rescue, buffers strand on decommission. DEV-01 = buffer over-credited relative to custody. Disjoint."
+      },
+      {
+        "ledger": "phoenix-nft-staking",
+        "entry": "aaebb4b9b0 (L-02)",
+        "status": "open",
+        "relation": "SAME-FUNCTION-DIFFERENT-DEFECT",
+        "note": "L-02 = collectNudge dust window-reset griefing (rate re-amortisation). DEV-01 = collectNudge unmeasured receipt. Same function, disjoint root causes."
+      },
+      {
+        "ledger": "phoenix-nft-staking",
+        "entry": "bfdb50105e (Q-03)",
+        "status": "wont-fix (qa)",
+        "relation": "SAME-CLASS-DIFFERENT-CONTRACT — RE-FILE, DISCLOSED",
+        "note": "Q-03 is the fee-on-transfer class on BatchNFTMinterMultiToken._payRewards, owner WONT-FIX. Its triage reason states verbatim: 'The caller chooses BOTH the token AND the recipient, the fee accrues to the token's own sink (no extraction by anyone), and there is NO path where A's token choice costs an unrelated B.' RE-FILE BASIS: DEV-01 supplies exactly the path Q-03's acceptance says does not exist — NudgeStreamer custody is POOLED PER TOKEN across (batchMinter,token) pairs, so pair A's settlement consumes pair B's backing and B's pullPendingStream reverts (PoC case B). Additional delta: BatchNFTMinterMultiToken.batchMint loops pullPendingStream over the whole whitelist in one tx, so one tainted token bricks the mint path for ALL reward tokens. The Q-03 wont-fix is NOT overridden and is NOT cited as suppression."
+      },
+      {
+        "ledger": "phoenix-nft-staking",
+        "entry": "bfdb50105e (Q-03) triage note",
+        "status": "wont-fix",
+        "relation": "KNOWN-INVALID-PREDICATE-DOES-NOT-FIRE",
+        "note": "Pre-empting a C4 'fee-on-transfer tokens are known-invalid' objection: the same triage note records that 'story-022 §4.4 documents FoT explicitly, so the C4 known-invalid predicate does not fire'. FoT is in scope for this family. (Recorded for the sanitizer/validity-checker; no suppression applied here — sanitizer is BLOCKED this run.)"
+      },
+      {
+        "ledger": "stable-yield-accumulator",
+        "entry": "5292756503 (M-02, error 0xd62cbfe8)",
+        "status": "fixed (with knowingly-accepted residual)",
+        "relation": "NOT-A-DUPLICATE",
+        "note": "0xd62cbfe8 is NudgeStreamer__NotRegistered — a stream-KEYING/wiring brick from setRewardToken re-keying an armed rail. DEV-01 involves no re-keying: the stream stays registered and correctly keyed, and fails on token custody. Disjoint. NOTE the M-02 closure text is nonetheless directly relevant to this run: it defers its three residual paths 'to a forthcoming dedicated deploy script, to be reviewed here under /audit-script' — i.e. to an audit of this shape. See the DEV-09 link."
+      }
+    ]
+  },
+  "sanitization": {
+    "disposition": "PASSED",
+    "suppressed": false,
+    "note": "KEPT. C4 known-invalid 'fee-on-transfer / weird ERC-20' predicate does NOT fire: DEV-01 is a first-party accounting defect in NudgeStreamer.sol (buffer += amount without receipt measurement, against POOLED per-token custody with a per-stream cap), not a request for weird-token support; and phoenix-nft-staking story-022 §4.4 documents FoT explicitly, so the token class is in-scope by the project's own spec. Reproduced by a 4/4-passing PoC (cross-pair drain + batchMint brick). In scope: lib/nft-staking is a FIRST-PARTY Behodler-org submodule, not a third-party dependency.",
+    "knownIssueSuppressionApplied": false,
+    "c4KnownInvalidApplied": true,
+    "c4KnownInvalidResult": "no category fires",
+    "blockedKnownIssueNote": "Cached KI #2 (mock contracts / testing infrastructure) could have been mis-stretched over DEV-01 because its vacuity evidence involves MockKendu/MockPhUSD. NOT SUPPRESSED, and would be wrong even if the KI list were live: the defect is in the FIRST-PARTY contract NudgeStreamer.sol, not in a mock; the mocks only explain why the local probe cannot detect it."
+  },
+  "reconciliation": {
+    "fingerprint": "a753907e2a4c6261389ea642ede743e198b50741d4bcb43fa8bad900729174d1",
+    "fingerprintInput": "lib/nft-staking/src/NudgeStreamer.sol:collectNudge / _settle / _accrued:UnmeasuredTokenReceipt:dev",
+    "legacyPathVariantChecked": null,
+    "origin": "new",
+    "ledgerMatch": null,
+    "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+    "firstSeenRun": "phoenix-phase-2-staging-21",
+    "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+    "regressionOf": null,
+    "priorStatus": null,
+    "disclosedRefile": {
+      "priorEntry": "phoenix-nft-staking :: bfdb50105e (Q-03, qa, wont-fix)",
+      "relation": "SAME-CLASS-DIFFERENT-CONTRACT — DISCLOSED RE-FILE, NOT AN OVERRIDE",
+      "basis": "Different project ledger, different contract (NudgeStreamer.sol vs BatchNFTMinterMultiToken.sol) and different function => different fingerprint. Q-03's wont-fix reason states verbatim there is 'NO path where A's token choice costs an unrelated B'; DEV-01 supplies exactly that path via POOLED per-token custody across (batchMinter,token) pairs. The prior human triage is preserved and untouched; this is a new instance whose facts contradict the prior acceptance's stated premise. Recommend the human re-weigh bfdb50105e in light of DEV-01."
+    }
+  },
+  "disclosure": {
+    "kind": "DISCLOSED-REFILE",
+    "priorLedger": "phoenix-nft-staking",
+    "priorEntry": "bfdb50105e",
+    "priorLabel": "Q-03",
+    "priorSeverity": "qa",
+    "priorStatus": "wont-fix",
+    "priorTriageReasonVerbatim": "The caller chooses BOTH the token AND the recipient, the fee accrues to the token's own sink (no extraction by anyone), and there is NO path where A's token choice costs an unrelated B.",
+    "refileBasis": "DEV-01 supplies exactly the path the prior acceptance states does not exist. NudgeStreamer custody is POOLED PER TOKEN across (batchMinter, token) pairs while the buffer cap in _accrued is PER STREAM, so pair A's settlement is paid out of the balance backing pair B, and B's pullPendingStream then reverts (PoC case B). Additional delta beyond Q-03's scope: BatchNFTMinterMultiToken.batchMint loops pullPendingStream over the whole getNudgeTokens() whitelist inside one transaction, so a single tainted token bricks the mint path for ALL reward tokens.",
+    "overrideOfPriorTriage": false,
+    "priorTriageUntouched": true,
+    "actionForHuman": "Re-weigh phoenix-nft-staking bfdb50105e in light of DEV-01 PoC case B. The wont-fix is NOT overridden by this run and was NOT edited; bfdb50105e also carries a TIER-3 RIDER that must remain intact.",
+    "keepSeparateFrom": "phoenix-nft-staking 6f46ec80f1 (L-03) attacks the same NatSpec block on the TIMING axis; DEV-01 is the CUSTODY axis with a different fix. Do not collapse."
+  },
+  "poc": {
+    "file": "workspace/phoenix-phase-2-staging/test/AuditDevNudgeStreamerFoT.t.sol",
+    "status": "passing",
+    "result": "4/4 PASS against the REAL NudgeStreamer with a 5% fee-on-transfer ERC20 (case A over-credit, case B cross-pair drain + revert, case C one tainted token reverts the whole batchMint loop, case D divergence vanishes at feeBps==0 proving the DeployMocks:1661 probe is vacuous by construction).",
+    "command": "forge test --match-path test/AuditDevNudgeStreamerFoT.t.sol -vv",
+    "lastRun": "2026-07-29"
+  },
+  "pocRequired": true,
+  "knownIssuesSuppression": {
+    "enabled": false,
+    "reason": "BLOCKED this run - registered-projects.json declares lib/phoenix-phase-2-staging/known-issues.md (11 cached issues, snapshot 2026-01-09T15:30:00Z) but the file does not exist on disk. No finding suppressed on that basis (Law 1)."
+  },
+  "parkedItemsCarriedForward": [
+    {
+      "id": "MR-DEV-001",
+      "kind": "OMITTED-CANDIDATE — RECOMMEND FILING AS A CONTRACT FINDING",
+      "confidence": "high (source-verified this run)",
+      "reason": "Constraint-4 check. mock-fidelity.md §2 documents a MOCK gap, but embedded in it is a first-party CONTRACT defect that appears nowhere in candidate-findings.json and would otherwise leave this run invisibly. The deduplicator does not mint findings; parked here so it is not lost.",
+      "title": "ERC4626YieldStrategy.previewRedeem / previewDeposit view passthroughs still STATICCALL the underlying vault — the story-060 / YS-01 Tokemak fix is one-directional",
+      "propagation": "PROPAGATES-TO-MAINNET",
+      "contract": "lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "function": "previewRedeem / previewDeposit",
+      "lineStart": 73,
+      "lineEnd": 85,
+      "rootCauseClassProposed": "StaticcallOnStateMutatingPreview",
+      "entryPoint": "dev",
+      "sourceVerification": "Read against the TOP-LEVEL submodule HEAD lib/reflax-yield-vault (not a nested stale pin). :73-75 `return vault.previewDeposit(assets);` and :83-85 `return vault.previewRedeem(shares);`, both declared `external view` => Solidity emits STATICCALL. Twenty lines below, :110-115 credits principal via `vault.convertToAssets(sharesReceived)` with an in-source comment naming the exact hazard: 'Use convertToAssets (NOT previewRedeem): convertToAssets is ERC4626-mandated STATICCALL-safe, whereas some real vaults (e.g. Tokemak Autopools) mutate state inside previewRedeem and revert with StateChangeDuringStaticCall when called as an external view.' The authors therefore knew the hazard and hardened ONE call site.",
+      "whyItMatters": "Against a real Tokemak Autopool these two views revert for every caller, always; against MockAutoDOLA (plain un-overridden OZ ERC4626) they return a clean number, always. The local rig therefore reports green on the exact behaviour that already bricked this project's YS-swap suite. Blast radius today is UI/keeper reads (no first-party on-chain caller found), which is why this is parked for triage rather than asserted as a Medium.",
+      "crossRunPriorArt": {
+        "ledger": "phoenix-phase-2-staging",
+        "entry": "28d5044e4e",
+        "label": "YS-01 lineage",
+        "severity": "medium",
+        "status": "acknowledged",
+        "entryPoint": "migrate:ys-swap-deploy",
+        "contractOfPrior": "ERC4626YieldStrategy._acquireShares",
+        "relation": "SAME-ROOT-CAUSE-DIFFERENT-FUNCTION => DIFFERENT FINGERPRINT",
+        "disclosure": "The prior entry is 'Story-060 fix line (vault.previewRedeem) reverts against the real Tokemak Autopool vaults', acknowledged on the _acquireShares deposit path — the path that was subsequently fixed by the convertToAssets swap. That acknowledgement does NOT cover previewRedeem/previewDeposit at :73-85, which are a different function and were never touched. This must not be auto-suppressed under 28d5044e4e."
+      },
+      "corroboratingMemory": "stable-yield-accumulator run-14 note: 'the guard is ONE-DIRECTIONAL, residual paths reproduce'. Same shape, independently observed here.",
+      "secondaryGapsInTheSameMockSection": [
+        "No maxRedeem/maxWithdraw check before `vault.redeem` in _disposeShares (:128-135): against a real Autopool with a liquid reserve below the request, user withdrawals brick. Locally impossible to reproduce.",
+        "MockAutoDOLA._updateYield() mints assets into the vault BEFORE super._deposit mints shares, so convertToAssets(sharesReceived) > amount and creditedPrincipal at :115 can EXCEED the deposited amount — the precise opposite of that line's stated intent. Any local invariant asserting 'principal is never over-credited' passes VACUOUSLY. Flagged because a vacuous-harness result is a known repeat failure mode in this repo."
+      ],
+      "recommendedAction": "Route to the script-auditor / code-scanner for a proper finding record with a fingerprint of its own (contract:function:StaticcallOnStateMutatingPreview:dev), or to /ledger for an explicit human decision. Do NOT fold into 28d5044e4e."
+    },
+    {
+      "id": "FAITH-L1-001 reopen trigger",
+      "channel": "spec-conformance F-04 + ledger reopenTrigger",
+      "law": "Law 1 — visible channel, with reason",
+      "note": "FAITH-L1-001 is rated Low ONLY because the sanctioned mainnet config registers a stream for USDC alone. If a Kendu stream is ever registered without a completed real-token round-trip against 0xaa95f26e30001251fb905d264aa7b00ee9df6c18, it becomes a live Medium instance of DEV-01 against real custody. BLOCKING PRE-BROADCAST ACTION: tick story 072 Preflight line 514 against the REAL token; story 073's MockKendu probe does not discharge it."
+    }
+  ],
+  "metadata": {
+    "createdAt": "2026-07-29",
+    "updatedAt": "2026-07-29",
+    "run": "phoenix-phase-2-staging-21",
+    "scanOrigin": "audit-script:dev",
+    "classificationOrigin": "script-audits/dev/findings-final.json",
+    "storyScoped": "story-073 (this run did NOT scan the whole project; lastAuditedCommit deliberately NOT advanced)"
+  }
+}

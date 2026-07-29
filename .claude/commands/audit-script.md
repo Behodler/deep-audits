@@ -87,12 +87,39 @@ Run the standard back half on the candidate findings:
 
 ## 7. Narrative review
 Invoke **report-writer** (script-review mode): assemble `script-audits/<entryPoint>/review.md` from `intent.md`, `side-effects.json`, the cluster analysis, and the classified findings — structured around the three questions (intent / side effects / knock-on), linking each structured finding and its location.
+- The **findings register** table is `Label | Sev | What | Mitigation | Where`. The `Mitigation` cell is a one-line compression of the finding's `recommendation` field and **must never be empty** — a finding filed without a stated fix is an incomplete finding, not a terse one. If `recommendation` is genuinely absent from the record, that is a defect to fix upstream in the classified finding, not to paper over in the table.
 
 ## 8. PoCs for High/Medium (where demonstrable)
 For each new/regressed High/Medium whose impact is concretely reproducible (e.g. "mint(4) reverts after this script alone"):
 - Invoke **poc-generator**: a fork-based forge test in `workspace/<project>/test/`.
 - Invoke **poc-validator**: confirm it compiles and demonstrates the exact behavior.
 - Invoke **finding-manager**: attach PoC + status.
+
+## 8.5 Submissions (same output contract as `/full-audit`)
+A script audit produces the **same submission artifacts** as a contract audit — the entry point changes what was scanned, not what a reader is owed. Everything lands in `reports/<project>-XX/submissions/`, alongside the carryover copies step 6 already writes there.
+
+**Per High/Medium** — invoke **report-writer**, then **report-validator**, then **finding-manager** (status → `submitted`):
+- One file per finding: `submissions/<label>.md` (e.g. `submissions/M-01.md`).
+- The metadata header comment is identical to the contract-audit format, **plus** an `Entry Point:` line, and **must carry the `Fingerprint:`** exactly as written to the ledger — the `sha256(contract:function:rootCauseClass:entryPoint)` value from the finding's `fingerprint` field. Never recompute or shorten it; copy it verbatim so a submission, its `findings/<sev>/*.json` record and its ledger entry are joinable by string match.
+```
+<!--
+ID: <sourceId>
+C4 Submission Metadata
+Project: <project> @ <commit> (run-XX, script audit)
+Entry Point: <npm-script-name>
+Title: [<label>] <title>
+Root Cause Link: https://github.com/<org>/<repo>/blob/<commit>/<path>#L<start>-L<end>
+Fingerprint: <finding.fingerprint verbatim>
+PoC File: workspace/<project>/test/<poc>.t.sol   (or: none — <why>)
+-->
+```
+- Body sections mirror the contract-audit report: Severity (+ rationale), Description, Impact, Proof of Concept (or why one is not demonstrable), and a **Recommended Mitigation** section rendering the finding's `recommendation` in full. **A submission with no Recommended Mitigation section does not pass `report-validator`.**
+
+**Low + Centralization** — invoke **qa-bundler**: bundle into `submissions/qa-report.md`, one section per finding, each with its fingerprint and its recommendation. QA findings are bundled, not individually filed.
+
+**Faithfulness (Law 2)** — invoke **finding-manager**: write `submissions/spec-conformance.md` from the `F-XX` findings, quoting the `[story-NNN]` acceptance text each deviation violates. Separate from the QA bundle.
+
+**Label scoping.** Labels (`M-01`, `L-03`, …) are scoped to the run directory, matching `findings/<sev>/`. If a single run directory audits more than one entry point, namespace both the labels and the submission filenames per entry point (`submissions/<entryPoint>/<label>.md`) so nothing collides; the fingerprint is the collision-proof key either way.
 
 ## 9. Summary
 ```
@@ -107,6 +134,10 @@ Findings:  High 0 · Medium 1 (incomplete remediation: index-4 pooler not author
            ledger: 1 new · 0 still-open · 0 regression   (entryPoint=RestoreMintAtIndex4)
 
 Review:    reports/phoenix-phase-2-staging-XX/script-audits/RestoreMintAtIndex4/review.md
+Submissions: reports/phoenix-phase-2-staging-XX/submissions/
+             Medium: M-01.md (fingerprint 4f2a1c9e…)
+             QA:     qa-report.md (0 Low + 0 Centralization)
+             Carryover: 0 still-open from prior runs
 Artifacts: entry-manifest.json · closure-manifest.json · intent.md · side-effects.json
 Ledger:    reports/ledgers/phoenix-phase-2-staging.json (updated)
 
@@ -118,7 +149,9 @@ Next: /list-findings phoenix-phase-2-staging · /ledger phoenix-phase-2-staging
 - **script-closure-mapper**: entry-point parse + transitive closure (sol/on-chain/js/cluster)
 - **script-auditor**: intent extraction, fork-based side-effect verification, cluster-interaction analysis
 - **deduplicator** → **sanitizer** → **severity-classifier** → **finding-manager**: standard findings pipeline (per-`entryPoint` reconciliation)
-- **report-writer**: narrative `review.md` (script-review mode)
+- **report-writer**: narrative `review.md` (script-review mode) **and** per-H/M `submissions/<label>.md` (C4 mode)
+- **report-validator**: quality gate on each submission — rejects one with no Recommended Mitigation
+- **qa-bundler**: `submissions/qa-report.md` from Low + Centralization
 - **poc-generator** / **poc-validator**: fork-based PoCs for High/Medium
 
 # Error Handling
@@ -132,5 +165,6 @@ Next: /list-findings phoenix-phase-2-staging · /ledger phoenix-phase-2-staging
 1. **Source repos are read-only** — closure mapping only reads `lib/`; all execution (preview, PoCs) runs from `workspace/`; never broadcast.
 2. **Delegate, don't do** — the command orchestrates; every step is an agent invocation (CLAUDE.md Agent Delegation Policy).
 3. **Per-entry-point namespace** — findings carry `entryPoint`; the fingerprint folds it in so script-audit findings never collide with contract-scan findings and regression reconciliation is per script.
+3.5. **Same submission contract as a contract audit** — a script audit is not a lesser audit. Every new/regressed High and Medium gets its own `submissions/<label>.md` carrying the ledger fingerprint verbatim and a Recommended Mitigation section; Low/Centralization get the QA bundle; faithfulness gets `spec-conformance.md`. `review.md` is the narrative *in addition to* these, never a substitute for them.
 4. **Alert on expired keys** — a failed RPC liveness probe is surfaced to the user, not silently downgraded to static mode.
 5. **Bounded scope** — audit the entry point's closure + ranked cluster; if the root cause is a broad contract bug outside the slice, record it and recommend `/full-audit` rather than expanding scope.

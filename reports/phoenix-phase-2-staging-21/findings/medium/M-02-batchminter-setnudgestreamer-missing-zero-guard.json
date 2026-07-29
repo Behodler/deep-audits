@@ -1,0 +1,184 @@
+{
+  "id": "M-02",
+  "sourceId": "DEV-03",
+  "project": "phoenix-phase-2-staging",
+  "status": "ready",
+  "severity": "medium",
+  "title": "BatchNFTMinterMultiToken.setNudgeStreamer is the only one of six streamer setters with no zero-address guard — zeroing it silently strands every accrued stream while batchMint keeps succeeding",
+  "contract": "lib/nft-staking/src/BatchNFTMinterMultiToken.sol",
+  "function": "setNudgeStreamer",
+  "line": 299,
+  "lineStart": 299,
+  "lineEnd": 302,
+  "entryPoint": "dev",
+  "fingerprint": "f7de907d798140658d9cd3c030a23d051c96a06e1abc6ab9f2ccf91d9ee78f20",
+  "fingerprintInput": "lib/nft-staking/src/BatchNFTMinterMultiToken.sol:setNudgeStreamer:InconsistentZeroAddressGuard:dev",
+  "fingerprintFormula": "sha256(contract:function:rootCauseClass:entryPoint)",
+  "origin": "new",
+  "auditedCommit": "3fb4e34",
+  "rootCauseClass": "InconsistentZeroAddressGuard",
+  "category": "access-control",
+  "propagation": "PROPAGATES-TO-MAINNET",
+  "plausibility": "plausible",
+  "regression": false,
+  "faithfulness": false,
+  "description": "All six donor contracts reject `setNudgeStreamer(address(0))` with an explicit guard — BalancerPoolerV2.sol:247, Uniboost.sol:191, NudgeRatchet.sol:106, PromotionUniV2_Eth.sol:349, StableYieldAccumulator.sol:514. `BatchNFTMinterMultiToken.setNudgeStreamer` (:299-302) has none, because address(0) is its deliberate 'streaming disabled' sentinel: `batchMint` gates the whole `pullPendingStream` loop on `if (_nudgeStreamer != address(0))` (:538). The sentinel design is defensible in isolation; the hazard is that it is the ONE setter in a family of six that accepts the value every sibling rejects, and its failure mode is silent while every sibling's is a loud revert.",
+  "impact": "An operator wiring the sink from a wrong or placeholder address (see DEV-06) gets no error and no event distinguishable from a normal reconfiguration. batchMint continues to succeed. Every accrued stream stays stranded in the streamer and the batcher is paid only whatever was already sitting in the sink. Because `pullPendingStream` is the ONLY path by which streamed funds reach the batch minter, and donors keep pushing INTO the streamer, the divergence grows without bound and is visible only by comparing streamer buffers against sink balances. This inverts the intuition an operator would form from the five guarded siblings.",
+  "attackPath": [
+    "1. Operator wires the sink using a wrong or placeholder address. The trigger is present IN-REPO, not hypothesised: server/deployments/mainnet-addresses.ts:131 carries `NudgeStreamer: 0x000...000`, type-indistinguishable from a real address because the ContractAddresses interface is regenerated from ANVIL data with every field a required plain `string` (DEV-06).",
+    "2. BatchNFTMinterMultiToken.setNudgeStreamer (top-level HEAD :290-293) accepts address(0) with no guard - unlike all five siblings, which revert (BalancerPoolerV2:247, Uniboost:191, PromotionUniV2_Eth:349, StableYieldAccumulator:514, NudgeRatchet:106). Verified directly at HEAD this run.",
+    "3. batchMint gates the whole pullPendingStream loop on `if (_nudgeStreamer != address(0))` (:527), so the streaming leg becomes a silent no-op while the mint itself keeps succeeding.",
+    "4. Donors continue to push into the streamer. Every accrued stream strands. Nothing reverts, nothing logs a distinguishable event, and the five loud siblings have taught the operator to expect a revert on a bad address."
+  ],
+  "evidence": "PoC workspace/phoenix-phase-2-staging/test/AuditDevStreamerWiring.t.sol, run with --fork-url against the live local chain — 2/2 PASS. test_zeroAddressGuardAsymmetry: all six donors return ok==false for setNudgeStreamer(address(0)); BatchNFTMinterMultiToken returns ok==true and nudgeStreamer() reads address(0). test_zeroedSinkStrandsAccruedStreams: with the streamer wired, a qualifying batchMint(26) pays the batcher 45,045,015 USDC + 5,000e18 phUSD + 50,000e18 Kendu; with the streamer zeroed the SAME batchMint SUCCEEDS with no revert and no event and pays 189,464 USDC + 0 phUSD + 0 Kendu, leaving the full matured pot stranded in the streamer.",
+  "recommendation": "Either (a) emit a distinct, unambiguous event when the streamer is set to zero (e.g. `NudgeStreamingDisabled`) so the disable is loud in logs, or (b) add an explicit `setNudgeStreamingEnabled(bool)` and require a non-zero address in `setNudgeStreamer`, separating 'disable' from 'misconfigure'. At minimum, the mainnet script must post-assert `batchMinter.nudgeStreamer() == <expected>` after the call — DeployMocks post-asserts only the SYA leg (:1129) of seven such calls.",
+  "classification": {
+    "c4Criterion": "C4 Medium - 'Assets not at direct risk, but the function of the protocol or its availability could be impacted ... with stated assumptions, but external requirements'.",
+    "assetImpact": "No theft, no economic loss, and expressly NOT scored as a value leak (the nudge pot is funded by yield on protocol-owned capital, so a non-arriving payout is a functional failure, not an economic one). The impact is AVAILABILITY OF A PROMISED PAYOUT: with the streamer zeroed, a qualifying batchMint(26) that should pay 45,045,015 USDC + 5,000e18 phUSD + 50,000e18 Kendu instead pays 189,464 USDC + 0 + 0, and SUCCEEDS - no revert, no distinguishable event. The entire matured pot stays stranded in the streamer. Because pullPendingStream is the ONLY path by which streamed funds reach the batch minter while donors keep pushing INTO the streamer, the divergence grows without bound and is observable only by manually comparing streamer buffers against sink balances.",
+    "attackPath": [
+      "1. Operator wires the sink using a wrong or placeholder address. The trigger is present IN-REPO, not hypothesised: server/deployments/mainnet-addresses.ts:131 carries `NudgeStreamer: 0x000...000`, type-indistinguishable from a real address because the ContractAddresses interface is regenerated from ANVIL data with every field a required plain `string` (DEV-06).",
+      "2. BatchNFTMinterMultiToken.setNudgeStreamer (top-level HEAD :290-293) accepts address(0) with no guard - unlike all five siblings, which revert (BalancerPoolerV2:247, Uniboost:191, PromotionUniV2_Eth:349, StableYieldAccumulator:514, NudgeRatchet:106). Verified directly at HEAD this run.",
+      "3. batchMint gates the whole pullPendingStream loop on `if (_nudgeStreamer != address(0))` (:527), so the streaming leg becomes a silent no-op while the mint itself keeps succeeding.",
+      "4. Donors continue to push into the streamer. Every accrued stream strands. Nothing reverts, nothing logs a distinguishable event, and the five loud siblings have taught the operator to expect a revert on a bad address."
+    ],
+    "likelihood": "medium. Requires an operator misstep, but a SPECIFICALLY ENABLED one: the exact wrong value sits in the repo's own mainnet address book today, the type system hides it, and DEV-07 shows the prose in that same file inverts the deployed/not-deployed distinction for four other entries. Detection is manual and comparative, so the window is long.",
+    "assumptions": "(1) Non-malicious owner throughout - this is rated purely as a Law-3 footgun, never as a malicious-admin vector. (2) The operator wires the streamer to address(0) or to a wrong address, e.g. by sourcing it from mainnet-addresses.ts. (3) The address(0)-as-'streaming-disabled' sentinel is a deliberate and defensible design in isolation; the defect is that the ONE setter in a family of six that accepts the value every sibling rejects also fails SILENTLY.",
+    "externalRequirements": "An operator mis-wire, plus the absence of a post-deploy assertion. DeployMocks post-asserts only the SYA leg (:1129) of seven setNudgeStreamer calls (see DEV-09), so the runbook does not catch it either."
+  },
+  "severityRationale": "ESCALATED to MEDIUM against the auditor's proposed Low. Escalation is justified on five independent grounds, and I am deliberately explicit because overstatement is a documented rejection cause for this pipeline. (1) PROVEN, NOT ARGUED: PoC workspace/phoenix-phase-2-staging/test/AuditDevStreamerWiring.t.sol is 2/2 PASS run --fork-url against the live chain; test_zeroAddressGuardAsymmetry shows all six donors return ok==false while BatchNFTMinterMultiToken returns ok==true, and test_zeroedSinkStrandsAccruedStreams shows the SAME batchMint(26) silently paying 189,464 instead of the full pot. The magnitude is measured, not estimated. (2) THE DEFECT IS THE SILENCE, NOT THE SENTINEL. A sentinel that disables a feature is fine; a sentinel that is accepted by exactly one of six sibling setters, whose five peers all revert loudly, actively INVERTS the intuition the operator has been trained to hold. That is the textbook Law-3 test - a competent, non-malicious owner would be surprised - and Law 3 requires such a footgun to be classified BY THE IMPACT IT UNLOCKS, not auto-downgraded to a centralization/QA note. The impact unlocked is the unbounded non-arrival of the entire nudge pot. (3) THE TRIGGER IS LIVE IN-REPO. This is not 'an operator might one day fat-finger an address'. DEV-06 puts a 0x0 NudgeStreamer placeholder into mainnet-addresses.ts that the type system cannot distinguish from a real address, and DEV-07 shows the surrounding prose already inverts real-vs-placeholder for four other entries. The C4 'user input mistake' exclusion does not fire, because the repo itself supplies the wrong input. (4) FAMILY PRECEDENT. The identical class - a sentinel/zero collaborator making the value leg a silent no-op while the main call keeps succeeding - was filed in yield-claim-nft as c91bef813d (M-04) at MEDIUM, and the owner triaged it 'Owner ack - WILL FIX (revert on unwired dispatch)'. That fix landed on ATokenDispatcherV2; BatchNFTMinterMultiToken.setNudgeStreamer never received the fail-closed treatment. Rating the same class Low here would be inconsistent with the family's own accepted precedent. yield-claim-nft 563df2e64a (L-09) is the precedent for keeping a reborn instance open on its own rather than folding it under a fixed sibling. (5) PROPAGATES-TO-MAINNET, on the live BatchNFTMinterMultiToken, with no compensating on-chain or runbook control. NOT ESCALATED FURTHER TO HIGH: nothing is stolen, no attacker exists, the funds remain in the streamer rather than leaving the protocol, and re-pointing setNudgeStreamer to the correct address restores the pull path - the condition is recoverable once detected. It also requires an operator misstep, which bars the 'no hand-wavy hypotheticals' High bar. Medium is the ceiling this evidence supports. SCOPE DISCIPLINE - DO NOT CONFLATE: the adjacent _dispatch path is NOT part of this finding and is NOT part of the escalation basis. There a DonationSkipped event IS emitted and USDS re-sweeps, making that path bounded QUIETNESS with no value consequence. The escalation rests solely on the setNudgeStreamer leg, which is silent AND strands.",
+  "severityAgreement": "DISAGREE - ESCALATED from proposed low to medium",
+  "proposedSeverity": "low",
+  "classifierNotes": "NOT related on root cause to phoenix-nft-staking 858e9e807a (H-01, wont-fix): that is the value-blind nudge GATE which OVER-pays the pot; DEV-03 STRANDS it - economically the opposite direction. The 858e9e80 wont-fix is NOT cited against this finding. Minimum remediation: emit a distinct NudgeStreamingDisabled event, or split disable from misconfigure via setNudgeStreamingEnabled(bool) + require non-zero; and post-assert `batchMinter.nudgeStreamer() == <expected>` in the mainnet script.",
+  "dedup": {
+    "dedupId": "DEDUP-DEV-003",
+    "dedupDisposition": "KEPT — RE-FILE OF A KNOWN CLASS, DISCLOSED",
+    "originalIds": [
+      "DEV-03"
+    ],
+    "dedupRationale": "Same fail-open/unwired-sink CLASS as prior art below, but a DISTINCT contract+function+entryPoint => distinct fingerprint that automatic dedup cannot flag. Disclosed rather than collapsed, per the standing re-file rule. No prior wont-fix/acknowledged status is overridden.",
+    "crossRunLinks": [
+      {
+        "ledger": "yield-claim-nft",
+        "entry": "c91bef813d (M-04)",
+        "status": "fixed (story-037 hookTypeId marker guard)",
+        "relation": "SAME-CLASS-DIFFERENT-CONTRACT — RE-FILE, DISCLOSED",
+        "note": "M-04 = 'Unwired-dispatch zero-debt value leak: default empty hook accrues no phUSD debt if owner forgets setHook (Law-3 footgun)'; owner triage reason: 'Owner ack — WILL FIX (guard against the default-sentinel hook: revert on unwired dispatch in _dispatch...)'. RE-FILE BASIS: identical shape (a sentinel/zero collaborator makes the value leg a silent no-op while the main call keeps succeeding) on a DIFFERENT contract (BatchNFTMinterMultiToken.setNudgeStreamer, nft-staking) that never received the M-04 fail-closed treatment. The M-04 remedy — fail closed on the default/unwired collaborator — is precisely what DEV-03 asks for here."
+      },
+      {
+        "ledger": "yield-claim-nft",
+        "entry": "563df2e64a (L-09)",
+        "status": "open",
+        "relation": "PRECEDENT-FOR-HANDLING",
+        "note": "L-09 is the same class reborn on a third dispatcher (Uniboost) and was explicitly recorded OPEN rather than auto-folded under the sibling wont-fix Q-08, with the reasoning 'The Q-08 wont-fix accepted the exposure on the LIVE BalancerPoolerV2, not on this newly-in-scope Uniboost.' DEV-03 is handled the same way."
+      },
+      {
+        "ledger": "phoenix-nft-staking",
+        "entry": "858e9e807a (H-01)",
+        "status": "wont-fix",
+        "relation": "NOT-RELATED-ON-ROOT-CAUSE",
+        "note": "Checked because it shares the contract (BatchNFTMinterMultiToken.batchMint) and was named in the dedup brief. 858e9e80 is the value-blind nudge GATE (count-only qualification paying the full pot). DEV-03 is a SETTER guard asymmetry that strands the pot instead of over-paying it — economically the opposite direction. NOT a duplicate and the 858e9e80 wont-fix is NOT cited against it."
+      }
+    ]
+  },
+  "sanitization": {
+    "disposition": "PASSED",
+    "suppressed": false,
+    "note": "KEPT. Law 3 footgun: a missing zero-address guard that is present on the five sibling setters is a NON-OBVIOUS consequence — a competent non-malicious owner would be surprised that zeroing the streamer strands accrued value while batchMint keeps succeeding (fail-open, silent). Not a 'malicious owner' framing; not 'reckless admin'. In scope.",
+    "knownIssueSuppressionApplied": false,
+    "c4KnownInvalidApplied": true,
+    "c4KnownInvalidResult": "no category fires",
+    "blockedKnownIssueNote": "Cached KI #10 \"Admin trust assumptions ... (operational risk)\" could have been stretched over a missing owner-setter guard. NOT SUPPRESSED: blocked-KI rule, and independently Law 3 keeps non-obvious owner footguns in scope."
+  },
+  "reconciliation": {
+    "fingerprint": "f7de907d798140658d9cd3c030a23d051c96a06e1abc6ab9f2ccf91d9ee78f20",
+    "fingerprintInput": "lib/nft-staking/src/BatchNFTMinterMultiToken.sol:setNudgeStreamer:InconsistentZeroAddressGuard:dev",
+    "legacyPathVariantChecked": null,
+    "origin": "new",
+    "ledgerMatch": null,
+    "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+    "firstSeenRun": "phoenix-phase-2-staging-21",
+    "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+    "regressionOf": null,
+    "priorStatus": null,
+    "disclosedRefile": {
+      "priorEntry": "yield-claim-nft :: c91bef813d (M-04, medium, fixed — \"Owner ack — WILL FIX: revert on unwired dispatch\")",
+      "relation": "SAME-CLASS-DIFFERENT-CONTRACT — DISCLOSED RE-FILE",
+      "basis": "Fail-open-on-unwired-pointer class. c91bef813d was fixed on ATokenDispatcherV2; BatchNFTMinterMultiToken.setNudgeStreamer never received the fail-closed treatment. Precedent for keeping this open rather than folding it under a fixed sibling: yield-claim-nft 563df2e64a (L-09, open) — the same class reborn on a third dispatcher was kept as its own OPEN entry. Not suppressed."
+    }
+  },
+  "disclosure": {
+    "kind": "DISCLOSED-REFILE",
+    "priorLedger": "yield-claim-nft",
+    "priorEntry": "c91bef813d",
+    "priorLabel": "M-04",
+    "priorSeverity": "medium",
+    "priorStatus": "fixed",
+    "priorTriageReasonVerbatim": "Owner ack - WILL FIX: revert on unwired dispatch",
+    "refileBasis": "Same class (fail-open on an unwired pointer) on a different first-party contract and function => different fingerprint. The prior entry establishes the family precedent that this class is rated Medium with an owner WILL-FIX disposition; it does not cover BatchNFTMinterMultiToken.setNudgeStreamer, which was never touched by that fix.",
+    "precedentForNotFolding": "yield-claim-nft 563df2e64a (L-09) was deliberately KEPT OPEN rather than folded under its `fixed` sibling. The same handling applies here: this is a new instance, not a re-observation of c91bef813d.",
+    "overrideOfPriorTriage": false,
+    "priorTriageUntouched": true,
+    "actionForHuman": "None required against c91bef813d (it stays `fixed`, untouched). Triage M-02 on its own merits."
+  },
+  "poc": {
+    "file": "workspace/phoenix-phase-2-staging/test/AuditDevStreamerWiring.t.sol",
+    "status": "passing",
+    "result": "2/2 PASS: the entire matured pot (45,045,015 USDC + 5,000e18 phUSD + 50,000e18 Kendu) is silently not paid while batchMint SUCCEEDS, after setNudgeStreamer accepts address(0)/an unwired pointer that the five sibling setters reject.",
+    "command": "forge test --match-path test/AuditDevStreamerWiring.t.sol -vv",
+    "lastRun": "2026-07-29"
+  },
+  "pocRequired": true,
+  "knownIssuesSuppression": {
+    "enabled": false,
+    "reason": "BLOCKED this run - registered-projects.json declares lib/phoenix-phase-2-staging/known-issues.md (11 cached issues, snapshot 2026-01-09T15:30:00Z) but the file does not exist on disk. No finding suppressed on that basis (Law 1)."
+  },
+  "parkedItemsCarriedForward": [
+    {
+      "id": "MR-DEV-001",
+      "kind": "OMITTED-CANDIDATE — RECOMMEND FILING AS A CONTRACT FINDING",
+      "confidence": "high (source-verified this run)",
+      "reason": "Constraint-4 check. mock-fidelity.md §2 documents a MOCK gap, but embedded in it is a first-party CONTRACT defect that appears nowhere in candidate-findings.json and would otherwise leave this run invisibly. The deduplicator does not mint findings; parked here so it is not lost.",
+      "title": "ERC4626YieldStrategy.previewRedeem / previewDeposit view passthroughs still STATICCALL the underlying vault — the story-060 / YS-01 Tokemak fix is one-directional",
+      "propagation": "PROPAGATES-TO-MAINNET",
+      "contract": "lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "function": "previewRedeem / previewDeposit",
+      "lineStart": 73,
+      "lineEnd": 85,
+      "rootCauseClassProposed": "StaticcallOnStateMutatingPreview",
+      "entryPoint": "dev",
+      "sourceVerification": "Read against the TOP-LEVEL submodule HEAD lib/reflax-yield-vault (not a nested stale pin). :73-75 `return vault.previewDeposit(assets);` and :83-85 `return vault.previewRedeem(shares);`, both declared `external view` => Solidity emits STATICCALL. Twenty lines below, :110-115 credits principal via `vault.convertToAssets(sharesReceived)` with an in-source comment naming the exact hazard: 'Use convertToAssets (NOT previewRedeem): convertToAssets is ERC4626-mandated STATICCALL-safe, whereas some real vaults (e.g. Tokemak Autopools) mutate state inside previewRedeem and revert with StateChangeDuringStaticCall when called as an external view.' The authors therefore knew the hazard and hardened ONE call site.",
+      "whyItMatters": "Against a real Tokemak Autopool these two views revert for every caller, always; against MockAutoDOLA (plain un-overridden OZ ERC4626) they return a clean number, always. The local rig therefore reports green on the exact behaviour that already bricked this project's YS-swap suite. Blast radius today is UI/keeper reads (no first-party on-chain caller found), which is why this is parked for triage rather than asserted as a Medium.",
+      "crossRunPriorArt": {
+        "ledger": "phoenix-phase-2-staging",
+        "entry": "28d5044e4e",
+        "label": "YS-01 lineage",
+        "severity": "medium",
+        "status": "acknowledged",
+        "entryPoint": "migrate:ys-swap-deploy",
+        "contractOfPrior": "ERC4626YieldStrategy._acquireShares",
+        "relation": "SAME-ROOT-CAUSE-DIFFERENT-FUNCTION => DIFFERENT FINGERPRINT",
+        "disclosure": "The prior entry is 'Story-060 fix line (vault.previewRedeem) reverts against the real Tokemak Autopool vaults', acknowledged on the _acquireShares deposit path — the path that was subsequently fixed by the convertToAssets swap. That acknowledgement does NOT cover previewRedeem/previewDeposit at :73-85, which are a different function and were never touched. This must not be auto-suppressed under 28d5044e4e."
+      },
+      "corroboratingMemory": "stable-yield-accumulator run-14 note: 'the guard is ONE-DIRECTIONAL, residual paths reproduce'. Same shape, independently observed here.",
+      "secondaryGapsInTheSameMockSection": [
+        "No maxRedeem/maxWithdraw check before `vault.redeem` in _disposeShares (:128-135): against a real Autopool with a liquid reserve below the request, user withdrawals brick. Locally impossible to reproduce.",
+        "MockAutoDOLA._updateYield() mints assets into the vault BEFORE super._deposit mints shares, so convertToAssets(sharesReceived) > amount and creditedPrincipal at :115 can EXCEED the deposited amount — the precise opposite of that line's stated intent. Any local invariant asserting 'principal is never over-credited' passes VACUOUSLY. Flagged because a vacuous-harness result is a known repeat failure mode in this repo."
+      ],
+      "recommendedAction": "Route to the script-auditor / code-scanner for a proper finding record with a fingerprint of its own (contract:function:StaticcallOnStateMutatingPreview:dev), or to /ledger for an explicit human decision. Do NOT fold into 28d5044e4e."
+    },
+    {
+      "id": "FAITH-L1-001 reopen trigger",
+      "channel": "spec-conformance F-04 + ledger reopenTrigger",
+      "law": "Law 1 — visible channel, with reason",
+      "note": "FAITH-L1-001 is rated Low ONLY because the sanctioned mainnet config registers a stream for USDC alone. If a Kendu stream is ever registered without a completed real-token round-trip against 0xaa95f26e30001251fb905d264aa7b00ee9df6c18, it becomes a live Medium instance of DEV-01 against real custody. BLOCKING PRE-BROADCAST ACTION: tick story 072 Preflight line 514 against the REAL token; story 073's MockKendu probe does not discharge it."
+    }
+  ],
+  "metadata": {
+    "createdAt": "2026-07-29",
+    "updatedAt": "2026-07-29",
+    "run": "phoenix-phase-2-staging-21",
+    "scanOrigin": "audit-script:dev",
+    "classificationOrigin": "script-audits/dev/findings-final.json",
+    "storyScoped": "story-073 (this run did NOT scan the whole project; lastAuditedCommit deliberately NOT advanced)"
+  }
+}

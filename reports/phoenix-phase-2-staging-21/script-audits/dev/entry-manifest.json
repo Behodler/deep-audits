@@ -1,0 +1,209 @@
+{
+  "entryPoint": "dev",
+  "project": "phoenix-phase-2-staging",
+  "submodulePath": "lib/phoenix-phase-2-staging",
+  "submoduleHead": "3fb4e34",
+  "storyTag": "Story 073",
+  "regressionBaseline": "bd2290c0",
+  "regressionBaselineRun": "phoenix-phase-2-staging-06",
+  "chainId": 31337,
+  "chainIdSource": "hard-coded literal in the npm scripts (anvil --chain-id 31337, --rpc-url http://localhost:8545, vm.writeFile(\"server/deployments/progress.31337.json\")). NOTE: script/DeployMocks.s.sol contains NO block.chainid guard of any kind — nothing prevents it from being pointed at another RPC.",
+  "forkAvailable": false,
+  "forkNote": "Target is a locally-spawned anvil chain (31337), not a mainnet fork. RPC_MAINNET/ETHERSCAN_API_KEY are irrelevant to this entry point; no deployed-bytecode corroboration is possible because nothing in this chain exists on mainnet.",
+
+  "intentComment": "Story 003 (local-deploy) + Story 073. `dev` is the one-command local development orchestration: wipe local state, start anvil, cold-deploy the ENTIRE Phoenix Phase-2 system against mocked mainnet dependencies, simulate a DOLA yield tick, extract the address book, regenerate the TypeScript address interface, and serve it over HTTP on :3001 for the Phoenix UI. Story 073 extended the local deploy to mirror the mainnet NudgeStreamer cutover planned in story 072 (streamer-buffered nudge donations, BatchNFTMinterMultiToken with USDC/phUSD/Kendu, NudgeRatchet back at index 7) and added a V1->NFTStakerMigrator->NFTStakerDepletionV2 migration REHEARSAL so story 072's riskiest mainnet phase can be dry-run for free.",
+  "packageJsonDocComments": [
+    "//local-deploy: Story 003 — local Anvil deployment orchestration",
+    "//extract-addresses: Story 013 — parameterize extract-addresses for multi-chain",
+    "//generate-ts: Story 028 — generate TypeScript address interface (anvil only; mainnet-addresses.ts is hand-maintained, story 068)",
+    "//serve-and-dev: Story 003 — API server + local dev orchestration"
+  ],
+
+  "variants": {
+    "base": {
+      "key": "dev",
+      "command": "npm run clean:local && npm run start:anvil & sleep 3 && npm run deploy:local && ./simulate-yield.sh && npm run extract:addresses && npm run generate:ts-anvil && npm run serve",
+      "broadcasts": true,
+      "broadcastTarget": "local anvil 31337 only",
+      "envFlags": ["--broadcast", "--slow", "--gas-estimate-multiplier 300"],
+      "shellSemantics": "The single `&` is a BACKGROUNDING operator, not `&&`. Bash parses this as TWO jobs: job A = `npm run clean:local && npm run start:anvil` (backgrounded), job B = `sleep 3 && npm run deploy:local && ... && npm run serve` (foreground). Consequences: (1) anvil runs detached in the background and is never killed by this script — unlike `test:nft-flow`, which ends with `kill %1`; (2) readiness is a fixed 3-second sleep, not a health probe, so a slow machine races the deploy against anvil startup; (3) `clean:local` executes inside the backgrounded job while the foreground job's `sleep 3` runs concurrently — but `deploy:local` re-runs `clean:local` itself, so the wipe is idempotent and the race is benign."
+    }
+  },
+  "noPreviewVariant": true,
+  "noPreviewVariantNote": "There is no `dev:preview` / `dev:dry`. Unlike the mainnet entry points in this repo (which all carry a PREVIEW_MODE=true sibling), DeployMocks has no PREVIEW_MODE branch at all — the only way to run it is to broadcast against a throwaway local chain. Re-running the audit's execution step therefore means re-running the whole `dev` chain against a fresh anvil in workspace/, not a read-only preview.",
+
+  "steps": [
+    {
+      "n": 1,
+      "key": "clean:local",
+      "command": "rm -rf broadcast/*/31337 server/deployments/progress.31337.json server/deployments/local.json",
+      "runsIn": "backgrounded job A, and AGAIN inside deploy:local (step 3)",
+      "reads": [],
+      "writes": [],
+      "deletes": [
+        "broadcast/*/31337  (all anvil-chain forge broadcast run records; mainnet broadcast/*/1 untouched)",
+        "server/deployments/progress.31337.json",
+        "server/deployments/local.json"
+      ],
+      "notDeleted": [
+        "server/deployments/addresses.ts",
+        "server/deployments/local-addresses.ts",
+        "server/deployments/mainnet-addresses.ts and all mainnet.backup.*.ts",
+        "server/deployments/progress.1.json and every progress.<saga>.1.json",
+        "hooks/generated.ts"
+      ],
+      "staleWindow": "addresses.ts / local-addresses.ts survive the wipe. If the chain aborts after clean:local but before generate:ts-anvil (e.g. deploy failure, or simulate-yield.sh's `set -e` firing on a missing progress file / null jq lookup), the repo is left with COMMITTED TypeScript address files pointing at a chain that no longer exists, with nothing but an ISO comment distinguishing them from fresh output."
+    },
+    {
+      "n": 2,
+      "key": "start:anvil",
+      "command": "anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --block-time 2",
+      "runsIn": "backgrounded job A; never killed by this entry point",
+      "reads": [],
+      "writes": [],
+      "note": "--host 0.0.0.0 binds on every interface, not just loopback. --block-time 2 means blocks mine every 2s, which is what makes `--slow` broadcast wall-clock-expensive and is why the migration rehearsal's committedDebt accrues between simulate and replay (see closure-manifest divergence D-14)."
+    },
+    {
+      "n": 3,
+      "key": "deploy:local",
+      "command": "npm run clean:local && forge script script/DeployMocks.s.sol:DeployMocks --rpc-url http://localhost:8545 --broadcast --slow --gas-estimate-multiplier 300",
+      "reads": [
+        "script/uniswap-artifacts/{UniswapV2Factory,UniswapV2Router02,WETH9}.json  (vm.getCode/vm.deployCode — canonical UniV2 creation bytecode)",
+        "env ANVIL_PRIVATE_KEY (vm.envUint; DeployMocks.s.sol:285)"
+      ],
+      "writes": [
+        "server/deployments/progress.31337.json  (single vm.writeFile at DeployMocks.s.sol:1943)",
+        "broadcast/DeployMocks.s.sol/31337/run-*.json + cache (forge)"
+      ],
+      "onChainEffect": "Cold deploy of ~70 contracts + ~120 configuration calls against anvil. See closure-manifest.json -> deployedContracts.",
+      "flags": {
+        "--broadcast": "signs and sends; no dry-run mode exists",
+        "--slow": "one tx at a time, awaiting confirmation — required because Router02 deadline and the migration rehearsal are timestamp-sensitive",
+        "--gas-estimate-multiplier 300": "3x gas estimates; blunt workaround for estimation misses on this very large script"
+      },
+      "resumeMechanism": "NONE. DeployMocks never reads a progress file (no vm.readFile / parseJson anywhere in the file); clean:local deletes it first; it is cold-deploy-only. The checkpoint/resume pattern described in the project CLAUDE.md exists only in the mainnet scripts.",
+      "progressFileShape": "Hand-assembled by string.concat in _writeProgressFile() (:1918-1945) — no vm.writeJson/vm.serializeJson, no escaping. deploymentStatus is the HARD-CODED literal \"completed\" (:1922), not derived from anything; the file always claims success if execution reaches the end. Emitted after vm.stopBroadcast(), i.e. during forge's local execution phase.",
+      "fsPermissionsRequired": [
+        "{ access = \"read-write\", path = \"./server/deployments\" }",
+        "{ access = \"read\", path = \"./script/uniswap-artifacts\" }"
+      ]
+    },
+    {
+      "n": 4,
+      "key": "./simulate-yield.sh",
+      "command": "./simulate-yield.sh [amount=2300]",
+      "reads": ["server/deployments/progress.31337.json (via jq: .contracts.MockDola.address, .contracts.MockAutoDOLA.address)"],
+      "writes": [],
+      "onChainEffect": "cast send MockDola.mint(MockAutoDOLA, 2300e18) — mints 2300 DOLA DIRECTLY TO the ERC4626 vault without minting shares, so totalAssets rises while totalSupply does not. That is the whole simulation: a one-shot donation-style share-price bump for MockAutoDOLA, giving ERC4626YieldStrategy(DOLA) claimable yield for StableYieldAccumulator to gather.",
+      "whatItDoesNotSimulate": "Only the DOLA vault. MockAutoUSDC, MockSUSDS, MockSUSDe get NO yield tick from this script (DeployMocks already seeds 1000 DOLA + 1000 USDC one-off at Phase 9.5/9.6). There is no time-based accrual, no repeated ticks, and no yield for the USDe market strategy, so the AMM-slippage path is never exercised under accrual.",
+      "credentials": "Hard-codes anvil default key 0xac09...ff80 and RPC http://localhost:8545. Not parameterized.",
+      "failureMode": "`set -e` + explicit guards: exits 1 if progress.31337.json is missing or either jq lookup is null. Requires jq, bc, cast on PATH."
+    },
+    {
+      "n": 5,
+      "key": "extract:addresses",
+      "command": "node server/extract-addresses.js 31337",
+      "reads": ["server/deployments/progress.31337.json (path built from __dirname, CWD-independent; exit 1 if missing)"],
+      "writes": ["server/deployments/local.json"],
+      "outputShape": "{ chainId, networkName, deploymentStatus (all copied verbatim from progress), extractedAt (ISO now), contracts: { <displayName>: { address, deployed, configured, deployGas, configGas } } } — flat map, no ABIs.",
+      "transforms": [
+        "1. drop entries whose address == 0x0 (the checkpoint markers Seeding / UsdcSeeding / DolaYield / UsdcYield)",
+        "2. MOCK-PREFIX STRIP: name.startsWith('Mock') ? name.slice(4) : name — a blind 4-char slice. MockPhUSD -> PhUSD, MockAutoDOLA -> AutoDOLA, MockKendu -> Kendu. THIS IS THE MECHANISM BY WHICH A MOCK BECOMES INDISTINGUISHABLE FROM THE REAL THING DOWNSTREAM.",
+        "3. drop DROPPED_CONTRACT_NAMES = [NFTMigrator, BuggedPoolerV2Index6]",
+        "4. drop UNISWAP_V2_BACKING_NAMES = [WETH9, UniswapV2Factory, UniswapV2Router02, UniPool{EYE,SCX,FLX}, UniRoutePool{WETH,USDS,DOLA}]",
+        "5. drop bare V1 NFT names [NFTMinter, BurnerEYE, BurnerSCX, BurnerFlax, BalancerPooler, GatherWBTC]",
+        "6. V2->base rename: NFTMinterV2 -> NFTMinter, BalancerPoolerV2 -> BalancerPooler, GatherWBTCV2 -> GatherWBTC"
+      ],
+      "observedCardinality": "71 progress entries -> 57 local.json entries",
+      "liveButUnusedAffordance": "CHAIN_OUTPUT_MAP still maps 1 -> mainnet.json, so `node server/extract-addresses.js 1` succeeds and writes an orphaned server/deployments/mainnet.json from the stale, step-marker-polluted progress.1.json. No npm script invokes it and nothing reads the output, but the affordance is live and its output would look authoritative."
+    },
+    {
+      "n": 6,
+      "key": "generate:ts-anvil",
+      "command": "node server/generate-ts-addresses.js 31337",
+      "reads": ["server/deployments/local.json (exit 1 with \"Run 'npm run extract:addresses' first.\" if absent)"],
+      "writes": [
+        "server/deployments/addresses.ts  — `export interface ContractAddresses { <Name>: string; ... }`, one member per local.json contracts key, insertion order, plus a generated-on header comment",
+        "server/deployments/local-addresses.ts — `import { ContractAddresses } from './addresses'; export const anvilAddresses: ContractAddresses = {...}; export type AnvilContractName = keyof ContractAddresses;`"
+      ],
+      "anvilOnly": "chainId 1 hits an explicit `REFUSING:` branch + process.exit(1). The mainnet codegen path was deliberately removed (story 068); mainnet-addresses.ts is hand-maintained and patched by scripts/patch-mainnet-addresses-*.js.",
+      "couplingHazard": "The ContractAddresses INTERFACE is regenerated from ANVIL data, but server/deployments/mainnet-addresses.ts is annotated `: ContractAddresses`. A purely local deploy change therefore breaks the mainnet address file's type-check until zero-address placeholders are hand-added — which is exactly what story-073 commit d241e61 did for Kendu and NudgeStreamer. Contract names are emitted raw with no TS-identifier sanitization.",
+      "orphanedFile": "server/deployments/mainnet-essential-addresses.json documents itself as \"the durable preservation source merged into mainnet-addresses.ts on every chainId-1 codegen run\" — but that codegen path now hard-refuses chainId 1 and a repo-wide grep finds ZERO consumers. The comment is false; external mainnet addresses survive only because the hand-maintained file is edited surgically."
+    },
+    {
+      "n": 7,
+      "key": "serve",
+      "command": "node server/index.js",
+      "reads": [
+        "server/deployments/progress.31337.json (loadDeployments, per-request, uncached)",
+        "server/deployments/local.json (loadExtractedAddresses, per-request, uncached)"
+      ],
+      "writes": [],
+      "listen": "process.env.API_PORT || 3001 on API_HOST || localhost; express + cors() with NO origin allowlist",
+      "endpoints": [
+        "GET /            — static doc blob with a hand-written, now-stale availableContracts list of 18 names (actual = 57)",
+        "GET /health",
+        "GET /contracts   — flat { name: address } derived from local.json",
+        "GET /contracts/:contractName — { name, address, deployed, configured }; 404 body lists all available names",
+        "GET /progress    — raw progress.31337.json"
+      ],
+      "hardCoded31337": "Both loaders are hard-wired to 31337; there is no multi-network support despite the CLAUDE.md spec, and the response shape does not match the documented {networks:{...}, activeNetwork, availableNetworks} contract. No ABIs are served."
+    }
+  ],
+
+  "notInThisChain": {
+    "generate:hooks": "`wagmi generate` -> hooks/generated.ts is NOT part of `dev`. It is run manually via `npm run generate:hooks` / `npm run update:hooks` (generate + version patch + publish to npm.pkg.github.com as @behodler/phase2-wagmi-hooks). wagmi.config.ts has contracts: [] and a single foundry({project:'.', include:[~40 artifact names]}) plugin with NO `deployments:` block — so generated.ts carries ABIs only and embeds zero addresses (grep -c 0x == 0). It reads out/ artifacts, so it depends on a prior `forge build` and on foundry.toml's skip list."
+  },
+
+  "forgeTarget": {
+    "file": "script/DeployMocks.s.sol",
+    "contract": "DeployMocks",
+    "entryFn": "run",
+    "lines": 1946,
+    "setUp": "none",
+    "chainGuard": "NONE — no require(block.chainid == 31337) anywhere in the file, despite the project CLAUDE.md mandating that anvil relaxations be gated behind an explicit `block.chainid == 31337` branch. The only 31337 coupling is the hard-coded output path in _writeProgressFile.",
+    "broadcastKey": "vm.envUint(\"ANVIL_PRIVATE_KEY\")",
+    "phases": [
+      "Phase 1: mock tokens (phUSD, USDC, USDS+sUSDS, USDe+sUSDe, DOLA) + baseline 4626 deposits",
+      "Phase 1.5: MockEYE / MockSCX / MockKendu / MockFlax / MockWBTC + Pauser(EYE)",
+      "Phase 2.5/2.6: MockAutoDOLA + ERC4626YieldStrategy(DOLA); MockAutoUSDC + ERC4626YieldStrategy(USDC)",
+      "Phase 2.7: MockMarketAMMAdapter(USDe<->sUSDe, 10bps) + ERC4626MarketYieldStrategy + setSlippageTolerance(30bps), with a require(ammSlippage <= tolerance) guard",
+      "Phase 3: PhusdStableMinter, PhlimboEA(1-week depletion), StableYieldAccumulator",
+      "Phase 3.6: Balancer mocks, BurnRecorder, NFTMinterV2, _deployUniswapAndPools (WETH9+Factory+Router02 from canonical bytecode + 3 target + 3 routing pools), Uniboost x3, BalancerPoolerV2, GatherV2, registerDispatcher 1..5, BuggedPoolerV2Index6 registered at 6 + disabled, MultiPooler, UniboostMintDebtHook x3, MockWaUSDC + MockSkyPSM (both pre-funded 1M USDC), setPSM/setMaxTout",
+      "Phase 3.7a: BalancerPoolerMintDebtHook + NFTStaker(id 4, APY 30%)",
+      "Phase 3.7b: _deployStreamerAndBatchMinter — NudgeStreamer, BatchNFTMinterMultiToken, whitelist USDC/phUSD/Kendu, nudgeSize 25, Pauser register, registerStream x3 @6h, seed phUSD 5k + Kendu 50k via collectNudge, setNudgeStreamer",
+      "Phase 3.7c: BalancerPoolerV2 setBatchMinter / setBatchDonationSize(30) / setNudgeStreamer",
+      "Phase 3.7d: _finalizeUniboost x3 (recipient=batchMinter, donationSplit 50, setNudgeStreamer) + _rehearseStakerMigration x3 (V1 NFTStakerDepletion -> NFTStakerMigrator -> NFTStakerDepletionV2)",
+      "Phase 3.7e: nudgeless BatchNFTMinter x3 (EYE/SCX/FLX)",
+      "Phase 3.7f: NudgeRatchet + hook + registerDispatcher (assert index==7) + NFTStakerPriceScaled(1e12, APY 45%) + RatchetBatchNFTMinter (USDS nudge, 10k seed)",
+      "Phase 3.7g: StableStaker + 3 pools (DOLA/USDC/USDe) two-sided wiring + 10% set-aside buffer + 10/5/10 phUSD-per-day",
+      "Phase 4: phUSD minter authorizations",
+      "Phase 5/6: yield-strategy clients + registerStablecoin(DOLA 18, USDC 6)",
+      "Phase 7: phlimbo.setDesiredAPY(0) twice around vm.roll(+1) — a cheatcode INSIDE the broadcast section",
+      "Phase 7.5: SYA config — setRewardToken FIRST (STORY 073 ORDERING GUARD), setPhlimbo, token configs, addYieldStrategy x2, discount 2000bps, approvePhlimbo(max), setWithdrawer x2, setNudgeAddress, setNudgeSplit(30), setNudgeStreamer + require",
+      "Phase 8: Pauser registration (minter, phlimbo, SYA, NFTMinterV2, NFTStaker, StableStaker)",
+      "Phase 8.7: SYA.setNFTMinter + NFTMinterV2.setAuthorizedBurner(SYA)",
+      "Phase 9 / 9.5 / 9.55 / 9.6: seed 5000 DOLA + 1000 DOLA yield; 5000 USDC + 1000 USDC yield",
+      "Phase 10/11: DepositView, ViewRouter, DepositPageView, setPage('deposit'), MintPageView, setPage('mint')",
+      "post-broadcast: _writeProgressFile()"
+    ]
+  },
+
+  "jsChain": {
+    "pre": [],
+    "post": [
+      { "step": "./simulate-yield.sh", "kind": "shell", "seeStep": 4 },
+      { "step": "node server/extract-addresses.js 31337", "kind": "node", "seeStep": 5 },
+      { "step": "node server/generate-ts-addresses.js 31337", "kind": "node", "seeStep": 6 },
+      { "step": "node server/index.js", "kind": "node (long-running)", "seeStep": 7 }
+    ]
+  },
+
+  "operationalObservations": [
+    "No chainid guard in DeployMocks — the project's own CLAUDE.md requires anvil relaxations to sit behind an explicit `block.chainid == 31337` branch. Every unrestricted-mint mock, every `phUSD.setMinter(deployer, true)`, and the whole migration rehearsal are un-gated code paths.",
+    "`deploymentStatus: \"completed\"` is a hard-coded string literal written after local execution, before/independent of broadcast confirmation. Benign on anvil (no resume consumer) but it is the same write-before-broadcast shape that already poisoned three committed progress.uniboost-cutover.1.POISONED*.bak files on mainnet.",
+    "Everything in server/deployments/ is committed to git, including the regenerated local.json / progress.31337.json / addresses.ts / local-addresses.ts. Every local `dev` run dirties the tree, and a local-only mock addition propagates into the tracked ContractAddresses interface that the MAINNET address book must satisfy.",
+    "anvil is backgrounded and never killed by `dev` (contrast `test:nft-flow`, which ends with `kill %1`). Repeated `dev` invocations will fail on a port-8545 bind unless anvil is killed manually.",
+    "Readiness is `sleep 3`, not a probe."
+  ]
+}
