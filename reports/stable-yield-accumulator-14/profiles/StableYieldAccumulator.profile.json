@@ -1,0 +1,396 @@
+{
+  "contract": "src/StableYieldAccumulator.sol",
+  "project": "stable-yield-accumulator",
+  "commit": "f7041304e4a71cc2325cf406974f5cc16a5b5322",
+  "regressionBase": "0fef726",
+  "profileTimestamp": "2026-07-26T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "storyContext": "story-026 — route the nudge share through NudgeStreamer (push leg REMOVED, replaced by mandatory pull)",
+
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPausable", "IStableYieldAccumulator"],
+
+  "verifiedProperties": {
+    "checkedArithmetic": {
+      "status": "verified",
+      "note": "pragma ^0.8.20, no `unchecked` blocks, no assembly anywhere in the file."
+    },
+    "noAssembly": { "status": "verified" },
+    "upgradeable": { "status": "verified-false", "note": "Non-upgradeable, constructor-based, no initializer. Storage-collision / initializer-front-run classes are structurally N/A." },
+    "initializerProtected": { "status": "n/a", "note": "constructor() Ownable(msg.sender); no init function." },
+    "reentrancyGuarded": {
+      "status": "verified",
+      "guarded": ["claim"],
+      "note": "claim() is the ONLY state-mutating permissionless entry point and it carries nonReentrant + whenNotPaused. All other mutators are onlyOwner/onlyPauser."
+    },
+    "accessControlled": {
+      "status": "verified",
+      "onlyOwner": ["setPauser","addYieldStrategy","removeYieldStrategy","setTokenConfig","pauseToken","unpauseToken","setDiscountRate","setPhlimbo","setRewardToken","approvePhlimbo","setNudgeAddress","setNudgeSplit","setNudgeStreamer","setNFTMinter"],
+      "onlyPauser": ["pause"],
+      "ownerOrPauser": ["unpause"],
+      "permissionless": ["claim"],
+      "permissionlessView": ["getYieldStrategies","getTokenConfig","getDiscountRate","calculateClaimAmount","canClaim","getYield","getTotalYield","yieldStrategies","tokenConfigs","isRegisteredStrategy","strategyTokens","pauser","rewardToken","discountRate","phlimbo","nudge","nudgeSplit","nudgeStreamer","nftMinter"],
+      "gapsFound": "none — no state-mutating function lacks a guard"
+    },
+    "pauseMechanism": {
+      "status": "verified",
+      "note": "Behodler3 pattern: pauser-only pause, owner-OR-pauser unpause. Only claim() is whenNotPaused; owner setters remain live while paused (intended, remediation must work under pause). Global pause is a hard claim freeze — no bypass path."
+    },
+    "noUnboundedLoops": {
+      "status": "violated",
+      "note": "Four unbounded loops — see LOCAL-001/LOCAL-002. All are bounded in practice by owner-controlled registry size or self-inflicted gas, none permit third-party DoS."
+    },
+    "weakRandomness": { "status": "verified-absent", "note": "No block.timestamp / prevrandao / blockhash / block.number used for any value-bearing outcome. No entropy source at all in this contract." },
+    "inboundCallbackSurface": {
+      "status": "verified-absent",
+      "note": "No _safeMint / safeTransferFrom / _mint on ERC721 or ERC1155 — the only ERC1155 interaction is balanceOf (view) and burn(), and OZ ERC1155 burn does NOT invoke onERC1155Received. No ERC777 hook path is created by this contract itself (rewardToken hook behaviour is an interaction-level concern, listed under externalCalls)."
+    },
+    "checksEffectsInteractions": {
+      "status": "likely",
+      "note": "claim() interleaves interactions (skimSurplus payouts to the claimer) BEFORE the claimer's payment is pulled. Safe only because of nonReentrant + atomicity — see stateMachine.claimOrdering."
+    },
+    "standingApprovals": {
+      "status": "mixed",
+      "nudgeStreamer": "verified-transient — forceApprove(streamer, nudgeAmount) is granted and fully consumed inside the same call; allowance returns to 0 (NudgeStreamer.collectNudge transferFrom's exactly `amount`).",
+      "phlimbo": "STANDING — approvePhlimbo(amount) leaves an open-ended allowance to `phlimbo` on `rewardToken`, never revoked by setPhlimbo or setRewardToken. See LOCAL-004."
+    }
+  },
+
+  "story026Delta": {
+    "summary": "The nudge leg changed from `IERC20(rewardToken).safeTransfer(nudge, nudgeAmount)` (push) to `forceApprove(nudgeStreamer, nudgeAmount)` + `INudgeStreamer(nudgeStreamer).collectNudge(nudge, rewardToken, nudgeAmount)` (mandatory pull). No fallback push remains.",
+    "newStateVariable": {
+      "name": "nudgeStreamer",
+      "type": "address",
+      "slotPosition": "appended after nudgeSplit, BEFORE isRegisteredStrategy/strategyTokens/nftMinter — this is an INSERTION into the middle of the declared storage layout, not an append at the tail",
+      "storageLayoutNote": "Harmless here because the contract is non-upgradeable and freshly deployed. It WOULD be a collision if any deployed instance were ever proxied or if an off-chain consumer reads slots by index. Flagged as an observation only, not a finding.",
+      "default": "address(0)",
+      "settableTo": "non-zero only",
+      "clearable": false
+    },
+    "setNudgeStreamer": {
+      "visibility": "external onlyOwner",
+      "preconditions": ["_streamer != address(0) else revert ZeroAddress()"],
+      "stateWrites": ["nudgeStreamer"],
+      "events": ["NudgeStreamerUpdated(old, new)"],
+      "externalCalls": [],
+      "note": "Deliberately one-way (no clear-to-zero). Intended disable path is setNudgeSplit(0). No sanity check that the target implements INudgeStreamer, and no check that a (nudge, rewardToken) stream is registered on it — misconfiguration surfaces only at the next claim, loudly."
+    },
+    "claimNudgeBranch": {
+      "location": "src/StableYieldAccumulator.sol:595-600",
+      "guard": "if (nudgeAmount > 0)",
+      "guardIsLoadBearing": true,
+      "guardRationale": "NudgeStreamer.collectNudge reverts NudgeStreamer__ZeroAmount() on amount == 0. Without this guard, EVERY claim on a split-0 accumulator would revert.",
+      "orderOfOperations": [
+        "1. read nudgeStreamer into local `streamer`",
+        "2. if (streamer == address(0)) revert NudgeStreamerNotConfigured()",
+        "3. IERC20(rewardToken).forceApprove(streamer, nudgeAmount)",
+        "4. INudgeStreamer(streamer).collectNudge(nudge, rewardToken, nudgeAmount)"
+      ],
+      "failureModes": [
+        {
+          "condition": "nudgeStreamer == address(0) AND nudgeAmount > 0",
+          "revert": "NudgeStreamerNotConfigured()",
+          "scope": "claim() is fully bricked for ALL claimers until owner calls setNudgeStreamer",
+          "reachability": "This is the POST-DEPLOY DEFAULT state. Any owner who sets nudgeSplit>0 + nudge before setting nudgeStreamer bricks claim. Documented as intentional and loud.",
+          "verified": "test_claim_RevertIf_NudgeStreamerUnset"
+        },
+        {
+          "condition": "nudgeSplit == 0 (so nudgeAmount == 0)",
+          "revert": "none — branch skipped entirely",
+          "scope": "Accumulator remains fully claimable with nudgeStreamer == address(0). The mandatory-streamer requirement is correctly scoped to the live-donation branch only.",
+          "verified": "test_claim_SplitZero_RequiresNoStreamer"
+        },
+        {
+          "condition": "streamer set, but streams[nudge][rewardToken].duration == 0 (registerStream never called for this pair)",
+          "revert": "NudgeStreamer__NotRegistered() — bubbles out of collectNudge, no try/catch envelope",
+          "scope": "claim() fully bricked for ALL claimers. Recovery is owner-side on the STREAMER (registerStream), or setNudgeSplit(0) on this contract.",
+          "reachability": "Re-armed by ANY of: initial wiring in the wrong order; setNudgeAddress(newSink) to an unregistered sink; setRewardToken(newToken) to an unregistered token (see LOCAL-003 — this third trigger is NOT documented).",
+          "verified": "test_claim_RevertIf_StreamNotRegistered"
+        },
+        {
+          "condition": "streamer.registerStream called against a sink that is not a BatchNFTMinterMultiToken",
+          "revert": "NudgeStreamer__NotWhitelisted(batchMinter, token) or a raw revert from the isNudgeToken staticcall",
+          "scope": "Streamer-side, occurs at registration not at claim. Structurally prevents an EOA nudge sink.",
+          "note": "SYA.setNudgeAddress itself accepts ANY address including an EOA — the shape constraint is enforced only on the streamer, one layer away."
+        },
+        {
+          "condition": "nudgeSplit > 0 AND nudge == address(0)",
+          "revert": "NudgeNotConfigured() — checked at line 580, BEFORE the payment transferFrom",
+          "scope": "pre-existing, unchanged by story-026"
+        }
+      ],
+      "reentrancyExposure": "collectNudge internally calls _settle → IERC20(token).safeTransfer(nudge, settled) BEFORE transferFrom(SYA). At that instant SYA holds `actualPayment` and has a live allowance to the streamer. A hook-bearing rewardToken (ERC777) would hand control to the `nudge` sink mid-claim. Blocked locally by claim's nonReentrant; DEFERRED to interaction analysis for the cross-contract adjudication.",
+      "valueSemanticsCarriedOver": "NudgeStreamer is a TIMING THROTTLE, not a value cap. The full nudgeAmount still reaches the `nudge` sink, just linearly over `duration` instead of instantly. Every value-conservation argument that held for the old push leg still holds; only the arrival schedule changed."
+    },
+    "removedBehaviour": [
+      "safeTransfer(nudge, nudgeAmount) — gone, no fallback. `nudge` never receives tokens directly from this contract anymore; it receives them from the NudgeStreamer's buffer.",
+      "Consequence: post-story-026 the `nudge` address is a routing LABEL on this contract (a key into the streamer's stream map), not a transfer target. Its balance no longer changes atomically with claim()."
+    ],
+    "gasDelta": "claim() is materially more expensive on the donation branch: forceApprove (2 SSTOREs for a USDT-shaped token) + an external call that itself performs a settle-transfer, an SSTORE-heavy buffer update and a transferFrom. .gas-snapshot was regenerated in commit b14522d."
+  },
+
+  "nftMinterV2Migration": {
+    "before": "yield-claim-nft/interfaces/INFTMinter.sol",
+    "after": "yield-claim-nft/interfaces/INFTMinterV2.sol",
+    "methodsUsedByThisContract": ["burn(address holder, uint256 tokenId, uint256 quantity)", "nextIndex() returns (uint256)"],
+    "abiCompatibility": "NO BREAK. Both selectors are byte-identical between the V1 and V2 interfaces; only the declaring file changed. A live V1-shaped NFTMinter would still answer both calls.",
+    "reasonForChange": "Forced, not elective: `src/interfaces/INFTMinter.sol` NO LONGER EXISTS at the pinned yield-claim-nft commit f46a5cb (deleted upstream by the V2 flatten refactor). Commit 3c9c54e is literally titled 'fixed broken build'. This is a compile-fix, not a semantic migration.",
+    "newAssumptionsIntroducedByV2": [
+      "V2 adds authorizedMinters / mintFor / replaceDispatcher / setDispatcherDisabled. SYA calls NONE of them — its assumption surface is unchanged.",
+      "SYA must be registered in nftMinter.authorizedBurners — unchanged from V1. If not, every claim reverts inside burn() AFTER the exempt-validation but BEFORE any value moves (line 619), so no NFT and no funds are lost.",
+      "nextIndex() is documented as starting at 1 so 0 is invalid — consistent with _validateAndBurnNFT's `require(index > 0)` and canClaim's `for (i = 1; i < count; i++)`."
+    ],
+    "pinDrift": {
+      "yield-claim-nft": "nested pin f46a5cb vs top-level clone HEAD d4cc563 — DRIFT EXISTS, but INFTMinterV2.sol is byte-identical at both commits (diffed). No profiling impact.",
+      "phoenix-nft-staking": "nested pin 5015f1b == top-level clone HEAD 5015f1b — NO DRIFT. The NudgeStreamer semantics profiled here are authoritative."
+    }
+  },
+
+  "decimalNormalization": {
+    "ledgerRef": "M-01, fingerprint ecc2d126dd, status: acknowledged",
+    "functions": ["_normalizeAmount(uint256,address)", "_denormalizeAmount(uint256,address)"],
+    "failOpenBranch": {
+      "code": "if (decimals == 0 && exchangeRate == 0) return amount;",
+      "lines": [674, 705],
+      "semantics": "An UNCONFIGURED token is silently treated as 18-decimals @ 1:1. For a real 6-dp token (USDC) this understates its normalized value by 1e12.",
+      "consequenceChain": "unconfigured 6-dp strategy token → _normalizeAmount returns a 1e12-too-small value → totalNormalizedYield ≈ 0 → claimerPayment ≈ 0 → _denormalizeAmount floors actualPayment to 0 → claimer pays NOTHING but still receives the full skimSurplus payout. The `totalNormalizedYield == 0` guard (line 568) does NOT catch this: the value is small, not zero.",
+      "statusThisRun": "UNCHANGED by story-026. Both helpers are byte-identical to the 0fef726 baseline. Re-confirmed present and reachable.",
+      "story026Interaction": "The nudge branch inherits it: nudgeAmount = actualPayment * nudgeSplit / 100, so a fail-open-zeroed actualPayment yields nudgeAmount == 0, the branch is skipped, and the claim SUCCEEDS silently with zero payment to both phlimbo and the streamer. The new mandatory-streamer revert is NOT a backstop for M-01.",
+      "additionalObservations": [
+        "A token with genuine 0 decimals and rate 0 is indistinguishable from an unconfigured token — no `configured` sentinel flag exists in TokenConfig.",
+        "setTokenConfig(token, 0, 0) is accepted and re-enters the fail-open branch — there is no way to assert 'this token IS configured, at 18dp, 1:1' distinctly from 'unset'.",
+        "The `decimals > 18` branches in both helpers are DEAD CODE: setTokenConfig rejects decimals > 18 with InvalidDecimals.",
+        "Round-trip _denormalizeAmount(_normalizeAmount(x)) is lossy downward for sub-1e12 dust on a 6-dp token; the loss always favours the claimer, never the protocol."
+      ]
+    },
+    "roundingDirections": {
+      "claimerPayment": "totalNormalizedYield * (10000 - discountRate) / 10000 — floors, favours the CLAIMER",
+      "denormalize": "scaled / 10**(18-decimals) — floors, favours the CLAIMER",
+      "nudgeAmount": "actualPayment * nudgeSplit / 100 — floors, remainder falls to phlimboAmount via subtraction. Favours PHLIMBO over the nudge sink by at most 99 wei per claim. Subtraction-derived phlimboAmount means no wei is ever stranded in the contract.",
+      "streamerDust": "NudgeStreamer._accrued floors; dust stays in the streamer buffer and streams later — favours the protocol (cross-contract, informational)."
+    }
+  },
+
+  "stateVariables": [
+    { "name": "pauser", "type": "address", "mutators": ["setPauser"], "readers": ["onlyPauser", "unpause"], "default": "address(0)", "note": "0 default means pause() is unreachable until set" },
+    { "name": "rewardToken", "type": "address", "mutators": ["setRewardToken"], "readers": ["claim","approvePhlimbo","calculateClaimAmount"], "invariant": "must be non-zero for claim; enforced at claim line 524" },
+    { "name": "yieldStrategies", "type": "address[]", "mutators": ["addYieldStrategy","removeYieldStrategy"], "readers": ["claim","calculateClaimAmount","getTotalYield","getYieldStrategies"], "invariant": "membership is mirrored by isRegisteredStrategy — held: add pushes+sets, remove swap-pops+clears" },
+    { "name": "tokenConfigs", "type": "mapping(address => TokenConfig)", "mutators": ["setTokenConfig","pauseToken","unpauseToken"], "readers": ["_normalizeAmount","_denormalizeAmount","claim","calculateClaimAmount"] },
+    { "name": "discountRate", "type": "uint256", "mutators": ["setDiscountRate"], "readers": ["claim","calculateClaimAmount"], "invariant": "<= 10000 (enforced)" },
+    { "name": "phlimbo", "type": "address", "mutators": ["setPhlimbo"], "readers": ["claim","approvePhlimbo"], "invariant": "non-zero once set (setter rejects 0); claim re-checks" },
+    { "name": "nudge", "type": "address", "mutators": ["setNudgeAddress"], "readers": ["claim"], "default": "address(0)", "note": "STORY-026: now a routing key into the streamer's stream map, no longer a transfer target. Setter still accepts address(0) and accepts EOAs." },
+    { "name": "nudgeSplit", "type": "uint256", "mutators": ["setNudgeSplit"], "readers": ["claim"], "invariant": "<= 100 (enforced)", "note": "the master kill-switch for the whole streamer rail" },
+    { "name": "nudgeStreamer", "type": "address", "mutators": ["setNudgeStreamer"], "readers": ["claim"], "default": "address(0)", "isNew": true, "invariant": "once set, never returns to address(0) (setter rejects 0, no clear path)" },
+    { "name": "isRegisteredStrategy", "type": "mapping(address => bool)", "mutators": ["addYieldStrategy","removeYieldStrategy"], "readers": ["claim","calculateClaimAmount","getYield"] },
+    { "name": "strategyTokens", "type": "mapping(address => address)", "mutators": ["addYieldStrategy","removeYieldStrategy"], "readers": ["claim","calculateClaimAmount","getYield","getTotalYield"], "invariant": "non-zero iff registered; a zero entry causes a silent `continue` in every loop" },
+    { "name": "nftMinter", "type": "address", "mutators": ["setNFTMinter"], "readers": ["_validateAndBurnNFT","canClaim"], "note": "setter accepts address(0), which bricks claim with the string revert 'NFT minter not configured'" }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "claim(uint256 nftIndex, uint256 minRewardTokenSupplied, address[] calldata exemptStrategies)",
+        "visibility": "external",
+        "accessControl": "none (permissionless, but NFT-gated: caller must hold >=1 unit of nftMinter tokenId == nftIndex, and exactly 1 is burned)",
+        "reentrancyGuard": true,
+        "pausable": true,
+        "preconditions": [
+          "phlimbo != address(0) else ZeroAddress()",
+          "rewardToken != address(0) else ZeroAddress()",
+          "every exemptStrategies[i] is currently registered else ExemptStrategyNotRegistered() — checked BEFORE the NFT burn so bad input never consumes an NFT",
+          "nftMinter != address(0) else require-string 'NFT minter not configured'",
+          "nftIndex > 0 else require-string 'Invalid index'",
+          "IERC1155(nftMinter).balanceOf(msg.sender, nftIndex) > 0 else NoValidNFT()",
+          "SYA must be an authorizedBurner on nftMinter (else burn reverts)",
+          "totalNormalizedYield != 0 after the skim loop else ZeroAmount()",
+          "actualPayment >= minRewardTokenSupplied else InsufficientYield()",
+          "!(nudgeSplit > 0 && nudge == address(0)) else NudgeNotConfigured()",
+          "if nudgeAmount > 0: nudgeStreamer != address(0) else NudgeStreamerNotConfigured()",
+          "if nudgeAmount > 0: streamer must have a registered (nudge, rewardToken) stream else NudgeStreamer__NotRegistered() bubbles up",
+          "msg.sender must have approved >= actualPayment of rewardToken to this contract"
+        ],
+        "stateChanges": ["none of this contract's own storage — claim writes NO SYA state; all effects are external token/NFT movements"],
+        "externalCalls": [
+          "IERC1155(nftMinter).balanceOf (view)",
+          "INFTMinterV2(nftMinter).burn(msg.sender, nftIndex, 1)",
+          "IYieldStrategy(strategy).skimSurplus(token, msg.sender)  [per non-exempt, non-paused strategy]",
+          "IERC20(rewardToken).safeTransferFrom(msg.sender, address(this), actualPayment)",
+          "IERC20(rewardToken).forceApprove(nudgeStreamer, nudgeAmount)  [donation branch only]",
+          "INudgeStreamer(nudgeStreamer).collectNudge(nudge, rewardToken, nudgeAmount)  [donation branch only]",
+          "IPhlimbo(phlimbo).collectReward(phlimboAmount)  [if phlimboAmount > 0]"
+        ],
+        "events": ["RewardsCollected(strategy, amount) per yielding strategy", "RewardsClaimed(msg.sender, actualPayment, strategiesWithYield)"]
+      },
+      { "function": "setNudgeStreamer(address)", "visibility": "external", "accessControl": "onlyOwner", "reentrancyGuard": false, "stateChanges": ["nudgeStreamer"], "externalCalls": [], "reverts": ["ZeroAddress() on address(0)", "OwnableUnauthorizedAccount"] },
+      { "function": "setNudgeAddress(address)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["nudge"], "externalCalls": [], "reverts": ["OwnableUnauthorizedAccount"], "note": "accepts address(0) and accepts EOAs" },
+      { "function": "setNudgeSplit(uint256)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["nudgeSplit"], "reverts": ["InvalidNudgeSplit() if > 100"] },
+      { "function": "setRewardToken(address)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["rewardToken"], "reverts": ["ZeroAddress()"], "note": "NO EVENT EMITTED; does not revoke the prior phlimbo allowance; re-arms the streamer registration requirement (LOCAL-003)" },
+      { "function": "approvePhlimbo(uint256)", "visibility": "external", "accessControl": "onlyOwner", "externalCalls": ["IERC20(rewardToken).forceApprove(phlimbo, amount)"], "note": "creates a STANDING allowance" },
+      { "function": "setPhlimbo(address)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["phlimbo"], "reverts": ["ZeroAddress()"], "note": "does not revoke the old phlimbo's allowance" },
+      { "function": "setNFTMinter(address)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["nftMinter"], "note": "accepts address(0)" },
+      { "function": "addYieldStrategy(address,address)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["yieldStrategies","isRegisteredStrategy","strategyTokens"], "reverts": ["ZeroAddress()","StrategyAlreadyRegistered()"] },
+      { "function": "removeYieldStrategy(address)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["yieldStrategies","isRegisteredStrategy","strategyTokens"], "reverts": ["StrategyNotRegistered()"], "note": "swap-and-pop reorders the array — any off-chain index-based consumer must not cache positions" },
+      { "function": "setTokenConfig(address,uint8,uint256)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["tokenConfigs"], "reverts": ["ZeroAddress()","InvalidDecimals() if decimals > 18"] },
+      { "function": "setDiscountRate(uint256)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["discountRate"], "reverts": ["ExceedsMaxDiscount() if > 10000"], "note": "10000 == 100% discount == free claim; the bound permits it" },
+      { "function": "pauseToken(address) / unpauseToken(address)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["tokenConfigs[token].paused"], "note": "no zero-address or registration check" },
+      { "function": "setPauser(address)", "visibility": "external", "accessControl": "onlyOwner", "stateChanges": ["pauser"], "note": "accepts address(0), which disables pause()" },
+      { "function": "pause()", "visibility": "external", "accessControl": "onlyPauser", "stateChanges": ["_paused"] },
+      { "function": "unpause()", "visibility": "external", "accessControl": "owner OR pauser", "stateChanges": ["_paused"] },
+      { "function": "calculateClaimAmount(address[]) view", "visibility": "external", "accessControl": "none", "note": "mirrors claim's pricing but from the _getYieldForStrategy ESTIMATE, not from skimSurplus's actual return — divergence is expected and is what minRewardTokenSupplied covers" },
+      { "function": "canClaim(address) view", "visibility": "external", "accessControl": "none", "note": "loops 1..nextIndex()-1 unbounded — see LOCAL-002" },
+      { "function": "getYield(address) view / getTotalYield() view", "visibility": "external", "accessControl": "none" }
+    ],
+
+    "externalCalls": [
+      {
+        "target": "INudgeStreamer nudgeStreamer",
+        "methods": ["collectNudge(address,address,uint256)"],
+        "trustLevel": "trusted (owner-set)",
+        "isNew": true,
+        "notes": "Authoritative implementation: /home/justin/code/audits/lib/phoenix-nft-staking/src/NudgeStreamer.sol @5015f1b (nested pin == top-level HEAD, no drift). collectNudge is nonReentrant, settles the accrued stream to `nudge` FIRST (an outbound transfer), then transferFrom's exactly `amount` from SYA, then recomputes rewardPerSecond over the full duration. It is a TIMING THROTTLE, not a value cap — the full amount still reaches `nudge`, just linearly. Reverts: NudgeStreamer__NotRegistered (duration == 0), NudgeStreamer__ZeroAmount (amount == 0). It consumes the exact allowance, so SYA's forceApprove leaves no residue."
+      },
+      { "target": "IPhlimbo phlimbo", "methods": ["collectReward(uint256)"], "trustLevel": "trusted (owner-set)", "notes": "Pull-based: relies on the standing allowance from approvePhlimbo. If that allowance is exhausted, claim reverts inside collectReward AFTER the claimer has already been paid the surplus and had rewardToken pulled — but the whole tx reverts atomically, so no loss." },
+      { "target": "IYieldStrategy strategy (per registered entry)", "methods": ["skimSurplus(address,address)", "getAuthorizedClients()", "totalBalanceOf()", "principalOf()"], "trustLevel": "trusted (owner-registered)", "notes": "skimSurplus sends the batched surplus of ALL the strategy's authorized clients DIRECTLY to msg.sender, and does so BEFORE the claimer pays. A reverting strategy bricks claim for everyone; the exemptStrategies escape hatch exists exactly for that, and is test-covered (test_claim_RoutesAroundRevertingStrategy)." },
+      { "target": "INFTMinterV2 nftMinter (ERC1155)", "methods": ["balanceOf (view)", "burn(address,uint256,uint256)", "nextIndex() (view)"], "trustLevel": "trusted (owner-set)", "notes": "burn does NOT trigger ERC1155 receive hooks — no inbound-callback surface is created. SYA must be an authorizedBurner." },
+      { "target": "IERC20 rewardToken", "methods": ["safeTransferFrom", "forceApprove"], "trustLevel": "semi-trusted (owner-set)", "notes": "forceApprove is used specifically to tolerate USDT-shaped approve-from-nonzero. A hook-bearing (ERC777) rewardToken would create an inbound callback during collectNudge's settle-transfer to `nudge`; blocked locally by nonReentrant — DEFERRED to interaction analysis." },
+      { "target": "IERC20 strategy underlying tokens", "methods": ["(transferred by the strategy, not by SYA)"], "trustLevel": "semi-trusted", "notes": "SYA never touches these directly; it only reads the amount skimSurplus reports." }
+    ],
+
+    "events": ["PauserUpdated","NFTMinterUpdated","YieldStrategyAdded","YieldStrategyRemoved","TokenConfigSet","TokenPaused","TokenUnpaused","DiscountRateSet","PhlimboUpdated","NudgeUpdated","NudgeSplitUpdated","NudgeStreamerUpdated (NEW)","RewardsClaimed","RewardsCollected"],
+    "modifiers": ["onlyOwner","onlyPauser","whenNotPaused","nonReentrant"]
+  },
+
+  "valueFlows": {
+    "entryPoints": [
+      "rewardToken IN: safeTransferFrom(claimer -> SYA, actualPayment). This is the ONLY inbound value flow to SYA.",
+      "strategy underlying: NEVER enters SYA. skimSurplus delivers it strategy -> claimer directly."
+    ],
+    "split": "actualPayment = _denormalizeAmount(totalNormalizedYield * (10000 - discountRate) / 10000, rewardToken); nudgeAmount = actualPayment * nudgeSplit / 100 (floor); phlimboAmount = actualPayment - nudgeAmount (exact remainder, no dust stranded).",
+    "exitLegs": [
+      { "leg": "nudge share", "path": "SYA --forceApprove--> NudgeStreamer --transferFrom--> streamer buffer --linear stream over `duration`--> nudge sink", "changedByStory026": true, "note": "no longer atomic with the claim; arrival is now time-distributed" },
+      { "leg": "phlimbo share", "path": "IPhlimbo(phlimbo).collectReward(phlimboAmount) pulls from SYA using the standing approvePhlimbo allowance", "changedByStory026": false },
+      { "leg": "claimer payout", "path": "each strategy --skimSurplus--> claimer, in native underlying decimals", "changedByStory026": false }
+    ],
+    "conservation": "Post-claim SYA rewardToken balance delta == 0 in the nominal path (in: actualPayment; out: nudgeAmount + phlimboAmount == actualPayment). SYA is designed to hold no residual rewardToken. It holds a residue only if phlimbo's collectReward pulls less than phlimboAmount, which would be a phlimbo-side deviation (interaction-level).",
+    "economicNote": "Per project memory: the yield being sold here is externally-derived (protocol-owned-capital yield). Under-payment by a claimer is misallocation / marketing spend, NOT an economic loss to depositors. This constrains how M-01-class findings should be severity-weighted downstream."
+  },
+
+  "stateMachine": {
+    "claimOrdering": "VALIDATE exempts -> BURN NFT -> SKIM (pays claimer) -> price -> slippage check -> nudge-config check -> PULL payment -> nudge leg -> phlimbo leg. The claimer is paid BEFORE they pay. Local verdict: safe, because (a) claim is nonReentrant, (b) all legs are in one atomic tx so any downstream revert unwinds the skim, and (c) SYA writes no storage in claim, so there is no state to corrupt via a partial execution.",
+    "postDeployBrickStates": [
+      "nftMinter == 0 -> claim reverts (string)",
+      "phlimbo == 0 or rewardToken == 0 -> claim reverts ZeroAddress",
+      "nudgeSplit > 0 && nudge == 0 -> claim reverts NudgeNotConfigured",
+      "nudgeSplit > 0 && nudgeStreamer == 0 -> claim reverts NudgeStreamerNotConfigured  [NEW, default post-deploy state]",
+      "nudgeSplit > 0 && stream unregistered on the streamer -> claim reverts NudgeStreamer__NotRegistered  [NEW]",
+      "SYA not an authorizedBurner on nftMinter -> claim reverts inside burn",
+      "phlimbo allowance exhausted -> claim reverts inside collectReward"
+    ],
+    "note": "story-026 doubles the number of external-config preconditions that can brick the sole permissionless entry point, and both new ones live on a DIFFERENT contract owned by a DIFFERENT owner instance (NudgeStreamer(initialOwner)). Availability of claim() is now coupled to streamer-side ops. Deliberate per the story, but it is the dominant availability characteristic of this run."
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-001",
+      "type": "unbounded-loop / quadratic gas",
+      "severity": "local-low",
+      "function": "claim",
+      "line": 538,
+      "description": "The strategy loop (yieldStrategies, owner-bounded) contains an inner loop over the caller-supplied `exemptStrategies` calldata array, giving O(n*m) work with m fully caller-controlled. Duplicates are NOT rejected — the same registered strategy may appear m times and still pass validation, so m is unbounded independent of n.",
+      "impact": "Self-inflicted gas burn only; a caller cannot use this to grief anyone else (each claim is independent and the cost lands on the caller). It does, however, mean claim's gas is not statically bounded, which matters for any bundler/relayer that pre-estimates. calculateClaimAmount:742 has the identical shape.",
+      "recommendation": "Bound exemptStrategies.length by yieldStrategies.length, or reject duplicates.",
+      "confidence": "verified"
+    },
+    {
+      "id": "LOCAL-002",
+      "type": "unbounded-loop",
+      "severity": "local-low",
+      "function": "canClaim",
+      "line": 789,
+      "description": "Loops i = 1 .. INFTMinterV2(nftMinter).nextIndex() - 1, issuing one external balanceOf staticcall per dispatcher index. nextIndex is monotonically increasing and controlled by the NFTMinter owner, never by this contract.",
+      "impact": "View-only and primarily bot-facing, so eth_call has generous gas. But any ON-CHAIN caller (another contract using canClaim as a gate) inherits an unbounded, monotonically growing cost that can eventually exceed the block gas limit. Unchanged by story-026 except that nextIndex now resolves through INFTMinterV2.",
+      "recommendation": "Offer a paginated variant, or have bots use the O(1) balanceOf(caller, index) directly.",
+      "confidence": "verified"
+    },
+    {
+      "id": "LOCAL-003",
+      "type": "owner-footgun / undocumented brick trigger",
+      "severity": "local-medium",
+      "function": "setRewardToken",
+      "line": 417,
+      "description": "story-026 makes claim() depend on a registered (nudge, rewardToken) stream on the NudgeStreamer. The contract's own ops-ordering NatSpec enumerates the re-arm triggers and names only `setNudgeAddress` (failure mode 3). `setRewardToken` is an equally potent trigger and is NOT mentioned anywhere: repointing the reward token to one for which no stream exists silently bricks every claim with a payable nudge share via NudgeStreamer__NotRegistered, from a setter whose stated purpose has nothing to do with the nudge rail.",
+      "lawTest": "A competent, non-malicious owner calling setRewardToken would be SURPRISED that it takes down claim(). Surprise => footgun => in scope under Law 3.",
+      "secondaryEffect": "setRewardToken also leaves the OLD token's standing allowance to phlimbo intact and grants no new one, so the phlimbo leg additionally reverts until approvePhlimbo is re-run for the new token. And it emits no event, so the change is invisible to off-chain monitoring.",
+      "recommendation": "Add the trigger to the ops-ordering doc block; emit a RewardTokenUpdated event; consider zeroing the old phlimbo allowance and requiring a fresh approvePhlimbo.",
+      "confidence": "verified"
+    },
+    {
+      "id": "LOCAL-004",
+      "type": "standing-approval hygiene",
+      "severity": "local-low",
+      "function": "approvePhlimbo / setPhlimbo / setRewardToken",
+      "line": 426,
+      "description": "approvePhlimbo grants an owner-chosen (typically large) standing rewardToken allowance to `phlimbo`. Neither setPhlimbo nor setRewardToken revokes it, so a repointed-away phlimbo retains spending rights over SYA's rewardToken balance indefinitely.",
+      "impact": "SYA is designed to hold ~zero rewardToken between claims, so the exploitable window is thin (a stale phlimbo could only skim mid-claim balances, and claim is nonReentrant). Pre-existing, not introduced by story-026.",
+      "recommendation": "Have setPhlimbo forceApprove(oldPhlimbo, 0) before repointing.",
+      "confidence": "verified"
+    },
+    {
+      "id": "LOCAL-005",
+      "type": "missing-event",
+      "severity": "local-qa",
+      "function": "setRewardToken",
+      "line": 417,
+      "description": "The only owner setter of a load-bearing address that emits no event. Every sibling setter (setPauser, setPhlimbo, setNudgeAddress, setNudgeSplit, setNudgeStreamer, setNFTMinter, setTokenConfig, setDiscountRate) emits one.",
+      "recommendation": "Add RewardTokenUpdated(old, new) to IStableYieldAccumulator.",
+      "confidence": "verified"
+    },
+    {
+      "id": "LOCAL-006",
+      "type": "interface-completeness",
+      "severity": "local-qa",
+      "function": "IStableYieldAccumulator (src/interfaces/IStableYieldAccumulator.sol)",
+      "description": "The interface — newly in scope this run — omits several public members of the implementation: setRewardToken, approvePhlimbo, setPauser, pauser(), discountRate(), isRegisteredStrategy(), getYieldStrategies is present but yieldStrategies(uint256) is not. An integrator typing SYA through this interface cannot perform reward-token or allowance ops.",
+      "note": "The members ClaimArbitrage actually depends on (rewardToken(), claim(), calculateClaimAmount(), strategyTokens()) ARE all present, so no live integration is broken. story-026 correctly added setNudgeStreamer(), nudgeStreamer(), NudgeStreamerUpdated and NudgeStreamerNotConfigured to it — the interface is faithful to the delta.",
+      "recommendation": "Complete the interface or document it as a deliberate partial view.",
+      "confidence": "verified"
+    },
+    {
+      "id": "LOCAL-007",
+      "type": "dead-code",
+      "severity": "local-qa",
+      "function": "_normalizeAmount / _denormalizeAmount",
+      "line": 682,
+      "description": "The `decimals > 18` branches in both helpers are unreachable: setTokenConfig rejects decimals > 18 with InvalidDecimals(). Also `error NotImplemented()` and `error InsufficientPending()` are declared in the interface and never used anywhere.",
+      "confidence": "verified"
+    }
+  ],
+
+  "deferredToInteractionAnalysis": [
+    "Whether the NudgeStreamer's re-registration of rewardPerSecond over the FULL duration on every collectNudge causes the nudge sink's effective arrival rate to drift under a high claim cadence (the phlimbo Linear-Depletion class). Cross-contract: requires the streamer's math plus a realistic claim frequency model.",
+    "Whether a hook-bearing rewardToken (ERC777) can exploit collectNudge's settle-transfer-to-sink-before-transferFrom-from-SYA ordering. claim's nonReentrant blocks re-entry into SYA; the open question is re-entry into the STREAMER or the SINK.",
+    "Whether the batch-minter sink's `batchMint` step-3.5 pullPendingStream flush plus this new streamed arrival changes the MEV/front-run economics of the nudge pot (relates to phoenix-nft-staking 858e9e80 and the run-22 aggregate-nudge Medium).",
+    "Whether skimSurplus paying the claimer BEFORE the payment is pulled is exploitable given a specific strategy implementation (e.g. one that makes an external call to the recipient).",
+    "The economic weight of M-01 (ecc2d126dd) given the externally-derived-yield framing — econ-scanner's call, not this profile's."
+  ],
+
+  "trustAssumptions": [
+    "nudgeStreamer is a genuine NudgeStreamer that pulls EXACTLY the approved amount — otherwise SYA's forceApprove leaves a residual standing allowance. Verified true for phoenix-nft-staking@5015f1b.",
+    "The NudgeStreamer's owner (a separate Ownable instance, possibly a different key) keeps the (nudge, rewardToken) stream registered. SYA's sole permissionless entry point is now hostage to that.",
+    "The `nudge` sink is a BatchNFTMinterMultiToken-shaped contract — enforced only on the streamer at registerStream time via isNudgeToken, never by SYA's own setNudgeAddress.",
+    "SYA is registered as an authorizedBurner on the configured INFTMinterV2.",
+    "phlimbo has a sufficient standing rewardToken allowance from approvePhlimbo.",
+    "Registered yield strategies' skimSurplus is honest and non-reverting; a single bad strategy bricks claim until owner remediation or claimer-side exemption.",
+    "rewardToken and strategy tokens are non-rebasing, non-fee-on-transfer, non-hook ERC20s (fee-on-transfer is a documented C4 known-invalid for this suite).",
+    "Owner has configured tokenConfigs for EVERY registered strategy token — the fail-open default is the root of M-01."
+  ],
+
+  "complexity": {
+    "loc": 832,
+    "externalPublicFunctions": 24,
+    "internalFunctions": 5,
+    "stateVariables": 12,
+    "externalCallSites": 9,
+    "loops": 8,
+    "deltaFromBaseline": "+103 lines in the implementation (mostly NatSpec), +38 in the interface; behaviourally: 1 new state var, 1 new setter, 1 new error, 1 new event, 1 rewritten claim branch, 2 interface-name swaps"
+  }
+}
