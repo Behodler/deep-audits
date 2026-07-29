@@ -96,7 +96,27 @@ provide the raw material and findings, not the prose.
 ## OPERATIONAL GUIDELINES
 
 ### 1. Extract intent (always)
-- Build the `intent.md` checklist from: the package.json `//`<key> comment, the script's NatSpec/`@notice`,
+- **Start with the story document — it outranks everything else in this list (Law 2).** Deployment and
+  migration scripts are story-driven exactly like contracts are: find the `[story-NNN]` tag(s) on the commits
+  that introduced or last touched the script (`git -C lib/<project> log --format='%h%x09%s' -- <script path>`),
+  plus any `Story 0XX` reference in the script's own comments, and **read the story document** from the
+  external, read-only tree:
+  ```
+  find ~/code/product-owner/stories/<storyDir> -type f \( -name '<NNN>-*.md' -o -name '<NNN>.*-*.md' \)
+  ```
+  `<storyDir>` is the project's `storyDir` field in `registered-projects.json` (**not** the project
+  name — `reflax-yield-vault` → `vault-RM`); that field caches the authoritative mapping in
+  `~/code/product-owner/registered-project-list.md`, so re-derive from there on a miss rather than guessing.
+  See `storyPolicy` in the registry for the full contract. Numbers are unique
+  **project-wide** across all `complete`/`incomplete`/`review`/`archive` and sprint folders — glob the whole
+  project tree, never one state or one sprint; decimal insertions (`045.5-…`) exist. The story's acceptance
+  criteria are the **authoritative** statement of what the script was supposed to do; the package.json comment
+  and NatSpec are the *author's restatement* of it, and a gap between the two is itself a first-class
+  intent-mismatch finding. **Never report that you could not hold the script accountable to its story because
+  the story is external** — resolving it is part of this step. Zero glob hits → state plainly that the story
+  does not exist; multiple hits → report the ambiguity rather than picking one. The tree is read-only; and a
+  script whose story sits in `incomplete`/`review` is in scope, but note the state.
+- Build the `intent.md` checklist from: the story document (above, authoritative), the package.json `//`<key> comment, the script's NatSpec/`@notice`,
   and any doc the comment references (e.g. `docs/*.md`). Separate **purpose** (what it means to do) from
   **declared pre-conditions** (`require`s before the broadcast block) and **declared post-conditions**
   (`require`/asserts after). The pre/post-conditions are the script author's own spec — treat deviations

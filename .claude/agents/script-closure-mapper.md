@@ -119,6 +119,15 @@ Write `<reportDir>/script-audits/<entryPoint>/entry-manifest.json` and
   - **shared address constants** with the target (strongest),
   - **same story tag** (`Story 0XX`) in comments,
   - **shared key contracts / dispatcher index / pool**.
+
+### 5b. Resolve story documents (always)
+- Collect every story tag in the closure: `[story-NNN]` on the commits that introduced/last touched the entry-point script and its cluster siblings (`git -C lib/<project> log --format='%h%x09%s' -- <path>`), plus any `Story 0XX` mentioned in comments.
+- Resolve each to its document in the external, **read-only** tree, using the project's `storyDir` from `registered-projects.json` (**not** the project name — `reflax-yield-vault` → `vault-RM`; the field caches the authoritative mapping in `~/code/product-owner/registered-project-list.md`, so re-derive from there on a miss rather than guessing — see `storyPolicy` in the registry):
+  ```
+  find ~/code/product-owner/stories/<storyDir> -type f \( -name '<NNN>-*.md' -o -name '<NNN>.*-*.md' \)
+  ```
+  Numbers are unique **project-wide** across all `complete`/`incomplete`/`review`/`archive` and sprint folders, so glob the whole project tree — never one state, never one sprint; decimal insertions (`045.5-…`) exist.
+- Emit `storyDocs: [{ tag, path, state, scriptsCovered }]` in the closure output so `script-auditor` can grade intent against the story rather than against the commit subject. Zero hits → record the tag with `path: null`; multiple hits → record all paths and flag the ambiguity. Never write to the stories tree, and never report a story as unavailable because it lives outside the audit repo.
 - Classify each `relation`: `predecessor` / `successor` (ordered migration steps), `skipped-step` (a follow-up the team noted was skipped — high signal for "did this leave the system half-configured"), `sibling-config` (tweaks the same target), `evidence` (a `TEMP`/simulation/`Fix*` script whose very existence hints a problem surfaced). Keep this list tight and ranked — it scopes the cluster-interaction analysis, it is not an excuse to pull in the whole repo.
 
 ## SCOPE RESTRICTION (CRITICAL)

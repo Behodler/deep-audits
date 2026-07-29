@@ -39,7 +39,7 @@ Invoke **project-manager**: "Load the persistent ledger and compute changed file
   - Ledger present, no `--full` → **regression scan**: scanners still receive the full scope for context, but focus effort on changed files/functions and on previously-`open` findings.
 - **New-in-scope files always get full attention.** `changed_since` returns a `newInScope` list — first-party contracts that changed and are not in the prior `scope` snapshot (e.g. a new migrator). These are **never** treated as out-of-scope or deferred to a confirmation: they are scanned as if cold, even in regression mode, and named explicitly in the run summary so the user sees them. Surfacing beats tidiness (Law 1).
 - Pass the ledger (open/fixed/acknowledged fingerprints) and the changed-file set to downstream agents.
-- Also invoke **project-manager** `get_story_intent` to resolve the `[story-NNN]` intents for the audited range (+ design docs / `CLAUDE.md` / `designDecisions`) for the **story-faithfulness** scanner (Law 2). Regression mode → the changed-commit range; `--full` → stories touching in-scope files.
+- Also invoke **project-manager** `get_story_intent` to resolve the `[story-NNN]` intents for the audited range (+ design docs / `CLAUDE.md` / `designDecisions`) for the **story-faithfulness** scanner (Law 2). Regression mode → the changed-commit range; `--full` → stories touching in-scope files. `get_story_intent` must **retrieve the story documents themselves** from `~/code/product-owner/stories/<storyDir>/` (read-only, external) — the `[story-NNN]` commit subject is only a pointer. See `registered-projects.json` → `storyPolicy`.
 
 ```
 Run Mode
@@ -94,7 +94,7 @@ Invoke **econ-scanner**: "Scan for cross-contract economic vulnerabilities"
 
 ### 5c. Story-Faithfulness Scan (Law 2)
 Invoke **story-faithfulness**: "Verify in-scope features implement the stories they derive from"
-- Works from profiles + the resolved `[story-NNN]` intents + design docs.
+- Works from profiles + the retrieved **story documents** (`~/code/product-owner/stories/<storyDir>/…/<NNN>-*.md`, authoritative) + the `[story-NNN]` commit bodies + design docs. Never grade faithfulness from a commit subject alone, and never report a story as inaccessible because it lives outside this repo.
 - Checks (1) does the implementation conform to each story's acceptance criteria, and (2) **Law-1 override** — is the story's *own* intent unsafe? An unsafe story escalates to a security finding; a behavioural deviation becomes a faithfulness (`F-XX`) finding for the spec-conformance report.
 
 ## 6. Tier 3 — Property & Symbolic Verification (default)

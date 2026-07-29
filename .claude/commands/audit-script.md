@@ -44,6 +44,7 @@ Invoke **script-closure-mapper**: "Resolve the entry point to its full transitiv
 - Resolves the Solidity import graph via `foundry.toml` remappings; classifies files `in-src` / `nested-submodule` / `external-lib`.
 - Maps hardcoded on-chain addresses + inline interfaces to source contracts (resolves nested-submodule paths; corroborates bytecode via Etherscan when fork is up).
 - Records off-chain state files the JS chain mutates, and the ranked **cluster** of sibling scripts (shared addresses / story tag / skipped-step / evidence).
+- **Resolves the story documents** behind the entry point and its cluster (`storyDocs[]`) from the external, read-only tree `~/code/product-owner/stories/<storyDir>/` — see `registered-projects.json` → `storyPolicy`. A `[story-NNN]` commit subject is a pointer, not the story; the document holds the acceptance criteria the script is graded against (Law 2). Never report that a script could not be held accountable to its story because the story lives outside this repo.
 - Output: `script-audits/<entryPoint>/entry-manifest.json` + `closure-manifest.json`.
 
 ```

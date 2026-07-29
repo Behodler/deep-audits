@@ -25,7 +25,10 @@ The other scanners ask "is this code exploitable?" (Law 1). You ask two differen
       "summary": "Snapshot nudge pot before mint loop to stop per-mint donation self-refund",
       "commit": "5f863d2",
       "body": "<full commit message body>",
-      "touchedFiles": ["src/BatchNFTMinter.sol"]
+      "touchedFiles": ["src/BatchNFTMinter.sol"],
+      "storyDoc": "~/code/product-owner/stories/nft-staking/complete/donation-order-fix/016-snapshot-nudge-pot-before-mint-loop.md",
+      "storyDocState": "complete",
+      "storyDocText": "<full story document>"
     }
   ],
   "designDocs": ["lib/phoenix-nft-staking/docs/design.md", "lib/phoenix-nft-staking/docs/runway-dynamics-and-apy-as-policy.md"],
@@ -36,10 +39,21 @@ The other scanners ask "is this code exploitable?" (Law 1). You ask two differen
 ```
 
 **Story source of truth (in priority order):**
-1. The `[story-NNN]` commit messages in the audited range (provided as `stories[]`).
-2. The project's feature spec / Critical Invariants in `lib/<project>/CLAUDE.md`.
-3. `lib/<project>/docs/*.md` design docs.
-4. `designDecisions` / `systemAssumptions` in `registered-projects.json`.
+1. **The story document** in `~/code/product-owner/stories/<storyDir>/…/<NNN>-<slug>.md` — the authoritative acceptance criteria. Provided as `storyDoc`/`storyDocText`.
+2. The `[story-NNN]` commit message body in the audited range (`stories[].body`) — a one-line-plus summary, **not** the spec.
+3. The project's feature spec / Critical Invariants in `lib/<project>/CLAUDE.md`.
+4. `lib/<project>/docs/*.md` design docs.
+5. `designDecisions` / `systemAssumptions` in `registered-projects.json`.
+
+**Stories are external — always retrieve them.** A `[story-NNN]` commit subject is a *pointer* to a document, not the story. **Never grade faithfulness from the commit subject alone, and never conclude "the story is external / I could not access it"** — that is a resolvable lookup, not a limitation. If `storyDocText` is missing from your input, resolve it yourself (read-only):
+```
+find ~/code/product-owner/stories/<storyDir> -type f \( -name '<NNN>-*.md' -o -name '<NNN>.*-*.md' \)
+```
+using the project's `storyDir` from `registered-projects.json` (**not** the project name — `reflax-yield-vault` → `vault-RM`; that field caches the authoritative mapping in `~/code/product-owner/registered-project-list.md`, so re-derive from there on a miss rather than guessing). Numbers are unique **project-wide** across all `complete`/`incomplete`/`review`/`archive` and sprint folders, so glob the whole project tree; decimal insertions (`045.5-…`) exist. Zero hits → report the story as genuinely non-existent and do not invent criteria. Multiple hits → report the ambiguity, do not pick one. The tree is **read-only**.
+
+**The state folder is metadata, not a filter.** `incomplete` and `review` stories are fully in scope — code often lands before a story is closed out — and `archive` still explains shipped behaviour. Record which state each story came from; a landed, wired feature whose story still sits in `incomplete` or `review` is worth surfacing as a note (the acceptance criteria may still be in flux).
+
+**Where the document and the commit disagree, the document wins** — and the divergence is itself reportable (the commit claimed something the story did not ask for, or omitted something it did).
 
 If a story's intent is genuinely undocumented, say so — do **not** invent acceptance criteria.
 

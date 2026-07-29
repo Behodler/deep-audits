@@ -11,7 +11,7 @@ This repository contains the audit tooling used to review the Phoenix/Behodler s
 Every audit decision — what to scan, what to report, how to rank, what to suppress — obeys a strict, ordered hierarchy. Lower laws yield to higher ones (Asimov-style). When laws conflict, the lowest-numbered one wins. This hierarchy is the authority behind the agent rules; where a C4 convention contradicts it, the laws win (C4 is an output spec, not the goal).
 
 1. **No exploits (security is paramount).** This is DeFi; a live exploit is the worst possible outcome. **Recall beats report-tidiness** — never silently drop a plausibly-security-relevant finding to keep a report clean. If a finding must be set aside, park it in a *visible* channel (manual-review / spec-conformance / carryover) with the reason, never in a log nobody reads.
-2. **Faithfulness to stories.** Features must do what the `[story-NNN]` they derive from says. Stories live in `[story-NNN]`-tagged git commit messages, `lib/<project>/docs/`, and the project `CLAUDE.md`. **Law 1 overrides:** if a story's own intended behaviour would introduce an exploit, flag the unsafe story — do not bless a faithful-but-exploitable implementation.
+2. **Faithfulness to stories.** Features must do what the `[story-NNN]` they derive from says. **The story documents themselves live outside this repo, in `~/code/product-owner/stories/`** — a `[story-NNN]` commit subject is a *pointer* to one of those documents, not the story. Read the document (see **Stories** under Critical Rules); supporting intent also lives in `lib/<project>/docs/` and the project `CLAUDE.md`. **Law 1 overrides:** if a story's own intended behaviour would introduce an exploit, flag the unsafe story — do not bless a faithful-but-exploitable implementation.
 3. **The owner is trusted — for KNOWING actions only.** Assume the owner is **non-malicious**: never report "a malicious owner could…" vectors (a self-audit cannot stop a malicious owner, and the owner is not their own adversary — such findings are pure noise). But an owner action with a *non-obvious* consequence that **unknowingly** enables a Law-1 exploit or breaks a Law-2 story is a **footgun**, and footguns are **in scope** — surfaced as operational hazards with safe-config guidance, at honest severity. The test: *"would a competent, non-malicious owner be surprised by this consequence?"* Surprise ⇒ footgun ⇒ report. Obvious ⇒ trusted ⇒ suppress.
 
 ## Terminology
@@ -27,10 +27,24 @@ Every audit decision — what to scan, what to report, how to rank, what to supp
 
 **Scope is default-in-scope — a denylist, not an allowlist (Law 1).** Every first-party `.sol` in a submodule is in scope by default; the only baked-in exclusion is the project's own nested `lib/**` (third-party + forked deps, handled at the findings layer). A **new** first-party contract introduced by a code change — a fresh migrator, a new strategy — is **automatically in scope and scanned**, never silently dropped and never gated behind a "is this in scope?" confirmation. The per-project `scope` array in `registered-projects.json` is an advisory focus hint and cached snapshot, **never** the gate; see `registered-projects.json` → `scopePolicy` for the authoritative semantics. Rationale: recall beats report-tidiness — risking extra tokens on a contract nobody cares about is acceptable; risking a live exploit in a contract that slipped under the radar is not. Cull noise at **triage** (`/ledger`), not by withholding the scan. A project may add *extra* human-chosen exclusions to its `outOfScope`, but under-scoping must never hide a first-party contract.
 
+**Stories are external, and must always be retrieved (Law 2).** The `[story-NNN]` prefix on a commit subject (e.g. `[story-073] Seed phUSD/Kendu nudge streams…`) is a **pointer**, not the story. The authoritative story documents live in the read-only tree `~/code/product-owner/stories/`, laid out as:
+
+```
+~/code/product-owner/stories/<storyDir>/<complete|incomplete|review|archive>/<sprint>/<NNN>-<slug>.md
+```
+
+- **Story numbers are unique project-wide** — across every state folder and every sprint/worktree folder. Decimal insertions exist (`045.5-...`). Resolve a tag by globbing the *whole* project tree, never one sprint or one state:
+  `find ~/code/product-owner/stories/<storyDir> -type f -name '<NNN>-*.md' -o -type f -name '<NNN>.*-*.md'`
+- **The state folder is metadata, not a filter.** `incomplete` / `review` stories are still in scope (code frequently lands before the story is closed out), and `archive` still explains shipped behaviour. Note which state a story came from — a landed feature whose story sits in `incomplete` is itself worth flagging.
+- **The directory name is not the project name** (`reflax-yield-vault` → `vault-RM`, `phoenix-phase-2-staging` → `phStaging2`). Never guess it. Use the project's `storyDir` field in `registered-projects.json` — a verified cache of the **authoritative** mapping in `~/code/product-owner/registered-project-list.md`, which lists `<storyDir>:<path under ~/code/>` per line and resolves mechanically via `git -C ~/code/<path> remote get-url origin` (the remote's basename is the audit project name). If a lookup misses or a project is added, re-derive from that file and refresh `storyDir`.
+- **Read-only, like `lib/`.** Never write to the stories tree.
+- **Never grade faithfulness from a commit subject alone, and never report "the story is external / unavailable."** If a glob returns zero hits, say the story genuinely does not exist; if it returns several, report the ambiguity rather than picking one. This applies to `/analyze`, `/full-audit`, **and `/audit-script`** — a deployment script is judged against its story exactly like a contract is. Authoritative semantics: `registered-projects.json` → `storyPolicy`.
+
 ## Architecture
 
 ### Directory Structure
 - `lib/` - Git submodules containing auditable Solidity projects (read-only audit references)
+- `~/code/product-owner/stories/<storyDir>/` - **External, read-only** story documents; the Law-2 source of truth (see Critical Rules → Stories)
 - `workspace/<project>/` - Writable clones for PoC/test development (gitignored; PoCs and Tier-3 tests live here)
 - `reports/<project>-XX/` - Per-run audit output, sequentially versioned
 - `reports/ledgers/<project>.json` - Persistent findings ledger (open/fixed/triaged across runs)
