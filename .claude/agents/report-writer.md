@@ -57,12 +57,15 @@ For High/Medium findings, generate clickable GitHub links to the vulnerable code
 
 **URL Pattern**:
 ```
-{repoUrl}/blob/{defaultBranch}/{contract}#L{lineStart}-L{lineEnd}
+{repoUrl}/blob/{branch}/{contract}#L{lineStart}-L{lineEnd}
 ```
 
 **Data Sources**:
-1. Get `repoUrl` and `defaultBranch` from `registered-projects.json` via project-manager
-2. Get `contract`, `lineStart`, `lineEnd` from the finding record
+1. `{branch}` = the finding's own `branch` field → else `currentBranch` → else `defaultBranch`, from `registered-projects.json` via project-manager. A finding discovered on a feature branch must link to **that** branch: a trunk link either 404s or, worse, resolves to unrelated lines in a file that never had the bug.
+2. Get `repoUrl` from `registered-projects.json` via project-manager
+3. Get `contract`, `lineStart`, `lineEnd` from the finding record
+
+When the finding's branch is not the default branch, say so next to the link (e.g. *"on branch `feat/nudge-v3`, not yet merged into `main`"*) — a reader must not mistake branch-only code for shipped code.
 
 **Examples**:
 - Line range: `https://github.com/code-423n4/pooltogether/blob/main/src/PrizePool.sol#L240-L252`

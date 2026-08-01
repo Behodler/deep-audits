@@ -22,7 +22,8 @@ The project-manager performs the following for every entry in `registered-projec
 ### 2a. Resolve project
 - Friendly name (lowercase-kebab key)
 - `submodule` field → `lib/<submodule>`
-- `defaultBranch` (fallback chain identical to `/update-lib`: `projects.<name>.defaultBranch` → `.gitmodules` `branch` → `git -C lib/<sub> remote show origin | awk '/HEAD branch/ {print $NF}'`)
+- The tracked branch (fallback chain identical to `/update-lib`: `projects.<name>.currentBranch` → `projects.<name>.defaultBranch` → `.gitmodules` `branch` → `git -C lib/<sub> remote show origin | awk '/HEAD branch/ {print $NF}'`). Ground-truth it against `git -C lib/<sub> rev-parse --abbrev-ref HEAD` and flag a mismatch — a stale `currentBranch` means someone moved the checkout outside `/update-lib`.
+- Mark the row when the submodule is parked off-trunk: append `(off-trunk, default <defaultBranch>)` to the branch cell. An audit running on a feature branch is a fact the reader needs before acting on the numbers.
 - Skip the project with a clear note if `lib/<submodule>` does not exist on disk.
 
 ### 2b. Determine remote HEAD
@@ -31,7 +32,7 @@ The project-manager performs the following for every entry in `registered-projec
 - On fetch failure (no network, auth issue), record an error string for that row and continue — do not abort the whole table.
 
 ### 2c. Determine last-audited commit
-- Load `reports/ledgers/<friendly>.json` if it exists and read `lastAuditedCommit`.
+- Load `reports/ledgers/<friendly>.json` if it exists and read **`branchBaselines[<branch>].lastAuditedCommit`** — the commit last audited *on the branch this row is reporting*. Fall back to the top-level `lastAuditedCommit` only when the ledger has no `branchBaselines` (pre-dating the field) **and** the row's branch equals `defaultBranch`; otherwise report `(no baseline on <branch>)`. Never count "behind" against another branch's baseline — the number would be fiction.
 - If the ledger is absent or has no `lastAuditedCommit`: record `(no ledger)` and skip the behind-count for that row. Do **not** fall back to the parent repo's submodule pointer — the pointer can be bumped without an audit, so it is not authoritative.
 - Also surface `lastRun` from the ledger if present (e.g., `reflax-yield-vault-06`) so the row links to a specific report directory.
 

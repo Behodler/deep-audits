@@ -19,10 +19,10 @@ Mechanism is **PoC-replay first**: if the finding has a runnable PoC, re-run it 
 # THE INVARIANT THAT MAKES THIS SAFE
 **recheck is baseline-preserving and single-entry.** Discovery scans (`/analyze`, `/full-audit`) earn the right to advance the regression baseline because they look at the whole scope; recheck does not. Therefore recheck:
 
-1. **MUST NOT write `lastAuditedCommit`** on the ledger. That field is the regression diff baseline; advancing it after looking at only one finding would make all future regression scans silently skip everything that changed between the old baseline and now.
+1. **MUST NOT write `lastAuditedCommit`** — nor any `branchBaselines[<branch>]` entry — on the ledger. Those fields are the regression diff baseline; advancing one after looking at only one finding would make all future regression scans silently skip everything that changed between the old baseline and now.
 2. **MUST NOT bump `lastSeenRun`** — that field means "observed by a discovery scan." recheck records its result in dedicated recheck-only fields instead (see step 6).
 3. **MUST touch only the target entry.** No other ledger entry, and no run pointer (`lastRun`), is modified.
-4. **MUST NOT auto-overwrite a human triage status** (`fix-pending` / `acknowledged` / `wont-fix` / `false-positive`) or auto-flip `open`↔`fixed`. recheck *proposes* a status change and prints the exact `/ledger` command; the human confirms. Note that `fix-pending` is *analysed* like `open` (it is a live finding — recheck fully engages with it) but *written* like a human status (only a human closes it).
+4. **MUST NOT auto-overwrite a human triage status** (`fix-pending` / `acknowledged` / `wont-fix` / `false-positive` / `abandoned`) or auto-flip `open`↔`fixed`. recheck *proposes* a status change and prints the exact `/ledger` command; the human confirms. Note that `fix-pending` is *analysed* like `open` (it is a live finding — recheck fully engages with it) but *written* like a human status (only a human closes it).
 
 If you cannot honor all four, stop and tell the user to run `/full-audit` instead.
 
@@ -49,7 +49,8 @@ Target:    HEAD 7d11f66  →  (resolve actual)
 
 ## 2. Scope Guard — is this change narrow enough for a recheck?
 Invoke **project-manager**: "Compute changed files between the finding's last-audited commit and the target commit"
-- Read-only `git -C lib/<submodule> diff --name-only <lastAuditedCommit> <target>`.
+- Read-only `git -C lib/<submodule> diff --name-only <baseline> <target>`, where `<baseline>` comes from `project-manager` → `audit_baseline` (the current branch's baseline, not the top-level mirror).
+- **Cross-branch guard:** if the submodule is now parked on a different branch than the finding's `branch`, say so up front. Rechecking a `master` finding while checked out on `feat/x` answers "is it live on feat/x?", not "was it fixed on master" — state which question is being answered, and record the answer's branch in `recheckResult`. A STILL-LIVE result on a branch the finding was not filed against **adds** that branch to `branchesSeen` (it now exists in two places) and is reported, never used to close anything.
 - **If the diff is empty** (code identical to when the finding was recorded): report that nothing changed for this finding; no re-verification needed; exit (offer `/ledger` if the user wants to triage anyway).
 - **If changed files extend beyond the finding's `contract`**: the change is broader than this finding. Print a warning and **recommend `/full-audit <project>`** — recheck cannot see new issues the broader change may have introduced. Proceed with the narrow recheck only if the user explicitly wants the single-finding answer anyway.
 

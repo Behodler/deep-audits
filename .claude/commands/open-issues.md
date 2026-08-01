@@ -12,7 +12,9 @@ This command is **read-only**. It never writes to ledgers, submodules, findings,
 
 # Definition: "undealt-with"
 A finding is **dealt-with** (and therefore *hidden* by default) when its ledger status records a resolution or a deliberate human/process decision:
-`fixed`, `acknowledged`, `wont-fix`, `false-positive`, `submitted`, `qa-bundled`, `merged`, `suppressed`.
+`fixed`, `acknowledged`, `wont-fix`, `false-positive`, `abandoned`, `submitted`, `qa-bundled`, `merged`, `suppressed`.
+
+**`abandoned` is dealt-with** — the branch that carried the finding was discarded, so there is no live code left to act on. It stays hidden unless the branch returns (`/ledger <project> reopen <fingerprint>`), and it is tallied separately from `wont-fix` in the hidden line, because "the code went away" and "we chose to live with it" are different facts.
 
 A finding is **undealt-with** (and therefore *shown*) when its status is anything else — i.e. it is still awaiting work or a decision. In practice this is:
 `open`, `fix-pending`, `pending`, `draft`, `needs-poc`, `ready`, `passing`, or any status not in the dealt-with set above.
@@ -47,7 +49,7 @@ Invoke **project-manager**: "Resolve friendly name (lowercase-kebab) and locate 
 ## 3. Load & Filter
 Invoke **finding-manager**: "Load the ledger, select undealt-with findings at or above the severity floor."
 - Load every entry from `reports/ledgers/<project>.json`.
-- **Status filter:** keep entries whose `status` is **not** in the dealt-with set (`fixed`, `acknowledged`, `wont-fix`, `false-positive`, `submitted`, `qa-bundled`, `merged`, `suppressed`). Unrecognized statuses are kept (fail-open). **`fix-pending` is deliberately NOT in the dealt-with set** — a fix is owed, so it is undealt-with by definition and must always be shown.
+- **Status filter:** keep entries whose `status` is **not** in the dealt-with set (`fixed`, `acknowledged`, `wont-fix`, `false-positive`, `abandoned`, `submitted`, `qa-bundled`, `merged`, `suppressed`). Unrecognized statuses are kept (fail-open). **`fix-pending` is deliberately NOT in the dealt-with set** — a fix is owed, so it is undealt-with by definition and must always be shown.
 - **Severity filter:** keep entries whose `severity` is at or above the floor.
 - Sort by severity (High → Medium → Low), then by label.
 - If `--include-dealt`, also collect the dealt-with set for a secondary section.
@@ -55,7 +57,7 @@ Invoke **finding-manager**: "Load the ledger, select undealt-with findings at or
 ## 4. Display Results
 Group by severity. Show label, status, fingerprint prefix (8 chars), title, and provenance (first/last run). Example (`/open-issues phoenix-nft-staking`):
 ```
-Undealt-with: phoenix-nft-staking  (floor: medium+ · ledger @ 9be4a87, updated 2026-05-30)
+Undealt-with: phoenix-nft-staking  (floor: medium+ · branch main @ 9be4a87, updated 2026-05-30)
 ──────────────────────────────────────────────────────────────────────────────
 
 High (2)
@@ -67,13 +69,15 @@ Medium (1)
 
 Summary
   Undealt-with at medium+: 3   (High 2 · Medium 1)
-  Hidden below floor: 4 Low/QA   ·   Hidden as dealt-with: 5 (fixed 2 · acknowledged 1 · submitted 1 · wont-fix 1)
+  Hidden below floor: 4 Low/QA   ·   Hidden as dealt-with: 7 (fixed 2 · acknowledged 1 · submitted 1 · wont-fix 1 · abandoned 2)
 
 Next steps:
   /ledger phoenix-nft-staking                     # full triage view
   /recheck phoenix-nft-staking a1f9c2b0           # is H-03 still live at HEAD?
   /write-report phoenix-nft-staking M-02          # draft the submission
 ```
+When the ledger holds findings from more than one branch, append the branch to each line (`branch feat/nudge-v3`, or `branch feat/nudge-v3 +main` when `branchesSeen` spans several) and name the branch the submodule is currently parked on in the header — a Medium that only exists on an unmerged feature branch is a different call from one on the trunk.
+
 Always print the two "Hidden …" lines so nothing is silently dropped — the user can see exactly how many findings the floor and the dealt-with filter removed.
 
 With `--count`, print only the Summary block. With `--include-dealt`, append a dimmed `Dealt-with (N)` section after the Summary listing those entries with their terminal status.

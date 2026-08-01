@@ -1,0 +1,78 @@
+{
+  "id": "L-01",
+  "dedupId": "D-26-01",
+  "project": "phoenix-nft-staking",
+  "status": "draft",
+  "severity": "low",
+  "route": "qa-report.md",
+  "title": "Unisolated cross-contract flush loop can brick batchMint (availability/isolation leg only)",
+  "contract": "src/BatchNFTMinterMultiToken.sol",
+  "function": "batchMint",
+  "line": 533,
+  "lineStart": 528,
+  "lineEnd": 536,
+  "entryPoint": null,
+  "fingerprint": "8bee8d5afb74d7f1e9bb115061dca60ce0cbbefba3ee66be91724570eeb6634c",
+  "rootCauseClass": "unisolated-external-call-loop",
+  "origin": "new",
+  "faithfulness": false,
+  "mergesUpstream": [
+    "LOCAL-NS-01 (consequence-chain limb)",
+    "S-01",
+    "PATTERN-001",
+    "CODE-01"
+  ],
+  "description": "batchMint's flush loop at :531-534 (block :528-536) iterates the OWNER's nudge-token whitelist and calls NudgeStreamer.pullPendingStream for each entry with no try/catch and, critically, WITHOUT gating on `qualifies`. Every iteration is optional for the caller's own outcome, yet any revert inside the semi-trusted streamer (reverting line src/NudgeStreamer.sol:243 via pullPendingStream:224) rolls back the whole mint. The genuinely new and plainly-reachable increment is that non-qualifying batches LOST THEIR STRUCTURAL IMMUNITY: _snapshotRewards:801 short-circuits balanceOf behind `qualifies` and _payRewards:831 skips zero amounts, so before this flush loop a `count < nudgeSize` caller had ZERO nudge-token exposure. The flush loop is now that caller's only exposure, for zero benefit.",
+  "impact": "Availability only. A revert inside the streamer bricks batchMint for every caller, including callers who take no nudge payout at all. Nothing is lost and the owner holds two single-transaction escapes (setNudgeStreamer(0), setNudgeTokenWhitelist(token,false)).",
+  "legBKilled": "Leg B (aggregate sum(buffer_i) over-statement) is KILLED and must NOT be restated as a mechanism. No plain-ERC20 path exists; every enumerated mechanism is token-side (negative rebase, burn-on-hold, clawback, blacklist-zeroing) and therefore C4-invalid standalone. The USDT carve-out does not rescue it (a blacklisted streamer cannot transfer at all, so the blacklist is the brick, not the buffer sum). Machine-confirmed: tier-3 INV-1 PASS at 200,000 calls/invariant (Foundry) + 200,310 calls / 2,001 sequences (Medusa), anti-vacuity measured (600/600 non-trivial checks, 3 simultaneous funded streams on one token), harness proven able to fail against a 1-wei over-credit mutant.",
+  "plainTokenReachability": "*** CORRECTED 2026-07-30 (remediation pass). THE PRIOR VALUE OF THIS FIELD - 'NIL at this commit ... needs an INV-1 violation, i.e. a weird token' - WAS A FACTUAL ERROR. It contradicted this record's own severityNote (which already named 'third-party-extraordinary (Circle/Tether pause or blocklist)') and, read literally, invited a future reader to dismiss a valid finding under the non-standard-ERC20 rule. *** NON-NIL, BUT NOT ATTACKER-INDUCIBLE. (a) NudgeStreamer__NotRegistered CANNOT fire in the flush loop: pullPendingStream early-returns for unregistered streams (src/NudgeStreamer.sol:222, `if (s.duration == 0) return;`). (b) _settle's transfer at :243 reverts on EITHER an INV-1 violation (weird token) OR an ISSUER-SIDE EVENT ON THE SETTLEMENT ASSET ITSELF - a USDC global pause, or a USDC/USDT blocklisting of the batchMinter. _settle transfers to recipient == msg.sender == THE BATCHMINTER, so either event reverts the un-isolated, un-gated flush loop and therefore batchMint for EVERY caller, including a `count < nudgeSize` caller who takes no payout. THAT TRIGGER NEEDS NO WEIRD-TOKEN PROPERTY: it is documented canonical behaviour of the protocol's ACTUAL settlement asset (both production donors forward USDC), and USDT IS THE NAMED EXCEPTION to the non-standard-token rule. IN SCOPE AS A MATTER OF RULE - may NOT be waved away as weird-token noise. *** IN SCOPE != MEDIUM: severity is set on the trigger-and-escape analysis in severityNote, NOT on token-class invalidity. *** Leg B remains separately KILLED (see legBKilled) - that argument kills leg B while CONFIRMING this isolation limb.",
+  "severityNote": "Low - CONFIRMED by the independent severity audit against the pause/blocklist evidence, on a per-branch escape analysis rather than on trigger plausibility. C4's Medium availability limb needs the outage to be ATTACKER-INDUCIBLE, OR UNDETECTABLE, OR UNRECOVERABLE; it is none of the three. BRANCHES: (1) Global USDC pause with payment token == nudge token (USDC): reachable but NOT INCREMENTAL - batchMint's own payment pull at :581 reverts regardless, so the outage is not this finding's. (2) Global USDC pause with payment token != USDC: reachable and incremental (the flush loop is then the only USDC touch), but escapable in ONE owner transaction - setNudgeTokenWhitelist(USDC,false) or setNudgeStreamer(0), loudly signalled. (3) Targeted blocklist of the batchMinter: a sovereign act against one named protocol contract; partly non-incremental (if payment is USDC the batchMinter cannot receive or pay USDC at all); same two one-tx escapes. No third party can induce an issuer freeze; the revert is loud and atomic; the stranded buffer is separately tracked at Low (4a1d8edc92, open). The IMPACT side does qualify for C4 Medium ('protocol function/availability impacted'); the ESCAPES are what hold it at Low - see reopenTrigger. The USDT carve-out sets SCOPE, not severity: treating 'the rule lets me file it' as 'the rule sets it at Medium' is the category error that produces overstated reports.",
+  "reopenTrigger": "*** REPLACED 2026-07-30 (remediation pass) WITH A FALSIFIABLE TRIGGER. The prior wording - 'reopens at Medium if a plainly-reachable trigger is found' - is UNFALSIFIABLE and was already arguably met: a plainly-reachable trigger IS now named (issuer-side USDC pause / USDT blocklist, see plainTokenReachability) and the finding is STILL Low, because the trigger class was never what held it down. *** NEW TRIGGER: L-01 BECOMES MEDIUM IF EITHER ONE-TRANSACTION OWNER ESCAPE IS REMOVED - i.e. if the nudge whitelist becomes immutable, or if `nudgeStreamer` can no longer be zeroed. Both escapes were verified in source at 9611312: setNudgeStreamer:297-300, and setNudgeTokenWhitelist:328-336 whose REMOVAL branch is derivation-free by design and therefore works even while the minter is unconfigured. THE ESCAPES ARE LOAD-BEARING FOR THIS LOW. This trigger is IN ADDITION TO the escalationContingency below (an INV-1 counterexample), which is a different door: it makes the outage arrive in NORMAL OPERATION with no operator action.",
+  "escalationContingency": {
+    "escalatesTo": "medium",
+    "condition": "A plain-ERC20 counterexample to INV-1 (sum(buffer_i) <= token.balanceOf(streamer)) is ever found.",
+    "evidenceState": "Halmos PROVED INV-1 for 2 streams at wide bounds (buffers/balance < 2^96, rewardPerSecond < 2^128, elapsed < 2^40) across all three write sites, INCLUDING the STRONG no-brick form (check_site2_settleNeverRevertsForInsufficientCustody, PASS). The >=3-stream case is INCONCLUSIVE-TIMEOUT above 2^32 (PASS only at the narrowed 2^32/2^48/2^24 domain) and the N>2 generalisation is HAND-CHECKED, NOT MACHINE-PROVED. A Halmos TIMEOUT is not a proof either way (MEMORY).",
+    "sharedWith": "L-03 (D-26-05) - the SAME counterexample escalates BOTH."
+  },
+  "recommendation": "TWO CO-EQUAL PARTS; NEITHER IS SUFFICIENT ALONE. PART 1: gate the flush loop at :528-536 on `qualifies` - removes the zero-benefit exposure for NON-QUALIFYING batches by restoring the structural immunity a `count < nudgeSize` caller used to have, and aligns this site with the gating every other reward-token touch already applies. BEHAVIOUR-NEUTRAL, and that was verified: _settle never recomputes rewardPerSecond (write sites :139, :206 only) and _accrued derives from block.timestamp - lastUpdate, so gating loses no accrual - the same amount settles at the next qualifying batch. PART 1 DOES NOT ADDRESS THE BRICK: a QUALIFYING batch still calls pullPendingStream across the whole whitelist, so one reverting nudge token still rolls back the entire mint - this finding's PRIMARY stated impact, which the qualifies gate does not touch. PART 2: wrap each per-token pullPendingStream call in try/catch, skipping with an event on failure - this is what removes the brick for QUALIFYING batches. Each iteration is optional to the caller's own outcome, so a failed pull should degrade that one token's settlement rather than destroy the mint; the event keeps the failure diagnosable rather than silent.",
+  "part2JustificationIsPlainAsset": "ADDED 2026-07-30 (remediation pass), a direct consequence of the plainTokenReachability correction. PART 2 (try/catch) NO LONGER RESTS ON A WEIRD-TOKEN-ONLY JUSTIFICATION - it closes an ISSUER-EVENT-CONDITIONAL exposure on USDC/USDT, the settlement asset the protocol actually uses, and only secondarily the token-side INV-1 branch. THE FIX'S CASE STRENGTHENS EVEN THOUGH THE LABEL DOES NOT MOVE. Shipping order guidance: PART 1 closes all of the routinely-reachable exposure (the non-qualifying caller's zero-benefit exposure, and L-02 in full); PART 2 is the half that survives an issuer freeze, a blocklisting, or a future token change. Supersedes any earlier description of part 2 as closing a 'token-side-conditional' exposure - read 'issuer-event-conditional'.",
+  "escapeHatchDoesNotArmL03": "CHECKED IN SOURCE AND STATED AFFIRMATIVELY, because a reader will suspect otherwise. The recommended escape setNudgeTokenWhitelist(token,false) does NOT arm L-03's mint-brick: collectNudge does NOT consult the batchMinter's whitelist at all - its only gate is `s.duration == 0`, and the batchMinter's isNudgeToken is read by registerStream:127 ONLY, at registration time. So de-whitelisting stops the FLUSH and leaves collectNudge - hence NudgeRatchet.dispatch, hence the mint - working exactly as before. HAD collectNudge carried a whitelist check, this escape would have converted an availability outage in L-01 into one in L-03 and the two would have composed into a genuine Medium. IT DOES NOT. Symmetrically, setNudgeStreamer(0) on the batchMinter does not touch NudgeRatchet.nudgeStreamer. BOTH ESCAPES ARE SAFE. What the de-whitelist escape DOES cost is the stranded buffer, separately tracked at 4a1d8edc92 (Low, open) - see DISC-26-03; state the composition or this Low reads as costless.",
+  "tryCatchAsymmetryVsL03": "DO NOT GENERALISE PART 2 TO L-03. Swallowing is acceptable at THIS site because the flush is optional to the caller and nothing downstream accrues debt against a value that failed to move: a skipped pullPendingStream leaves that token's buffer untouched on the streamer for the next batch to settle, and no downstream accounting is keyed to the amount that failed to arrive. At L-03's site it is ACTIVELY HARMFUL: ATokenDispatcherV2.dispatch:124-125 runs _dispatch(...) THEN hook.onDispatch(minter, amount, extraData), so a swallowed collectNudge lets mint-debt accrue against `amount` while the USDC sits undelivered on the dispatcher. Same construct, opposite verdict, because the consequence of PROCEEDING differs. This is a DELIBERATE REASONED DISTINCTION, not an inconsistency - preserve it in any restatement.",
+  "crossReferences": [
+    {
+      "id": "D-26-02 / L-02",
+      "why": "SAME code site :528-536, DIFFERENT consequence (value migration vs availability). Do NOT collapse - upstream decision 2."
+    },
+    {
+      "id": "D-26-03 / Q-01 and D-26-04 / F-01-031",
+      "why": "The NatSpec limb of the same profile finding (LOCAL-NS-01 was SPLIT; both limbs preserved)."
+    },
+    {
+      "id": "D-26-05 / L-03",
+      "why": "Same isolation CLASS, different consumer and wider blast radius. Do NOT collapse."
+    },
+    {
+      "id": "MR-26-04",
+      "why": "An _accrued overflow would brick collectNudge AND pullPendingStream for the pair, hence every batchMint via this loop."
+    }
+  ],
+  "disclosures": [
+    "DISC-26-01",
+    "DISC-26-02",
+    "DISC-26-03"
+  ],
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-07-30T00:00:00Z",
+    "updatedAt": "2026-07-30T00:00:00Z",
+    "foundAtCommit": "9611312",
+    "foundAtCommitFull": "96113129b57ebf7a7c45c65996f792a92c71cdce",
+    "run": "phoenix-nft-staking-26",
+    "scanOrigin": "run-26 tier1-3 (static-analyzer, pattern-matcher, profiles, code-scanner, econ-scanner, story-faithfulness, invariant-generator, symbolic-analyzer)",
+    "classificationOrigin": "severity-classifier run-26",
+    "crossRepoVerifiedAt": {
+      "yield-claim-nft": "d4cc563"
+    },
+    "tier3": "invariants.md INV-1 PASS 452k+ calls, 2 engines, mutation-verified harness; symbolic-results.json 6 PASS / 3 TIMEOUT / 1 expected-fail control"
+  }
+}

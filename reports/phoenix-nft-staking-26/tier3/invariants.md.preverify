@@ -1,0 +1,189 @@
+# Tier-3 Invariant Verification — run 26
+
+**Subject:** `src/NudgeStreamer.sol` @ workspace commit `9611312`
+**Purpose:** machine-confirm (or refute) Tier-2's kill of the run's lead candidate.
+**Verdict: Leg-B kill is MACHINE-CONFIRMED** — no counterexample under a plain,
+well-behaved ERC20 across 452,000+ fuzzed calls on two independent engines, with the
+harness demonstrably able to fail (mutation-verified).
+
+## The claim under test
+
+> Per token, `Σ buffer_i <= token.balanceOf(address(streamer))` over every registered
+> `(batchMinter, token)` stream, under all sequences of plain-ERC20 operations.
+
+"Plain, well-behaved ERC20" = standard OpenZeppelin `ERC20`, 18 decimals, no
+fee-on-transfer, no rebasing, no transfer hooks, no admin clawback, no reentrancy.
+
+## Artifacts (all audit-authored — NEVER report these as project tests)
+
+| Path | Role |
+|---|---|
+| `workspace/phoenix-nft-staking/test/Invariant_Run26_BufferConservation.t.sol` | Foundry invariant harness + handler, deep deterministic campaign, econ cross-check, mutation tests |
+| `workspace/phoenix-nft-staking/test/MedusaTarget_Run26_BufferConservation.sol` | Second-engine (Medusa) target, self-contained, no `forge-std/Test` base |
+| `workspace/phoenix-nft-staking/test/patched/MutantNudgeStreamer.sol` | Deliberately broken streamer (1-wei over-credit) used to prove the harness can fail |
+| `workspace/phoenix-nft-staking/medusa-run26.json` | Medusa config |
+
+## Results — Foundry invariant runner
+
+Configuration: `runs=1000, depth=50, fail_on_revert=false` (also run at
+`runs=2000, depth=100` → 200,000 calls per invariant, same result).
+
+| Invariant | Type | Result | Depth reached |
+|---|---|---|---|
+| `invariant_INV1_pooledCustodyCoversAggregateBuffer` | conservation (primary) | **PASS** | 200,000 calls (2000×100) |
+| `invariant_INV2_bufferNonIncreasingOutsideCredit` | monotonicity | **PASS** | 200,000 calls |
+| `invariant_INV3_settlementMonotone` | conservation (incl. exact closure `paid + buffer == credited`) | **PASS** | 200,000 calls |
+| `invariant_INV3c_noLeakage` | custody routing | **PASS** | 200,000 calls |
+| `invariant_INV4_harnessIsLive` | tripwire | **PASS** | 200,000 calls |
+| `test_Campaign_DeepSequenceWithCoverageReport` | 600-step deterministic trajectory, INV-1..3 checked every step | **PASS** | 600 steps |
+| `test_Econ_LowPassRetentionAtWindowEnd` | econ cross-check | **PASS** | — |
+| `test_Mutation_INV1_DetectsOneWeiOverCredit` | falsification capability | **PASS** (detects mutant) | — |
+| `test_Mutation_OverCreditStarvesPooledCustody` | consequence of a violation | **PASS** (flush reverts) | — |
+
+**No counterexample found. No invariant failed.**
+
+## Results — Medusa (second engine)
+
+`medusa 1.5.1`, 4 workers, `callSequenceLength=100`, assertion + property testing,
+cheatcodes enabled. **200,310 calls / 2,001 sequences, 0 failures, 1,509 branches, 23/23 tests passed.**
+
+- `property_inv1_tokenA` — **PASS**
+- `property_inv1_tokenB` — **PASS**
+- `property_inv3_conservation` — **PASS**
+- `property_inv4_harnessIsLive` (tripwire) — **PASS**
+- Assertion-mode on every handler (`collectNudge`, `pullPendingStream`, `pullUnregistered`,
+  `warp`, `donate`, `registerStream`) — **PASS**. INV-1 is also asserted inline after every
+  operation, so Medusa's assertion mode independently guards it.
+
+Echidna was not run: Medusa (the primary, per the agent spec) completed successfully,
+so the fallback was unnecessary.
+
+## Anti-vacuity evidence
+
+This suite has produced a vacuous harness before (a mock that never failed ⇒ guarded
+state never written ⇒ every assertion `0 == 0`). Concrete counter-evidence here:
+
+1. **Seeded state, before the first check.** `setUp` registers **3 streams on tokenA**
+   (so the *aggregate*, not a single stream, is under test) plus **1 stream on tokenB**
+   (per-token isolation), funds all four, and warps 1 day so accrual exists. `seed()`
+   hard-`require`s that 4 credits landed, that `pendingStream > 0`, and that 3 tokenA
+   streams are simultaneously funded. Medusa does the same in its **constructor**
+   (it has no `setUp` phase).
+2. **Non-triviality is measured, not assumed.** The handler records, after every call,
+   whether the tokenA aggregate was non-zero and whether ≥2 streams were funded at
+   once. The deterministic 600-step campaign reports:
+   - `INV-1 checks vs NON-ZERO tokenA aggregate: 600/600` (**100%**)
+   - `INV-1 checks vs ≥2-stream tokenA aggregate: 600/600` (**100%**)
+   - max tokenA aggregate buffer reached: **303,666.39 e18**; streamer tokenA balance 295,244 e18
+   - 6 pairs registered, 97 credits landed
+   The fuzzed runs enforce per-run floors: >25% of checks non-trivial, ≥1 multi-stream
+   observation, ≥3 streams simultaneously funded, and a non-zero credit landed by the
+   fuzzer itself (not merely by seeding).
+3. **The harness is proven able to fail.** `test/patched/MutantNudgeStreamer.sol` is
+   byte-identical to the real contract except `collectNudge` credits **one wei more**
+   than it received. INV-1's own assertion catches it immediately
+   (`aggregate 1000000000000000000001 > custody 1000000000000000000000`), and the
+   downstream consequence is pinned too: the next `pullPendingStream` **reverts** with
+   `ERC20InsufficientBalance(streamer, 1e21, 1e21+1)`. Since `batchMint` loops
+   `pullPendingStream` over the whole nudge whitelist in one transaction, an
+   unaffordable settle on any one stream bricks the entire mint — that is the harm
+   INV-1 stands guard over. A green INV-1 therefore carries information.
+
+## Handler call counts and revert ratio
+
+From Foundry's per-selector metrics at `runs=1000, depth=50` (50,000 calls; the
+`collectNudge` and `pullPendingStream` selectors are listed 3× and 2× respectively to
+weight them — see the code comment for why this keeps the tripwire strict instead of
+weakening it):
+
+| Handler | Calls | Reverts | Discards |
+|---|---|---|---|
+| `collectNudge` | 16,775 | 0 | 0 |
+| `pullPendingStream` | 11,098 | 0 | 0 |
+| `registerStream` | 5,551 | 0 | 0 |
+| `pullUnregistered` | 5,566 | 0 | 0 |
+| `donate` | 5,530 | 0 | 0 |
+| `warp` | 5,480 | 0 | 0 |
+
+**Revert ratio: 0 / 50,000 = 0.00%.** No handler was ever skipped and no handler
+always reverted — inputs are `bound()`ed so calls succeed rather than bounce off
+guards. Medusa's leg was likewise 0 failed sequences out of 2,001.
+
+## Econ cross-check (independent of INV-1)
+
+The econ tier derived that the streamer is a **first-order low-pass filter**, not a
+linear drain. Confirmed, with one correction to the stated figure.
+
+`test_Econ_LowPassRetentionAtWindowEnd`: `duration = 7 days`, 28 equal deposits spread
+evenly across one window, buffer settled before measuring:
+
+```
+cumulative inflow:       28000.000000000000000000
+buffer at window end:    17247.313073785264274753
+retained bps: 6159   (61.59%)
+released bps: 3840   (38.40%)
+```
+
+With the rate recomputed on every deposit, `dB/dt = q − B/D`, so
+`B(D) = qD·(1 − 1/e)` → **~63.2% retained / ~36.8% released** at the nominal window
+end. The measured 61.6% / 38.4% is that value under 28 discrete deposits rather than
+continuous inflow.
+
+> **Correction for the report:** the econ note's "~36.7% of a burst remains buffered at
+> the nominal window end" has the orientation inverted. `1/e ≈ 36.8%` is the **released**
+> share; the **retained** share is `1 − 1/e ≈ 63.2%`. The qualitative re-frame (low-pass,
+> not linear drain) is confirmed; the number should be quoted as ~63% retained. This
+> matches the 63.26% figure recorded for the run-18 depletion PoC.
+
+Also confirmed: `e^{-t/D}` bounds withholding — after a further 5 durations with no new
+deposits, the buffer settles to exactly **0** (no permanently-stuck residue), and
+INV-2 confirms the buffer never rises absent a `collectNudge` credit.
+
+## Honesty statement (required)
+
+A passing invariant campaign is **"no counterexample found in N sequences"** —
+absence of evidence, not proof of safety. Recorded depths so that a clean result is
+never read as "proven safe":
+
+- Foundry: `runs=2000, depth=100` → **200,000 calls per invariant**; also `runs=1000, depth=50`.
+- Medusa: `testLimit=200000, callSequenceLength=100` → **200,310 calls / 2,001 sequences**.
+- Deterministic trajectory: **600 steps**, INV-1..INV-3 checked after every step.
+
+Only Halmos `[PASS]` is a proof. **INV-1 is a good candidate to hand to the
+symbolic-analyzer** for an actual proof: it is a small, arithmetic-only property over a
+single storage struct with four write sites, so it is plausibly within reach of Halmos
+with a bounded number of streams — and it is load-bearing enough (a violation bricks
+`batchMint`) to be worth a proof rather than a bug-hunt.
+
+## Scope limits of this confirmation — what was NOT tested
+
+The claim was deliberately confined to a plain token, matching what Tier 2 asserted.
+This campaign therefore says **nothing** about:
+
+- fee-on-transfer / taxed / reflection tokens (the contract defends these via the
+  measured-delta credit; not exercised here),
+- rebasing or burn-on-hold tokens, admin clawback, or blocklists,
+- reentrant or hook-bearing tokens (`nonReentrant` is wired but not fuzzed here),
+- tokens with non-18 decimals (the accrual math is decimal-agnostic by construction;
+  the project's own `NudgeStreamer.t.sol` covers a 6-dp case),
+- the `batchMinter` side of the integration — `MinterStub` implements only
+  `isNudgeToken` and never spends, which is what makes its balance a clean
+  cumulative-payout meter but also means no batchMinter logic was under test.
+
+Tier 2's enumeration held that every constructible counterexample required a
+token-side property. This campaign is consistent with that and adds no new
+counterexample of its own.
+
+## Reproduction
+
+```bash
+cd workspace/phoenix-nft-staking
+FOUNDRY_INVARIANT_RUNS=2000 FOUNDRY_INVARIANT_DEPTH=100 \
+FOUNDRY_INVARIANT_FAIL_ON_REVERT=false FOUNDRY_INVARIANT_SHOW_METRICS=true \
+  forge test --match-path test/Invariant_Run26_BufferConservation.t.sol -vv --threads 2
+
+medusa fuzz --config medusa-run26.json
+```
+
+Findings to file from this tier: **none.** No invariant failed and no counterexample
+was produced. The only report-affecting output is the econ figure correction above.

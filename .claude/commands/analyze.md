@@ -33,7 +33,8 @@ Invoke **project-manager**: "Get scope and known issues for project"
 ## 3. Load Ledger and Determine Run Mode
 Invoke **project-manager**: "Load the persistent ledger and compute changed files"
 - Read `reports/ledgers/<project>.json` (the persistent findings ledger).
-- Compute `changed_since(lastAuditedCommit, HEAD)` via read-only `git -C lib/<submodule> diff --name-only`.
+- **Resolve the baseline per branch** via `project-manager` → `audit_baseline`: the diff base is `branchBaselines[<current branch>]`, or — for a branch never audited before — `git merge-base <current branch> <defaultBranch>`, so the delta is exactly this branch's own commits. **Never** diff against another branch's `lastAuditedCommit`; that would drop unscanned code from the scan (Law 1). See `registered-projects.json` → `branchPolicy`.
+- Compute `changed_since(<baseline>, HEAD)` via read-only `git -C lib/<submodule> diff --name-only`.
 - **Run mode:**
   - No ledger, or `--full` → **full scan** (entire scope).
   - Ledger present, no `--full` → **regression scan**: scanners still receive the full scope for context, but focus effort on changed files/functions and on previously-`open` findings.
@@ -45,7 +46,8 @@ Invoke **project-manager**: "Load the persistent ledger and compute changed file
 Run Mode
 ────────
 Ledger: reports/ledgers/phoenix-nft-staking.json (12 findings: 3 open, 7 fixed, 2 acknowledged)
-Last audited commit: a1b2c3d
+Branch: feat/nudge-v3 (default main) — findings from this run are tagged branch=feat/nudge-v3
+Baseline: a1b2c3d (merge-base with main — first audit on this branch)
 Changed since: src/Staking.sol, src/RewardVault.sol (2 files)
 NEW in scope: src/InPlaceMigrator.sol (1 file — auto-included, scanned cold)
 Mode: REGRESSION (focus on changed code + open findings) — use --full to force cold scan
@@ -156,6 +158,7 @@ Invoke **finding-manager**: "Create finding records and upsert the ledger"
   - **High/Medium** (including reopened ones) → `<report-dir>/submissions/<label>-C<n>.md`, in the **same dir** as the new submissions, with a metadata header naming the originating audit, the original fingerprint, and why it is still/again valid. `<n>` ascends with the originating audit number; no `REOPEN` in filenames.
   - **Low/QA/Centralization** → `<report-dir>/submissions/carryover/qa-report-<NN>.md`, one whole-QA-report copy per originating audit `<NN>` — never one file per Low finding.
 - Upsert `reports/ledgers/<project>.json`: add new entries, bump `lastSeenRun` for still-open, mark entries whose code changed and are no longer flagged as `fixed` at the current commit, set `lastAuditedCommit = HEAD`.
+- **Branch stamping:** every new entry gets `branch` = the branch this run scanned and `branchesSeen = [<that branch>]`; re-seen entries keep their original `branch` and append the current one to `branchesSeen`. Write `branchBaselines[<branch>] = { lastAuditedCommit: HEAD, lastRun, updatedAt }`. This is what makes findings retirable when a branch is discarded (`/ledger <project> abandon-branch <branch>`) without disturbing findings that also live on the trunk.
 
 ## 11. Save Analysis Report
 Save raw analysis to `<report-dir>/analysis-<timestamp>.json` (scan metadata, counts, filtering + reconciliation stats).

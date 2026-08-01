@@ -50,6 +50,8 @@ PoCs/tests live in `workspace/<project>/test/` (preferred) or `reports/<project>
   "function": "withdrawRewardToken",
   "line": 245, "lineStart": 240, "lineEnd": 252,
   "entryPoint": null,
+  "branch": "feat/nudge-v3",
+  "branchesSeen": ["feat/nudge-v3"],
   "fingerprint": "<sha256(contract:function:rootCauseClass[:entryPoint])>",
   "origin": "new | regression | still-open",
   "description": "...",
@@ -63,6 +65,15 @@ PoCs/tests live in `workspace/<project>/test/` (preferred) or `reports/<project>
 
 ### Location & link fields
 `contract` is relative to the submodule root; `lineStart`/`lineEnd` drive GitHub range links built by report-writer (`<repoUrl>/blob/<branch>/<contract>#L<start>-L<end>`).
+
+### Branch provenance (`branch`, `branchesSeen`)
+`branch` is the submodule branch (`registered-projects.json` → `projects.<name>.currentBranch`, ground-truthed by `git -C lib/<sub> rev-parse --abbrev-ref HEAD`) that the scan was parked on when the finding was **first discovered**. It is written once and never rewritten. `branchesSeen` is the de-duplicated list of every branch on which a scan has observed the finding, discovery branch included; each run appends the current branch if it is not already there, and entries are **never removed**.
+
+The pair answers one question: *if this branch is thrown away, does the bug go with it?* A finding with `branchesSeen == ["feat/nudge-v3"]` exists only on that branch and becomes an abandonment candidate when the branch is discarded. A finding with `branchesSeen == ["feat/nudge-v3", "master"]` also lives on the trunk and is **never** abandoned, no matter what happens to the feature branch. Older entries predating this field have no `branch`; treat a missing `branch` as the project's `defaultBranch` (trunk) — which makes them permanently ineligible for abandonment, the safe default (Law 1).
+
+**Branch is NOT part of the fingerprint.** The fingerprint stays `sha256(contract:function:rootCauseClass[:entryPoint])`, so the same defect found on a branch and then on the trunk reconciles as one entry that gained a second `branchesSeen` value — not as two findings. Splitting by branch would re-file every trunk finding on every branch scan and destroy the ledger's regression lineage.
+
+Report links: build GitHub ranges against the finding's own `branch` (`<repoUrl>/blob/<branch>/<contract>#L<start>-L<end>`), falling back to `currentBranch` then `defaultBranch`. A link built against the trunk for branch-only code 404s or, worse, points at unrelated lines.
 
 ### Entry-point scope (`entryPoint`)
 `entryPoint` namespaces a finding to the package.json script that surfaced it (e.g. `"RestoreMintAtIndex4"`), set by `/audit-script` runs. It is **optional and nullable**: contract-scan findings from `/analyze` and `/full-audit` leave it `null`. When present it is folded into the fingerprint — `sha256(contract:function:rootCauseClass:entryPoint)` — so the *same* code issue surfaced via two different scripts stays distinct, and a script-audit finding never collides with a contract-scan finding on the same `contract:function`. When absent/empty, the hash is exactly `sha256(contract:function:rootCauseClass)` as before (byte-identical to legacy findings — backward compatible). Regression reconciliation in the ledger therefore happens per entry point automatically.
@@ -80,29 +91,57 @@ The persistent ledger lives at `reports/ledgers/<project>.json` (outside version
 - **New finding** → append entry with `fingerprint`, `status: "open"`, `firstSeenRun` = current run, `lastSeenRun` = current run, and `reportPath`.
 - **Still-open** (matched an existing `open` entry) → bump `lastSeenRun`; do not regenerate a report.
 - **Regression** (matched a `fixed` entry that reappeared) → set `status: "open"`, record `regressionOf` = prior run, flag in the run output.
-- **Resolved** → for entries whose code changed since `lastAuditedCommit` and are no longer flagged, set `status: "fixed"` and `fixedAtCommit` = current HEAD.
-- Always set the ledger's `lastAuditedCommit` = current submodule HEAD and `updatedAt`.
+- **Resolved** → for entries whose code changed since the branch baseline (see `audit_baseline`) and are no longer flagged, set `status: "fixed"` and `fixedAtCommit` = current HEAD.
+- Always set the ledger's `lastAuditedCommit` = current submodule HEAD and `updatedAt`, **plus** the branch bookkeeping below.
 
 Ledger entry shape:
 ```json
 {
   "fingerprint": "<sha256>", "title": "...", "severity": "high",
-  "status": "open | fix-pending | fixed | acknowledged | wont-fix | false-positive",
+  "status": "open | fix-pending | fixed | acknowledged | wont-fix | false-positive | abandoned",
   "firstSeenRun": "phoenix-nft-staking-09", "lastSeenRun": "phoenix-nft-staking-12",
   "fixedAtCommit": null, "regressionOf": null,
+  "branch": "master", "branchesSeen": ["master"],
+  "abandonedBranch": null, "abandonedAt": null,
   "contract": "src/RewardVault.sol", "function": "withdrawRewardToken",
   "lineStart": 240, "lineEnd": 252, "entryPoint": null,
   "reportPath": "reports/phoenix-nft-staking-12/submissions/H-01-submission.md"
 }
 ```
-Never silently overwrite a human-set status (`fix-pending`/`acknowledged`/`wont-fix`/`false-positive`) — those are triage decisions set via `/ledger`.
+Never silently overwrite a human-set status (`fix-pending`/`acknowledged`/`wont-fix`/`false-positive`/`abandoned`) — those are triage decisions set via `/ledger`.
+
+### Branch bookkeeping (every upsert)
+The ledger carries, alongside the existing top-level fields:
+```json
+{
+  "branch": "feat/nudge-v3",
+  "lastAuditedCommit": "<HEAD of the most recent run, any branch — back-compat mirror>",
+  "branchBaselines": {
+    "master":        { "lastAuditedCommit": "9611312…", "lastRun": "phoenix-nft-staking-26", "updatedAt": "…" },
+    "feat/nudge-v3": { "lastAuditedCommit": "4ab77e1…", "lastRun": "phoenix-nft-staking-27", "updatedAt": "…" }
+  }
+}
+```
+- Write `branchBaselines[<current branch>]` on every run, and mirror it to the top-level fields.
+- **Read** the baseline for a regression diff from `branchBaselines[<current branch>]` only — never from another branch's entry (`project-manager` → `audit_baseline`). A branch with no baseline of its own baselines at `merge-base(<branch>, <defaultBranch>)`, or runs cold.
+- New entry → `branch` = current branch, `branchesSeen` = `[current branch]`. Re-seen entry → append the current branch to `branchesSeen` if absent; **never** rewrite `branch`.
+- **Legacy entries (no `branch` field) backfill to the trunk, never to the current branch.** On first touch, set `branch = <defaultBranch>` and `branchesSeen = [<defaultBranch>]` *before* appending the current branch. This is a certainty, not a guess: branch switching did not exist before this metadata, so every pre-existing finding was necessarily discovered on the project's trunk — `master`, or `main` where that is the repo's trunk. Stamping a pre-existing trunk finding as branch-only just because it was re-observed during a feature-branch run would make it abandonment-eligible and delete a live bug from every future scan — the exact Law-1 failure this metadata exists to prevent.
+
+### `abandoned` — the branch-discarded status
+`abandoned` means *the code that carried this finding no longer exists on any live branch* — the branch it lived on was thrown away. It is set **only** by `/ledger <project> abandon-branch <branch>` (or `/ledger … abandon <fingerprint>`), never by a scan.
+
+- **Scan-wise it behaves like a disposal:** suppressed by the sanitizer, not carried over, hidden as dealt-with by `/open-issues`. Rationale: re-reporting a bug in deleted code is pure noise.
+- **It is not a judgement about the bug.** Unlike `wont-fix`, nobody decided to live with the issue — the code just went away. Keep them in separate `/ledger` sections and never migrate one to the other.
+- **Reversible and never deleted.** If the branch comes back (or gets resurrected under a new name), `/ledger <project> reopen <fingerprint>` restores it with its full lineage; `abandonedBranch`/`abandonedAt` stay as history.
+- **Eligibility is strict:** only entries whose `branchesSeen` is *exactly* `[<discarded branch>]`. An entry also seen on any other branch stays exactly as it is. An entry with no `branch` field (pre-dating the metadata) is treated as trunk and is **never** eligible.
+- **A merged branch is not a discarded branch.** If the branch was merged into `defaultBranch`, its code is now trunk code and its findings are live — refuse the abandonment (see `/ledger` → `abandon-branch`).
 
 **`fix-pending` is the one human-set status that is NOT a disposal.** It means "valid finding, human committed to fixing it, fix not yet verified". It behaves like `open` everywhere that matters — never suppressed by the sanitizer, always carried over into the current run, always rescanned — and differs from `open` only in that it records an owner commitment. Do not auto-flip it to `fixed` even when the code changed and the scan no longer flags it: *propose* the flip, print the `/ledger <project> fixed <fingerprint>` command, and let the human confirm. A fix that merely stops tripping the scanner is not a verified fix, and this status exists precisely because someone is relying on the fix landing correctly (Law 1).
 
 ## CARRYOVER (FULL COPY, NOT STUBS)
 A finding that stays **`open`** or **`fix-pending`** in the ledger across runs (the sanitizer marked it `still-open`), or one that has **become valid again** (a `fixed`/closed entry that is live once more — a regression or an expired closure), is **not** re-analysed, but it must be readable **in the run you are reviewing, without following a link**. Carryover is therefore a **verbatim copy of the original report file** with a metadata header prepended — never a pointer stub.
 
-The sanitizer passes the carryover list (each with its ledger record). Do **not** carry over `acknowledged`, `wont-fix`, or `false-positive` entries — the human already triaged those.
+The sanitizer passes the carryover list (each with its ledger record). Do **not** carry over `acknowledged`, `wont-fix`, `false-positive`, or `abandoned` entries — the human already triaged those (an `abandoned` finding's code no longer exists on a live branch).
 
 ### High / Medium (and any reopened H/M) — full copy, alongside new findings
 - Write to the **same directory as this run's new submissions**: `submissions/<label>-C<n>.md`. **No `carryover/` subdirectory.**
@@ -174,6 +213,8 @@ QA-severity carryover stays in **`submissions/carryover/`** and is **never** wri
 2. **Preserve metadata** — creation/update timestamps.
 3. **Validate before transitions** — PoC must exist before `ready`.
 4. **Sequential labeling** — never reuse or skip labels.
-5. **Respect human ledger statuses** — never auto-overwrite fix-pending/acknowledged/wont-fix/false-positive.
+5. **Respect human ledger statuses** — never auto-overwrite fix-pending/acknowledged/wont-fix/false-positive/abandoned.
 6. **Never drop an open finding from view** — every still-open (or re-validated) ledger entry is carried over into the current run: H/M as a full copy at `submissions/<label>-C<n>.md`, QA as `submissions/carryover/qa-report-<NN>.md`. Never a bare pointer stub, never one file per Low finding, never `REOPEN` in a filename.
 7. **`fix-pending` is never a disposal** — it is rescanned, carried over, and surfaced exactly like `open`. Never suppress it, and never auto-flip it to `fixed` — propose the flip and let the human confirm.
+8. **Never abandon a finding automatically.** A scan may *observe* that a branch is gone; only an explicit `/ledger … abandon-branch` sets `abandoned`, and only for entries seen on that branch alone. Never abandon an entry whose branch was merged into the trunk — the code is still live (Law 1).
+9. **`branch` is write-once; `branchesSeen` is append-only.** Neither is ever cleared, and neither enters the fingerprint.
