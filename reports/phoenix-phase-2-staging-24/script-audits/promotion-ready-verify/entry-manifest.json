@@ -1,0 +1,68 @@
+{
+  "entryPoint": "promotion-ready:verify",
+  "suite": "promotion-ready",
+  "project": "phoenix-phase-2-staging",
+  "submodulePath": "lib/phoenix-phase-2-staging",
+  "branch": "master",
+  "head": "b9391b199ef38d7bf5066b6cd81d21b283a3a4e1",
+  "regressionBaseline": "c4396b1",
+  "chainId": 1,
+  "chainIdSource": "require(block.chainid == CHAIN_ID) in the overridden run(); CHAIN_ID = 1 inherited from DeployMainnetPromotionReady",
+  "isSecondaryDiscriminator": true,
+  "siblingEntryPoint": "promotion-ready:broadcast (see ../promotion-ready-broadcast/)",
+
+  "intentComment": "READ-ONLY POST-BROADCAST VERIFICATION (story 075, script-audit run-22 M-01). No --broadcast, no --ledger, nothing signed, nothing written. Runs as a SEPARATE forge script invocation AFTER the cutover has settled, which is the entire point: forge script executes the whole cutover body once LOCALLY and dispatches the ~60 transactions afterwards, so Phase 0, every in-phase post-condition and all of _phase7_wiringAssertions() had already evaluated against PRE-broadcast state before transaction #1 left the machine, and --skip-simulation removes the pre-send sanity check rather than that local pass. Phase 8's BLOCKING probes are gated off under broadcast. This leg re-runs Phase 7's ABSOLUTE wiring assertions against LIVE chain state, plus the phUSD mint-authority check that existed on no path before story 075. It CONSUMES the write-once baselines.bptAtCutover persisted by story 074 and NEVER re-derives it. Every check is a require, so any failure exits non-zero and halts the '&&' chain. Safe to re-run at will. NOT DISCHARGED HERE and still a human step: story-072 checklist line 1197 (trigger one index-4 mint, assert BatchDonatedViaPSM fired). STORY 076 RESTATED ITS MINT-AUTHORITY CLAIM from INVARIANCE to an EXPECTED TWO-SIDED DELTA plus a POSITIVE assertion that PhlimboV3 holds mint authority, and added a SECOND consumed baseline, phlimboV2StakedAtCutover.",
+
+  "variants": {
+    "verify": {
+      "key": "promotion-ready:verify",
+      "command": "forge script script/VerifyPromotionReady.s.sol:VerifyPromotionReady --rpc-url $RPC_MAINNET -vvv",
+      "broadcasts": false,
+      "envFlags": ["--rpc-url $RPC_MAINNET", "-vvv"],
+      "absentFlags": ["--broadcast", "--ledger", "--slow", "--skip-simulation", "--legacy", "PREVIEW_MODE"],
+      "jsChain": { "pre": [], "forge": "script/VerifyPromotionReady.s.sol:VerifyPromotionReady", "post": [] }
+    }
+  },
+
+  "invokedBy": [
+    { "key": "promotion-ready:broadcast", "position": "final leg, after scripts/patch-mainnet-addresses-promotion-ready.js, joined with '&&'" },
+    { "key": "promotion-ready:resume", "position": "final leg, after scripts/patch-mainnet-addresses-promotion-ready.js, joined with '&&'" },
+    { "key": "(standalone)", "position": "safe to re-run at will" }
+  ],
+
+  "forgeTarget": {
+    "file": "script/VerifyPromotionReady.s.sol",
+    "contract": "VerifyPromotionReady",
+    "entryFn": "run",
+    "lines": 310,
+    "inherits": "DeployMainnetPromotionReady (script/DeployMainnetPromotionReady.s.sol)",
+    "overridesRun": true,
+    "inheritanceNote": "INHERIT, DON'T COPY (story 075). Deriving from the deploy script gives the verifier all ~40 address constants, the 16 runtime address members, _loadProgressFile(), _phase7_wiringAssertions() and its _assertSlot/_assertHookPair/_assertStream helpers for free. Chosen over --sig, which would have left a live callable run() that performs the entire cutover. CARRIED-FORWARD NIT from story 075: it still inherits the whole cutover body including its vm.startBroadcast blocks; only run() is overridden."
+  },
+
+  "jsChain": { "pre": [], "post": [] },
+  "offChainWrites": "NONE. This key writes no file of any kind.",
+
+  "executionBody": [
+    "require(block.chainid == 1)",
+    "_requireNoBroadcastFlag()  -- rejects PREVIEW_MODE, which means nothing on a live read-only pass. There is no cheatcode that reports --broadcast, so the real control is structural: this contract opens no broadcast context anywhere, pinned at SOURCE level by test/VerifyPromotionReadyGuards.t.sol scanning the file text.",
+    "_loadAndValidateProgressFile()  -- requires the progress file to exist and resolves ALL 16 RUNTIME ADDRESSES (14 at story 075; story 076 added PhlimboV3 and MigratorV2V3); requires _isDeployed('NudgeStreamer') && _isDeployed('BatchNFTMinter')",
+    "_adoptPersistedBptBaseline()  -- ABORTS if baselines.bptAtCutover is absent or zero. NO live-read fallback, deliberately: post-broadcast the old pooler is always empty, so a live read yields 0 and the BPT conservation assertion collapses to balanceOf(newPooler) >= 0. The audit is explicit that a standalone verifier without the persisted baseline ACTIVELY WORSENS finding L-02 (pps22l2) from Low to Medium.",
+    "_adoptPersistedPhlimboBaseline()  [STORY 076]  -- same crux applied to the PhlimboV2 -> PhlimboV3 stake migration. ABORTS if baselines.phlimboV2StakedAtCutover is absent or zero; post-broadcast PhlimboV2 is ALWAYS empty by construction (the cutover's own completeness gate requires totalStaked() == 0), so a re-derived baseline is 0 and the assertion collapses to phlimboV3.totalStaked() >= 0.",
+    "_phase7_wiringAssertions()  -- the whole point: re-run against LIVE post-broadcast state",
+    "_verifyMintAuthorityInvariance()  -- three claims (see below)",
+    "_printSummary()"
+  ],
+
+  "mintAuthorityClaims": {
+    "1_expectedTwoSidedDelta": "liveMask == (phusdMinterMaskAtPhase0 & ~(1 << PHUSD_MINTER_BIT_PHLIMBO_V2)) over the fixed 20-address candidate set, PLUS liveVersion == phusdMintVersionAtPhase0. Story 075's claim was INVARIANCE (byte-identical membership) because story 072 made zero phUSD.setMinter calls; Phase 4e makes two, so invariance is now the WRONG claim and would fail on a correct cutover. Asserting both directions is what keeps the control meaningful: a one-sided 'V2 was revoked' check would not notice an unintended grant or revoke elsewhere in the set. phUSD's global mintVersion is still asserted UNCHANGED - setMinter does not touch it, only revokeAllMintPrivileges does, and the cutover never calls that. Guarded by _requirePhlimboV2BitIndex() so a reordered candidate array cannot silently repoint the bit while still passing.",
+    "2_positiveForPhlimboV3": "canMint && grantedAt == liveVersion for newPhlimboV3. It is a runtime CREATE so it cannot live in the pure compile-time candidate set and its grant cannot be expressed as a mask bit. It MUST be asserted somewhere because a missing grant fails SILENTLY: PhlimboV3._claimRewards banks a failed mint rather than reverting (PhlimboV3.sol:913 - VERIFIED at pin f279c62).",
+    "3_absoluteSweep": "_requireNotPhusdMinter over the OTHER 15 newly deployed contracts - none may hold phUSD mint authority. PhlimboV3 is the ONE declared exclusion; MigratorV2V3 STAYS IN the sweep (V2 itself mints the pending phUSD rewards during withdraw, so the migrator needs no role). A blanket relaxation to accommodate PhlimboV3 would silently discard a real control.",
+    "noteBranch": "If the baseline's bit 19 was never set, the verifier LOGS a NOTE rather than letting a green run imply a revoke was verified. Story 076 Autonomous Decision 1 records that on mainnet the Phase 0 mask reads 270080 with bit 19 CLEAR - i.e. PhlimboV2 does NOT currently hold phUSD mint authority and step 14's revoke is a NO-OP today."
+  },
+
+  "sourceLevelGuards": {
+    "test/VerifyPromotionReadyGuards.t.sol": "Asserts source-level properties of script/VerifyPromotionReady.s.sol that no behavioural model can reach - chiefly that it contains NO balanceOf(OLD_POOLER) live-read fallback for the BPT cutover baseline, and no state-mutating cheatcodes. foundry.toml grants read on ./script purely to enable this (a carried-forward [low] from story 075). Because of this scan, the forbidden literals are deliberately never spelled out verbatim anywhere in VerifyPromotionReady.s.sol.",
+    "test/PhusdMinterDeltaGuards.t.sol": "Story 076 Autonomous Decision 6, not requested by the checklist. A 9-test no-fork suite proving the shipped two-sided check rejects a stray grant elsewhere, a stray revoke elsewhere, and a V2 revoke that never landed - including a test showing the NAIVE one-sided check passing what the shipped one rejects."
+  }
+}
