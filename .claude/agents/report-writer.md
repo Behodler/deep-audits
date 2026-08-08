@@ -151,18 +151,27 @@ PoC File: H-01-poc.t.sol
 Every submission is stamped with a short, separator-free, globally-unique ID of the form
 `<project-acronym><report#><type><issue#>` (e.g. `ryv5m2` = reflax-yield-vault, report 05, M-02).
 
-Derive it from the run-dir name and the finding's C4 label:
-1. **project-acronym** — strip the trailing `-<NN>` from the run-dir name to get the family
-   (`reflax-yield-vault-05` → `reflax-yield-vault`); take the first letter of each hyphen-separated word
-   of the family, **dropping pure-numeric words** (`phoenix-phase-2-staging` → `pps`).
-2. **report#** — the `NN` with leading zeros removed (`05` → `5`); a bare family dir with no
-   `-NN` is report `0`.
-3. **type** — the label letter lowercased: `h`/`m`/`l`/`c`/`g`.
-4. **issue#** — the label number with leading zeros removed (`M-02` → `2`).
+This is the finding's **primary human handle** and the value written to the ledger's `issueId`
+field — not a decoration on the report. Derive it from the run-dir name and the C4 label:
+1. **project-acronym** — read `projects.<name>.idPrefix` from `registered-projects.json`. That
+   field is **authoritative; never re-derive a prefix that is already recorded there.** Only when
+   registering a *new* project do you propose one (first letter of each hyphen-separated word of
+   the project name, **dropping pure-numeric words**: `phoenix-phase-2-staging` → `pps`), then
+   write it to the registry and to `docs/issue-id-scheme.md`.
+2. **report#** — the `NN` with leading zeros removed (`05` → `5`, `26` → `26`); a bare family dir
+   with no `-NN` is report `0`.
+3. **type** — the label letter lowercased: `h`/`m`/`l`/`c`/`f`/`q`/`g` (both `Q-0x` and `QA-0x` → `q`).
+4. **issue#** — the label number with leading zeros removed (`M-02` → `2`). **Unpadded.**
 
-The acronym keys off the report-dir family name, NOT the upstream repo name. The full spec,
-the current acronym table, and collision handling live in `docs/issue-id-scheme.md` — consult
-it (and append any new acronym) when a project's acronym is not already listed there.
+**Mint once.** The ID encodes the run where the finding was **first seen** and its **original**
+label, so a carryover report keeps the originating run's ID (`ryv5m2` stays `ryv5m2` when copied
+into run 08). Never recompute it to the current run — every cross-reference in the ledger, triage
+notes and plan docs would break. If the finding already has an `issueId` in the ledger, copy that
+value verbatim rather than deriving a fresh one.
+
+Project name, submodule dir and report-dir family are the same canonical string, so the prefix is
+unambiguous. Full spec, acronym table, resolution ladder and collision handling:
+`docs/issue-id-scheme.md`.
 
 ### QA Report Structure
 ```markdown

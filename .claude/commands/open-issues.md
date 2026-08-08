@@ -8,7 +8,7 @@ Answer one question fast: **which findings in this project still need someone to
 
 Reads the persistent ledger `reports/ledgers/<project>.json` and shows only the findings that have **not** been resolved or triaged to a terminal decision — the *undealt-with* backlog — filtered to a severity floor that defaults to **Medium and above** (where the value leaks live; this suite is mostly DeFi).
 
-This command is **read-only**. It never writes to ledgers, submodules, findings, or the registry. To change a finding's disposition use `/ledger <project> <action> <fingerprint>`.
+This command is **read-only**. It never writes to ledgers, submodules, findings, or the registry. To change a finding's disposition use `/ledger <project> <action> <selector>`, passing the issue ID shown in the first column (`pns12h3`).
 
 # Definition: "undealt-with"
 A finding is **dealt-with** (and therefore *hidden* by default) when its ledger status records a resolution or a deliberate human/process decision:
@@ -55,17 +55,17 @@ Invoke **finding-manager**: "Load the ledger, select undealt-with findings at or
 - If `--include-dealt`, also collect the dealt-with set for a secondary section.
 
 ## 4. Display Results
-Group by severity. Show label, status, fingerprint prefix (8 chars), title, and provenance (first/last run). Example (`/open-issues phoenix-nft-staking`):
+Group by severity. Show **issue ID first**, then label, status, fingerprint prefix (8 chars), title, and provenance (first/last run). Example (`/open-issues phoenix-nft-staking`):
 ```
 Undealt-with: phoenix-nft-staking  (floor: medium+ · branch main @ 9be4a87, updated 2026-05-30)
 ──────────────────────────────────────────────────────────────────────────────
 
 High (2)
-  H-03  [open]         a1f9c2b0  Reward-debt accounting drain on unstakeFor   first -12 · last -14
-  H-04  [fix-pending]  88ae7589  Promo flush over-credit  (fix owed)          first -14 · last -14
+  pns12h3  H-03  [open]         a1f9c2b0  Reward-debt accounting drain on unstakeFor   first -12 · last -14
+  pns14h4  H-04  [fix-pending]  88ae7589  Promo flush over-credit  (fix owed)          first -14 · last -14
 
 Medium (1)
-  M-02  [open]   7c2e4419  Oracle staleness unchecked in price pull      first -13 · last -14
+  pns13m2  M-02  [open]   7c2e4419  Oracle staleness unchecked in price pull      first -13 · last -14
 
 Summary
   Undealt-with at medium+: 3   (High 2 · Medium 1)
@@ -73,9 +73,14 @@ Summary
 
 Next steps:
   /ledger phoenix-nft-staking                     # full triage view
-  /recheck phoenix-nft-staking a1f9c2b0           # is H-03 still live at HEAD?
-  /write-report phoenix-nft-staking M-02          # draft the submission
+  /recheck phoenix-nft-staking pns12h3            # is H-03 still live at HEAD?
+  /write-report phoenix-nft-staking pns13m2       # draft the submission
 ```
+The issue ID (`pns12h3` = phoenix-nft-staking, report 12, H-03) is the permanent, typeable
+handle — it is what to paste into `/ledger` or `/recheck`. The label is run-scoped and the
+fingerprint is the machine key; both stay visible but neither leads. An entry that predates the
+ID backfill prints `—` in that column and is addressed by fingerprint instead; that is expected
+on historical findings, never a defect.
 When the ledger holds findings from more than one branch, append the branch to each line (`branch feat/nudge-v3`, or `branch feat/nudge-v3 +main` when `branchesSeen` spans several) and name the branch the submodule is currently parked on in the header — a Medium that only exists on an unmerged feature branch is a different call from one on the trunk.
 
 Always print the two "Hidden …" lines so nothing is silently dropped — the user can see exactly how many findings the floor and the dealt-with filter removed.
@@ -97,7 +102,7 @@ The orchestrating agent MUST delegate the load/filter to **finding-manager** and
 1. **Read-only.** Never mutate the ledger, findings, submodules, or registry. Disposition changes go through `/ledger`.
 2. **Fail-open on status.** An entry whose `status` is not a known dealt-with value is shown, never hidden.
 3. **No silent truncation.** Always report how many findings were hidden by the severity floor and by the dealt-with filter.
-4. **Fingerprints are stable** (`sha256(contract:function:rootCauseClass[:entryPoint])`); display an 8-char prefix and accept unique prefixes downstream.
+4. **Lead with the issue ID.** `issueId` (`pns12h3`) is the permanent human handle — minted once at first sighting, never recomputed — and is the first column. `fingerprint` (`sha256(contract:function:rootCauseClass[:entryPoint])`) is the machine key: display an 8-char prefix, secondary. A missing `issueId` on a historical entry prints `—` and is never treated as corruption.
 
 # Examples
 ```

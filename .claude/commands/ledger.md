@@ -3,19 +3,51 @@ View and triage the persistent findings ledger for a project
 Inspect and update `reports/ledgers/<project>.json` — the persistent record of which findings are open, fixed, or triaged across audit runs. Triage decisions recorded here are respected by future `/analyze` and `/full-audit` runs (acknowledged/wont-fix/false-positive findings are suppressed; `fix-pending` findings keep being rescanned; reappearing fixed findings are flagged as regressions).
 
 # Arguments
-- `$ARGUMENTS` format: `<project-name> [action] [fingerprint] [note]`
+- `$ARGUMENTS` format: `<project-name> [action] [selector] [note]`
 - Project name is case-insensitive (normalized to lowercase-kebab).
+- **`<selector>` names one finding.** Preferred form is the issue ID (`pps26l1`); a fingerprint
+  prefix, a run label (`L-01`), or a plain-English description also work — see **Selecting a
+  finding** below. Older revisions of this command called this argument `<fingerprint>`; the
+  fingerprint still works, it is just no longer the only thing that does.
 - Actions:
   - *(none)* → list the ledger
-  - `fixpending <fingerprint> [note]` → mark `fix-pending` — **valid finding, fix owed.** Stays in the scan.
-  - `ack <fingerprint> [note]` → mark `acknowledged` — **disposal.** Suppressed from future scans.
-  - `wontfix <fingerprint> [note]` → mark `wont-fix`
-  - `false-positive <fingerprint> [note]` → mark `false-positive`
-  - `fixed <fingerprint>` → mark `fixed` (records current submodule commit)
-  - `reopen <fingerprint>` → set back to `open` (also the way to undo an abandonment)
+  - `fixpending <selector> [note]` → mark `fix-pending` — **valid finding, fix owed.** Stays in the scan.
+  - `ack <selector> [note]` → mark `acknowledged` — **disposal.** Suppressed from future scans.
+  - `wontfix <selector> [note]` → mark `wont-fix`
+  - `false-positive <selector> [note]` → mark `false-positive`
+  - `fixed <selector>` → mark `fixed` (records current submodule commit)
+  - `reopen <selector>` → set back to `open` (also the way to undo an abandonment)
   - `abandon-branch <branch> [note] [--force]` → mark every finding seen **only** on `<branch>` as `abandoned` — the branch was discarded, so the code carrying them is gone
-  - `abandon <fingerprint> [note]` → mark one finding `abandoned` (same meaning, single entry)
+  - `abandon <selector> [note]` → mark one finding `abandoned` (same meaning, single entry)
   - `branches` → group the ledger by branch and show which branches are gone upstream
+
+## Selecting a finding
+
+Selectors are typed by a human at a terminal, so this command **resolves intent rather than
+parsing syntax**. Full ladder and safety rules: **finding-manager → FINDING SELECTOR
+RESOLUTION** and `docs/issue-id-scheme.md`. In short, all of these reach the same entry:
+
+```
+/ledger phoenix-phase-2-staging wontfix pps26l4      # issue ID — preferred
+/ledger phoenix-phase-2-staging wontfix PPS-26-L-4   # punctuation/case ignored
+/ledger phoenix-phase-2-staging wontfix 26l4         # project already known from arg 1
+/ledger phoenix-phase-2-staging wontfix b8e3d591     # fingerprint prefix
+/ledger phoenix-phase-2-staging wontfix L-04         # run label, newest run
+/ledger phoenix-phase-2-staging wontfix "deployer minter grant"   # description
+```
+
+Two rules make this safe rather than reckless:
+
+- **Announce any non-exact resolution** before writing: `Resolved "deployer minter grant" → pps26l4  b8e3d591  "…"`.
+- **Confirm before a fuzzy mutation.** A match by run label or free text (ladder rungs 4–5) must
+  be confirmed by the human *before* the status write lands. Triaging the wrong entry marks a
+  live bug `wont-fix` — the Law-1 failure this ledger exists to prevent. An issue-ID or
+  fingerprint match is exact and needs no confirmation.
+- Ambiguity lists up to 5 ranked candidates and asks; it never picks the top one silently.
+  Zero matches lists the nearest few rather than just failing.
+
+Note that a typo costing one clarifying round trip is the *intended* behaviour — a syntax
+error must never crash the command or, worse, hit the wrong finding.
 
 ## Choosing between `fixpending` and `ack`
 
@@ -55,19 +87,22 @@ Ledger: phoenix-nft-staking   (branch feat/nudge-v3 @ a1b2c3d, updated 2026-05-2
   baselines: master 9611312 (run -26) · feat/nudge-v3 a1b2c3d (run -27)
 ─────────────────────────────────────────────────────────────────
 OPEN (3)
-  H  a1f9..  Reward debt accounting drain        first phoenix-nft-staking-09 · last -12
-  M  7c2e..  Missing staleness check on oracle   first phoenix-nft-staking-11 · last -12
-  L  3b80..  Unindexed event                     first phoenix-nft-staking-12 · last -12
+  H  pns9h1    a1f9..  Reward debt accounting drain        first phoenix-nft-staking-09 · last -12
+  M  pns11m2   7c2e..  Missing staleness check on oracle   first phoenix-nft-staking-11 · last -12
+  L  pns12l3   3b80..  Unindexed event                     first phoenix-nft-staking-12 · last -12
 FIX-PENDING (1)   ← still scanned; fix owed
-  H  88ae..  Promo flush over-credit             "will fix: gate accrual on phase"
+  H  pns14h1   88ae..  Promo flush over-credit             "will fix: gate accrual on phase"
 FIXED (7)
-  H  9d44..  Migrator drain via unstakeFor       fixed at 0fae12 (phoenix-nft-staking-08)
+  H  pns8h2    9d44..  Migrator drain via unstakeFor       fixed at 0fae12 (phoenix-nft-staking-08)
 ACKNOWLEDGED (2)   ← suppressed from future scans
-  C  5e11..  Single-admin migrator key (by design)   "trusted multisig" 
+  C  —         5e11..  Single-admin migrator key (by design)   "trusted multisig"
 WONT-FIX (0)   FALSE-POSITIVE (0)
 ABANDONED (1)   ← branch discarded; code no longer exists
-  M  c40b..  Streamer double-credit on rewire        branch feat/spike-v2 (discarded 2026-07-30)
+  M  pns25m4   c40b..  Streamer double-credit on rewire        branch feat/spike-v2 (discarded 2026-07-30)
 ```
+The **issue ID** column comes first — it is the handle to quote and to type back into this
+command. The fingerprint prefix stays as the secondary, machine-side key. Entries predating the
+ID backfill print `—`; that is expected, not damage, and they are still addressed by fingerprint.
 List `FIX-PENDING` in its own section directly after `OPEN` — **never** collapse it into `ACKNOWLEDGED`. The two sections carry opposite scan semantics, so the annotations above ("still scanned" / "suppressed") are load-bearing: keep them. `ABANDONED` likewise gets its own section: it is a disposal by *code deletion*, not by decision, and merging it into `WONT-FIX` would misrepresent both.
 
 Annotate each finding with its branch when the ledger holds more than one — `branch feat/x` for a branch-only finding, `branch feat/x +master` when `branchesSeen` covers several.
@@ -88,12 +123,13 @@ A branch is `GONE` when `origin/<branch>` no longer resolves after `git fetch --
 
 ## 2b. Update (action given)
 Invoke **finding-manager**: "Update ledger entry status"
-- Apply the new status to the entry with the given fingerprint (a unique prefix is acceptable).
+- Resolve the selector via finding-manager → FINDING SELECTOR RESOLUTION (issue ID → fingerprint prefix → run label → description). Announce any non-exact resolution; **confirm with the human before writing** when the match came from a run label or free text.
+- Apply the new status to the resolved entry.
 - For `fixed`, record `fixedAtCommit` = current submodule HEAD.
 - For `fix-pending`, leave `fixedAtCommit` **null** — a fix is owed, not landed. Record the plan in the note.
 - Store the optional note. Set `updatedAt`.
 - Never delete entries — status changes only (preserves regression detection).
-- Confirm the change. When setting `fix-pending`, state in the confirmation that the finding **stays in the scan** and remains visible to `/open-issues`; when setting `acknowledged`, state that it is now **suppressed from future scans**. The human should never have to infer which of the two they got.
+- Confirm the change, naming the entry by **issue ID first** (`pns14h1`, fingerprint `88ae7589`). When setting `fix-pending`, state in the confirmation that the finding **stays in the scan** and remains visible to `/open-issues`; when setting `acknowledged`, state that it is now **suppressed from future scans**. The human should never have to infer which of the two they got.
 
 ## 2d. Abandon a branch (`abandon-branch <branch> [note] [--force]`)
 Invoke **project-manager** first for the two safety checks, then **finding-manager** to write.
@@ -110,12 +146,12 @@ Invoke **project-manager** first for the two safety checks, then **finding-manag
 5. **Report** both sets and the reversal command:
 ```
 Abandoned 2 findings from feat/spike-v2 (branch gone upstream, not merged into main):
-  M-04  c40b1e77  Streamer double-credit on rewire
-  L-09  8fe2a013  Unindexed rewire event
+  pns25m4  M-04  c40b1e77  Streamer double-credit on rewire
+  pns25l9  L-09  8fe2a013  Unindexed rewire event
 Left open — also seen on other branches (NOT abandoned):
-  H-02  a1f9c2b0  Reward-debt drain          also on main
-  M-07  7c2e4419  Oracle staleness           also on main
-Undo with: /ledger phoenix-nft-staking reopen c40b1e77
+  pns9h2   H-02  a1f9c2b0  Reward-debt drain          also on main
+  pns11m7  M-07  7c2e4419  Oracle staleness           also on main
+Undo with: /ledger phoenix-nft-staking reopen pns25m4
 ```
 Never print only the abandoned count — the untouched list is the proof that nothing live was buried.
 
@@ -128,7 +164,8 @@ Never print only the abandoned count — the untouched list is the proof that no
 # Critical Rules
 1. **Statuses set here are authoritative** — automated runs never overwrite them.
 2. **Never delete ledger entries** — a `fixed` entry must persist so a reappearance is caught as a regression.
-3. **Fingerprints are stable** — `sha256(contract:function:rootCauseClass)`; accept unique prefixes for convenience.
+3. **Two stable identifiers, both accepted.** `issueId` (`pps26l1`) is the human handle — minted once at first sighting, never recomputed, printed first. `fingerprint` (`sha256(contract:function:rootCauseClass[:entryPoint])`) is the machine key that later scans re-derive from the code; unique prefixes are accepted. Never write one where the other belongs, and never renumber an `issueId`.
+3a. **Resolve selectors, don't parse them.** Walk the ladder, announce non-exact matches, confirm before a fuzzy *mutation*, list candidates on ambiguity. A malformed selector must never crash the command and must never silently hit the wrong finding.
 4. **`ack` is a disposal; `fixpending` is not** — `ack` suppresses the finding from every future scan. Only use it when the finding will *not* be fixed. A promise to fix is `fixpending`. If the instruction is ambiguous, ask rather than defaulting to `ack`.
 5. **Abandonment is human-only, branch-exact, and never applies to merged branches.** No scan sets `abandoned`; only entries seen *solely* on the discarded branch are eligible; a branch merged into the trunk is refused outright. Always print what was left untouched.
 6. **`fix-pending` is never auto-resolved** — only a human `/ledger … fixed` closes it. `/analyze`, `/full-audit`, and `/recheck` may *propose* the flip; they never apply it.

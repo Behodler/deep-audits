@@ -129,16 +129,20 @@ function setFeeRate(uint256 newRate) external onlyOwner {
 ### Global Issue ID stamp
 Every L/C section header carries an inline `<!-- id: ... -->` comment with the finding's
 globally-unique ID: `<project-acronym><report#><type><issue#>` (e.g. `sya9c1` = stable-yield-accumulator,
-report 09, C-01). Derive it from the run-dir name and the label:
-1. **project-acronym** — strip trailing `-<NN>` from the run-dir name to get the family, then
-   take the first letter of each hyphen word, **dropping pure-numeric words**
-   (`phoenix-phase-2-staging` → `pps`). The family name equals the repo/submodule name.
-2. **report#** — the `NN` with leading zeros removed (`09` → `9`; bare family dir = `0`).
-3. **type** — `l` for Low, `c` for Centralization.
-4. **issue#** — the label number with leading zeros removed (`C-01` → `1`).
+report 09, C-01). This is the finding's **primary human handle** and the value written to the
+ledger's `issueId` field. Derive it from the run-dir name and the label:
+1. **project-acronym** — read `projects.<name>.idPrefix` from `registered-projects.json`;
+   that field is **authoritative, never re-derived** when already present.
+2. **report#** — the `NN` with leading zeros removed (`09` → `9`, `26` → `26`; bare family dir = `0`).
+3. **type** — `l` Low, `c` Centralization, `q` QA (both `Q-0x` and `QA-0x`), `f` Faithfulness.
+4. **issue#** — the label number with leading zeros removed, **unpadded** (`C-01` → `1`).
 
-Full spec, acronym table, and collision handling: `docs/issue-id-scheme.md` (append any new
-acronym there).
+**Mint once**: the ID encodes the run where the finding was *first seen* and its *original*
+label. A carryover QA report keeps the originating run's IDs — never restamp them to the current
+run. If the ledger already holds an `issueId` for the finding, copy it verbatim.
+
+Full spec, acronym table, resolution ladder, and collision handling: `docs/issue-id-scheme.md`
+(append any new acronym there and to the registry).
 
 ### Content Guidelines
 

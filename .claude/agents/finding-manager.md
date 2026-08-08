@@ -16,6 +16,33 @@ Valid transitions: draft→needs-poc, draft→ready, needs-poc→ready, ready→
 ## LABELS
 - `H-XX` High, `M-XX` Medium, `L-XX` Low (QA), `C-XX` Centralization (QA), `F-XX` Faithfulness / spec-conformance (Law 2 — story deviations; if a deviation also has asset/value/availability impact it ALSO gets an H/M label and report, with the F-XX as its faithfulness cross-ref).
 - Sequential within severity; labels persist once assigned (never renumber on deletion).
+- **A label is run-scoped and is NOT an identity.** `M-01` is reassigned every run. The permanent human handle is `issueId` (below); the permanent machine key is `fingerprint`.
+
+## ISSUE ID (`issueId`) — the primary human handle
+Format `<idPrefix><report#><type><issue#>`, all lowercase, no separators: `pps26l1` =
+phoenix-phase-2-staging, report 26, L-01. Spec: `docs/issue-id-scheme.md`; authoritative
+prefixes: `registered-projects.json` → `projects.<name>.idPrefix` (never re-derive a prefix
+that is already recorded there).
+
+- **Mint once, at first sighting.** Compose it from the finding's `firstSeenRun` number and its
+  **original** label, then never re-mint, renumber or recompute it. A finding first filed as
+  M-01 in run 12 stays `sya12m1` forever, including in every later run's carryover. Recomputing
+  it on a later run would invalidate every cross-reference in triage notes and plan docs.
+- **`type`** is the label letter lowercased — `h`/`m`/`l`/`c`/`f`/`q` (both `Q-0x` and `QA-0x` → `q`).
+  **Numbers are unpadded**: `sya14m1`, not `sya14m02`.
+- **Write `issueId`; read `issueId` | `id` | `internalId` as aliases** — older ledgers used the
+  other two names for the same thing. Never write the aliases going forward.
+- **Never mint an ID onto a historical entry that lacks one.** Only phoenix-phase-2-staging runs
+  25–26 and the natively-stamped ledgers were backfilled; every other pre-existing entry is
+  intentionally ID-less. A missing `issueId` is expected, is never corruption, and must never
+  cause an entry to be skipped — fall through to `fingerprint`.
+- It is emitted first wherever findings are listed, and accepted as a selector everywhere one
+  is taken (see FINDING SELECTOR RESOLUTION).
+
+`issueId`, `fingerprint` and `label` are three different things and none substitutes for
+another. Only the fingerprint is **content-derived**, which is why it and not the issueId
+drives regression / incomplete-fix reconciliation: a later scan re-computes it from the code
+with no lookup table, whereas nothing re-derives "this is `sya12m1`" from a contract.
 
 ## STORAGE STRUCTURE
 Each run uses a versioned directory provided by the orchestrator. Single audit path (no mode subdirectory):
@@ -42,6 +69,7 @@ PoCs/tests live in `workspace/<project>/test/` (preferred) or `reports/<project>
 ```json
 {
   "id": "H-01",
+  "issueId": "pns14h1",
   "project": "phoenix-nft-staking",
   "status": "ready",
   "severity": "high",
@@ -88,8 +116,8 @@ All finding operations take the versioned `reportDir`. Core operations:
 
 ## LEDGER UPSERT
 The persistent ledger lives at `reports/ledgers/<project>.json` (outside versioned run dirs). At the end of a run, upsert it:
-- **New finding** → append entry with `fingerprint`, `status: "open"`, `firstSeenRun` = current run, `lastSeenRun` = current run, and `reportPath`.
-- **Still-open** (matched an existing `open` entry) → bump `lastSeenRun`; do not regenerate a report.
+- **New finding** → append entry with `issueId` (minted now, from this run's number + the finding's label), `fingerprint`, `status: "open"`, `firstSeenRun` = current run, `lastSeenRun` = current run, and `reportPath`.
+- **Still-open** (matched an existing `open` entry) → bump `lastSeenRun`; do not regenerate a report. **Carry `issueId` through untouched** — do not re-mint it to this run's number, and do not mint one if the entry never had one.
 - **Regression** (matched a `fixed` entry that reappeared) → set `status: "open"`, record `regressionOf` = prior run, flag in the run output.
 - **Resolved** → for entries whose code changed since the branch baseline (see `audit_baseline`) and are no longer flagged, set `status: "fixed"` and `fixedAtCommit` = current HEAD.
 - Always set the ledger's `lastAuditedCommit` = current submodule HEAD and `updatedAt`, **plus** the branch bookkeeping below.
@@ -97,7 +125,7 @@ The persistent ledger lives at `reports/ledgers/<project>.json` (outside version
 Ledger entry shape:
 ```json
 {
-  "fingerprint": "<sha256>", "title": "...", "severity": "high",
+  "issueId": "pns09h1", "fingerprint": "<sha256>", "title": "...", "severity": "high",
   "status": "open | fix-pending | fixed | acknowledged | wont-fix | false-positive | abandoned",
   "firstSeenRun": "phoenix-nft-staking-09", "lastSeenRun": "phoenix-nft-staking-12",
   "fixedAtCommit": null, "regressionOf": null,
@@ -202,6 +230,38 @@ QA-severity carryover stays in **`submissions/carryover/`** and is **never** wri
 ---
 ```
 
+## FINDING SELECTOR RESOLUTION
+Every command that names a single finding (`/ledger <action> <sel>`, `/recheck <sel>`,
+`/review-finding`, `/write-report`, `/generate-poc`) hands you a **selector**. A selector is a
+convenience for a human at a terminal, **not a parser contract**. You are not a lookup table —
+resolve intent. Walk this ladder and stop at the first rung yielding exactly one entry:
+
+1. **`issueId`, exact** — normalise first: lowercase, strip `-`, `_`, `#`, spaces. `PPS-26-L-1`,
+   `pps26L1`, `pps 26 l 1` all reach `pps26l1`. Check `issueId`, `id` and `internalId`.
+2. **`issueId`, tolerant** — zero-padding ignored both ways (`pps26l01` ≡ `pps26l1`); `qa` ≡ `q`;
+   and since the command already knows the project from its own first argument, accept a bare
+   `<report#><type><issue#>` (`26l1`) or even `<type><issue#>` (`l1`, newest run) without the prefix.
+   A *wrong but unambiguous* prefix (`ps26l1` for `pps26l1`) resolves too — say what you did.
+3. **`fingerprint`** — full, or any unique prefix of ≥4 hex chars, case-insensitive.
+4. **run label** — `M-01`, scoped to the newest run unless one is named (`M-01@25`, `25 M-01`).
+5. **free text** — rank against `title`, `contract`, `function`, `rootCauseClass`. "the deployer
+   minter grant one", "stale address book" are legitimate selectors; take a clear winner.
+
+**Announce every non-exact resolution** on one line before acting:
+```
+Resolved "deployer minter grant" → pps26l4  b8e3d591  "The deploy script grants itself phUSD mint authority and never revokes it"
+```
+
+**Read-only vs mutating (Law 1).** For a read-only operation, an unambiguous rung-4/rung-5 match
+may be used directly once announced. For a **mutating** operation — any status write — a rung-4
+or rung-5 match must be **confirmed by the human before the write lands**. Triaging the wrong
+finding marks a live bug `wont-fix`; the confirmation costs one line, the mistake costs an
+exploit. Rungs 1–3 are exact enough to act on without confirmation either way.
+
+**Ambiguity and misses never resolve silently.** On >1 match, list up to 5 ranked candidates with
+issueId, fingerprint prefix, severity and title, and ask. On 0 matches, list the nearest few
+rather than only reporting failure — a typo should cost a round trip, not a dead end.
+
 ## ERROR HANDLING
 - Duplicate label → reject, suggest next available.
 - Missing finding → clear error with suggestions.
@@ -218,3 +278,5 @@ QA-severity carryover stays in **`submissions/carryover/`** and is **never** wri
 7. **`fix-pending` is never a disposal** — it is rescanned, carried over, and surfaced exactly like `open`. Never suppress it, and never auto-flip it to `fixed` — propose the flip and let the human confirm.
 8. **Never abandon a finding automatically.** A scan may *observe* that a branch is gone; only an explicit `/ledger … abandon-branch` sets `abandoned`, and only for entries seen on that branch alone. Never abandon an entry whose branch was merged into the trunk — the code is still live (Law 1).
 9. **`branch` is write-once; `branchesSeen` is append-only.** Neither is ever cleared, and neither enters the fingerprint.
+10. **`issueId` is minted once and never recomputed** — it encodes `firstSeenRun` + the original label, not the current run. Never re-mint on carryover, never mint onto a historical entry that lacks one, and never let a missing `issueId` cause an entry to be skipped (fall through to `fingerprint`).
+11. **Resolve selectors, don't parse them.** Walk the ladder in FINDING SELECTOR RESOLUTION, announce any non-exact match, and confirm before a *mutating* fuzzy match. Never reject a near-miss on syntax alone; never silently pick one of several candidates.

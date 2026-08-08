@@ -7,13 +7,15 @@ This is **re-verification**, not discovery. It answers "does this exact finding 
 Mechanism is **PoC-replay first**: if the finding has a runnable PoC, re-run it against the current code. A passing PoC is authoritative evidence the finding is still live; a PoC whose exploit assertion no longer holds is evidence the fix landed. Scanner re-run is a fallback only when no PoC exists.
 
 # Arguments
-- `$ARGUMENTS` format: `<project-name> <finding-label-or-fingerprint> [--commit <ref>]`
+- `$ARGUMENTS` format: `<project-name> <selector> [--commit <ref>]`
 - Project name is the friendly name (case-insensitive; normalized to lowercase-kebab).
-- Finding selector: a ledger label (`M-01`) or a unique fingerprint prefix (`9addc2`).
+- **Finding selector** — preferred form is the issue ID (`ryv5m1`); a fingerprint prefix, a run label (`M-01`), or a plain-English description also resolve. Full ladder and safety rules: finding-manager → **FINDING SELECTOR RESOLUTION**. Recheck is read-only with respect to discovery, so an unambiguous fuzzy match may be used directly **once announced**; ambiguity lists up to 5 candidates and asks.
 - `--commit <ref>` re-verifies against a specific submodule commit instead of current HEAD (default: HEAD).
 - Examples:
-  - `reflax-yield-vault M-01` — re-verify M-01 against the freshly-pulled submodule HEAD
+  - `reflax-yield-vault ryv5m1` — re-verify by issue ID (preferred)
+  - `reflax-yield-vault M-01` — same finding by run label
   - `reflax-yield-vault 9addc2` — same, selected by fingerprint prefix
+  - `reflax-yield-vault "skim overskim duplicate clients"` — same, by description
   - `reflax-yield-vault M-02 --commit 7d11f66` — re-verify against a pinned commit
 
 # THE INVARIANT THAT MAKES THIS SAFE
@@ -34,12 +36,12 @@ Invoke **project-manager**: "Resolve friendly name to submodule path; get curren
 - Get `lib/<submodule>`, the current submodule HEAD (the "latest code"), and the target commit (`--commit` if given, else HEAD).
 
 Invoke **finding-manager**: "Load the ledger entry for this selector"
-- Read `reports/ledgers/<project>.json`; match the label or fingerprint prefix to exactly one entry.
-- Load its `fingerprint`, `status`, `severity`, `title`, `contract`, `function`, `lineStart/lineEnd`, `reportPath`, `firstSeenRun`, `fixedAtCommit`.
+- Read `reports/ledgers/<project>.json`; resolve the selector to exactly one entry via FINDING SELECTOR RESOLUTION (issue ID → fingerprint prefix → run label → description). Announce any non-exact resolution on one line before proceeding.
+- Load its `issueId`, `fingerprint`, `status`, `severity`, `title`, `contract`, `function`, `lineStart/lineEnd`, `reportPath`, `firstSeenRun`, `fixedAtCommit`.
 - If the selector matches a `merged` entry (e.g. M-03 → M-02), report the merge and recheck the surviving entry instead.
 
 ```
-Recheck: reflax-yield-vault  M-01
+Recheck: reflax-yield-vault  ryv5m1  (M-01)
 ─────────────────────────────
 Finding:  _skimSurplusBatch over-skim via duplicate clients[]  (medium, status: open)
 Owner run: reflax-yield-vault-05
@@ -105,11 +107,11 @@ Invoke **finding-manager**: "Record recheck result on the target entry only — 
   ```
 - Set the ledger's top-level `updatedAt`. Do **not** touch `lastAuditedCommit` or `lastRun`.
 - **Propose**, do not apply, any status change, and print the exact command:
-  - LIKELY-FIXED on an `open` finding → recommend `/ledger <project> fixed <fingerprint>` (which records `fixedAtCommit`).
-  - **LIKELY-FIXED on a `fix-pending` finding → the fix landed.** This is the status's happy path — the human promised a fix and the PoC now says it works. Recommend `/ledger <project> fixed <fingerprint>`. Do **not** auto-apply: `fix-pending` is a human status, and only a human closes it.
+  - LIKELY-FIXED on an `open` finding → recommend `/ledger <project> fixed <issueId>` (which records `fixedAtCommit`).
+  - **LIKELY-FIXED on a `fix-pending` finding → the fix landed.** This is the status's happy path — the human promised a fix and the PoC now says it works. Recommend `/ledger <project> fixed <issueId>`. Do **not** auto-apply: `fix-pending` is a human status, and only a human closes it.
   - **STILL-LIVE on a `fix-pending` finding whose code has CHANGED → possible INCOMPLETE FIX.** Surface this loudly, second only to a regression. Someone edited this code intending to fix it and the PoC still passes. Recommend no status change (it correctly remains `fix-pending`) and state plainly that the attempted fix does not close the finding.
   - STILL-LIVE on a `fix-pending` finding whose code is unchanged → the fix has not landed yet. Expected, low signal; no status change.
-  - **STILL-LIVE on a `fixed` finding → REGRESSION.** Surface this loudly (a fix that was marked done is exploitable again is the highest-signal result) and recommend `/ledger <project> reopen <fingerprint>`. Do not auto-reopen.
+  - **STILL-LIVE on a `fixed` finding → REGRESSION.** Surface this loudly (a fix that was marked done is exploitable again is the highest-signal result) and recommend `/ledger <project> reopen <issueId>`. Do not auto-reopen.
   - STILL-LIVE on an `open` finding → no status change needed; the recheck fields record the confirmation.
   - Any result on an `acknowledged` / `wont-fix` / `false-positive` finding → report the result for information only; never change a human status. (**`fix-pending` is not in this set** — it is a live finding awaiting a fix, so recheck engages with it exactly as it does an `open` one.)
 
