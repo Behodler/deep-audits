@@ -1,0 +1,74 @@
+{
+  "contract": "lib/phUSD-stable-minter/src/PhusdStableMinter.sol",
+  "role": "TRUST BOUNDARY — interface abstraction only; not first-party antimatter code",
+  "treeRead": "/home/justin/code/audits/lib/antimatter/lib/phUSD-stable-minter @ d6ed11561e14d2d43adfe481e01357fbd800e218 (2026-05-27). NOTE: no top-level lib/phUSD-stable-minter sibling exists in the audit repo, so this nested pin is the ONLY tree available and is stale by construction.",
+  "solidityVersion": "^0.8.13",
+  "inheritanceChain": ["Ownable (OZ)", "ReentrancyGuard (OZ)", "IPausable (lib/pauser)"],
+
+  "verifiedProperties": {
+    "checkedArithmetic": {"value": true, "confidence": "verified", "evidence": "pragma ^0.8.13, compiled at 0.8.27 by antimatter; no unchecked/assembly in the file."},
+    "noUnboundedLoops": {"value": true, "confidence": "verified", "evidence": "no `for`/`while` anywhere in PhusdStableMinter.sol."},
+    "reentrancyGuarded": {"value": ["mint"], "confidence": "verified", "evidence": ":203 `function mint(address stablecoin, uint256 amount) external nonReentrant`. noMintDeposit (:162) and approveYS (:180) are onlyOwner and NOT guarded."},
+    "pauseMechanism": {"value": true, "confidence": "verified", "evidence": ":86 pause() / :96 unpause(), both `require(msg.sender == pauser)`; :204 `require(!paused, \"Contract is paused\")` gates mint(). pauser is owner-set at :76."},
+    "checksEffectsInteractions": {"value": true, "confidence": "verified", "evidence": "Daily-cap state (mintedToday/lastMintTimestamp) is written at :218-222 BEFORE the first external call at :226."},
+    "immutablePhUSD": {"value": true, "confidence": "verified", "evidence": ":22 `address public immutable phUSD`, set only in the constructor (:67). This is what makes Antimatter's setPhUSD/setPhUSDMinter cross-check (Antimatter.sol:127-129, :139-141) a permanent guarantee rather than a snapshot."}
+  },
+
+  "keySurfaceForAntimatter": {
+    "mint(address stablecoin, uint256 amount)": {
+      "line": 203,
+      "accessControl": "none — permissionless",
+      "preconditions": ["!paused (:204)", "amount > 0 (:205)", "config.yieldStrategy != 0 (:208)", "config.enabled (:209)", "mintedToday + phUSDAmount <= maxMintPerDay when cap is set (:221)"],
+      "recipientOfMintedPhUSD": "msg.sender — i.e. ANTIMATTER, not the annihilator, not `from`. Evidence: :232 `IMintableToken(phUSD).mint(msg.sender, phUSDAmount)`. This is exactly why Antimatter measures a self-balance delta at Antimatter.sol:232 and forwards it at :237.",
+      "orderOfOperations": ["compute phUSDAmount (:212)", "charge daily cap (:215-223)", "pull stablecoin from msg.sender (:226)", "IYieldStrategy(config.yieldStrategy).deposit(stablecoin, amount, address(this)) (:229)", "mint phUSD to msg.sender (:232)"],
+      "depositRecipient": "address(this) — the MINTER is credited as the yield-strategy principal holder (:229). Neither Antimatter nor the annihilator has any claim on the strategy.",
+      "returnValueOfDeposit": "DISCARDED. :229 is a bare statement call. On the pinned vault tree deposit returns nothing so this is consistent; on vault master it returns creditedPrincipal (possibly < amount) and that information is thrown away. See IYieldStrategy.json."
+    },
+    "calculateMintAmount(address stablecoin, uint256 inputAmount)": {
+      "line": 243,
+      "formula": "(inputAmount * exchangeRate * 10**(18 - decimals)) / 1e18",
+      "evidence": ":254-255",
+      "roundingDirection": "DOWN (single integer division by 1e18) — favours the protocol.",
+      "compositionWithAntimatter": "Antimatter guarantees inputAmount * 10**(18-decimals) == amount exactly (Antimatter.sol:254-256), so from Antimatter's perspective this reduces to floor(amount * exchangeRate / 1e18).",
+      "decimalsAbove18": "10**(18 - decimals) underflows and reverts. Antimatter pre-empts this with an explicit UnsupportedDecimals revert at Antimatter.sol:252. The source carries an in-line note to auditors at :252-253 accepting the >18-decimals assumption; per project convention an in-source comment carries no suppression authority."
+    },
+    "stablecoinConfigs(address)": {
+      "line": 36,
+      "publicGetterTuple": "(address yieldStrategy, uint256 exchangeRate, uint8 decimals, bool enabled, uint256 maxMintPerDay, uint256 mintedToday, uint256 lastMintTimestamp)",
+      "antimatterDestructure": "Antimatter.sol:250 destructures as `(address yieldStrategy,, uint8 decimals,,,,)` — 7 slots, positions match. VERIFIED consistent with the struct at :25-33. This is a tight ABI coupling: reordering or inserting a struct field in the minter would silently mis-bind Antimatter's `decimals` without any compile error at the minter's end.",
+      "registrationTest": "Both contracts define 'registered' as yieldStrategy != address(0) (minter :278-280, Antimatter :251). Consistent."
+    },
+    "maxMintPerDay": {
+      "line": "30, 190, 215-223",
+      "semantics": "Rolling 24h window per stablecoin, denominated in phUSD (18dp). 0 disables. Window resets when block.timestamp >= lastMintTimestamp + 1 days (:216), which also covers the first-ever mint since lastMintTimestamp starts at 0.",
+      "windowShape": "Not a sliding window — it is a hard 24h epoch that only advances when a mint occurs after expiry, so a mint at t and another at t+1day-1s both charge the same window while a mint at t+1day starts a fresh full allowance. Standard behaviour for this pattern.",
+      "criticalNote": "This cap is charged ONLY for phUSD the minter itself mints. Antimatter's second leg (Antimatter.sol:236) is minted directly on Antimatter's own FlaxToken authorisation and never touches this counter — see AM-LOCAL-002."
+    },
+    "pauseState": {"line": "40, 86-100, 204", "effectOnAntimatter": "Pausing bricks annihilateFrom entirely; the whole call reverts and nothing is half-settled (test/Annihilation.t.sol:262)."}
+  },
+
+  "ownership": {
+    "owner": "msg.sender at deploy (:66 `Ownable(msg.sender)`) — independent of Antimatter.owner() and FlaxToken.owner().",
+    "ownerOnlyFunctions": ["setPauser (:76)", "registerStablecoin (:111)", "updateExchangeRate (:138)", "setStablecoinEnabled (:150)", "noMintDeposit (:162)", "approveYS (:180)", "setMaxMintPerDay (:190)"],
+    "pauserOnlyFunctions": ["pause (:86)", "unpause (:96)"]
+  },
+
+  "observationsRelevantToAntimatter": [
+    "registerStablecoin (:111) OVERWRITES the whole struct, resetting maxMintPerDay/mintedToday/lastMintTimestamp to 0 (:120-128). Re-registering an existing stable (e.g. to change its yield strategy) therefore silently deletes its daily cap and clears the current window. Owner footgun; belongs to the minter's own audit, noted here because it removes a rail that bounds annihilation volume.",
+    "registerStablecoin does NOT validate `decimals` against IERC20Metadata(stablecoin).decimals(). A mis-entered decimals value propagates straight into Antimatter's pairing ratio (Antimatter.sol:254) AND into the mint formula (:254), in the same direction — a stable registered with 6 decimals when it really has 18 would make Antimatter pull 1e-12 of the intended stablecoin while still minting the full phUSD. Antimatter has no independent decimals check to catch this. Cross-contract; flagged for interaction analysis.",
+    "registerStablecoin does not require approveYS, and approveYS is a separate owner call (:180). A registered-but-unapproved stable passes Antimatter's registration check (Antimatter.sol:251) and then reverts inside :229. Liveness footgun.",
+    "updateExchangeRate (:138) has no bound, no timelock and no upper/lower sanity check.",
+    "mint() is permissionless, so Antimatter is not privileged on the minter — it is just another caller."
+  ],
+
+  "interfaceAbstraction": {
+    "externalCalls": [
+      {"target": "IERC20 stablecoin", "methods": ["safeTransferFrom"], "trustLevel": "semi-trusted", "line": 226},
+      {"target": "IYieldStrategy config.yieldStrategy", "methods": ["deposit"], "trustLevel": "trusted", "line": 229, "notes": "Owner-registered per stablecoin. Return value discarded."},
+      {"target": "IMintableToken phUSD", "methods": ["mint"], "trustLevel": "trusted", "line": 232, "notes": "Minter must be an authorised FlaxToken minter or this reverts."}
+    ],
+    "events": ["PauserChanged", "Paused", "Unpaused", "StablecoinEnabledChanged", "StablecoinRegistered", "ExchangeRateUpdated", "PhUSDMinted", "TokensDeposited", "ApprovalSet", "MaxMintPerDayUpdated"]
+  },
+
+  "complexity": {"loc": 281, "functions": 12, "externalCalls": 5, "stateVariables": 3}
+}

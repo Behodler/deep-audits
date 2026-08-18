@@ -1,0 +1,137 @@
+{
+  "id": "H-01",
+  "issueId": "am1h1",
+  "project": "antimatter",
+  "status": "draft",
+  "severity": "high",
+  "label": "H-01",
+  "title": "An ERC20 allowance over ANTIMATTER is silently a dual-asset authority: it lets a third party spend the grantor's STABLECOIN and keep the entire ~2x phUSD proceeds",
+  "contract": "src/Antimatter.sol",
+  "function": "annihilateFrom",
+  "lines": {
+    "allowanceSpend": 214,
+    "burn": 215,
+    "stablePull": 222,
+    "amLegMint": 236,
+    "stableLegTransfer": 237,
+    "range": "201-239"
+  },
+  "entryPoint": null,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "033432b0e650af67",
+  "fingerprintBasis": "src/Antimatter.sol:annihilateFrom:SingleAllowanceGrantsDualAssetAuthority",
+  "fingerprintNote": "sha256(contract:function:rootCauseClass)[:16] - legacy form, empty entryPoint. Carried verbatim from sanitized.json; reproduces from fingerprintBasis.",
+  "rootCauseClass": "SingleAllowanceGrantsDualAssetAuthority",
+  "origin": "new",
+  "firstSeenRun": "antimatter-01",
+  "lastSeenRun": "antimatter-01",
+  "sources": [
+    "SA-001",
+    "AM-LOCAL-001",
+    "CODE-001",
+    "invariant_06_noStableSpentBeyondCallerAllowance",
+    "invariant_07_noValueRedirectedAwayFromOwner",
+    "symbolic:check_callerCannotSpendStableWithoutStableAllowance_d6",
+    "symbolic:check_callerCannotSpendStableWithoutStableAllowance_d6_k"
+  ],
+  "commit": "0bb82d867dba43bc514a508800826f90436c2ee3",
+  "classification": {
+    "assetImpact": "The grantor's ENTIRE stablecoin balance approved to Antimatter (in practice the full balance, since a max-approval is the only way to use the contract more than once) is pulled out uncompensated, plus the antimatter itself. Both the ~1x antimatter-leg phUSD and the ~1x stable-leg phUSD - the whole ~2x proceeds - are delivered to an attacker-chosen address. Victim receives nothing.",
+    "attackPath": [
+      "1. Victim approves Antimatter to spend her stablecoin. This is MANDATORY - annihilateFrom pulls the stablecoin via safeTransferFrom(from, address(this), stableAmount) at :222, so no holder can ever annihilate without it. Universal among users, not a special condition.",
+      "2. Victim grants an ordinary ERC20 antimatter allowance to a third party - a keeper, router, or any counterparty. The project ships this as a supported flow (test/Annihilation.t.sol:130-141 test_thirdPartySpendsAntimatterAllowance) and NatSpec :189-192 advertises acting on someone else's behalf.",
+      "3. Attacker calls annihilateFrom(stable, victim, attacker, amount). :214 spends ONLY the antimatter allowance; :215 burns the victim's antimatter.",
+      "4. :222 debits a SECOND asset - the victim's stablecoin - on Antimatter's own standing approval from `from`. No stablecoin allowance from victim to attacker is checked or spent (confirmed at source: the only _spendAllowance call is over antimatter).",
+      "5. :236 mints `amount` phUSD to `recipient` and :237 transfers `mintedForStable` to `recipient`; `recipient` is validated only against address(0), so the attacker names himself.",
+      "6. One transaction, no flash loan, no admin, no market condition, repeatable up to the allowance."
+    ],
+    "likelihood": "High. Executable by any allowance grantee at will; deterministic; no timing, price, or privilege dependency. The only 'trigger' is the victim doing two things the protocol requires and documents.",
+    "assumptions": "Victim holds antimatter and a registered stablecoin; both are prerequisites of using the contract at all.",
+    "externalRequirements": "None beyond the two ordinary approvals in steps 1-2. No owner action, no third contract, no adversarial market."
+  },
+  "justification": "HELD AT HIGH after explicitly testing the 'no hypotheticals' bar as instructed. Neither precondition is extraordinary: (a) the stablecoin approval to Antimatter is not a user choice an attacker must wait for, it is a hard requirement of ever annihilating, so every real user has it; (b) an antimatter allowance is a plain ERC20 approve, and the project's own test suite asserts third-party annihilation is intended behaviour. The defect is precisely that one grant of authority silently carries a second - approve(bob, N) on antimatter is de facto also approve(bob, toStableAmount(N)) on every stablecoin the grantor approved to Antimatter, plus an unrestricted right to redirect the ~2x proceeds. That is direct, uncompensated theft of a specific victim's assets by a specific attacker along a fully concrete path, which is the C4 High definition. Downgrade arguments considered and rejected: 'user error / phishing' does not apply because the victim's action is exactly what the documentation and tests tell her to do and the harm is invisible at approval time; 'approve race / safeApprove front-running' does not apply because nothing is racing - the authority is over-broad by construction; 'intended design' does not apply because an ERC20 approver cannot consent to a second asset she was never asked about, and Law 1 makes intended-but-exploitable reportable. Evidence quality supports High without hand-waving: passing PoC with exact figures (Alice USDC 100e6 -> 0, phUSD to Bob 200e18, usdc.allowance(alice,bob)==0 throughout), two invariants broken on two independent engines (Foundry 512x150 and Medusa 210,604 calls), a clean 2-call Medusa shrink, a deterministic non-fuzz replay, and a Halmos REFUTATION establishing the defect over the whole amount domain rather than one witness. Source re-read at lib/antimatter/src/Antimatter.sol:214-237 confirms the single _spendAllowance is over antimatter only.",
+  "plausibility": "plausible",
+  "confidence": "high",
+  "channels": [
+    "primary"
+  ],
+  "faithfulness": false,
+  "recommendation": "Require `recipient == from` whenever `msg.sender != from`. This closes the theft window while preserving both legitimate flows (keeper/router annihilating on your behalf and delivering to you; self-annihilation to another recipient). Alternatives: additionally require and spend `IERC20(stable).allowance(from, msg.sender) >= stableAmount`, or drop the `from` parameter and make annihilation self-only.",
+  "evidence": {
+    "poc": {
+      "file": "workspace/antimatter/test/audit/Tier2.t.sol",
+      "tests": [
+        "test_H01_amAllowanceDrainsGrantorStablecoinToAttacker - Alice USDC 100e6 -> 0, phUSD to Alice 0, phUSD to Bob 200e18, usdc.allowance(alice,bob)==0 throughout",
+        "test_H01_baselineTransferFromTakesOnlyAM - control: plain transferFrom leaves Alice's USDC at 100e6",
+        "test_H01_violatesNoBurnOutsideAnnihilationInvariant - AM supply falls 100e18 while phUSD.balanceOf(alice)==0"
+      ],
+      "status": "passing"
+    },
+    "invariant": {
+      "engines": [
+        "Foundry (512 runs x depth 150)",
+        "Medusa 1.5.1 (210,604 calls)"
+      ],
+      "failures": [
+        "invariant_06: 'caller moved stablecoin it was never approved for: 335696647 != 0'",
+        "invariant_07: 'phUSD proceeds of a holder's assets delivered to a caller-chosen third party: 6646395452000000000000 != 0'"
+      ],
+      "deterministicReplay": "test_counterexample_allowanceConservation (PASSES = reproduces): victim approves attacker 100e18 AM only -> attacker annihilateFrom(usdc,victim,attacker,100e18) -> victim USDC -100e6, usdc.allowance(victim,attacker) still 0, phUSD.balanceOf(attacker)==200e18, victim 0",
+      "medusaShrink": "clean 2-call minimisation (approveAntimatter, annihilateOnBehalf)",
+      "shrinkerCaveat": "Foundry's shrinker is unreliable here (cumulative ghosts report a non-reproducing 1-call sequence); Medusa's shrink and the hand-built replay are the load-bearing artifacts."
+    },
+    "symbolic": {
+      "tool": "halmos 0.3.3",
+      "artifacts": [
+        "tier3/halmos-p3b.txt",
+        "tier3/halmos-p3b-k.txt"
+      ],
+      "result": "REFUTED - the naive safety claim (a caller with zero stablecoin allowance cannot move `from`'s stablecoin) is false",
+      "witnesses": [
+        "amount = 0xe8d4a5100000000000000000 (~7.2e10 AM)",
+        "k = 2**79 (amount ~ 6.04e17 AM)"
+      ],
+      "domain": "fully concrete d=6, rate=1e18 - unaffected by the symbolic-EXP over-approximation caveat",
+      "significance": "establishes the defect over the whole amount domain, not just a hand-picked value",
+      "corroborating": "symbolic 3a PROVED the antimatter allowance itself falls by exactly `amount` - i.e. the AM leg is correct, which is precisely why the stablecoin leg's missing authority check is the defect"
+    }
+  },
+  "poc": {
+    "file": "workspace/antimatter/test/audit/Tier2.t.sol",
+    "tests": [
+      "test_H01_amAllowanceDrainsGrantorStablecoinToAttacker - Alice USDC 100e6 -> 0, phUSD to Alice 0, phUSD to Bob 200e18, usdc.allowance(alice,bob)==0 throughout",
+      "test_H01_baselineTransferFromTakesOnlyAM - control: plain transferFrom leaves Alice's USDC at 100e6",
+      "test_H01_violatesNoBurnOutsideAnnihilationInvariant - AM supply falls 100e18 while phUSD.balanceOf(alice)==0"
+    ],
+    "status": "passing",
+    "auditAuthored": true,
+    "auditAuthoredNote": "AUDIT-AUTHORED proof-of-concept written for this audit under workspace/antimatter/test/audit/. It is NOT part of the antimatter project's own test suite, is not present in the submodule at any commit, and must never be cited as project coverage nor filed as a project test path."
+  },
+  "sanitizer": {
+    "verdict": "PASS",
+    "reason": "No known-issues document exists for this project (knownIssuesFile/Source null, knownIssues empty, verified at HEAD) so KI suppression has no authority; no C4 known-invalid class genuinely applies; not a malicious-owner vector; ledger empty so no prior entry to reconcile against."
+  },
+  "metadata": {
+    "createdAt": "2026-08-18T00:00:00Z",
+    "updatedAt": "2026-08-18T00:00:00Z",
+    "scanOrigin": "antimatter-01",
+    "classificationOrigin": "am-CLASS-001",
+    "dedupOrigin": "DEDUP-001",
+    "coldScan": true
+  },
+  "additionalContext": {
+    "strongestFraming": "CODE-001",
+    "framingRationale": "CODE-001 is kept verbatim as the primary narrative: it is the only source that states the exposure in ERC20-approval terms (approve(bob,N) on antimatter is de facto also approve(bob,toStableAmount(N)) on every stablecoin approved to Antimatter, plus a redirection right), carries the legitimate-flow analysis proving the mitigation costs no functionality, and pre-empts the intentionality defence.",
+    "rootCause": "annihilateFrom derives TWO asset movements and one value redirection from ONE grant of authority. Only the antimatter allowance is checked and spent; the stablecoin leg rides on Antimatter's own standing approval from `from`, and `recipient` is validated only against address(0).",
+    "impact": "Direct, uncompensated theft of the grantor's stablecoin. Loss per victim is bounded by min(antimatter allowance, stablecoin approval to Antimatter) - which for the universal max-approval pattern is the full antimatter allowance. Victim also loses the antimatter and receives nothing.",
+    "invariantViolated": "lib/antimatter/CLAUDE.md 'Antimatter must never expose a burn outside a completed annihilation'. From `from`'s ledger, annihilateFrom with msg.sender != from and recipient != from is indistinguishable from burn().",
+    "intentionalityNote": "Asserted as correct by the project's own test_thirdPartySpendsAntimatterAllowance (test/Annihilation.t.sol:130-141). Not a defence: an ERC20 approver cannot consent to a second asset they were never asked about, and in-source NatSpec (:189-192) carries no suppression authority. Law 1: intended-but-exploitable is still reportable.",
+    "notes": "SA-001 (slither arbitrary-send-erc20, impact=High confidence=High) is the deterministic seed and is retained in `sources` for traceability, not re-filed."
+  },
+  "mergeAction": "5-way consolidation (static seed + profiler local-high + Tier-2 code finding + 2 broken invariants on 2 independent engines + symbolic refutation over the whole amount domain). Verified before collapsing: all seven cite the same defect at the same lines (:214 spends only the AM allowance, :222 debits a second asset, :236-237 credit a caller-chosen address).",
+  "inputSeverity": "high",
+  "severityChanged": false
+}
