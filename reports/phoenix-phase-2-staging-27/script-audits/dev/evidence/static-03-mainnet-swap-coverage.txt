@@ -1,0 +1,62 @@
+### A.4 mainnet swap inventory vs local mirror ###
+-- mainnet pull/setDispatcher/setHook/replaceDispatcher call sites --
+148: *      hook.pull()  ->  hook.setDispatcher(new)  ->  new.setHook(hook)  ->  replaceDispatcher(idx, new)
+173: *   4a  New `BalancerPoolerV2` (index 4) + BPT custody shift + `replaceDispatcher(4)`.
+174: *   4b  New `Uniboost` x3 (indices 1/2/3) + `replaceDispatcher(1/2/3)`.
+176: *       `replaceDispatcher(7)`.
+1300:            IMintDebtHookLike(HOOK_POOLER).pull();
+1303:            console.log("  BalancerPoolerMintDebtHook.pull(): settled");
+1341:            IMintDebtHookLike(HOOK_POOLER).setDispatcher(newPooler);
+1342:            BalancerPoolerV2(newPooler).setHook(IDispatchHook(HOOK_POOLER));
+1344:            console.log("  hook repointed: setDispatcher(new) then new.setHook(hook) [fail-closed]");
+1363:            minter.replaceDispatcher(IDX_POOLER, newPooler);
+1372:            console.log("  replaceDispatcher(4) OK; price/growth preserved:", price, growth);
+1393:    ///           hook-wired, and immediately before `replaceDispatcher(4)`. There is no
+1456:            IMintDebtHookLike(hook).pull();
+1459:            console.log("  hook.pull(): settled");
+1519:            IMintDebtHookLike(hook).setDispatcher(ub);
+1520:            Uniboost(ub).setHook(IDispatchHook(hook));
+1528:            minter.replaceDispatcher(idx, ub);
+1584:            IMintDebtHookLike(HOOK_RATCHET).pull();
+1623:            IMintDebtHookLike(HOOK_RATCHET).setDispatcher(newRatchet);
+1624:            NudgeRatchet(newRatchet).setHook(IDispatchHook(HOOK_RATCHET));
+1632:            minter.replaceDispatcher(IDX_RATCHET, newRatchet);
+1638:            console.log("  replaceDispatcher(7) OK; price/growth untouched:", price, growth);
+
+-- index-4 BalancerPoolerV2 swap: BPT custody shift region --
+    ///        1. `newPooler.owner() == OWNER` immediately before the transfer. `withdrawBPT`
+    ///           takes an ARBITRARY recipient, so the destination is asserted, not trusted.
+    ///        2. Direct old -> new. Never via the Ledger EOA, the batch-minter, or any
+    ///           intermediary.
+    ///        3. The destination can give it back: `withdrawBPT` (`:424`) and `rescueERC20`
+    ///           (`:437`), both `onlyOwner`, are on the static type of `newPooler`, and the
+    ///           recovery path is exercised in PREVIEW_MODE (Phase 8).
+    ///        4. Sequenced late — after the new pooler is fully deployed, config-mirrored and
+    ///           hook-wired, and immediately before `replaceDispatcher(4)`. There is no
+    ///           ordering in which the position rests somewhere we do not control.
+    ///        5. RESUME GUARD. The progress file is written during forge's LOCAL exec, before
+    ///           broadcasting, so after a crash it can name a pooler that was never deployed.
+    ///           A blind resume could deploy a SECOND pooler and strand the BPT on the first.
+    ///           If the old pooler's BPT is already zero we ABORT rather than re-run: the
+    ///           executor must locate the holder and confirm its owner first.
+    ///        6. Exact conservation both ways. BPT is not fee-on-transfer, so equality — not
+    ///           tolerance — is correct.
+    function _moveBPT() internal {
+        if (_isConfigured("pooler_bpt")) {
+            console.log("  BPT already moved");
+            return;
+        }
+        uint256 oldBpt = IERC20(BALANCER_POOL).balanceOf(OLD_POOLER);
+        uint256 newBptBefore = IERC20(BALANCER_POOL).balanceOf(newPooler);
+        console.log("  BPT on old pooler (runtime read):", oldBpt);
+
+        // Guard 5.
+        require(
+            oldBpt > 0, "ABORT: old pooler BPT is already 0 - locate the holder and confirm its owner, do NOT re-run"
+        );
+        // Guard 1.
+        require(IOwnable(newPooler).owner() == OWNER, "new pooler owner != OWNER - refusing to send BPT");
+        // Guard 3: prove the recovery surface exists on the destination before committing.
+        require(newPooler.code.length > 0, "new pooler has no code");
+
+        // Guard 2: direct old -> new, no intermediary.
