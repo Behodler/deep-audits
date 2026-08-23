@@ -1,0 +1,480 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.27;
+
+// AUDIT-AUTHORED. Not part of the antimatter project's own test suite. Never cite as coverage.
+
+import {Test, console2} from "@forge-std/Test.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {Antimatter} from "../../../src/Antimatter.sol";
+import {AntimatterHandler, HostileDonorStable} from "./AntimatterHandler.sol";
+import {MockStable} from "../../mocks/MockStable.sol";
+import {FlaxToken} from "@phUSD/FlaxToken.sol";
+
+contract AntimatterInvariantTest is Test {
+    AntimatterHandler internal handler;
+
+    function setUp() public {
+        handler = new AntimatterHandler(0); // cap disabled: see AntimatterDailyCapInvariantTest
+
+        bytes4[] memory sel = new bytes4[](12);
+        sel[0] = AntimatterHandler.annihilate.selector;
+        sel[1] = AntimatterHandler.annihilateUnderstated.selector;
+        sel[2] = AntimatterHandler.annihilateOverstated.selector;
+        sel[3] = AntimatterHandler.annihilateHostileDonor.selector;
+        sel[4] = AntimatterHandler.amApprove.selector;
+        sel[5] = AntimatterHandler.amTransferFrom.selector;
+        sel[6] = AntimatterHandler.amTransfer.selector;
+        sel[7] = AntimatterHandler.setStableApproval.selector;
+        sel[8] = AntimatterHandler.tryRescue.selector;
+        sel[9] = AntimatterHandler.ownerMint.selector;
+        sel[10] = AntimatterHandler.setExchangeRate.selector;
+        sel[11] = AntimatterHandler.warp.selector;
+
+        targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
+        targetContract(address(handler));
+    }
+
+    // =====================================================================
+    // ANTI-VACUOUSNESS TRIPWIRE (mandatory).
+    // A green campaign in which no annihilation ever settled is a FAILED campaign, not a pass.
+    // Armed only after the sequence has had a fair chance, so the very first call cannot trip it.
+    // =====================================================================
+    function invariant_00_tripwire_annihilationActuallyHappened() public view {
+        if (handler.attemptedAnnihilate() < 5) return;
+        require(handler.okAnnihilate() > 0, "TRIPWIRE: no annihilation ever succeeded - the campaign is VACUOUS");
+    }
+
+    // NOTE on afterInvariant(): this Foundry version rolls state back between invariant runs, so
+    // the handler's cumulative counters read zero inside afterInvariant(). An abort-on-empty check
+    // there would fail on every campaign regardless of the contract, which is why the tripwire
+    // lives in invariant_00 (evaluated DURING a run, where the counters are live) and is
+    // corroborated by test_ZZ_coverageWalk below.
+
+    /// The handler records violations instead of reverting (a reverting handler call would be
+    /// swallowed by fail_on_revert=false and hide the violation). This surfaces them.
+    function invariant_01_noRecordedViolations() public view {
+        if (handler.violationCount() != 0) {
+            revert(handler.firstViolation());
+        }
+    }
+
+    // ------------------------------------------------------------------ INV 1
+    /// SOLE-BURN: supply moves only by owner mints and annihilate burns. There is no other burn
+    /// path on Antimatter (no burn/burnFrom is exposed), and every per-call burn leg is checked
+    /// inside the handler.
+    function invariant_1_soleBurn_supplyEqualsMintedMinusAnnihilated() public view {
+        assertEq(
+            handler.antimatter().totalSupply(),
+            handler.expectedSupply(),
+            "INV1: totalSupply != ghostMinted - ghostBurnedByAnnihilate"
+        );
+    }
+
+    // ------------------------------------------------------------------ INV 2
+    /// NO-THIRD-PARTY-POWER (H-01, fingerprint 033432b0e6). B holds an unlimited ANTIMATTER
+    /// allowance over A and A has approved Antimatter for its stablecoins. A's stablecoin must be
+    /// reachable only by A's own calls. The per-call leg lives in the handler
+    /// (_assertOnlyCallerStableMoved); this is the standing check that Antimatter never holds a
+    /// stablecoin allowance it could use later.
+    function invariant_2_noThirdPartyPower_noStandingPull() public view {
+        AntimatterHandler h = handler;
+        assertEq(
+            IERC20(address(h.usdc())).allowance(address(h.antimatter()), address(h.minter())),
+            0,
+            "INV2: Antimatter holds a standing usdc allowance to the minter"
+        );
+        assertEq(
+            IERC20(address(h.dola())).allowance(address(h.antimatter()), address(h.minter())),
+            0,
+            "INV2: Antimatter holds a standing dola allowance to the minter"
+        );
+    }
+
+    // ------------------------------------------------------------------ INV 3
+    function invariant_3_wholeOrNothing_noResidue() public view {
+        AntimatterHandler h = handler;
+        address am = address(h.antimatter());
+        assertEq(
+            IERC20(address(h.usdc())).balanceOf(am),
+            h.ghostDonatedStable(address(h.usdc())),
+            "INV3: residual usdc on Antimatter"
+        );
+        assertEq(
+            IERC20(address(h.dola())).balanceOf(am),
+            h.ghostDonatedStable(address(h.dola())),
+            "INV3: residual dola on Antimatter"
+        );
+        assertEq(
+            IERC20(address(h.phUSD())).balanceOf(am), h.ghostDonatedPhUSD(), "INV3: residual phUSD on Antimatter"
+        );
+    }
+
+    // ------------------------------------------------------------------ INV 6
+    /// DECIMALS-CROSSCHECK (M-01, fingerprint a1c81428a4). Load-bearing regression check.
+    function invariant_6_decimalsCrosscheck_understatedNeverSettles() public view {
+        assertEq(handler.okUnderstated(), 0, "INV6: an understated-decimals annihilation settled (M-01 REOPENED)");
+        assertEq(handler.okOverstated(), 0, "INV6b: an overstated-decimals annihilation settled");
+    }
+
+    /// Access control: the rescue backstop stayed owner-only throughout.
+    function invariant_7_rescueStaysOwnerOnly() public view {
+        assertEq(handler.okRescue(), 0, "ACL: a non-owner rescued from Antimatter");
+    }
+
+    // ----------------------------------------------------------------- INV-A
+    /// INERT RANGE (story-003 minPhUSDOut). Every annihilate the handler drives supplies a floor
+    /// drawn from [0, amount], boundary included. `totalPhUSD = amount + mintedForStable` and the
+    /// antimatter half is minted unconditionally, so no such floor can bind. A single
+    /// InsufficientPhUSDOut revert anywhere in the campaign refutes the claim.
+    function invariant_A_floorInInertRangeNeverBinds() public view {
+        assertEq(
+            handler.annFloorReverts(),
+            0,
+            "INV-A: annihilate reverted InsufficientPhUSDOut for a floor inside [0, amount]"
+        );
+    }
+
+    /// Anti-vacuousness for INV-A specifically: the boundary case must actually have been drawn.
+    function invariant_A_tripwire_boundaryFloorWasExercised() public view {
+        if (handler.okAnnihilate() < 20) return;
+        require(handler.annFloorAtAmount() > 0, "TRIPWIRE: minPhUSDOut == amount was never drawn - INV-A is VACUOUS");
+    }
+
+    // =====================================================================
+    // RETIRED-BY-DESIGN-CHANGE
+    // ---------------------------------------------------------------------
+    // The run-01 harness carried two invariants whose MEANING depended on the removed
+    // `annihilateFrom(stable, from, recipient, amount)` third-party path:
+    //
+    //   invariant_06_noStableSpentBeyondCallerAllowance
+    //       "the stablecoin pulled from `from` never exceeds what `from` allowed the CALLER".
+    //   invariant_07_noValueRedirectedAwayFromOwner
+    //       "the phUSD produced from `from`'s assets is never delivered to anyone but `from`".
+    //
+    // Both quantify over a (caller, from) pair with caller != from. At c91bc1a no such pair can
+    // exist: `annihilate` sources both halves from msg.sender and there is no `from` parameter.
+    // They are RETIRED-BY-DESIGN-CHANGE, not ported: rewriting them with from == msg.sender would
+    // turn each into a trivially-true statement about the caller's own assets and would silently
+    // replace the property that mattered. Their surviving intent is carried instead by
+    // invariant_2_noThirdPartyPower_noStandingPull plus the handler's per-call
+    // _assertOnlyCallerStableMoved leg, which is a DIFFERENT and stronger statement: no actor's
+    // stablecoin moves except the acting caller's own.
+    // =====================================================================
+
+    function invariant_zz_callSummary() public view {
+        console2.log("totalCalls            ", handler.totalCalls());
+        console2.log("okAnnihilate          ", handler.okAnnihilate());
+        console2.log("revertAnnihilate      ", handler.revertAnnihilate());
+        console2.log("skipAnnihilate        ", handler.skipAnnihilate());
+        console2.log("attemptUnderstated    ", handler.attemptUnderstated());
+        console2.log("okUnderstated         ", handler.okUnderstated());
+        console2.log("attemptOverstated     ", handler.attemptOverstated());
+        console2.log("okOverstated          ", handler.okOverstated());
+        console2.log("attemptHostileDonor   ", handler.attemptHostile());
+        console2.log("okHostileDonor        ", handler.okHostile());
+        console2.log("revertHostileDonor    ", handler.revertHostile());
+        console2.log("okTransferFrom        ", handler.okTransferFrom());
+        console2.log("okApprove             ", handler.okApprove());
+        console2.log("okTransfer            ", handler.okTransfer());
+        console2.log("attemptRescue         ", handler.attemptRescue());
+        console2.log("okRescue              ", handler.okRescue());
+        console2.log("callsWarp             ", handler.callsWarp());
+        console2.log("peakIssued usdc       ", handler.peakIssuedInWindow(address(handler.usdc())));
+        console2.log("peakCharged usdc      ", handler.peakChargedInWindow(address(handler.usdc())));
+        console2.log("annFloorNonZero       ", handler.annFloorNonZero());
+        console2.log("annFloorAtAmount      ", handler.annFloorAtAmount());
+        console2.log("annFloorReverts       ", handler.annFloorReverts());
+        console2.log("okHostileInjected     ", handler.okHostileInjected());
+        console2.log("ghostInjectedForwarded", handler.ghostInjectedForwarded());
+        console2.log("violations            ", handler.violationCount());
+    }
+
+    // =====================================================================
+    // Deterministic unit checks that the fuzzer's random walk should not be trusted to reach.
+    // These run under `forge test` alongside the invariant campaign.
+    // =====================================================================
+
+    /// INV6 / M-01, stated as the run-01 exploit shape exactly: registered 6, real 18.
+    function test_M01_understatedDecimalsExploitIsClosed() public {
+        AntimatterHandler h = new AntimatterHandler(0);
+        Antimatter am = h.antimatter();
+        address a = h.actors(0);
+        address und = address(h.understated());
+        MockStable undTok = h.understated();
+        FlaxToken ph = h.phUSD();
+
+        // The run-01 exploit: pay 100e6 units of an 18-decimal token (1e-10 of a token) and
+        // receive 200e18 phUSD. Confirm it now reverts on the decimals cross-check.
+        vm.prank(a);
+        vm.expectRevert(abi.encodeWithSelector(Antimatter.DecimalsMismatch.selector, und, uint8(6), uint256(18)));
+        am.annihilate(und, a, 100 ether, 0);
+
+        assertEq(ph.balanceOf(a), 0, "no phUSD minted");
+        assertEq(undTok.balanceOf(a), 1_000_000 ether, "no stablecoin taken");
+    }
+
+    /// The mirror misconfiguration also fails closed.
+    function test_M01b_overstatedDecimalsAlsoFailsClosed() public {
+        AntimatterHandler h = new AntimatterHandler(0);
+        Antimatter am = h.antimatter();
+        address a = h.actors(0);
+        address ovr = address(h.overstated());
+
+        vm.prank(a);
+        vm.expectRevert(abi.encodeWithSelector(Antimatter.DecimalsMismatch.selector, ovr, uint8(18), uint256(6)));
+        am.annihilate(ovr, a, 100 ether, 0);
+    }
+
+    /// INV2 / H-01 stated adversarially and deterministically: B has an unlimited antimatter
+    /// allowance over A and A has approved Antimatter for USDC. Every route B can reach must
+    /// leave A's USDC untouched.
+    function test_H01_allowanceOverAntimatterConfersNoPowerOverAStablecoin() public {
+        AntimatterHandler h = new AntimatterHandler(0);
+        Antimatter am = h.antimatter();
+        MockStable usdc = h.usdc();
+        FlaxToken ph = h.phUSD();
+        address A = h.actors(0);
+        address B = h.actors(1);
+
+        assertEq(am.allowance(A, B), type(uint256).max, "premise: B holds an unlimited AM allowance over A");
+        assertEq(usdc.allowance(A, address(am)), type(uint256).max, "premise: A approved Antimatter for USDC");
+        uint256 aUsdc0 = usdc.balanceOf(A);
+        uint256 aAm0 = am.balanceOf(A);
+
+        // Route 1: B annihilates. A's assets are simply not reachable — B can only burn B's own
+        // antimatter and spend B's own stablecoin.
+        vm.prank(B);
+        am.annihilate(address(usdc), B, 100 ether, 0);
+        assertEq(usdc.balanceOf(A), aUsdc0, "R1: A's USDC untouched");
+        assertEq(am.balanceOf(A), aAm0, "R1: A's antimatter untouched");
+
+        // Route 2: B moves A's antimatter to itself via the allowance (the only thing the
+        // allowance legitimately buys), then annihilates it. A's USDC still must not move: B
+        // pays the stablecoin half out of B's own balance.
+        uint256 bUsdc1 = usdc.balanceOf(B);
+        vm.prank(B);
+        am.transferFrom(A, B, 100 ether);
+        vm.prank(B);
+        am.annihilate(address(usdc), B, 100 ether, 0);
+        assertEq(usdc.balanceOf(A), aUsdc0, "R2: A's USDC untouched");
+        assertEq(usdc.balanceOf(B), bUsdc1 - 100e6, "R2: B paid the stablecoin half itself");
+        assertEq(am.balanceOf(A), aAm0 - 100 ether, "R2: only the allowance-authorised AM left A");
+
+        // Route 3: B names A as recipient. A only ever receives.
+        vm.prank(B);
+        am.annihilate(address(usdc), A, 100 ether, 0);
+        assertEq(usdc.balanceOf(A), aUsdc0, "R3: A's USDC untouched");
+        assertEq(ph.balanceOf(A), 200 ether, "R3: A received phUSD only");
+
+        // Route 4: there is no signature that takes a `from`. Nothing else to try.
+        assertEq(usdc.balanceOf(A), aUsdc0, "H-01 closed: A's stablecoin never moved");
+    }
+
+    /// INV-C at this HEAD. The run-02 form of this test asserted PhUSDAmountMismatch; that error
+    /// and the equality check behind it were DELETED by story-003, so the old assertion targeted
+    /// code that no longer exists (bit-rot, not a fix). The live behaviour is the opposite: phUSD
+    /// injected into Antimatter between the `phUSDBefore` snapshot and the `mintedForStable` delta
+    /// is counted and forwarded to the caller-chosen recipient. Ledger L-01, ad4b779566291190.
+    function test_INVC_hostileMidCallPhUSDInjectionIsForwarded() public {
+        AntimatterHandler h = new AntimatterHandler(0);
+        Antimatter am = h.antimatter();
+        FlaxToken ph = h.phUSD();
+        HostileDonorStable d = h.donor();
+        address a = h.actors(0);
+
+        // A materially-sized injection, matching the run-01 PoC shape (500e18 pushed from the
+        // stable's own transfer hook) rather than a 1-wei curiosity.
+        d.setInjectAmount(500 ether);
+        d.arm(true);
+
+        uint256 phBefore = ph.balanceOf(a);
+        vm.prank(a);
+        am.annihilate(address(d), a, 100 ether, 0); // no floor: the floor is irrelevant to INV-C
+
+        // 100 (antimatter half) + 100 (stable half at rate 1e18) + 500 (injected mid-call).
+        assertEq(ph.balanceOf(a) - phBefore, 700 ether, "INV-C: injection was not forwarded");
+        assertEq(ph.balanceOf(address(am)), 0, "INV-C: injection left residue instead of forwarding");
+        assertEq(d.lastInjected(), 500 ether, "control: the hook actually fired");
+
+        // The recipient is caller-chosen, so the injected value follows the recipient, not the donor.
+        // The donor was seeded with 1000e18 phUSD by the handler's constructor, so a second
+        // 500e18 injection needs no fresh mint.
+        address mark = address(0xD00D);
+        d.setInjectAmount(500 ether);
+        d.arm(true);
+        vm.prank(a);
+        am.annihilate(address(d), mark, 100 ether, 0);
+        assertEq(ph.balanceOf(mark), 700 ether, "INV-C: injection followed the caller-chosen recipient");
+    }
+
+    /// ABORT-ON-EMPTY, deterministic. Drives the handler through a long pseudo-random walk from a
+    /// fixed seed and asserts that every action class was actually exercised and that the
+    /// settlement path settled. This is the check that makes a green invariant campaign
+    /// meaningful; it also prints the per-action success counts.
+    function test_ZZ_coverageWalk() public {
+        AntimatterHandler h = new AntimatterHandler(0);
+        uint256 seed = 42;
+        for (uint256 i; i < 600; i++) {
+            seed = uint256(keccak256(abi.encode(seed, i)));
+            uint256 k = seed % 12;
+            if (k == 0 || k == 1 || k == 2) h.annihilate(seed, seed >> 8, seed >> 16, seed >> 24, seed >> 32);
+            else if (k == 3) h.annihilateUnderstated(seed, seed >> 8);
+            else if (k == 4) h.annihilateOverstated(seed, seed >> 8);
+            else if (k == 5) h.annihilateHostileDonor(seed, seed >> 8, (seed >> 200) % 2 == 0);
+            else if (k == 6) h.amApprove(seed, seed >> 8, seed >> 16);
+            else if (k == 7) h.amTransferFrom(seed, seed >> 8, seed >> 16, seed >> 24);
+            else if (k == 8) h.amTransfer(seed, seed >> 8, seed >> 16);
+            else if (k == 9) h.tryRescue(seed, seed >> 8, seed >> 16);
+            else if (k == 10) h.ownerMint(seed, seed >> 8);
+            else h.warp(seed);
+        }
+
+        console2.log("=== coverage walk (600 actions, seed 42) ===");
+        console2.log("totalCalls           ", h.totalCalls());
+        console2.log("annihilate attempted ", h.attemptedAnnihilate());
+        console2.log("annihilate OK        ", h.okAnnihilate());
+        console2.log("annihilate reverted  ", h.revertAnnihilate());
+        console2.log("annihilate skipped   ", h.skipAnnihilate());
+        console2.log("understated attempts ", h.attemptUnderstated());
+        console2.log("understated OK       ", h.okUnderstated());
+        console2.log("overstated attempts  ", h.attemptOverstated());
+        console2.log("overstated OK        ", h.okOverstated());
+        console2.log("hostile attempts     ", h.attemptHostile());
+        console2.log("hostile OK           ", h.okHostile());
+        console2.log("hostile reverted     ", h.revertHostile());
+        console2.log("amTransferFrom OK    ", h.okTransferFrom());
+        console2.log("amApprove OK         ", h.okApprove());
+        console2.log("amTransfer OK        ", h.okTransfer());
+        console2.log("rescue attempts      ", h.attemptRescue());
+        console2.log("rescue OK            ", h.okRescue());
+        console2.log("annFloorNonZero      ", h.annFloorNonZero());
+        console2.log("annFloorAtAmount     ", h.annFloorAtAmount());
+        console2.log("annFloorReverts      ", h.annFloorReverts());
+        console2.log("okHostileInjected    ", h.okHostileInjected());
+        console2.log("injectedForwarded    ", h.ghostInjectedForwarded());
+        console2.log("violations           ", h.violationCount());
+        if (h.violationCount() > 0) console2.log("first violation      ", h.firstViolation());
+
+        // ABORT-ON-EMPTY assertions: every guarded path must have been genuinely exercised.
+        assertGt(h.okAnnihilate(), 0, "VACUOUS: no annihilation ever settled");
+        assertGt(h.attemptUnderstated(), 0, "VACUOUS: the M-01 regression path was never attempted");
+        assertGt(h.attemptHostile(), 0, "VACUOUS: the hostile-donor path was never attempted");
+        assertGt(h.okTransferFrom(), 0, "VACUOUS: the antimatter-allowance path was never exercised");
+        assertGt(h.attemptRescue(), 0, "VACUOUS: the rescue ACL was never probed");
+        assertGt(h.annFloorAtAmount(), 0, "VACUOUS: the minPhUSDOut == amount boundary was never drawn");
+        assertGt(h.annFloorNonZero(), 0, "VACUOUS: every draw used a zero floor - INV-A untested");
+        assertEq(h.annFloorReverts(), 0, "INV-A: a floor inside [0, amount] bound and reverted");
+        assertGt(h.okHostileInjected(), 0, "VACUOUS: no mid-call injection ever settled - INV-C untested");
+        assertEq(h.violationCount(), 0, "a per-call property was violated during the walk");
+        assertEq(h.okUnderstated(), 0, "M-01 REOPENED");
+        assertEq(h.okRescue(), 0, "rescue ACL broken");
+    }
+
+    /// NEGATIVE CONTROL for the tripwire, in two halves. A tripwire that cannot fire is worth
+    /// nothing; a tripwire that fires on a legitimate revert is worse than nothing.
+    function test_ZZ_tripwireIsFalsifiable() public {
+        // Half 1 — PRECONDITION-AWARENESS. Approvals revoked, so every attempt is INFEASIBLE.
+        // Nothing settles, but that is correct behaviour, so the tripwire must stay silent and
+        // no liveness violation may be recorded.
+        AntimatterHandler h = new AntimatterHandler(0);
+        h.setStableApproval(0, 0, 0);
+        h.setStableApproval(0, 1, 0);
+        h.setStableApproval(1, 0, 0);
+        h.setStableApproval(1, 1, 0);
+        h.setStableApproval(2, 0, 0);
+        h.setStableApproval(2, 1, 0);
+
+        uint256 seed = 7;
+        for (uint256 i; i < 120; i++) {
+            seed = uint256(keccak256(abi.encode(seed, i)));
+            h.annihilate(seed, seed >> 8, seed >> 16, seed >> 24, seed >> 32);
+        }
+        assertEq(h.okAnnihilate(), 0, "control 1: nothing settled");
+        assertEq(h.attemptedAnnihilate(), 0, "control 1: no attempt was feasible, so none counted");
+        assertEq(h.violationCount(), 0, "control 1: an infeasible revert is not a violation");
+
+        // Half 2 — REAL FALSIFIABILITY. Approvals intact and balances funded, so every attempt is
+        // FEASIBLE, but the yield strategy is paused so the settlement path cannot complete. The
+        // tripwire's precondition is now met with zero successes, i.e. it WOULD fire, and the
+        // liveness leg of INV-A records a violation.
+        AntimatterHandler g = new AntimatterHandler(0);
+        g.setStrategyPaused(true);
+        seed = 7;
+        for (uint256 i; i < 120; i++) {
+            seed = uint256(keccak256(abi.encode(seed, i)));
+            g.annihilate(seed, seed >> 8, seed >> 16, seed >> 24, seed >> 32);
+        }
+        assertGt(g.attemptedAnnihilate(), 5, "control 2: feasible attempts were made");
+        assertEq(g.okAnnihilate(), 0, "control 2: none settled - the tripwire's condition is met");
+        assertGt(g.violationCount(), 0, "control 2: the liveness leg did NOT record a violation");
+        console2.log("control 2 first violation:", g.firstViolation());
+    }
+
+    /// INV3 in its sharpest form: a whole-or-nothing settlement leaves no residue, no allowance.
+    function test_INV3_wholeOrNothing() public {
+        AntimatterHandler h = new AntimatterHandler(0);
+        Antimatter am = h.antimatter();
+        MockStable usdc = h.usdc();
+        FlaxToken ph = h.phUSD();
+        address mnt = address(h.minter());
+        address a = h.actors(0);
+
+        vm.prank(a);
+        am.annihilate(address(usdc), a, 1000 ether, 0);
+        assertEq(usdc.balanceOf(address(am)), 0);
+        assertEq(ph.balanceOf(address(am)), 0);
+        assertEq(usdc.allowance(address(am), mnt), 0);
+    }
+}
+
+/// @dev Separate campaign with a LIVE rolling daily cap on the minter. Kept apart from the core
+///      campaign because a biting cap makes the settlement path revert most of the time, which
+///      starves the other invariants of successful annihilations (the tripwire caught exactly
+///      that). Carries the run-01 invariant_09 / invariant_10 pair forward.
+contract AntimatterDailyCapInvariantTest is Test {
+    AntimatterHandler internal handler;
+    uint256 internal constant CAP = 10_000e18;
+
+    function setUp() public {
+        handler = new AntimatterHandler(CAP);
+        bytes4[] memory sel = new bytes4[](3);
+        sel[0] = AntimatterHandler.annihilate.selector;
+        sel[1] = AntimatterHandler.warp.selector;
+        sel[2] = AntimatterHandler.ownerMint.selector;
+        targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
+        targetContract(address(handler));
+    }
+
+    function invariant_cap_tripwire() public view {
+        if (handler.attemptedAnnihilate() < 5) return;
+        require(handler.okAnnihilate() > 0, "TRIPWIRE: no annihilation settled under the cap campaign");
+    }
+
+    // ---------------------------------------------------------- ported from run-01
+    // DAILY-CAP HONESTY. Not in the Part-3 list, but carried over from the run-01 harness
+    // (invariant_09 / invariant_10) so that porting does not silently drop coverage. These back
+    // ledger findings M-03 / M-05 and are EXPECTED TO FAIL: only the stable leg is charged to the
+    // minter's cap while both legs are issued.
+    function invariant_8_dailyCapGovernsAllIssuance() public view {
+        assertLe(
+            handler.peakIssuedInWindow(address(handler.usdc())),
+            CAP,
+            "USDC: phUSD issued in a 24h window exceeded maxMintPerDay"
+        );
+        assertLe(
+            handler.peakIssuedInWindow(address(handler.dola())),
+            CAP,
+            "DOLA: phUSD issued in a 24h window exceeded maxMintPerDay"
+        );
+    }
+
+    function invariant_9_minterCapChargedForFullIssuance() public view {
+        assertEq(
+            handler.peakChargedInWindow(address(handler.usdc())),
+            handler.peakIssuedInWindow(address(handler.usdc())),
+            "USDC: minter cap charged for less than the phUSD actually issued"
+        );
+    }
+
+}

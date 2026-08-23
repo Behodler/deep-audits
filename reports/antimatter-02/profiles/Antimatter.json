@@ -1,0 +1,146 @@
+{
+  "contract": "src/Antimatter.sol",
+  "commit": "c91bc1a44424b853247a3849732bf89547defdec",
+  "profileTimestamp": "2026-08-19T00:00:00Z",
+  "solidityVersion": "^0.8.27 (foundry.toml solc = 0.8.27)",
+  "inheritanceChain": ["ERC20 (OZ)", "Ownable (OZ)", "ReentrancyGuard (OZ)"],
+  "libraries": ["EnumerableSet.AddressSet", "SafeERC20 for IERC20"],
+
+  "externalSurface": [
+    {"sig": "setPhUSD(IFlax)", "line": 142, "access": "onlyOwner", "mutates": ["phUSD"], "externalCalls": ["phUSDMinter.phUSD() (x1-2, view)"]},
+    {"sig": "setPhUSDMinter(PhusdStableMinter)", "line": 154, "access": "onlyOwner", "mutates": ["phUSDMinter"], "externalCalls": ["newMinter.phUSD() (view)"]},
+    {"sig": "setApprovedMinter(address,bool)", "line": 169, "access": "onlyOwner", "mutates": ["_approvedMinters"], "externalCalls": []},
+    {"sig": "isApprovedMinter(address)", "line": 177, "access": "none (view)"},
+    {"sig": "approvedMinterCount()", "line": 182, "access": "none (view)"},
+    {"sig": "approvedMinterAt(uint256)", "line": 187, "access": "none (view)"},
+    {"sig": "approvedMinters()", "line": 192, "access": "none (view)"},
+    {"sig": "mint(address,uint256)", "line": 197, "access": "onlyApprovedMinters (owner() OR _approvedMinters member)", "mutates": ["_balances", "_totalSupply"], "reentrancyGuard": false},
+    {"sig": "annihilate(address,address,uint256)", "line": 221, "access": "none (permissionless)", "reentrancyGuard": true},
+    {"sig": "toStableAmount(address,uint256)", "line": 280, "access": "none (public view)"},
+    {"sig": "rescueERC20(IERC20,address,uint256)", "line": 306, "access": "onlyOwner", "reentrancyGuard": true},
+    {"sig": "owner() / transferOwnership(address) / renounceOwnership()", "line": "inherited Ownable.sol:56,84,76", "access": "view / onlyOwner / onlyOwner"},
+    {"sig": "name/symbol/decimals/totalSupply/balanceOf/transfer/allowance/approve/transferFrom", "line": "inherited ERC20.sol:52,60,77,82,87,99,106,120,142", "access": "none (standard ERC20)"},
+    {"sig": "phUSD() / phUSDMinter()", "line": "119,124 (public state getters)", "access": "none (view)"}
+  ],
+
+  "burnPaths": {
+    "claim": "annihilate is the ONLY entry point reaching _burn",
+    "verdict": "VERIFIED-BY-READING (mechanically checked, not assumed)",
+    "evidence": [
+      "grep '_burn' over src/ returns exactly one site: src/Antimatter.sol:239, inside annihilate.",
+      "OZ ERC20.sol (lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol:229) declares _burn as `internal` and NOT virtual; there is no public/external burn on the base.",
+      "ERC20Burnable is NOT in the inheritance list (line 22): only ERC20, Ownable, ReentrancyGuard.",
+      "Ownable and ReentrancyGuard expose no supply-affecting function (Ownable.sol:56/76/84; ReentrancyGuard exposes only private/internal helpers).",
+      "_update (ERC20.sol:176) is virtual but is NOT overridden in Antimatter.sol, so no alternate supply-reduction path exists.",
+      "No assembly, no delegatecall, no fallback/receive in Antimatter.sol."
+    ],
+    "burnDebitedAccount": "msg.sender (line 239). No _spendAllowance anywhere in the file — the 0bb82d8 call was deleted; grep '_spendAllowance' over src/ returns zero hits."
+  },
+
+  "phUSDMintPaths": {
+    "claim": "_phUSD.mint(...) is reached only from annihilate",
+    "verdict": "VERIFIED-BY-READING",
+    "sites": [
+      {"line": 260, "call": "_phUSD.mint(recipient, amount)", "guard": "reachable only after all annihilate checks + _burn + successful minter.mint + exact-quote match", "amount": "`amount` = the 18-dec antimatter quantity burned (the antimatter half)"}
+    ],
+    "note": "The stablecoin half's phUSD is NOT minted by Antimatter; PhusdStableMinter mints it to Antimatter (PhusdStableMinter.sol:232, recipient = msg.sender = Antimatter) and Antimatter forwards it with safeTransfer at line 261.",
+    "internalAMMintSites": [{"line": 198, "call": "_mint(to, amount)", "guard": "onlyApprovedMinters"}]
+  },
+
+  "annihilateOrdering": {
+    "checksPhase": [
+      {"line": 222, "check": "amount == 0 -> ZeroAmount"},
+      {"line": 223, "check": "recipient == address(0) -> RecipientZeroAddress"},
+      {"line": 226, "check": "phUSD unset -> PhUSDNotSet"},
+      {"line": 228, "check": "phUSDMinter unset -> PhUSDMinterNotSet"},
+      {"line": 230, "check": "toStableAmount(stable, amount) -> external staticcalls to minter.stablecoinConfigs and stable.decimals; reverts StablecoinNotRegistered / UnsupportedDecimals / DecimalsUnavailable / DecimalsMismatch / AmountNotRepresentable"},
+      {"line": 234, "check": "expectedForStable = minter.calculateMintAmount(stable, stableAmount)  [external view, PRE-burn]"},
+      {"line": 235, "check": "expectedForStable == 0 -> PhUSDNotReceived"}
+    ],
+    "firstStateMutation": {"line": 239, "op": "_burn(msg.sender, amount)", "note": "Antimatter's OWN storage (_balances[msg.sender], _totalSupply) is the first and only local state written, and it is written BEFORE any state-changing external call. All external calls made before this point (lines 230, 234) are staticcall-only views."},
+    "interactionsPhase": [
+      {"line": 243, "op": "stableBefore = IERC20(stable).balanceOf(this)  [view; taken AFTER burn, BEFORE pull]"},
+      {"line": 244, "op": "phUSDBefore = _phUSD.balanceOf(this)  [view]"},
+      {"line": 246, "op": "IERC20(stable).safeTransferFrom(msg.sender, this, stableAmount)  [STATE-CHANGING EXTERNAL CALL #1]"},
+      {"line": 247, "op": "IERC20(stable).forceApprove(minter, stableAmount)  [#2]"},
+      {"line": 251, "op": "minter.mint(stable, stableAmount)  [#3 — pulls the stable, deposits to YS, mints phUSD to this]"},
+      {"line": 253, "op": "IERC20(stable).forceApprove(minter, 0)  [#4]"},
+      {"line": 254, "op": "post-check: balanceOf(this) != stableBefore -> StableNotDeposited"},
+      {"line": 256, "op": "mintedForStable = _phUSD.balanceOf(this) - phUSDBefore  [measured]"},
+      {"line": 257, "op": "post-check: mintedForStable != expectedForStable -> PhUSDAmountMismatch"},
+      {"line": 260, "op": "_phUSD.mint(recipient, amount)  [#5]"},
+      {"line": 261, "op": "phUSD.safeTransfer(recipient, mintedForStable)  [#6]"},
+      {"line": 263, "op": "emit Annihilated"}
+    ],
+    "summary": "Strict CEI on Antimatter's own storage: the sole local write (_burn, 239) precedes every state-changing interaction. No Antimatter storage is written after line 239. Whole function is nonReentrant (221).",
+    "allowanceSurfaceTouched": "stable's allowance(this -> minter) is set to stableAmount at 247 and zeroed at 253. Antimatter's OWN _allowances mapping is never read or written by annihilate."
+  },
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {"value": true, "confidence": "verified-by-reading", "note": "no for/while/do anywhere in src/Antimatter.sol; approvedMinters() at 192 returns EnumerableSet.values() which copies the set — O(n) memory in an owner-controlled set, view-only, not called on the annihilate path"},
+    "checkedArithmetic": {"value": true, "confidence": "verified-by-reading", "note": "0.8.27, no unchecked blocks; the only arithmetic is at 256 (subtraction, cannot underflow because phUSD balance is measured monotonically within the call and would revert if it decreased), 263 (amount + mintedForStable), and 297-299"},
+    "assembly": {"value": false, "confidence": "verified-by-reading", "note": "one low-level staticcall at 292, no inline assembly"},
+    "reentrancyGuarded": ["annihilate (221)", "rescueERC20 (306)"],
+    "reentrancyUnguarded": ["mint (197)", "all ERC20/Ownable inherited mutators"],
+    "accessControlled": ["setPhUSD", "setPhUSDMinter", "setApprovedMinter", "rescueERC20 (onlyOwner)", "mint (onlyApprovedMinters)"],
+    "initializerProtected": {"value": "n/a", "note": "not upgradeable; constructor-only (137)"},
+    "pausable": {"value": false, "note": "Antimatter has no pause; pausing lives on PhusdStableMinter (paused, line 204 of the minter) and takes effect as a revert inside minter.mint"},
+    "weakRandomness": {"value": false, "confidence": "verified-by-reading", "note": "no block.timestamp / prevrandao / blockhash / difficulty anywhere in Antimatter.sol"},
+    "inboundCallbackHooks": {"value": false, "confidence": "verified-by-reading", "note": "no ERC721/1155 safe-mint or receive hooks; the untrusted-callback surface is entirely the arbitrary `stable` token address"}
+  },
+
+  "localInvariants": [
+    {"id": "INV-1", "statement": "annihilate debits antimatter from msg.sender and no one else.", "basis": "verified-by-reading — line 239 is the only _burn and its account operand is literally msg.sender; no _spendAllowance exists in the file."},
+    {"id": "INV-2", "statement": "annihilate debits the stablecoin from msg.sender and no one else.", "basis": "verified-by-reading — line 246 safeTransferFrom(msg.sender, ...)."},
+    {"id": "INV-3", "statement": "recipient is only ever credited, never debited.", "basis": "verified-by-reading — recipient appears only at 223 (zero check), 260 (mint to), 261 (transfer to), 263 (event)."},
+    {"id": "INV-4", "statement": "On success the antimatter burned equals `amount` and the phUSD delivered equals amount + mintedForStable.", "basis": "verified-by-reading (239, 260, 261, 263)."},
+    {"id": "INV-5", "statement": "On success Antimatter's stablecoin balance is exactly what it was before the pull (no residue).", "basis": "verified-by-reading — post-check at 254 compares against stableBefore captured at 243."},
+    {"id": "INV-6", "statement": "On success Antimatter's phUSD balance is unchanged net: it receives mintedForStable at 251 and forwards exactly mintedForStable at 261.", "basis": "verified-by-reading, ASSUMES phUSD.transfer moves the full amount (no fee-on-transfer on phUSD) — the transfer result is not re-measured."},
+    {"id": "INV-7", "statement": "The stable allowance Antimatter grants the minter is zeroed before the function returns on the success path.", "basis": "verified-by-reading (247 set, 253 clear). NOT true on a revert path — but a revert unwinds the approval anyway."},
+    {"id": "INV-8", "statement": "expectedForStable is computed strictly before _burn and before any state-changing external call.", "basis": "verified-by-reading (234 vs 239/246)."},
+    {"id": "INV-9", "statement": "The minter's registered decimals equal the token's self-reported decimals for any successful annihilate.", "basis": "verified-by-reading (292-295), ASSUMES `stable` reports decimals honestly and consistently within the tx (a token can return different values across calls; only one reading is taken, at 292, and the minter separately re-reads config.decimals inside calculateMintAmount at minter:254)."},
+    {"id": "INV-10", "statement": "annihilate cannot succeed on an amount that is not exactly representable in the stable's decimals.", "basis": "verified-by-reading (298-299): integer-division round-trip equality."},
+    {"id": "INV-11", "statement": "toStableAmount does NOT check config.enabled.", "basis": "verified-by-reading — 284 destructures only yieldStrategy (idx 0) and decimals (idx 2); `enabled` (idx 3) is discarded. A disabled stablecoin passes toStableAmount and calculateMintAmount and is only rejected inside minter.mint (minter:209, 'Stablecoin minting is paused'), i.e. AFTER the _burn but within the same reverting tx."},
+    {"id": "INV-12", "statement": "annihilate has no owner/minter gate — it is permissionless for any AM holder.", "basis": "verified-by-reading (221, no modifier other than nonReentrant)."}
+  ],
+
+  "revertConditionsAnnihilate": [
+    "ZeroAmount (222)", "RecipientZeroAddress (223)", "PhUSDNotSet (226)", "PhUSDMinterNotSet (228 and 282)",
+    "StablecoinNotRegistered (285)", "UnsupportedDecimals (286)", "DecimalsUnavailable (293)", "DecimalsMismatch (295)",
+    "AmountNotRepresentable (299)", "PhUSDNotReceived (235, now PRE-burn)", "ERC20InsufficientBalance from _burn (239)",
+    "stable transferFrom failure (246)", "forceApprove failure (247/253)",
+    "minter reverts: 'Contract is paused' / 'Amount must be greater than zero' / 'Stablecoin not registered' / 'Stablecoin minting is paused' / 'Daily mint limit exceeded' / YS deposit failure / phUSD mint failure (minter:204-232)",
+    "StableNotDeposited (254)", "PhUSDAmountMismatch (257)", "phUSD.mint failure — Antimatter not an authorized IFlax minter or mintVersion stale (260)",
+    "ReentrancyGuardReentrantCall (221)"
+  ],
+
+  "trustBoundary": {
+    "externalCalls": [
+      {"target": "phUSDMinter.stablecoinConfigs(stable)", "line": 284, "type": "staticcall (view)", "trustLevel": "trusted (owner-configured, first-party)", "trustedTo": "return the authoritative yieldStrategy/decimals tuple", "measuredAfter": "yieldStrategy != 0 and decimals <= 18 are checked; decimals is cross-checked against the token at 292-295"},
+      {"target": "stable.decimals() via low-level staticcall", "line": 292, "type": "staticcall", "trustLevel": "UNTRUSTED (caller supplies `stable`, but it must already be registered by the owner at 285, so effectively owner-gated)", "trustedTo": "return a 32-byte word equal to the registered decimals", "measuredAfter": "ok flag, data.length == 32, and equality with registered decimals. Decoded as uint256 so a >255 value fails the equality rather than reverting the decode."},
+      {"target": "phUSDMinter.calculateMintAmount(stable, stableAmount)", "line": 234, "type": "staticcall (view)", "trustLevel": "trusted", "trustedTo": "quote the exact phUSD the subsequent minter.mint will produce", "measuredAfter": "!= 0 at 235; and exact equality against the observed delta at 257"},
+      {"target": "IERC20(stable).balanceOf(this)", "lines": [243, 254], "type": "staticcall", "trustLevel": "semi-trusted", "trustedTo": "report an honest balance", "measuredAfter": "difference is the invariant being enforced"},
+      {"target": "phUSD.balanceOf(this)", "lines": [244, 256], "type": "staticcall", "trustLevel": "trusted (first-party FlaxToken v2)", "measuredAfter": "delta compared to expectedForStable at 257"},
+      {"target": "IERC20(stable).safeTransferFrom(msg.sender, this, stableAmount)", "line": 246, "type": "state-changing, UNTRUSTED CODE EXECUTES", "trustLevel": "semi-trusted (owner-registered token, but arbitrary code)", "trustedTo": "move exactly stableAmount and not re-enter", "measuredAfter": "re-entry blocked by nonReentrant (221); short-transfer surfaces as a revert inside minter.mint (insufficient balance) or as StableNotDeposited (254)"},
+      {"target": "IERC20(stable).forceApprove(minter, stableAmount) / (minter, 0)", "lines": [247, 253], "type": "state-changing, untrusted code executes", "trustedTo": "record the allowance; forceApprove tolerates non-standard approve"},
+      {"target": "phUSDMinter.mint(stable, stableAmount)", "line": 251, "type": "state-changing", "trustLevel": "trusted first-party", "trustedTo": "pull exactly stableAmount, deposit it to the registered yield strategy, and mint calculateMintAmount(...) phUSD to Antimatter", "measuredAfter": "stable balance restored (254) and phUSD delta == quote (257). The YS deposit itself is NOT verified by Antimatter — Antimatter only observes that the stable left its own balance, not where it went."},
+      {"target": "phUSD.mint(recipient, amount)", "line": 260, "type": "state-changing", "trustLevel": "trusted first-party", "trustedTo": "mint `amount` phUSD; requires Antimatter to hold IFlax minter authorization at the current mintVersion (IFlax.sol:103)", "measuredAfter": "NOT measured — the result is assumed. ASSUMED."},
+      {"target": "phUSD.safeTransfer(recipient, mintedForStable)", "line": 261, "type": "state-changing", "trustLevel": "trusted", "measuredAfter": "NOT re-measured. ASSUMED (no FoT on phUSD)."},
+      {"target": "token.safeTransfer(to, amount) in rescueERC20", "line": 308, "type": "state-changing", "trustLevel": "arbitrary token, owner-chosen", "guard": "onlyOwner + nonReentrant"}
+    ],
+    "unverifiedDownstream": [
+      "PhusdStableMinter -> IYieldStrategy(config.yieldStrategy).deposit(stable, amount, minter) (PhusdStableMinter.sol:229). Requires a prior owner call to approveYS (minter:180) or the deposit reverts. Antimatter has no visibility into this hop.",
+      "Antimatter must be authorized on PhusdStableMinter's phUSD? No — the minter mints via IMintableToken(phUSD).mint (minter:232) using the MINTER's own authorization. Antimatter needs its OWN separate IFlax authorization for line 260."
+    ]
+  },
+
+  "trustAssumptions": [
+    "phUSD (FlaxToken v2) is a well-behaved 18-decimal ERC20 with no transfer fee and no transfer hooks; Antimatter's phUSD transfer at 261 is not measured.",
+    "Antimatter is (and remains) an authorized IFlax minter at the live mintVersion; IFlax.revokeAllMintPrivileges (IFlax.sol:119) would brick annihilate at line 260 after the burn — reverting, so no loss, but a full DoS.",
+    "PhusdStableMinter is owner-configured and honest; the only thing Antimatter independently proves about it is the phUSD wiring (145/158) and the two post-conditions at 254/257.",
+    "The owner registers only stablecoins whose decimals() is stable across calls and <= 18.",
+    "`stable` executes no reentrancy that matters — enforced locally by nonReentrant, and PhusdStableMinter.mint is itself nonReentrant (minter:203)."
+  ],
+
+  "complexity": {"loc": 311, "externalOrPublicFunctions": 11, "stateVariables": 3, "stateChangingExternalCalls": 6, "viewExternalCalls": 6}
+}

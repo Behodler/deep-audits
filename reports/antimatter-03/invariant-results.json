@@ -1,0 +1,100 @@
+{
+  "project": "antimatter",
+  "commit": "3a96fb7de072b29515986f92282cdece7b12d4ca",
+  "run": "antimatter-03",
+  "runTimestamp": "2026-08-21T02:20:00Z",
+  "runners": {
+    "forge_fuzz": {"available": true, "artifact": "tier3/forge-fuzz-run03claims.txt", "fuzz_runs_actual": 20000, "fuzz_seed": "0xA17", "tests": 13, "passed": 13, "failed": 0},
+    "forge_invariant": {"available": true, "artifact": "tier3/forge-invariant-campaign.txt", "runs_actual": 256, "depth_actual": 500, "calls_actual": 128000, "fuzz_seed": "0xA17", "reverts": 0},
+    "forge_invariant_dailycap": {"available": true, "artifact": "tier3/forge-invariant-dailycap-fresh.txt", "runs_actual": 256, "calls_actual": 128000, "fuzz_seed": "0xB22", "note": "separate campaign, cache/invariant/failures cleared beforehand so the two failures are fresh, not replayed"},
+    "medusa": {"available": true, "artifact": "tier3/medusa-run.txt", "config": "tier3/medusa-config-used.json", "workers": 4, "testLimit_configured": 250000, "calls_actual": 258974, "sequences_actual": 4317, "elapsed": "2m06s", "branches": 4018, "corpus": 45, "passed": 16, "failed": 3, "failed_are_all_intentional_sentinels": true},
+    "echidna": {"available": false, "note": "not run - Medusa (primary) executed successfully, so the fallback was unnecessary"},
+    "halmos": {"available": true, "note": "NOT run by this agent; symbolic proof is the symbolic-analyzer's tier"}
+  },
+  "claims": [
+    {
+      "id": "INV-A",
+      "statement": "if (totalPhUSD < minPhUSDOut) at src/Antimatter.sol:260 is unsatisfiable for every minPhUSDOut in [0, amount], because totalPhUSD = amount + mintedForStable and the antimatter half is minted unconditionally.",
+      "verdict": "PROVEN (no counterexample; fuzzing, not a proof)",
+      "evidence": {
+        "forge_fuzz": {"artifact": "tier3/forge-fuzz-run03claims.txt", "test": "testFuzz_INVA_floorInInertRangeNeverBinds", "runs": 20000, "seed": "0xA17", "note": "R and minPhUSDOut fuzzed independently; non-revert AND caller/recipient balances asserted"},
+        "forge_invariant": {"artifact": "tier3/forge-invariant-campaign.txt", "invariant": "invariant_A_floorInInertRangeNeverBinds", "runs": 256, "calls": 128000, "annFloorReverts": 0},
+        "medusa": {"artifact": "tier3/medusa-run.txt", "assertion": "MedusaAntimatterTarget.annihilate(uint256,uint256,uint256,uint256,uint256)", "result": "PASSED over 258974 calls"}
+      },
+      "coverage_counters": {"annFloorNonZero": 33, "annFloorAtAmount": 17, "annFloorReverts": 0, "coverageWalk_annFloorAtAmount": 72, "coverageWalk_annFloorNonZero": 139},
+      "falsifiability_control": "test_INVA_control_oneWeiAboveTheRangeDoesBind - minPhUSDOut = amount+1 reverts InsufficientPhUSDOut(amount+1, amount). The check is live; only [0, amount] is inert.",
+      "security_reading": "story-003 shipped a slippage floor whose entire useful range starts one wei above `amount`. A caller who reasons in the natural units of the trade (\"I paired 100 antimatter, I want at least 100 phUSD back\") sets a floor that can never bind, and eats the whole stable-leg shortfall silently."
+    },
+    {
+      "id": "INV-B",
+      "statement": "mintedForStable == amount * R / 1e18 exactly for every registered decimals value, so the caller's shortfall is amount * (1e18 - R) / 1e18 with no rounding edge. Corollary: the stable leg is zero ONLY at R == 0.",
+      "verdict": "PROVEN (no counterexample; fuzzing, not a proof)",
+      "evidence": {
+        "forge_fuzz_18dec": {"artifact": "tier3/forge-fuzz-run03claims.txt", "test": "testFuzz_INVB_shortfallIsExact_18dec", "runs": 20000, "seed": "0xA17"},
+        "forge_fuzz_6dec": {"artifact": "tier3/forge-fuzz-run03claims.txt", "test": "testFuzz_INVB_shortfallIsExact_6dec", "runs": 20000, "seed": "0xA17"},
+        "deterministic": {"test": "test_INVB_refutes_lowRateZeroClaim"}
+      },
+      "refutation": {
+        "earlier_scan_claim": "the stable leg goes to zero at any rate below 1e16",
+        "status": "REFUTED empirically",
+        "counterexamples": [
+          "18-dec stable, R = 1 wei, amount = 100e18 -> mintedForStable = 100 wei (not 0)",
+          "6-dec stable, R = 1e15 (0.001, far below the alleged 1e16 cliff), amount = 100e18 -> mintedForStable = 0.1e18 (not 0)",
+          "R = 0 -> mintedForStable = 0; this is the only zero point"
+        ]
+      }
+    },
+    {
+      "id": "INV-C",
+      "statement": "With the deleted equality check gone, phUSD arriving at Antimatter between the phUSDBefore snapshot and the mintedForStable delta is counted and forwarded to the caller-chosen recipient (ledger L-01, ad4b779566291190).",
+      "verdict": "PROVEN / STILL-LIVE at 3a96fb7",
+      "evidence": {
+        "forge_deterministic": {"artifact": "tier3/forge-fuzz-run03claims.txt", "test": "test_INVC_midCallInjectionIsForwarded", "detail": "500e18 injected from the stable's transfer hook; annihilator received 700e18 on a 100e18 pair; zero residue on Antimatter. Reproduces the run-01 PoC shape at this HEAD."},
+        "forge_fuzz": {"test": "testFuzz_INVC_forwardedSurplusEqualsInjection", "runs": 20000, "seed": "0xA17", "detail": "forwarded surplus == injected quantity across [1, 1000e18]"},
+        "forge_invariant": {"artifact": "tier3/forge-invariant-campaign.txt", "counters": {"okHostileInjected": 22, "ghostInjectedForwarded": 22}},
+        "medusa": {"artifact": "tier3/medusa-run.txt", "sentinel": "sentinel_expectFail_midCallInjectionForwarded", "shrunk_sequence": ["MedusaAntimatterTarget.annihilateHostileDonor(0, <amount>, armed=true)", "sentinel_expectFail_midCallInjectionForwarded() -> okHostileInjected() == 1 -> assertion failed"]}
+      },
+      "converse": {
+        "run02_counter_test": "test_midCallPhUSDInjectionNowReverts (test/audit/Tier2Delta.t.sol)",
+        "status": "CONFIRMED BIT-ROT",
+        "detail": "It asserted vm.expectRevert(PhUSDAmountMismatch(100e18, 100e18+1)). That error selector and the equality check behind it were deleted by story-003, so the test targeted code that no longer exists. Rewritten in place as test_midCallPhUSDInjectionIsForwarded_wasNowReverts, which now asserts the live behaviour (200e18 + 1 wei delivered, no revert) and passes."
+      },
+      "extra_finding": "test_INVC_injectionSatisfiesAFloorTheQuoteAloneWouldNot: injected phUSD is indistinguishable from minted phUSD to the new minPhUSDOut check, so a third party can push a caller's floor over the line with donated value. The floor is not a guarantee about how much phUSD was actually MINTED for the pair."
+    },
+    {
+      "id": "CTRL-burn",
+      "statement": "Antimatter never exposes a burn outside a completed annihilation.",
+      "verdict": "PROVEN (no counterexample)",
+      "evidence": {"forge": "tier3/forge-fuzz-run03claims.txt::test_CTRL_noBurnSurfaceOutsideAnnihilation", "stateful": "tier3/forge-invariant-campaign.txt::invariant_1_soleBurn_supplyEqualsMintedMinusAnnihilated (256 runs / 128000 calls)"}
+    },
+    {
+      "id": "CTRL-atomicity",
+      "statement": "Annihilation settles whole or not at all - no partial state, no stable residue on the contract.",
+      "verdict": "PROVEN (no counterexample)",
+      "evidence": {"forge": "tier3/forge-fuzz-run03claims.txt::test_CTRL_wholeOrNothing_failedLegLeavesNoPartialState", "stateful": "tier3/forge-invariant-campaign.txt::invariant_3_wholeOrNothing_noResidue (256 runs / 128000 calls)"}
+    }
+  ],
+  "harnessIntegrity": {
+    "guardedStateSeeded": true,
+    "guardedStateProof": "test_00_control_guardedStateIsReachableAndFalsifiable - GuardedYieldStrategy booked 100e18 principal and depositCount 1 after a settlement, and reverts StrategyPaused when paused. The mock is not a never-failing stub.",
+    "abortOnEmptyTripwires": [
+      "invariant_00_tripwire_annihilationActuallyHappened (precondition-aware: counts only FEASIBLE attempts)",
+      "invariant_A_tripwire_boundaryFloorWasExercised",
+      "test_ZZ_coverageWalk assertGt/assertEq block",
+      "Medusa sentinel_expectFail_* inverted assertions"
+    ],
+    "tripwireFalsifiabilityProof": "test_ZZ_tripwireIsFalsifiable half 2 - a paused yield strategy yields >5 feasible attempts, 0 settlements and a recorded violation 'INV-A/liveness: a funded, approved annihilate with a floor in [0, amount] reverted'.",
+    "medusaSentinels": {
+      "sentinel_expectFail_annihilationSettled": "FAILED (expected) - annihilations really settled",
+      "sentinel_expectFail_boundaryFloorDrawn": "FAILED (expected) - minPhUSDOut == amount really drawn",
+      "sentinel_expectFail_midCallInjectionForwarded": "FAILED (expected) - a mid-call injection really settled and forwarded"
+    },
+    "coverageCounters_statefulCampaign": {"totalCalls": 500, "okAnnihilate": 16, "revertAnnihilate": 17, "skipAnnihilate": 15, "attemptUnderstated": 31, "okUnderstated": 0, "attemptOverstated": 35, "okOverstated": 0, "attemptHostileDonor": 38, "okHostileDonor": 37, "okHostileInjected": 22, "annFloorNonZero": 33, "annFloorAtAmount": 17, "annFloorReverts": 0, "violations": 0},
+    "coverageCounters_deterministicWalk": {"actions": 600, "seed": 42, "annihilateAttempted": 139, "annihilateOK": 139, "understatedAttempts": 52, "understatedOK": 0, "overstatedAttempts": 50, "overstatedOK": 0, "hostileAttempts": 53, "hostileOK": 12, "annFloorAtAmount": 72, "annFloorReverts": 0, "okHostileInjected": 7, "violations": 0}
+  },
+  "preExistingFailures": [
+    {"invariant": "invariant_8_dailyCapGovernsAllIssuance", "runner": "forge", "artifact": "tier3/forge-invariant-dailycap-fresh.txt", "counterexample": "USDC: phUSD issued in a 24h window 10344672122000000000000 > maxMintPerDay 10000000000000000000000", "status": "EXPECTED-TO-FAIL, backs ledger M-03/M-05, not a new run-03 finding", "freshNotReplayed": true},
+    {"invariant": "invariant_9_minterCapChargedForFullIssuance", "runner": "forge", "artifact": "tier3/forge-invariant-dailycap-fresh.txt", "counterexample": "USDC: minter cap charged 3516000000000000 for 7032000000000000 actually issued (exactly half - only the stable leg is charged)", "status": "EXPECTED-TO-FAIL, backs ledger M-03/M-05", "freshNotReplayed": true}
+  ],
+  "honestyNote": "A passing invariant campaign is 'no counterexample found', not proof of safety. INV-A held under 20000 fuzz runs, 256 stateful runs x depth 500 (128000 calls) and 258974 Medusa calls across 4317 sequences; it is a good candidate to hand to the symbolic-analyzer for an actual Halmos proof, since the argument (totalPhUSD >= amount by construction) is trivially symbolic."
+}

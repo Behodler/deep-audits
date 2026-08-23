@@ -1,0 +1,63 @@
+{
+  "contract": "lib/phUSD-stable-minter/src/PhusdStableMinter.sol",
+  "role": "NESTED DEPENDENCY — interface abstraction only, NOT deep-profiled (third-party/first-party-sibling boundary)",
+  "loc": 281,
+  "solidity": "^0.8.13",
+  "inherits": ["Ownable", "ReentrancyGuard", "IPausable"],
+
+  "storage": {
+    "phUSD": {"line": 22, "type": "address immutable", "note": "read by Antimatter.setPhUSD (145) and setPhUSDMinter (158) to prove wiring agreement"},
+    "stablecoinConfigs": {
+      "line": 36,
+      "type": "mapping(address => StablecoinConfig) public",
+      "structFieldOrder": ["yieldStrategy (address)", "exchangeRate (uint256, 1e18 = 1:1)", "decimals (uint8)", "enabled (bool)", "maxMintPerDay (uint256, phUSD 18-dec, 0 = no limit)", "mintedToday (uint256)", "lastMintTimestamp (uint256)"],
+      "structLines": "25-33",
+      "note": "Antimatter destructures this 7-tuple at Antimatter.sol:284, taking index 0 (yieldStrategy) and index 2 (decimals) only. This IS the registered-decimals accessor — there is no dedicated decimalsOf(); getStablecoinConfig (265) is the struct-returning alternative."
+    },
+    "pauser": {"line": 39}, "paused": {"line": 40}
+  },
+
+  "asUsedByAntimatter": [
+    {"fn": "phUSD()", "line": 22, "kind": "view", "usedAt": "Antimatter.sol:145,146,158,159"},
+    {"fn": "stablecoinConfigs(address)", "line": 36, "kind": "view", "usedAt": "Antimatter.sol:284", "purpose": "registered decimals + registration test (yieldStrategy != 0)"},
+    {"fn": "calculateMintAmount(address,uint256) returns (uint256)", "line": 243, "kind": "public view", "usedAt": "Antimatter.sol:234"},
+    {"fn": "mint(address stablecoin, uint256 amount)", "line": 203, "kind": "external nonReentrant, PERMISSIONLESS", "usedAt": "Antimatter.sol:251", "note": "the deposit entry point — it is named `mint`, not depositStable. It mints phUSD to msg.sender (minter:232), i.e. to Antimatter, which is why Antimatter forwards at 261."}
+  ],
+
+  "calculateMintAmountSemantics": {
+    "formula": "(inputAmount * config.exchangeRate * 10**(18 - config.decimals)) / 1e18   [minter:254-255]",
+    "capAware": false,
+    "capAwareVerdict": "VERIFIED-BY-READING: NOT cap-aware. calculateMintAmount (243-256) reads only exchangeRate and decimals from the config; it never references maxMintPerDay, mintedToday, or lastMintTimestamp, and it is `view` so it cannot roll the window.",
+    "enabledAware": false,
+    "enabledAwareNote": "It also does not consult `enabled` or `paused`; it returns a non-zero quote for a disabled or unregistered stablecoin (unregistered => decimals 0, exchangeRate 0 => returns 0).",
+    "consequenceForTheNewExactEqualityCheck": [
+      "The daily cap is enforced as a REVERT, not a haircut: minter:221 `require(config.mintedToday + phUSDAmount <= config.maxMintPerDay, 'Daily mint limit exceeded')`. It never mints a reduced amount. Therefore a cap over-run cannot produce a quote-vs-actual DIVERGENCE reaching Antimatter.sol:257 — the whole tx reverts inside minter.mint at line 251 first.",
+      "So Antimatter's cap exposure is availability (annihilate DoS once the daily budget is consumed), not a PhUSDAmountMismatch.",
+      "Likewise 'Stablecoin minting is paused' (minter:209) and 'Contract is paused' (minter:204) are reverts at Antimatter.sol:251, not mismatches.",
+      "Both Antimatter's quote (Antimatter.sol:234) and the minter's own internal quote (minter:212) call the SAME view with the SAME arguments inside the SAME transaction, and every input it reads (exchangeRate, decimals) is onlyOwner-mutable (updateExchangeRate minter:138, registerStablecoin minter:111). Divergence at Antimatter.sol:257 therefore requires either (a) a third party crediting phUSD to Antimatter during minter.mint, or (b) the minter/phUSD deviating from this code — i.e. it is a tripwire against a swapped or upgraded minter, not against normal operation. Not adjudicated here.",
+      "Rounding: the division by 1e18 at minter:255 truncates. Antimatter compares two truncations of the identical expression, so truncation is not itself a source of divergence."
+    ]
+  },
+
+  "dailyCapSurface": {
+    "storage": ["maxMintPerDay (struct field, minter:30)", "mintedToday (minter:31)", "lastMintTimestamp (minter:32)"],
+    "setter": {"fn": "setMaxMintPerDay(address,uint256)", "line": 190, "access": "onlyOwner", "note": "0 disables"},
+    "enforcement": "minter:215-223, rolling 24h window keyed on block.timestamp >= lastMintTimestamp + 1 days; window resets to 0 and re-stamps on first mint after expiry",
+    "defaultAtRegistration": "maxMintPerDay: 0 (minter:125) => uncapped until the owner sets it",
+    "readAccessor": "none dedicated — read via the public stablecoinConfigs getter or getStablecoinConfig (265). Antimatter reads neither the cap nor the remaining budget."
+  },
+
+  "otherSurface": [
+    {"fn": "registerStablecoin(address,address,uint256,uint8)", "line": 111, "access": "onlyOwner"},
+    {"fn": "updateExchangeRate(address,uint256)", "line": 138, "access": "onlyOwner"},
+    {"fn": "setStablecoinEnabled(address,bool)", "line": 150, "access": "onlyOwner"},
+    {"fn": "noMintDeposit(address,address,uint256)", "line": 162, "access": "onlyOwner"},
+    {"fn": "approveYS(address,address)", "line": 180, "access": "onlyOwner", "note": "max-approves the YS; PRECONDITION for minter.mint's YS deposit at 229 to succeed"},
+    {"fn": "setPauser / pause / unpause", "lines": [76, 86, 96]},
+    {"fn": "getStablecoinConfig / isStablecoinRegistered", "lines": [265, 278], "kind": "view"}
+  ],
+
+  "mintCallSequence": ["require !paused (204)", "require amount > 0 (205)", "require registered (208)", "require enabled (209)", "phUSDAmount = calculateMintAmount (212)", "cap window + require + accrue (215-223)", "safeTransferFrom(msg.sender -> minter, amount) (226)", "IYieldStrategy(yieldStrategy).deposit(stable, amount, minter) (229)", "IMintableToken(phUSD).mint(msg.sender, phUSDAmount) (232)", "emit PhUSDMinted (234)"],
+
+  "trustBoundaryStatement": "Antimatter treats PhusdStableMinter as the single source of truth for which stablecoins are supported, their decimals, and their exchange rate. Antimatter independently verifies only: (1) minter.phUSD() == its own phUSD, at configuration time (Antimatter.sol:145,158); (2) registered decimals == the token's own decimals (Antimatter.sol:292-295); (3) the stable fully left Antimatter (Antimatter.sol:254); (4) the phUSD received exactly equals the minter's pre-quote (Antimatter.sol:257). Everything else — that the deposit reached the yield strategy, that the exchange rate is economically correct, that the cap is set sanely — is ASSUMED."
+}

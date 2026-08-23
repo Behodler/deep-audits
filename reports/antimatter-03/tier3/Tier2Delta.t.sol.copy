@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.27;
+
+import {Test} from "@forge-std/Test.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {FlaxToken} from "@phUSD/FlaxToken.sol";
+import {IFlax} from "@phUSD/IFlax.sol";
+import {PhusdStableMinter} from "@phUSDMinter/PhusdStableMinter.sol";
+import {Antimatter} from "../../src/Antimatter.sol";
+import {MockStable} from "../mocks/MockStable.sol";
+import {MockYieldStrategy} from "../mocks/MockYieldStrategy.sol";
+
+/// decimals() that returns a huge blob -> unbounded returndatacopy into `bytes memory data`.
+contract BombStable {
+    uint256 public words;
+    constructor(uint256 w) { words = w; }
+    fallback(bytes calldata) external returns (bytes memory) {
+        return new bytes(words * 32);
+    }
+}
+
+/// decimals() that writes state -> staticcall fails -> DecimalsUnavailable, though honest.
+contract StatefulDecimalsStable {
+    uint256 public reads;
+    function decimals() public returns (uint8) { reads++; return 18; }
+}
+
+/// Pushes phUSD to Antimatter from inside its own transfer hook (mid-call injection).
+contract DonorStable is ERC20 {
+    address public am;
+    FlaxToken public phusd;
+    bool public armed;
+    constructor() ERC20("Donor", "DON") {}
+    function wire(address _am, FlaxToken _p) external { am = _am; phusd = _p; armed = true; }
+    function mint(address to, uint256 v) external { _mint(to, v); }
+    function _update(address f, address t, uint256 v) internal override {
+        super._update(f, t, v);
+        if (armed && t == am && f != address(0)) {
+            armed = false;
+            phusd.transfer(am, 1); // this contract holds phUSD
+        }
+    }
+}
+
+contract Tier2DeltaTest is Test {
+    Antimatter internal antimatter;
+    FlaxToken internal phUSD;
+    PhusdStableMinter internal minter;
+    MockYieldStrategy internal strategy;
+    MockStable internal usdc;
+    address internal owner = address(0xA11CE);
+    address internal user = address(0xB0B);
+
+    function setUp() public {
+        phUSD = new FlaxToken();
+        minter = new PhusdStableMinter(address(phUSD));
+        strategy = new MockYieldStrategy();
+        usdc = new MockStable("USD Coin", "USDC", 6);
+        antimatter = new Antimatter(owner);
+        phUSD.setMinter(address(minter), true);
+        phUSD.setMinter(address(antimatter), true);
+        phUSD.setMinter(address(this), true);
+        minter.registerStablecoin(address(usdc), address(strategy), 1e18, 6);
+        minter.approveYS(address(usdc), address(strategy));
+        vm.startPrank(owner);
+        antimatter.setPhUSD(IFlax(address(phUSD)));
+        antimatter.setPhUSDMinter(minter);
+        vm.stopPrank();
+    }
+
+    // ---- CLAIM 1: unbounded returndata copy in the decimals() staticcall (:292)
+    function test_returndataBombGasCost() public {
+        uint256[3] memory sizes = [uint256(1), 20000, 200000];
+        for (uint256 i; i < 3; i++) {
+            BombStable b = new BombStable(sizes[i]);
+            minter.registerStablecoin(address(b), address(strategy), 1e18, 6);
+            uint256 g = gasleft();
+            try antimatter.toStableAmount(address(b), 100 ether) {} catch {}
+            emit log_named_uint("words", sizes[i]);
+            emit log_named_uint("gas used", g - gasleft());
+        }
+    }
+
+    function test_returndataBombBricksQuote() public {
+        BombStable b = new BombStable(2_000_000); // 64MB of returndata
+        minter.registerStablecoin(address(b), address(strategy), 1e18, 6);
+        vm.expectRevert(); // out of gas / memory
+        this.quoteWithGas{gas: 30_000_000}(address(b));
+    }
+
+    function quoteWithGas(address s) external view returns (uint256) {
+        return antimatter.toStableAmount(s, 100 ether);
+    }
+
+    // ---- CLAIM 2: an honest but state-writing decimals() bricks the pair
+    function test_statefulDecimalsBricksHonestToken() public {
+        StatefulDecimalsStable s = new StatefulDecimalsStable();
+        minter.registerStablecoin(address(s), address(strategy), 1e18, 18);
+        vm.expectRevert(abi.encodeWithSelector(Antimatter.DecimalsUnavailable.selector, address(s)));
+        antimatter.toStableAmount(address(s), 100 ether);
+    }
+
+    // ---- CLAIM 3 (run-02) RETIRED AS BIT-ROT: at 3a96fb7 the equality check this test asserted
+    // (PhUSDAmountMismatch) no longer exists, so the assertion targets deleted code. The live
+    // behaviour is the opposite - the injection is counted and FORWARDED - and is re-established
+    // at this HEAD in test/audit/invariant/Run03Claims.t.sol (INV-C). Renamed rather than deleted
+    // so the walk-back stays visible in the diff.
+    function test_midCallPhUSDInjectionIsForwarded_wasNowReverts() public {
+        DonorStable d = new DonorStable();
+        minter.registerStablecoin(address(d), address(strategy), 1e18, 18);
+        minter.approveYS(address(d), address(strategy));
+        d.mint(user, 100 ether);
+        phUSD.mint(address(d), 1); // donor holds 1 wei phUSD to push
+        d.wire(address(antimatter), phUSD);
+
+        vm.prank(owner);
+        antimatter.mint(user, 100 ether);
+        vm.prank(user);
+        d.approve(address(antimatter), type(uint256).max);
+
+        uint256 phBefore = phUSD.balanceOf(user);
+        vm.prank(user);
+        antimatter.annihilate(address(d), user, 100 ether, 0);
+
+        // No revert. The 1 wei injected from the stable's transfer hook lands in mintedForStable
+        // and is forwarded on top of the quote.
+        assertEq(phUSD.balanceOf(user) - phBefore, 200 ether + 1, "mid-call injection was forwarded, not rejected");
+        assertEq(phUSD.balanceOf(address(antimatter)), 0, "no residue");
+    }
+}

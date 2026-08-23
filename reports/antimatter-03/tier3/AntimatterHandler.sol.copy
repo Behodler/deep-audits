@@ -1,0 +1,726 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.27;
+
+// AUDIT-AUTHORED. Not part of the antimatter project's own test suite. Never cite as coverage.
+//
+// Tier-3 stateful-fuzzing handler for `Antimatter.annihilate(address,address,uint256)` at c91bc1a.
+//
+// PORTING NOTE (run-01 -> run-02):
+//   The run-01 harness drove `annihilateFrom(address stable, address from, address recipient,
+//   uint256 amount)` — it could annihilate on behalf of an arbitrary `from`. That capability no
+//   longer exists at c91bc1a; the entry point is `annihilate(stable, recipient, amount)` and both
+//   halves are sourced from msg.sender. Per the porting rule, actors act ONLY as themselves and
+//   annihilate ONLY their own balance. No prank/proxy trick is used to simulate the removed
+//   third-party path. Invariants whose meaning depended on that path are marked
+//   RETIRED-BY-DESIGN-CHANGE in AntimatterInvariant.t.sol and are NOT silently rewritten into a
+//   weaker property.
+//
+// Actors are real contracts (Actor proxies), not vm.prank identities, so the same handler drives
+// both the Foundry invariant runner and Medusa without cheatcodes.
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {FlaxToken} from "@phUSD/FlaxToken.sol";
+import {IFlax} from "@phUSD/IFlax.sol";
+import {PhusdStableMinter} from "@phUSDMinter/PhusdStableMinter.sol";
+import {Antimatter} from "../../../src/Antimatter.sol";
+import {MockStable} from "../../mocks/MockStable.sol";
+import {GuardedYieldStrategy} from "./AuditMocks.sol";
+
+/// @dev An independent on-chain identity. Only the handler ever drives it.
+contract Actor {
+    function exec(address target, bytes memory data) external returns (bool ok, bytes memory ret) {
+        (ok, ret) = target.call(data);
+    }
+}
+
+/// @dev A registered stablecoin that pushes phUSD into Antimatter from inside its own transfer
+///      hook, i.e. after Antimatter has snapshotted `phUSDBefore`. Used to probe QUOTE-EQUALITY.
+contract HostileDonorStable is ERC20 {
+    address public am;
+    FlaxToken public phusd;
+    bool public armed;
+    uint256 public injectAmount = 1;
+    uint256 public lastInjected; // phUSD pushed into Antimatter during the most recent transfer
+
+    constructor() ERC20("HostileDonor", "HDON") {}
+
+    function wire(address _am, FlaxToken _p) external {
+        am = _am;
+        phusd = _p;
+    }
+
+    function arm(bool v) external {
+        armed = v;
+        lastInjected = 0;
+    }
+
+    function setInjectAmount(uint256 v) external {
+        injectAmount = v;
+    }
+
+    function mint(address to, uint256 v) external {
+        _mint(to, v);
+    }
+
+    function _update(address f, address t, uint256 v) internal override {
+        super._update(f, t, v);
+        if (armed && t == am && f != address(0) && phusd.balanceOf(address(this)) >= injectAmount && injectAmount > 0)
+        {
+            armed = false;
+            phusd.transfer(am, injectAmount);
+            lastInjected = injectAmount;
+        }
+    }
+}
+
+contract AntimatterHandler {
+    // ------------------------------------------------------------------ system
+    Antimatter public antimatter;
+    FlaxToken public phUSD;
+    PhusdStableMinter public minter;
+    GuardedYieldStrategy public strategy;
+
+    MockStable public usdc; // real 6, registered 6   — honest
+    MockStable public dola; // real 18, registered 18 — honest
+    MockStable public understated; // real 18, registered 6  — the run-01 M-01 exploit shape
+    MockStable public overstated; // real 6,  registered 18 — the mirror misconfiguration
+    HostileDonorStable public donor; // real 18, registered 18, injects phUSD mid-call
+
+    Actor public actorA;
+    Actor public actorB;
+    Actor public actorC;
+    address public passiveRecipient = address(0xBEEF);
+
+    address[3] internal _actors;
+    address[2] internal _liveStables; // the two honest stables used by the generic action
+
+    uint256 public immutable CAP_PER_DAY;
+    address internal constant HEVM = 0x7109709ECfa91a80626fF3989D68f67F5b1DD12D;
+
+    // ----------------------------------------------------------------- ghosts
+    // Mirror of PhusdStableMinter's own rolling 24h window, per stable. Ported unchanged from the
+    // run-01 harness: these back the daily-cap invariants (run-01 M-03 / M-05).
+    mapping(address => uint256) public windowStart;
+    mapping(address => uint256) public issuedInWindow; // BOTH legs
+    mapping(address => uint256) public chargedToMinterCap; // stable leg only
+    mapping(address => uint256) public peakIssuedInWindow;
+    mapping(address => uint256) public peakChargedInWindow;
+    uint256 public callsWarp;
+
+    uint256 public ghostAMMinted;
+    uint256 public ghostAMBurnedByAnnihilate;
+    uint256 public ghostDonatedPhUSD;
+    mapping(address => uint256) public ghostDonatedStable;
+
+    // call counters — the anti-vacuousness tripwire reads these
+    uint256 public totalCalls;
+    uint256 public okAnnihilate;
+    uint256 public revertAnnihilate;
+    uint256 public skipAnnihilate;
+    uint256 public attemptUnderstated;
+    uint256 public okUnderstated; // MUST stay 0 (M-01 regression)
+    uint256 public attemptOverstated;
+    uint256 public okOverstated; // MUST stay 0
+    uint256 public attemptHostile;
+    uint256 public okHostile;
+    uint256 public revertHostile;
+    uint256 public okTransferFrom;
+    uint256 public okApprove;
+    uint256 public okTransfer;
+    uint256 public attemptRescue;
+    uint256 public okRescue; // MUST stay 0 (non-owner rescue)
+    uint256 public okDonate;
+    uint256 public okMint;
+    uint256 public okRate;
+
+    // ---- run-03 (story-003 minPhUSDOut) counters
+    uint256 public annFloorNonZero;   // annihilate calls made with minPhUSDOut > 0
+    uint256 public annFloorAtAmount;  // annihilate calls made with minPhUSDOut == amount exactly
+    uint256 public annFloorReverts;   // annihilate reverts whose selector was InsufficientPhUSDOut
+    uint256 public feasibleAttempts;  // annihilate attempts where funds AND approval were sufficient
+    uint256 public okHostileInjected; // hostile-donor annihilations that settled WITH an injection
+    uint256 public ghostInjectedForwarded; // phUSD injected mid-call that reached the recipient
+
+    // ------------------------------------------------------------- violations
+    // The handler NEVER asserts inline: a reverting handler call is swallowed by Foundry when
+    // fail_on_revert=false, which would hide a real violation. Violations are recorded and the
+    // invariant/assertion layer reads them.
+    string[] public violations;
+
+    function violationCount() external view returns (uint256) {
+        return violations.length;
+    }
+
+    function firstViolation() external view returns (string memory) {
+        return violations.length == 0 ? "" : violations[0];
+    }
+
+    function _req(bool cond, string memory what) internal {
+        if (!cond) violations.push(what);
+    }
+
+    // ------------------------------------------------------------------ setup
+    /// @param capPerDay The minter's rolling 24h phUSD cap per stable. 0 disables the cap.
+    constructor(uint256 capPerDay) {
+        CAP_PER_DAY = capPerDay;
+        phUSD = new FlaxToken();
+        minter = new PhusdStableMinter(address(phUSD));
+        strategy = new GuardedYieldStrategy();
+        strategy.setClient(address(minter), true);
+
+        usdc = new MockStable("USD Coin", "USDC", 6);
+        dola = new MockStable("Dola", "DOLA", 18);
+        understated = new MockStable("Understated", "UND", 18);
+        overstated = new MockStable("Overstated", "OVR", 6);
+        donor = new HostileDonorStable();
+
+        antimatter = new Antimatter(address(this)); // handler is the owner
+
+        // phUSD authorises the stable minter, Antimatter, and this handler (for donations).
+        phUSD.setMinter(address(minter), true);
+        phUSD.setMinter(address(antimatter), true);
+        phUSD.setMinter(address(this), true);
+
+        // Registered configs. Note the two deliberately-wrong registrations.
+        minter.registerStablecoin(address(usdc), address(strategy), 1e18, 6);
+        minter.approveYS(address(usdc), address(strategy));
+        minter.registerStablecoin(address(dola), address(strategy), 1e18, 18);
+        minter.approveYS(address(dola), address(strategy));
+        minter.registerStablecoin(address(understated), address(strategy), 1e18, 6); // real 18
+        minter.approveYS(address(understated), address(strategy));
+        minter.registerStablecoin(address(overstated), address(strategy), 1e18, 18); // real 6
+        minter.approveYS(address(overstated), address(strategy));
+        minter.registerStablecoin(address(donor), address(strategy), 1e18, 18);
+        minter.approveYS(address(donor), address(strategy));
+
+        // A LIVE rolling daily cap on the minter. Not a stub: the minter genuinely reverts past
+        // it, so the cap invariants below are checked against a guard that can actually bite.
+        if (capPerDay > 0) {
+            minter.setMaxMintPerDay(address(usdc), capPerDay);
+            minter.setMaxMintPerDay(address(dola), capPerDay);
+        }
+
+        antimatter.setPhUSD(IFlax(address(phUSD)));
+        antimatter.setPhUSDMinter(minter);
+
+        actorA = new Actor();
+        actorB = new Actor();
+        actorC = new Actor();
+        _actors = [address(actorA), address(actorB), address(actorC)];
+        _liveStables = [address(usdc), address(dola)];
+
+        // ------------------- SEED REAL GUARDED STATE (anti-vacuousness) -------------------
+        for (uint256 i; i < 3; i++) {
+            address a = _actors[i];
+            antimatter.mint(a, 100_000 ether);
+            ghostAMMinted += 100_000 ether;
+
+            usdc.mint(a, 1_000_000e6);
+            dola.mint(a, 1_000_000 ether);
+            understated.mint(a, 1_000_000 ether);
+            overstated.mint(a, 1_000_000e6);
+            donor.mint(a, 1_000_000 ether);
+
+            // Every annihilator must approve Antimatter for the stablecoin half.
+            _approveFrom(a, address(usdc));
+            _approveFrom(a, address(dola));
+            _approveFrom(a, address(understated));
+            _approveFrom(a, address(overstated));
+            _approveFrom(a, address(donor));
+        }
+
+        // The adversarial premise of NO-THIRD-PARTY-POWER: B holds an unlimited ANTIMATTER
+        // allowance over A, and A has (as every annihilator must) approved Antimatter for its
+        // stablecoins. Under the old annihilateFrom this pair of facts drained A.
+        Actor(actorA).exec(
+            address(antimatter), abi.encodeCall(IERC20.approve, (address(actorB), type(uint256).max))
+        );
+
+        // The hostile donor holds phUSD it can push into Antimatter mid-call.
+        phUSD.mint(address(donor), 1_000 ether);
+        donor.wire(address(antimatter), phUSD);
+    }
+
+    function _approveFrom(address a, address token) internal {
+        Actor(a).exec(token, abi.encodeCall(IERC20.approve, (address(antimatter), type(uint256).max)));
+    }
+
+    /// TEST-ONLY (never in a fuzz selector list): lets a falsifiability control starve the
+    /// settlement path while leaving every precondition satisfied.
+    function setStrategyPaused(bool p) external {
+        strategy.setPaused(p);
+    }
+
+    function actors(uint256 i) external view returns (address) {
+        return _actors[i % 3];
+    }
+
+    // ------------------------------------------------------------------ utils
+    function _bound(uint256 x, uint256 lo, uint256 hi) internal pure returns (uint256) {
+        if (hi <= lo) return lo;
+        return lo + (x % (hi - lo + 1));
+    }
+
+    function _pickActor(uint256 s) internal view returns (address) {
+        return _actors[s % 3];
+    }
+
+    function _pickRecipient(uint256 s) internal view returns (address) {
+        uint256 k = s % 4;
+        return k == 3 ? passiveRecipient : _actors[k];
+    }
+
+    struct Snap {
+        uint256[3] am;
+        uint256[3] phusd;
+        uint256[3][2] stable; // [stableIdx][actorIdx]
+        uint256 recipPhusd;
+        uint256 supply;
+    }
+
+    function _snap(address recipient) internal view returns (Snap memory s) {
+        for (uint256 i; i < 3; i++) {
+            s.am[i] = antimatter.balanceOf(_actors[i]);
+            s.phusd[i] = phUSD.balanceOf(_actors[i]);
+            s.stable[0][i] = IERC20(_liveStables[0]).balanceOf(_actors[i]);
+            s.stable[1][i] = IERC20(_liveStables[1]).balanceOf(_actors[i]);
+        }
+        s.recipPhusd = phUSD.balanceOf(recipient);
+        s.supply = antimatter.totalSupply();
+    }
+
+    /// INVARIANT 2 core: nobody's stablecoin may move except the acting caller's own.
+    function _assertOnlyCallerStableMoved(Snap memory pre, address caller) internal {
+        for (uint256 i; i < 3; i++) {
+            if (_actors[i] == caller) continue;
+            _req(
+                IERC20(_liveStables[0]).balanceOf(_actors[i]) == pre.stable[0][i],
+                "INV2: a non-caller actor's stablecoin (usdc) moved"
+            );
+            _req(
+                IERC20(_liveStables[1]).balanceOf(_actors[i]) == pre.stable[1][i],
+                "INV2: a non-caller actor's stablecoin (dola) moved"
+            );
+        }
+    }
+
+    /// INVARIANT 3: nothing comes to rest on Antimatter, and no allowance is left standing.
+    function _assertNoResidue() internal {
+        _req(
+            usdc.balanceOf(address(antimatter)) == ghostDonatedStable[address(usdc)],
+            "INV3: residual usdc on Antimatter beyond tracked donations"
+        );
+        _req(
+            dola.balanceOf(address(antimatter)) == ghostDonatedStable[address(dola)],
+            "INV3: residual dola on Antimatter beyond tracked donations"
+        );
+        _req(
+            understated.balanceOf(address(antimatter)) == ghostDonatedStable[address(understated)],
+            "INV3: residual understated-stable on Antimatter"
+        );
+        _req(
+            overstated.balanceOf(address(antimatter)) == ghostDonatedStable[address(overstated)],
+            "INV3: residual overstated-stable on Antimatter"
+        );
+        _req(
+            donor.balanceOf(address(antimatter)) == ghostDonatedStable[address(donor)],
+            "INV3: residual hostile-donor-stable on Antimatter"
+        );
+        _req(
+            phUSD.balanceOf(address(antimatter)) == ghostDonatedPhUSD,
+            "INV3: residual phUSD on Antimatter beyond tracked donations"
+        );
+        _req(usdc.allowance(address(antimatter), address(minter)) == 0, "INV3: usdc allowance to minter not cleared");
+        _req(dola.allowance(address(antimatter), address(minter)) == 0, "INV3: dola allowance to minter not cleared");
+        _req(donor.allowance(address(antimatter), address(minter)) == 0, "INV3: donor allowance to minter not cleared");
+    }
+
+    // ============================== ACTIONS ==============================
+
+    struct AnnCtx {
+        address caller;
+        address recipient;
+        address stable;
+        uint256 scale;
+        uint256 amount;
+        uint256 stableAmount;
+        uint256 expected;
+        uint256 preCallerStable;
+        uint256 minOut;
+    }
+
+    /// The main path: an actor annihilates its OWN antimatter against its OWN stablecoin.
+    function annihilate(uint256 actorSeed, uint256 stableSeed, uint256 recipSeed, uint256 amount, uint256 floorSeed)
+        external
+    {
+        totalCalls++;
+        AnnCtx memory c;
+        c.caller = _pickActor(actorSeed);
+        c.recipient = _pickRecipient(recipSeed);
+        c.stable = _liveStables[stableSeed % 2];
+        c.scale = c.stable == address(usdc) ? 1e12 : 1;
+
+        {
+            uint256 amBal = antimatter.balanceOf(c.caller);
+            uint256 maxByStable = IERC20(c.stable).balanceOf(c.caller) * c.scale;
+            uint256 cap = amBal < maxByStable ? amBal : maxByStable;
+            if (cap > 5_000 ether) cap = 5_000 ether;
+            if (cap < c.scale) {
+                skipAnnihilate++;
+                return;
+            }
+            c.amount = (_bound(amount, 1, cap) / c.scale) * c.scale;
+        }
+        if (c.amount == 0) {
+            skipAnnihilate++;
+            return;
+        }
+        c.stableAmount = c.amount / c.scale;
+        c.expected = minter.calculateMintAmount(c.stable, c.stableAmount);
+        c.preCallerStable = IERC20(c.stable).balanceOf(c.caller);
+
+        // INV-A: the caller's floor, drawn from the INERT RANGE [0, amount]. Every value here is
+        // claimed unsatisfiable because totalPhUSD = amount + mintedForStable >= amount.
+        // Every even draw pins the exact boundary minPhUSDOut == amount.
+        c.minOut = (floorSeed % 2 == 0) ? c.amount : _bound(floorSeed, 0, c.amount);
+        if (c.minOut > 0) annFloorNonZero++;
+        if (c.minOut == c.amount) annFloorAtAmount++;
+
+        // A call is FEASIBLE when the caller is funded and has approved Antimatter for the
+        // stablecoin half. Only feasible attempts carry information: a revert on an infeasible
+        // one (the fuzzer having revoked the approval via setStableApproval) is correct
+        // behaviour, not a vacuous campaign. The anti-vacuousness tripwire reads this counter.
+        bool feasible = IERC20(c.stable).allowance(c.caller, address(antimatter)) >= c.stableAmount
+            && IERC20(c.stable).balanceOf(c.caller) >= c.stableAmount
+            && antimatter.balanceOf(c.caller) >= c.amount;
+        if (feasible) feasibleAttempts++;
+
+        Snap memory pre = _snap(c.recipient);
+
+        (bool ok, bytes memory ret) = Actor(c.caller).exec(
+            address(antimatter), abi.encodeCall(Antimatter.annihilate, (c.stable, c.recipient, c.amount, c.minOut))
+        );
+
+        if (!ok && ret.length >= 4) {
+            bytes4 sel;
+            assembly {
+                sel := mload(add(ret, 32))
+            }
+            if (sel == Antimatter.InsufficientPhUSDOut.selector) {
+                annFloorReverts++;
+                _req(false, "INV-A: InsufficientPhUSDOut raised with minPhUSDOut <= amount (inert range is NOT inert)");
+            }
+        }
+
+        // LIVENESS leg of INV-A: with the cap disabled, a funded and approved annihilate whose
+        // floor lies in the inert range [0, amount] has no legitimate reason to fail.
+        if (!ok && feasible && CAP_PER_DAY == 0) {
+            _req(false, "INV-A/liveness: a funded, approved annihilate with a floor in [0, amount] reverted");
+        }
+
+        if (ok) {
+            okAnnihilate++;
+            ghostAMBurnedByAnnihilate += c.amount;
+
+            // INVARIANT 1 (SOLE-BURN): the caller's own balance and total supply each fell by
+            // exactly `amount`, and no other holder's antimatter moved at all.
+            _req(
+                antimatter.balanceOf(c.caller) == _amOf(pre, c.caller) - c.amount,
+                "INV1: caller antimatter did not fall by exactly `amount`"
+            );
+            _req(antimatter.totalSupply() == pre.supply - c.amount, "INV1: supply did not fall by exactly `amount`");
+            for (uint256 i; i < 3; i++) {
+                if (_actors[i] == c.caller) continue;
+                _req(antimatter.balanceOf(_actors[i]) == pre.am[i], "INV1: a non-caller holder's antimatter moved");
+            }
+
+            // INVARIANT 4 (CONSERVATION) + INVARIANT 5 (QUOTE-EQUALITY).
+            _req(
+                IERC20(c.stable).balanceOf(c.caller) == c.preCallerStable - c.stableAmount,
+                "INV4: caller stablecoin delta != toStableAmount(stable, amount)"
+            );
+            uint256 phDelta = phUSD.balanceOf(c.recipient) - pre.recipPhusd;
+            _req(
+                phDelta == c.amount + c.expected,
+                "INV4/INV5: recipient phUSD delta != amount + quoted mintedForStable"
+            );
+
+            // Daily-cap bookkeeping (run-01 M-03 / M-05): phUSD issued vs charged to the cap.
+            _noteWindow(c.stable, phDelta, c.expected);
+        } else {
+            revertAnnihilate++;
+            _req(antimatter.totalSupply() == pre.supply, "INV1: supply moved on a reverted annihilate");
+            _req(
+                IERC20(c.stable).balanceOf(c.caller) == c.preCallerStable,
+                "INV3: caller stablecoin moved on a reverted annihilate"
+            );
+        }
+
+        _assertOnlyCallerStableMoved(pre, c.caller);
+        _assertNoResidue();
+    }
+
+    /// INVARIANT 6 (M-01 regression): a stablecoin whose REGISTERED decimals understate its real
+    /// `decimals()` must be un-annihilatable. Any success here is the run-01 exploit reopening.
+    function annihilateUnderstated(uint256 actorSeed, uint256 amount) external {
+        totalCalls++;
+        attemptUnderstated++;
+        address caller = _pickActor(actorSeed);
+        amount = _bound(amount, 1e12, 1_000 ether);
+        amount = (amount / 1e12) * 1e12;
+
+        Snap memory pre = _snap(caller);
+        uint256 preStable = understated.balanceOf(caller);
+        uint256 prePh = phUSD.balanceOf(caller);
+
+        (bool ok,) = Actor(caller).exec(
+            address(antimatter), abi.encodeCall(Antimatter.annihilate, (address(understated), caller, amount, uint256(0)))
+        );
+
+        if (ok) {
+            okUnderstated++;
+            _req(false, "INV6: annihilation SUCCEEDED against an understated-decimals stablecoin (M-01 reopened)");
+        } else {
+            _req(understated.balanceOf(caller) == preStable, "INV6: stable moved on a rejected understated annihilate");
+            _req(phUSD.balanceOf(caller) == prePh, "INV6: phUSD minted on a rejected understated annihilate");
+            _req(antimatter.totalSupply() == pre.supply, "INV6: antimatter burned on a rejected annihilate");
+        }
+        _assertNoResidue();
+    }
+
+    /// The mirror misconfiguration: registered decimals OVERSTATE the token's real decimals.
+    function annihilateOverstated(uint256 actorSeed, uint256 amount) external {
+        totalCalls++;
+        attemptOverstated++;
+        address caller = _pickActor(actorSeed);
+        amount = _bound(amount, 1e12, 1_000 ether);
+        amount = (amount / 1e12) * 1e12;
+        Snap memory pre = _snap(caller);
+        (bool ok,) = Actor(caller).exec(
+            address(antimatter), abi.encodeCall(Antimatter.annihilate, (address(overstated), caller, amount, uint256(0)))
+        );
+        if (ok) {
+            okOverstated++;
+            _req(false, "INV6b: annihilation SUCCEEDED against an overstated-decimals stablecoin");
+        } else {
+            _req(antimatter.totalSupply() == pre.supply, "INV6b: antimatter burned on a rejected annihilate");
+        }
+        _assertNoResidue();
+    }
+
+    /// INVARIANT 5 probe: a registered stablecoin that injects phUSD into Antimatter from inside
+    /// its own transfer hook, i.e. AFTER `phUSDBefore` was snapshotted. Either the quote check
+    /// catches it (revert = griefing DoS) or it settles wrong (mis-settlement).
+    function annihilateHostileDonor(uint256 actorSeed, uint256 amount, bool armed) external {
+        totalCalls++;
+        attemptHostile++;
+        address caller = _pickActor(actorSeed);
+        amount = _bound(amount, 1e12, 1_000 ether);
+        amount = (amount / 1e12) * 1e12;
+        donor.arm(armed);
+
+        uint256 expected = minter.calculateMintAmount(address(donor), amount);
+        Snap memory pre = _snap(caller);
+        uint256 prePh = phUSD.balanceOf(caller);
+
+        (bool ok,) = Actor(caller).exec(
+            address(antimatter), abi.encodeCall(Antimatter.annihilate, (address(donor), caller, amount, uint256(0)))
+        );
+
+        if (ok) {
+            okHostile++;
+            ghostAMBurnedByAnnihilate += amount; // this path burns too - credit the ghost
+            uint256 injected = donor.lastInjected();
+            if (injected > 0) {
+                okHostileInjected++;
+                ghostInjectedForwarded += injected;
+            }
+            // INV-C: with the equality check deleted, mid-call phUSD injected into Antimatter is
+            // counted into mintedForStable and forwarded to the caller-chosen recipient. The
+            // settled value is therefore quote + injection, NOT the quote.
+            _req(
+                phUSD.balanceOf(caller) - prePh == amount + expected + injected,
+                "INV-C: hostile-donor settlement != amount + quote + mid-call injection"
+            );
+        } else {
+            revertHostile++;
+            _req(antimatter.totalSupply() == pre.supply, "INV5: antimatter burned on a reverted hostile annihilate");
+        }
+        donor.arm(false);
+        _assertNoResidue();
+    }
+
+    // ---------------------------- adversarial ERC20 surface ----------------------------
+
+    /// Ordinary ERC20 allowance grant between actors (keeps B's power over A live and varied).
+    function amApprove(uint256 ownerSeed, uint256 spenderSeed, uint256 amt) external {
+        totalCalls++;
+        address o = _pickActor(ownerSeed);
+        address sp = _pickActor(spenderSeed);
+        Snap memory pre = _snap(o);
+        (bool ok,) = Actor(o).exec(address(antimatter), abi.encodeCall(IERC20.approve, (sp, amt)));
+        if (ok) okApprove++;
+        _assertOnlyCallerStableMoved(pre, o);
+        _assertNoResidue();
+    }
+
+    /// The one thing an antimatter allowance legitimately buys: moving the grantor's ANTIMATTER.
+    /// It must buy nothing more — in particular the grantor's STABLECOIN must not move.
+    function amTransferFrom(uint256 spenderSeed, uint256 fromSeed, uint256 toSeed, uint256 amt) external {
+        totalCalls++;
+        address sp = _pickActor(spenderSeed);
+        address from = _pickActor(fromSeed);
+        address to = _pickActor(toSeed);
+        amt = _bound(amt, 0, antimatter.balanceOf(from));
+        Snap memory pre = _snap(sp);
+        (bool ok,) = Actor(sp).exec(address(antimatter), abi.encodeCall(IERC20.transferFrom, (from, to, amt)));
+        if (ok) {
+            okTransferFrom++;
+            _req(antimatter.totalSupply() == pre.supply, "INV1: transferFrom changed antimatter total supply");
+        }
+        // INVARIANT 2: no stablecoin may move on ANY allowance-driven action, including the
+        // spender's own — transferFrom touches antimatter only.
+        for (uint256 i; i < 3; i++) {
+            _req(usdc.balanceOf(_actors[i]) == pre.stable[0][i], "INV2: usdc moved during an antimatter transferFrom");
+            _req(dola.balanceOf(_actors[i]) == pre.stable[1][i], "INV2: dola moved during an antimatter transferFrom");
+        }
+        _assertNoResidue();
+    }
+
+    function amTransfer(uint256 fromSeed, uint256 toSeed, uint256 amt) external {
+        totalCalls++;
+        address from = _pickActor(fromSeed);
+        address to = _pickActor(toSeed);
+        amt = _bound(amt, 0, antimatter.balanceOf(from));
+        Snap memory pre = _snap(from);
+        (bool ok,) = Actor(from).exec(address(antimatter), abi.encodeCall(IERC20.transfer, (to, amt)));
+        if (ok) {
+            okTransfer++;
+            _req(antimatter.totalSupply() == pre.supply, "INV1: transfer changed antimatter total supply");
+        }
+        _assertOnlyCallerStableMoved(pre, address(0)); // no stablecoin should move at all
+        _assertNoResidue();
+    }
+
+    /// An actor revoking / re-granting its stablecoin approval to Antimatter.
+    function setStableApproval(uint256 actorSeed, uint256 stableSeed, uint256 amt) external {
+        totalCalls++;
+        address a = _pickActor(actorSeed);
+        address stable = _liveStables[stableSeed % 2];
+        Actor(a).exec(stable, abi.encodeCall(IERC20.approve, (address(antimatter), amt)));
+        _assertNoResidue();
+    }
+
+    /// A non-owner attempting the rescue backstop. Must never succeed.
+    function tryRescue(uint256 actorSeed, uint256 stableSeed, uint256 amt) external {
+        totalCalls++;
+        attemptRescue++;
+        address a = _pickActor(actorSeed);
+        address stable = _liveStables[stableSeed % 2];
+        (bool ok,) = Actor(a).exec(
+            address(antimatter), abi.encodeCall(Antimatter.rescueERC20, (IERC20(stable), a, amt))
+        );
+        if (ok) {
+            okRescue++;
+            _req(false, "ACL: a non-owner successfully called rescueERC20");
+        }
+        _assertNoResidue();
+    }
+
+    /// Outright donations to Antimatter, ghost-tracked so INV3 stays exact rather than trivially
+    /// false. (A plain donation strands value on Antimatter; it is not a settlement bug.)
+    function donatePhUSD(uint256 amt) external {
+        totalCalls++;
+        amt = _bound(amt, 0, 1_000 ether);
+        phUSD.mint(address(antimatter), amt);
+        ghostDonatedPhUSD += amt;
+        okDonate++;
+        _assertNoResidue();
+    }
+
+    function donateStable(uint256 stableSeed, uint256 amt) external {
+        totalCalls++;
+        address stable = _liveStables[stableSeed % 2];
+        amt = _bound(amt, 0, 1_000e6);
+        MockStable(stable).mint(address(antimatter), amt);
+        ghostDonatedStable[stable] += amt;
+        okDonate++;
+        _assertNoResidue();
+    }
+
+    /// Owner-side state churn (the handler is the Antimatter/minter owner).
+    function ownerMint(uint256 toSeed, uint256 amt) external {
+        totalCalls++;
+        address to = _pickActor(toSeed);
+        amt = _bound(amt, 0, 5_000 ether);
+        antimatter.mint(to, amt);
+        ghostAMMinted += amt;
+        okMint++;
+        _assertNoResidue();
+    }
+
+    function setExchangeRate(uint256 stableSeed, uint256 rate) external {
+        totalCalls++;
+        address stable = _liveStables[stableSeed % 2];
+        rate = _bound(rate, 1e12, 5e18); // nonzero: a zero rate is a separate, known Low
+        minter.updateExchangeRate(stable, rate);
+        okRate++;
+        _assertNoResidue();
+    }
+
+    /// Mirrors PhusdStableMinter.mint's rolling-window reset exactly.
+    function _noteWindow(address stable, uint256 issuedBothLegs, uint256 chargedStableLeg) internal {
+        if (block.timestamp >= windowStart[stable] + 1 days) {
+            windowStart[stable] = block.timestamp;
+            issuedInWindow[stable] = 0;
+            chargedToMinterCap[stable] = 0;
+        }
+        issuedInWindow[stable] += issuedBothLegs;
+        chargedToMinterCap[stable] += chargedStableLeg;
+        if (issuedInWindow[stable] > peakIssuedInWindow[stable]) peakIssuedInWindow[stable] = issuedInWindow[stable];
+        if (chargedToMinterCap[stable] > peakChargedInWindow[stable]) {
+            peakChargedInWindow[stable] = chargedToMinterCap[stable];
+        }
+    }
+
+    /// Time movement, so the minter's rolling window actually rolls. Uses the hevm cheatcode
+    /// address directly (available to both forge and medusa) rather than forge-std, so the
+    /// handler stays engine-agnostic. Medusa also advances timestamps on its own.
+    function warp(uint256 dt) external {
+        totalCalls++;
+        callsWarp++;
+        dt = _bound(dt, 1 hours, 30 hours);
+        (bool ok,) = HEVM.call(abi.encodeWithSignature("warp(uint256)", block.timestamp + dt));
+        ok; // best-effort: if cheatcodes are unavailable the engine advances time itself
+        _assertNoResidue();
+    }
+
+    // ------------------------------------------------------------------ views
+    function _amOf(Snap memory s, address who) internal view returns (uint256) {
+        for (uint256 i; i < 3; i++) {
+            if (_actors[i] == who) return s.am[i];
+        }
+        return 0;
+    }
+
+    /// Draws of the settlement path that actually reached the contract (were not skipped for
+    /// want of balance). The tripwire arms on THIS, not on totalCalls: a sequence in which the
+    /// fuzzer simply never drew `annihilate` is uninformative, whereas a sequence that attempted
+    /// it repeatedly and never once settled is a vacuous campaign.
+    function attemptedAnnihilate() external view returns (uint256) {
+        return feasibleAttempts;
+    }
+
+    function expectedSupply() external view returns (uint256) {
+        return ghostAMMinted - ghostAMBurnedByAnnihilate;
+    }
+
+    function summary()
+        external
+        view
+        returns (uint256 _totalCalls, uint256 _okAnn, uint256 _revAnn, uint256 _skipAnn, uint256 _und, uint256 _hostile)
+    {
+        return (totalCalls, okAnnihilate, revertAnnihilate, skipAnnihilate, attemptUnderstated, attemptHostile);
+    }
+}

@@ -1,0 +1,93 @@
+--- a/test/Annihilation.t.sol
++++ b/test/Annihilation.t.sol
+@@ -329,6 +329,90 @@
+         assertEq(phUSD.balanceOf(address(antimatter)), 0, "nothing trapped");
+     }
+ 
++    // ---------------------------------------------------------- AUDIT-AUTHORED: M-07 PoC
++    // The three tests below were written by the audit for finding M-07
++    // (aa6a092cacb3c93c) and are NOT part of the project's own coverage. They demonstrate
++    // that the story-003 slippage floor at src/Antimatter.sol:259-260 is inert for every
++    // `minPhUSDOut` in [0, amount], because `_phUSD.mint(recipient, amount)` at :263 is
++    // unconditional and so `totalPhUSD >= amount` always holds.
++
++    /// M-07. A floor stated in the natural units of the trade — "I paired 100 antimatter,
++    /// I want at least 100 phUSD back" — sits at the top of the inert band and buys zero
++    /// protection. This is test_shortPhUSDMintClearingFloorSucceeds with the floor lowered
++    /// from 150 ether to `amount`: the same call still settles at the same shortfall.
++    function test_M07_floorAtAmountBuysNoProtection() public {
++        uint256 amount = 100 ether;
++        uint256 stableAmount = 100e6;
++        _fund(user, amount, usdc, stableAmount);
++
++        minter.updateExchangeRate(address(usdc), 6e17); // 60 phUSD for the stable half
++
++        uint256 minPhUSDOut = amount; // the caller's stated floor
++
++        vm.prank(user);
++        antimatter.annihilate(address(usdc), user, amount, minPhUSDOut); // (1) NO REVERT
++
++        // (2) The stablecoin is gone and deposited in the yield strategy. PhusdStableMinter
++        //     exposes no redeem, burn or withdraw, so this is irreversible.
++        assertEq(usdc.balanceOf(user), 0, "caller's stablecoin is gone");
++        assertEq(usdc.balanceOf(address(antimatter)), 0, "nothing left on Antimatter");
++        assertEq(usdc.balanceOf(address(strategy)), stableAmount, "deposited into the yield strategy");
++        assertEq(
++            strategy.principal(address(usdc), address(minter)),
++            stableAmount,
++            "principal booked to the minter, not the caller"
++        );
++
++        // (3) 160e18 received, not the 200e18 the 2x value proposition implies.
++        uint256 received = phUSD.balanceOf(user);
++        assertEq(received, 160 ether, "100 AM half + 60 for the stable half");
++        assertEq(antimatter.balanceOf(user), 0, "antimatter burned");
++        assertEq(phUSD.balanceOf(address(antimatter)), 0, "nothing trapped");
++
++        uint256 par = 200 ether;
++        uint256 stableHalfReceived = received - amount; // 60 ether
++        assertEq(stableHalfReceived, 60 ether, "stable half fetched 60, not 100");
++        assertEq((100 ether - stableHalfReceived) * 100 / 100 ether, 40, "40% shortfall on the stable half");
++        assertLt(received, par, "caller settled short");
++        assertEq((par - received) * 100 / par, 20, "20% shortfall against the par total");
++
++        assertGe(amount, minPhUSDOut, "the unconditional half alone clears the stated floor");
++    }
++
++    /// M-07 CONTROL. The guard is not dead code and the path above does reach it: one wei
++    /// above the antimatter half is the first floor that can ever bind, and it reverts with
++    /// the exact InsufficientPhUSDOut(minPhUSDOut, received) data.
++    function test_M07_control_amountPlusOneDoesRevert() public {
++        uint256 amount = 100 ether;
++        _fund(user, amount, usdc, 100e6);
++
++        minter.updateExchangeRate(address(usdc), 0); // received == amount exactly
++
++        vm.prank(user);
++        vm.expectRevert(abi.encodeWithSelector(Antimatter.InsufficientPhUSDOut.selector, amount + 1, amount));
++        antimatter.annihilate(address(usdc), user, amount, amount + 1);
++
++        assertEq(antimatter.balanceOf(user), amount, "burn rolled back");
++        assertEq(usdc.balanceOf(user), 100e6, "stable untouched");
++        assertEq(phUSD.totalSupply(), 0, "nothing minted");
++    }
++
++    /// M-07, the far end of the inert band. At a zero rate the caller surrenders the stable
++    /// half for nothing and a floor of `amount` still does not fire.
++    function test_M07_zeroRateFloorAtAmountStillSettles() public {
++        uint256 amount = 100 ether;
++        _fund(user, amount, usdc, 100e6);
++
++        minter.updateExchangeRate(address(usdc), 0);
++
++        vm.prank(user);
++        antimatter.annihilate(address(usdc), user, amount, amount); // no revert
++
++        assertEq(phUSD.balanceOf(user), amount, "only the antimatter half");
++        assertEq(usdc.balanceOf(user), 0, "the stable half was taken for nothing");
++        assertEq(usdc.balanceOf(address(strategy)), 100e6, "and deposited irreversibly");
++    }
++
+     /// Overpayment is no longer refused. The old check demanded the minter deliver exactly the
+     /// quantity its own quote promised; the floor is one-sided, so a rate that moves in the
+     /// caller's favour simply pays out more and the whole surplus reaches `recipient`.

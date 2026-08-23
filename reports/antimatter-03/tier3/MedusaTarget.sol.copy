@@ -1,0 +1,144 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.27;
+
+// AUDIT-AUTHORED. Not part of the antimatter project's own test suite. Never cite as coverage.
+//
+// Medusa assertion-mode target. Wraps the same AntimatterHandler used by the Foundry invariant
+// runner, so both engines drive identical state transitions and identical properties. No
+// cheatcodes are used: actors are real contracts.
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {AntimatterHandler} from "./AntimatterHandler.sol";
+
+contract MedusaAntimatterTarget {
+    AntimatterHandler public handler;
+
+    constructor() {
+        handler = new AntimatterHandler(0);
+    }
+
+    // Every fuzzable entry point drives the handler and then re-asserts the standing properties.
+    modifier checked() {
+        _;
+        _assertAll();
+    }
+
+    function _assertAll() internal view {
+        AntimatterHandler h = handler;
+
+        // Recorded per-call violations (INV1 caller leg, INV2 stable leg, INV3, INV4, INV5, INV6).
+        assert(h.violationCount() == 0);
+
+        // INV1 SOLE-BURN, global leg.
+        assert(h.antimatter().totalSupply() == h.expectedSupply());
+
+        // INV2 no standing pull authority.
+        assert(IERC20(address(h.usdc())).allowance(address(h.antimatter()), address(h.minter())) == 0);
+        assert(IERC20(address(h.dola())).allowance(address(h.antimatter()), address(h.minter())) == 0);
+
+        // INV3 no residue beyond tracked donations.
+        address am = address(h.antimatter());
+        assert(IERC20(address(h.usdc())).balanceOf(am) == h.ghostDonatedStable(address(h.usdc())));
+        assert(IERC20(address(h.dola())).balanceOf(am) == h.ghostDonatedStable(address(h.dola())));
+        assert(IERC20(address(h.phUSD())).balanceOf(am) == h.ghostDonatedPhUSD());
+
+        // INV6 M-01 regression: the decimals cross-check never lets a mis-registered stable settle.
+        assert(h.okUnderstated() == 0);
+        assert(h.okOverstated() == 0);
+
+        // ACL.
+        assert(h.okRescue() == 0);
+
+        // INV-A: no annihilate in the campaign ever reverted on a floor drawn from [0, amount].
+        assert(h.annFloorReverts() == 0);
+
+        // ANTI-VACUOUSNESS TRIPWIRE. Armed once the sequence has had a fair chance.
+        assert(h.attemptedAnnihilate() < 5 || h.okAnnihilate() > 0);
+    }
+
+    function annihilate(uint256 a, uint256 s, uint256 r, uint256 amt, uint256 floorSeed) external checked {
+        handler.annihilate(a, s, r, amt, floorSeed);
+    }
+
+    function annihilateUnderstated(uint256 a, uint256 amt) external checked {
+        handler.annihilateUnderstated(a, amt);
+    }
+
+    function annihilateOverstated(uint256 a, uint256 amt) external checked {
+        handler.annihilateOverstated(a, amt);
+    }
+
+    function annihilateHostileDonor(uint256 a, uint256 amt, bool armed) external checked {
+        handler.annihilateHostileDonor(a, amt, armed);
+    }
+
+    function amApprove(uint256 o, uint256 sp, uint256 amt) external checked {
+        handler.amApprove(o, sp, amt);
+    }
+
+    function amTransferFrom(uint256 sp, uint256 f, uint256 t, uint256 amt) external checked {
+        handler.amTransferFrom(sp, f, t, amt);
+    }
+
+    function amTransfer(uint256 f, uint256 t, uint256 amt) external checked {
+        handler.amTransfer(f, t, amt);
+    }
+
+    function setStableApproval(uint256 a, uint256 s, uint256 amt) external checked {
+        handler.setStableApproval(a, s, amt);
+    }
+
+    function tryRescue(uint256 a, uint256 s, uint256 amt) external checked {
+        handler.tryRescue(a, s, amt);
+    }
+
+    function donatePhUSD(uint256 amt) external checked {
+        handler.donatePhUSD(amt);
+    }
+
+    function donateStable(uint256 s, uint256 amt) external checked {
+        handler.donateStable(s, amt);
+    }
+
+    function ownerMint(uint256 t, uint256 amt) external checked {
+        handler.ownerMint(t, amt);
+    }
+
+    function setExchangeRate(uint256 s, uint256 rate) external checked {
+        handler.setExchangeRate(s, rate);
+    }
+
+    // ==================================================================
+    // VACUOUSNESS SENTINELS (inverted assertions).
+    // Medusa resets handler state between sequences, so a cumulative counter cannot be read off
+    // the end of a campaign. These three assertions are written to be FALSE once the guarded
+    // state has genuinely been reached, so Medusa reporting them as FAILED is the POSITIVE
+    // evidence that the campaign was not vacuous. A campaign in which all three "pass" is a
+    // campaign that never exercised the behaviour under test and must be treated as UNVERIFIED.
+    // ==================================================================
+
+    /// EXPECTED TO FAIL: proves at least one annihilation actually settled.
+    function sentinel_expectFail_annihilationSettled() external view {
+        assert(handler.okAnnihilate() == 0);
+    }
+
+    /// EXPECTED TO FAIL: proves the INV-A boundary minPhUSDOut == amount was actually drawn.
+    function sentinel_expectFail_boundaryFloorDrawn() external view {
+        assert(handler.annFloorAtAmount() == 0);
+    }
+
+    /// EXPECTED TO FAIL: proves a mid-call phUSD injection was actually settled and forwarded
+    /// (INV-C / ledger L-01).
+    function sentinel_expectFail_midCallInjectionForwarded() external view {
+        assert(handler.okHostileInjected() == 0);
+    }
+
+    // Read-outs so a Medusa run can be audited for vacuousness after the fact.
+    function okAnnihilateCount() external view returns (uint256) {
+        return handler.okAnnihilate();
+    }
+
+    function totalCallCount() external view returns (uint256) {
+        return handler.totalCalls();
+    }
+}

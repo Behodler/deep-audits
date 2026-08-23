@@ -1,0 +1,126 @@
+{
+  "id": "L-04",
+  "issueId": "am2l4",
+  "project": "antimatter",
+  "status": "draft",
+  "severity": "low",
+  "label": "L-04",
+  "title": "The new decimals() staticcall copies unbounded return data and forwards all remaining gas, so a registered token can make toStableAmount - and therefore every annihilation of that pair - cost more gas than a block allows",
+  "contract": "src/Antimatter.sol",
+  "function": "toStableAmount",
+  "lines": {
+    "staticcall": 292,
+    "lengthCheck": 293,
+    "range": "288-295"
+  },
+  "lineStart": 288,
+  "lineEnd": 295,
+  "entryPoint": null,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "25088b59893f37e0",
+  "fingerprintBasis": "src/Antimatter.sol:toStableAmount:UnboundedReturndataCopyOnMetadataCall",
+  "fingerprintNote": "sha256(contract:function:rootCauseClass)[:16] - legacy form, empty entryPoint. Newly minted this run; verified to reproduce from fingerprintBasis and not to collide with any of the 19 pre-existing ledger fingerprints.",
+  "rootCauseClass": "UnboundedReturndataCopyOnMetadataCall",
+  "origin": "new",
+  "firstSeenRun": "antimatter-02",
+  "lastSeenRun": "antimatter-02",
+  "sources": [
+    "CODE-203",
+    "PATTERN-MR-001 (residual b: unmetered gas forwarding)"
+  ],
+  "commit": "c91bc1a44424b853247a3849732bf89547defdec",
+  "classification": {
+    "assetImpact": "NONE - no theft, no burn, no stranded value. The failure is entirely a denial of service: annihilate() is unusable for the affected pair (it routes through toStableAmount at :230) and the public toStableAmount quote helper is unusable for off-chain callers. Antimatter is not consumed on this path, so holders keep their tokens and their entitlement.",
+    "attackPath": [
+      "1. Owner registers stablecoin S. The StablecoinNotRegistered guard at :285 runs FIRST, so no caller can aim toStableAmount at an address of their own choosing - registration is the only way in.",
+      "2. S's implementation is subsequently changed (upgradeable proxy) so that decimals() returns a very large ABI blob, or simply burns gas.",
+      "3. Any call to toStableAmount(S, x) executes `(bool ok, bytes memory data) = stable.staticcall(...)` at :292, which allocates and RETURNDATACOPYs the ENTIRE return buffer before `data.length != 32` is evaluated at :293. Memory expansion is quadratic, so the caller pays for the callee's choice. All remaining gas is forwarded, so a gas-burning decimals() reaches the same outcome via the 63/64 rule.",
+      "4. Measured: 16,782 gas for a 32-byte answer; 1,815,823 gas at 640KB; 158,677,386 gas at 6.4MB; out-of-gas under a 30,000,000 gas cap at 64MB.",
+      "5. annihilate(S, ...) and eth_call quoting for S are both dead for as long as S behaves that way."
+    ],
+    "likelihood": "LOW. Requires the registered token itself to be hostile or catastrophically broken - no honest token answers decimals() with kilobytes, and no unprivileged third party can introduce such a token. A token capable of this ALREADY holds cheaper unilateral power to brick annihilate for its own pair (revert transferFrom, pause, blacklist Antimatter), so the marginal likelihood-weighted risk this adds is small.",
+    "assumptions": "A token that has been owner-registered as a supported stablecoin later returns an unbounded return buffer from decimals(), or burns the gas forwarded to it.",
+    "externalRequirements": "Owner registration of the token (a prerequisite, not the cause), plus a post-registration change in the token's implementation - an upgradeable proxy is the realistic vehicle. Outside the owner's control."
+  },
+  "justification": "Held at LOW. The measurement is unambiguous and the DoS is real, but severity must reflect what is NEWLY at risk, and the answer is very little: the exclusive trigger-holder is the registered token, and that token can already deny annihilation for its own pair at will and for less gas. That marginal-capability deflator is IMMATERIAL, NOT ABSENT - see marginalCapabilityDeflator - and it is stated in this write-up precisely so the Low is not read as understated. Not raised to Medium: no meaningful capability is newly granted, nothing is consumed, no unprivileged attacker participates, and no value leaks. Not suppressed as 'weird ERC20' or as a reckless admin mistake either: the C4 known-invalid list covers admin RECKLESSNESS, and registering a stablecoin is the intended operation, while the hostile behaviour appears afterwards. The defect worth fixing is a one-line discipline failure - read exactly one word, bound the gas - and its fix costs nothing, which is itself an argument for reporting it rather than absorbing it. This is defence-in-depth, correctly labelled as such.",
+  "marginalCapabilityDeflator": {
+    "statedAs": "IMMATERIAL, NOT ABSENT",
+    "amendment": "AMENDED PER SEVERITY-AUDITOR. The deflator - 'a token that can do this can already brick its own pair by reverting transferFrom' - is TRUE but does not fully account for the finding's reach. A returndata gas bomb ALSO kills the public `toStableAmount` quote helper, which a `transferFrom` revert does NOT: transferFrom is never reached by a view-only quote, so off-chain quoting, front-end previews and any integrator calling toStableAmount(S, x) keep working under a transferFrom revert and stop working under this one. The residual marginal capability is therefore real but small - a view-function outage on a pair that is already unusable for settlement - which is why it is recorded as immaterial to the band rather than as a reason to raise it."
+  },
+  "plausibility": "conditional",
+  "confidence": "high",
+  "regression": false,
+  "faithfulness": false,
+  "channels": [
+    "qa-report"
+  ],
+  "law3Verdict": "FOOTGUN, IN SCOPE. Adopted from the sanitizer and re-tested at classification: registration-GATED, not owner-CAUSED. The trigger is a third party's post-registration implementation change, and a competent, non-malicious owner would be SURPRISED that registering a token hands that token a block-gas-limit lever over a public view function on the annihilation path. Surprise => footgun => reported. NOT classified on any 'malicious owner' basis.",
+  "recommendation": "Read exactly one word and ignore the rest: an assembly staticcall with a 32-byte output buffer plus an explicit `returndatasize() == 32` check, and/or cap the forwarded gas (`{gas: 30000}` is ample for any real decimals()). The stated reason at :289-291 for preferring a raw staticcall over try/catch (an uncatchable uint8 decode of a >255 value) remains valid and is entirely unaffected by this change.",
+  "doNotCollapse": {
+    "with": "L-05 (3a8dbad19ba9104e)",
+    "reason": "Same call site, same delta, DIFFERENT trigger class and DIFFERENT fix. L-04's trigger requires a hostile or broken token and is defence-in-depth; L-05's trigger is reachable by an honest token and is an operational hazard.",
+    "fixIndependence": "L-05'S FIX DOES NOT FIX L-04. `bytes memory data` at :292 copies ALL returndata BEFORE any check runs, so moving the cross-check to registration time, caching it, or changing what happens on an unavailable answer leaves the unbounded copy exactly where it is on every call that still performs one. Conversely, bounding the copy to 32 bytes does not make an unavailable decimals() available. BOTH FIXES ARE OWED."
+  },
+  "evidence": {
+    "poc": {
+      "file": "workspace/antimatter/test/audit/Tier2Delta.t.sol",
+      "tests": [
+        "test_returndataBombGasCost - 16,782 gas at 32 bytes; 1,815,823 at 640KB; 158,677,386 at 6.4MB",
+        "test_returndataBombBricksQuote - reverts out-of-gas under a 30,000,000 gas cap against a 64MB answer"
+      ],
+      "status": "passing",
+      "auditAuthored": true,
+      "auditAuthoredNote": "AUDIT-AUTHORED proof-of-concept written for this audit under workspace/antimatter/test/audit/. It is NOT part of the antimatter project's own test suite, is not present in lib/antimatter at any commit, and must never be cited as project coverage nor filed as a project test path."
+    },
+    "sources": [
+      "CODE-203",
+      "PATTERN-MR-001 (residual b: unmetered gas forwarding)"
+    ]
+  },
+  "poc": {
+    "file": "workspace/antimatter/test/audit/Tier2Delta.t.sol",
+    "tests": [
+      "test_returndataBombGasCost",
+      "test_returndataBombBricksQuote"
+    ],
+    "status": "passing",
+    "lastRun": "2026-08-19T00:00:00Z",
+    "auditAuthored": true
+  },
+  "sanitizer": {
+    "verdict": "PASS",
+    "reason": "No known-issues document exists for this project at any commit (knownIssuesFile/Source null, knownIssues empty), so KI suppression has no authority. C4 known-invalid classes considered and declined: 'non-standard/weird ERC20' (the stablecoin set is an owner-curated allowlist, and the root cause is caller-side and token-independent) and 'reckless admin mistake' (registration-gated, not owner-caused). Not a malicious-owner vector."
+  },
+  "validityCheck": {
+    "verdict": "VALID",
+    "carveOutsConsidered": [
+      "non-standard/weird ERC20",
+      "reckless admin mistake",
+      "common automated-tool finding without H/M path",
+      "OOS parent/forked root cause"
+    ],
+    "notes": "Valid, but its honest weight is defence-in-depth and the classifier already says so. The marginal-capability argument must stay in the write-up so the Low is not read as understated - recorded here as marginalCapabilityDeflator, amended to 'immaterial, not absent'.",
+    "recommendation": "Keep as filed in the QA bundle."
+  },
+  "metadata": {
+    "createdAt": "2026-08-19T00:00:00Z",
+    "updatedAt": "2026-08-19T00:00:00Z",
+    "scanOrigin": "antimatter-02",
+    "classificationOrigin": "am-CLASS-02-001",
+    "dedupOrigin": "DEDUP-02-001",
+    "validityCheckOrigin": "validity-check-report.json",
+    "coldScan": false,
+    "scanMode": "regression (0bb82d8..c91bc1a)"
+  },
+  "additionalContext": {
+    "rootCause": "`(bool ok, bytes memory data) = stable.staticcall(abi.encodeWithSignature(\"decimals()\"))` at :292 allocates and RETURNDATACOPYs the callee's ENTIRE return buffer into memory before `data.length != 32` is evaluated at :293, and forwards all remaining gas. The caller pays quadratic memory-expansion cost for a value the callee chooses.",
+    "impact": "Denial of service on toStableAmount for the affected pair, and therefore on annihilate() for that pair (reached at :230), plus on the public quote helper used by off-chain integrators. Nothing is consumed: the revert precedes _burn at :239.",
+    "newInThisDelta": "YES. At 0bb82d8 toStableAmount made no external call to `stable` at all. The call site is introduced by story-002 (f48f30d) as the fix for ledger M-01.",
+    "notATradeoffAgainstM01": "Bounding the copy and metering the gas does not weaken the M-01 cross-check in any way - the cross-check needs exactly 32 bytes and a few thousand gas."
+  },
+  "inputSeverity": "low",
+  "severityChanged": false
+}

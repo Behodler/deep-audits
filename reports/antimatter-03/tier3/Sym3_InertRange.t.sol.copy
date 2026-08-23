@@ -1,0 +1,177 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.27;
+
+import {Test} from "forge-std/Test.sol";
+import {Antimatter} from "../../../src/Antimatter.sol";
+import {IFlax} from "@phUSD/IFlax.sol";
+import {PhusdStableMinter} from "@phUSDMinter/PhusdStableMinter.sol";
+import {SymERC20, SymFlax, SymYieldStrategy} from "./SymMocks.sol";
+
+/// @notice SYM-3 — INV-A, the inert range of `minPhUSDOut`.
+///
+/// @dev Claim: for every `minPhUSDOut` in [0, amount], the guard at src/Antimatter.sol:260
+///      (`if (totalPhUSD < minPhUSDOut) revert InsufficientPhUSDOut(...)`) is unsatisfiable.
+///
+///      Reverts are made OBSERVABLE rather than pruned: `annihilate` is invoked through a
+///      low-level `call`, and the property is stated on the returned success flag and the
+///      first four bytes of returndata. Halmos prunes reverting sub-call paths by default,
+///      which would make a naive "cannot revert" property vacuous; the controls below are
+///      what demonstrate this harness does not suffer from that.
+contract Sym3InertRange is Test {
+    Antimatter am;
+    PhusdStableMinter minter;
+    SymFlax phUSD;
+    SymYieldStrategy ys;
+
+    bytes4 immutable INSUFFICIENT = Antimatter.InsufficientPhUSDOut.selector;
+
+    function setUp() public {
+        phUSD = new SymFlax();
+        minter = new PhusdStableMinter(address(phUSD));
+        ys = new SymYieldStrategy();
+        am = new Antimatter(address(this));
+        am.setPhUSD(IFlax(address(phUSD)));
+        am.setPhUSDMinter(minter);
+    }
+
+    /// @dev Registers a stablecoin with `d` decimals and a SYMBOLIC exchange rate `R`,
+    ///      funds and approves the caller for both halves.
+    function _prepare(uint8 d, uint256 R, uint256 amount) internal returns (SymERC20 t) {
+        t = new SymERC20(d);
+        minter.registerStablecoin(address(t), address(ys), R, d);
+        minter.approveYS(address(t), address(ys));
+        am.mint(address(this), amount);              // the antimatter half (self-burn)
+        t.mint(address(this), 2 ** 255);             // the stablecoin half
+        t.approve(address(am), type(uint256).max);
+    }
+
+    /// @dev Low-level invocation so a revert is a value, not a pruned path.
+    function _call(address stable, uint256 amount, uint256 minOut)
+        internal
+        returns (bool ok, bytes4 sel)
+    {
+        bytes memory ret;
+        (ok, ret) = address(am).call(
+            abi.encodeCall(Antimatter.annihilate, (stable, address(this), amount, minOut))
+        );
+        if (ret.length >= 4) {
+            assembly {
+                sel := mload(add(ret, 32))
+            }
+        }
+    }
+
+    // ==================================================================
+    // INV-A: the guard is unreachable for minPhUSDOut <= amount.
+    // amount, minPhUSDOut and the exchange rate R are all fully symbolic.
+    // ==================================================================
+
+    function check_invA_d18(uint256 amount, uint256 minOut, uint256 R) public {
+        vm.assume(minOut <= amount);
+        SymERC20 t = _prepare(18, R, amount);
+        (bool ok, bytes4 sel) = _call(address(t), amount, minOut);
+        assert(ok || sel != INSUFFICIENT);
+    }
+
+    function check_invA_d06(uint256 amount, uint256 minOut, uint256 R) public {
+        vm.assume(minOut <= amount);
+        SymERC20 t = _prepare(6, R, amount);
+        (bool ok, bytes4 sel) = _call(address(t), amount, minOut);
+        assert(ok || sel != INSUFFICIENT);
+    }
+
+    // ==================================================================
+    // FALSIFIABILITY CONTROL (mandatory).
+    // Same property text, but with minPhUSDOut == amount + 1. This MUST be
+    // refuted with a counterexample; if it PASSES, the harness cannot observe
+    // the revert at all and the INV-A results above would be vacuous.
+    // ==================================================================
+
+    function check_invA_control_d18_mustFail(uint256 amount) public {
+        vm.assume(amount > 0 && amount < 2 ** 128);
+        SymERC20 t = _prepare(18, 0, amount);        // R = 0 => mintedForStable = 0
+        (bool ok, bytes4 sel) = _call(address(t), amount, amount + 1);
+        assert(ok || sel != INSUFFICIENT);           // MUST FAIL
+    }
+
+    function check_invA_control_d06_mustFail(uint256 k) public {
+        vm.assume(k > 0 && k < 2 ** 64);
+        uint256 amount = k * 1e12;                   // representable at 6 decimals
+        SymERC20 t = _prepare(6, 0, amount);
+        (bool ok, bytes4 sel) = _call(address(t), amount, amount + 1);
+        assert(ok || sel != INSUFFICIENT);           // MUST FAIL
+    }
+
+    // ==================================================================
+    // REACHABILITY CONTROL: the happy path is actually executable in this
+    // harness (setup does not revert away every path). MUST FAIL with a
+    // counterexample in which ok == true.
+    // ==================================================================
+
+    function check_invA_reach_d18_mustFail(uint256 k) public {
+        vm.assume(k > 0 && k < 2 ** 64);
+        SymERC20 t = _prepare(18, 1e18, k);
+        (bool ok,) = _call(address(t), k, k);
+        assert(!ok);                                 // MUST FAIL
+    }
+
+    function check_invA_reach_d06_mustFail(uint256 k) public {
+        vm.assume(k > 0 && k < 2 ** 64);
+        uint256 amount = k * 1e12;
+        SymERC20 t = _prepare(6, 1e18, amount);
+        (bool ok,) = _call(address(t), amount, amount);
+        assert(!ok);                                 // MUST FAIL
+    }
+
+    // ==================================================================
+    // INV-B (secondary): on a returning path the stable leg is exactly
+    // amount * R / 1e18, so it is zero only when R == 0 (or amount*R < 1e18).
+    // ==================================================================
+
+    function check_invB_d18(uint256 amount, uint256 R) public {
+        SymERC20 t = _prepare(18, R, amount);
+        uint256 before = phUSD.balanceOf(address(this));
+        (bool ok,) = _call(address(t), amount, 0);
+        if (ok) {
+            uint256 got = phUSD.balanceOf(address(this)) - before;
+            assert(got == amount + (amount * R) / 1e18);
+        }
+    }
+
+    function check_invB_d06(uint256 amount, uint256 R) public {
+        SymERC20 t = _prepare(6, R, amount);
+        uint256 before = phUSD.balanceOf(address(this));
+        (bool ok,) = _call(address(t), amount, 0);
+        if (ok) {
+            uint256 got = phUSD.balanceOf(address(this)) - before;
+            assert(got == amount + (amount * R) / 1e18);
+        }
+    }
+
+    /// @dev Bounded-domain retry of check_invB_d06 (the unbounded form TIMED OUT).
+    ///      Domain: amount < 2**128, R < 2**128.
+    function check_invB_d06_b128(uint256 amount, uint256 R) public {
+        vm.assume(amount < 2 ** 128);
+        vm.assume(R < 2 ** 128);
+        SymERC20 t = _prepare(6, R, amount);
+        uint256 before = phUSD.balanceOf(address(this));
+        (bool ok,) = _call(address(t), amount, 0);
+        if (ok) {
+            uint256 got = phUSD.balanceOf(address(this)) - before;
+            assert(got == amount + (amount * R) / 1e18);
+        }
+    }
+
+    /// @dev Tighter bounded retry: amount < 2**64, R < 2**64.
+    function check_invB_d06_b64(uint256 amount, uint256 R) public {
+        vm.assume(amount < 2 ** 64);
+        vm.assume(R < 2 ** 64);
+        SymERC20 t = _prepare(6, R, amount);
+        uint256 before = phUSD.balanceOf(address(this));
+        (bool ok,) = _call(address(t), amount, 0);
+        if (ok) {
+            uint256 got = phUSD.balanceOf(address(this)) - before;
+            assert(got == amount + (amount * R) / 1e18);
+        }
+    }
+}

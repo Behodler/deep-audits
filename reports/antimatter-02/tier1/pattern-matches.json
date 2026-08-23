@@ -1,0 +1,183 @@
+{
+  "project": "antimatter",
+  "reportDir": "reports/antimatter-02",
+  "scanTimestamp": "2026-08-19T00:00:00Z",
+  "scanType": "pattern-matching",
+  "mode": "regression",
+  "baselineCommit": "0bb82d8",
+  "headCommit": "c91bc1a44424b853247a3849732bf89547defdec",
+  "patternDb": {"path": "patterns/vulnerability-patterns.json", "version": "1.1", "patternsLoaded": 35},
+  "scope": ["src/Antimatter.sol"],
+  "scopeNote": "Full sweep of src/Antimatter.sol (311 LOC, sole first-party contract). lib/phUSD-stable-minter and lib/flax-token-v2 read for precondition evaluation only — root cause OOS per CLAUDE.md nested-lib rule.",
+  "groundTruth": "reports/antimatter-02/profiles/Antimatter.json",
+  "patternsChecked": 35,
+  "findingsCount": 2,
+  "manualReviewCount": 3,
+  "ruledOutCount": 30,
+  "errors": [],
+
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "type": "uncapped-mint-on-demand",
+      "severity": "potential-medium",
+      "contract": "src/Antimatter.sol",
+      "line": 260,
+      "confidence": "medium",
+      "deltaShape": 5,
+      "description": "annihilate mints phUSD twice in one call from two different authorities, and only one of them is subject to the stable minter's rolling 24h emission cap. The stablecoin half is minted inside PhusdStableMinter.mint, which enforces `config.mintedToday + phUSDAmount <= config.maxMintPerDay` (PhusdStableMinter.sol:221). The antimatter half is minted directly by Antimatter at line 260 via `_phUSD.mint(recipient, amount)` using Antimatter's OWN IFlax minter authorization, so it never passes through the minter and never touches mintedToday. An owner who sets maxMintPerDay for a stablecoin to bound daily phUSD issuance gets approximately half the bound they configured: every annihilate emits `amount + mintedForStable` phUSD (line 263) while only `mintedForStable` is metered.",
+      "matchedSignatures": ["mint(", "phUSD", "IMintableToken/IFlax authorized minter"],
+      "preconditionsMet": {
+        "per-call mint amount derived from user-influenceable accounting with no emission cap": "PARTIALLY MET — `amount` is entirely caller-supplied (line 221) and the line-260 mint has no per-call, per-day, or aggregate cap. The backstop is that `amount` must be burned from the caller's own AM balance (line 239, verified sole _burn site) and AM is mintable only under onlyApprovedMinters (line 197). So the true ceiling is circulating AM supply, which is owner/approved-minter controlled — a cap, but one living in a different contract's access control rather than in the emission path the owner configured.",
+        "two paths can mint for the same accrual (double mint)": "NOT MET — the two mints correspond to two distinct consumed inputs (AM burned + stablecoin deposited), not one accrual counted twice.",
+        "mint not gated by a single _updatePool writer": "N/A — no accumulator model in this contract."
+      },
+      "missingMitigations": [
+        "No emission cap of any kind on the antimatter-half mint at line 260",
+        "Antimatter does not consult, decrement, or mirror PhusdStableMinter.mintedToday / maxMintPerDay"
+      ],
+      "lawBasis": "Law 3 footgun test: a competent, non-malicious owner setting maxMintPerDay would plausibly be surprised that the annihilate path issues roughly 2x that cap in phUSD. Surprise => footgun => in scope, not a trusted-owner suppression.",
+      "notes": "Distinct from run-01's H-01 (dual-asset allowance), which the c91bc1a delta closes. Hand to econ-scanner to weigh against the run-01 finding that the unbacked phUSD leg is real dilution, not opportunity cost.",
+      "references": ["patterns/vulnerability-patterns.json#MINT-ON-DEMAND-OVERMINT"]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "no-caller-specified-minimum-output",
+      "severity": "potential-medium",
+      "contract": "src/Antimatter.sol",
+      "line": 234,
+      "confidence": "medium",
+      "deltaShape": 2,
+      "description": "annihilate(address,address,uint256) exposes no minimum-output parameter. The phUSD the caller receives for the stablecoin half is whatever `minter.calculateMintAmount` quotes at execution time (line 234), which is `(inputAmount * config.exchangeRate * 10**(18-decimals)) / 1e18` (PhusdStableMinter.sol:255). `exchangeRate` is a live owner setter with no timelock (PhusdStableMinter.sol:140-141). The c91bc1a delta added a strict equality check at line 257 (`mintedForStable != expectedForStable -> PhUSDAmountMismatch`), but both sides of that comparison are read AFTER the transaction is mined — it proves the minter honoured its own quote within the tx, and proves nothing about the quote the caller saw when they signed. A rate change landing between submission and inclusion silently alters the proceeds of an irreversible AM burn (line 239), and the caller has no way to express a floor.",
+      "matchedSignatures": ["amountOutMin (absent)", "calculateMintAmount quote consumed without a caller-supplied bound"],
+      "preconditionsMet": {
+        "amountOutMin = 0": "MET — no such parameter exists on annihilate.",
+        "User cannot specify minimum": "MET — verified against the full external surface in the profile; no overload, no config, no per-caller floor.",
+        "No deadline parameter": "MET — annihilate takes no deadline.",
+        "swap(": "NOT MET as a literal signature — this is a mint at an administered rate, not an AMM swap. The economic exposure (execution price moves against a committed, irreversible input) is the same, which is why this is reported at medium rather than high confidence."
+      },
+      "missingMitigations": [
+        "No minPhUSDOut / minTotalOut parameter on annihilate",
+        "No deadline parameter",
+        "expectedForStable is computed in the same transaction as execution, so it cannot bind the rate the caller agreed to"
+      ],
+      "lawBasis": "Root cause (the missing caller-side guard) is in first-party src/Antimatter.sol even though the rate setter is in the OOS nested lib, so this is in scope. Law 3 footgun test: an owner adjusting exchangeRate for ordinary operational reasons would plausibly not expect to change the settlement price of in-flight annihilations. Surprise => footgun.",
+      "notes": "The exact-equality check at 257 is a genuine hardening against minter/execution divergence and should be credited as such; it is simply orthogonal to submission-time price risk. Not an owner-malicious vector — do not report it as one.",
+      "references": ["patterns/vulnerability-patterns.json#MISSING-SLIPPAGE"]
+    }
+  ],
+
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-READONLY",
+      "type": "untrusted-external-call-in-public-view",
+      "severity": "potential-low",
+      "contract": "src/Antimatter.sol",
+      "line": 292,
+      "confidence": "low",
+      "deltaShape": 1,
+      "description": "The c91bc1a delta turned `toStableAmount` from a pure-arithmetic helper into a public view that hands control to a caller-supplied address: `stable.staticcall(abi.encodeCall(IERC20Metadata.decimals, ()))`. The function's own NatSpec advertises it to off-chain callers as a quote helper. Routed for adjudication rather than reported, because the pattern's core precondition is not met.",
+      "preconditionsMet": {
+        "a value-reporting view is readable while the contract has made an external call but not yet restored its invariant": "NOT MET — toStableAmount reports a decimal rescaling, not a price/share-price/collateral value, and Antimatter holds no transiently-inconsistent state. Per the profile, the sole local write (_burn, line 239) is fully settled before every state-changing interaction, and toStableAmount is invoked at line 230, before it.",
+        "the view is not guarded and can be called during another contract's reentrant callback": "MET but inert — reentry lands in staticcall context (no writes possible) and annihilate's nonReentrant lock is already taken at line 221.",
+        "downstream integrators use this view as an oracle": "UNKNOWN — no integrators exist yet; the NatSpec invites this use."
+      },
+      "whyRouted": "Two residual observations no DB pattern covers, surfaced rather than dropped: (a) the annihilate critical write path now depends on an external token's liveness, so a registered stablecoin that is a proxy (USDC is) can brick annihilate by changing or removing decimals() post-registration — DoS, fail-closed, no loss; (b) the staticcall forwards all remaining gas with no stipend (63/64 rule), so a registered token can burn the caller's gas. Both require an owner-registered token, since `yieldStrategy != address(0)` is checked at line 285 before the staticcall is reached, which is what holds this at low confidence.",
+      "ruledOutSubchecks": [
+        "Return-data-size assumption: `data.length != 32` is asserted before `abi.decode(data,(uint256))` (293-294), so no decode-overflow or short-return misread. A uint8 return ABI-encodes to a padded 32-byte word, making the uint256 decode correct, and a value above 255 fails the equality at 295 rather than reverting anonymously — the in-source comment shows this was deliberate.",
+        "Return value ignored: `ok` IS checked (line 293)."
+      ],
+      "references": ["patterns/vulnerability-patterns.json#REENTRANCY-READONLY"]
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "pattern-db",
+      "patternId": "FRONTRUN-APPROVE",
+      "type": "orphaned-authorisation / allowance-semantic-drift",
+      "severity": "potential-low",
+      "contract": "src/Antimatter.sol",
+      "line": 239,
+      "confidence": "low",
+      "deltaShape": 3,
+      "routedFrom": "patternsSkipped — FRONTRUN-APPROVE carries the C4 QA/known-issue note, so it is not emitted as a primary finding. Routed here under the skip rule's plausible-HM-twist clause rather than discarded.",
+      "description": "c91bc1a deleted the `_spendAllowance(from, msg.sender, amount)` leg and replaced `annihilateFrom(stable,from,recipient,amount)` with `annihilate(stable,recipient,amount)`, burning `msg.sender`'s own balance. Verified: grep for `_spendAllowance` over src/ returns zero hits. Antimatter still inherits the unmodified OZ ERC20 approve/allowance/transferFrom surface. The question routed for adjudication is whether AM approvals granted to enable annihilateFrom become orphaned authorisations after the function they were granted for ceases to exist.",
+      "preconditionsMet": {
+        "escalation of what a stale approval can do": "NOT MET — the analysis resolves negative. annihilateFrom never constrained the allowance it spent; any approval sufficient to drive it was always equally sufficient for a bare transferFrom. The removal strictly REDUCES what an outstanding approval can accomplish, so no new power is conferred on any existing spender.",
+        "User calls approve with non-zero to non-zero": "NOT MET on any first-party path."
+      },
+      "whyRouted": "The residual is operational, not a privilege escalation: if any integrator was built against annihilateFrom, this is a breaking interface removal, and holders retain approvals granted for a purpose that no longer exists. Whether that matters depends on deployment status, which the pattern tier cannot determine — run-01 was a cold scan and neither the profile nor the registry records a live deployment. Confirm deployment/integrator status before dispositioning; no DB pattern covers breaking-interface removal, so this would otherwise fall in the negative space entirely.",
+      "references": ["patterns/vulnerability-patterns.json#FRONTRUN-APPROVE"]
+    },
+    {
+      "id": "PATTERN-MR-003",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "type": "balance-delta-donation-timing",
+      "severity": "potential-low",
+      "contract": "src/Antimatter.sol",
+      "line": 256,
+      "confidence": "low",
+      "deltaShape": 2,
+      "partialMatch": "ONLY the donation-timing sub-clause ('pot read/snapshotted AFTER an external mint/transfer loop') matches. The pattern's defining shape — a count-only gate, a caller-chosen payout recipient, a fixed pot — is entirely absent from Antimatter. Routed for adjudication precisely because the pattern fit is poor but the underlying timing question is real.",
+      "description": "The delta added measured-delta accounting: `mintedForStable = _phUSD.balanceOf(address(this)) - phUSDBefore` (line 256), compared for EXACT equality against a quote taken pre-burn at line 234. Check-ordering is correct on the axis that matters: phUSDBefore is captured at line 244 AFTER the burn but BEFORE any state-changing external call, so phUSD donated to Antimatter before the transaction is baselined out and cannot inflate the delta.",
+      "residualQuestion": "A donation landing DURING the call, between lines 244 and 256, inflates mintedForStable and trips PhUSDAmountMismatch. The only untrusted code executing in that window is `stable` (safeTransferFrom at 246, forceApprove at 247/253). A hostile registered stablecoin could push phUSD to Antimatter inside its own transferFrom to force a revert. Impact is a griefing DoS with full tx unwind, never theft — and it requires the owner to have registered a hostile token, so the realistic reading is that this is not exploitable. Recorded so the negative space is auditable rather than assumed.",
+      "references": ["patterns/vulnerability-patterns.json#BATCH-PAYOUT-FIXED-POT"]
+    }
+  ],
+
+  "patternsSkipped": [
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "reason": "Pattern `note` field states C4 typically treats this as QA/known issue, satisfying the skip rule. Not emitted as a primary finding. NOT silently dropped — the delta's allowance-removal question is routed to manualReview as PATTERN-MR-002.",
+      "signatureHits": "forceApprove at lines 247 and 253"
+    }
+  ],
+
+  "ruledOut": [
+    {"patternId": "FEE-ON-TRANSFER-ACCOUNTING", "signatureHits": "safeTransferFrom(246), balanceOf(address(this))(243,244,254,256), balanceBefore-analog", "verdict": "NON-MATCH — preconditions unmet", "reason": "Three independent grounds. (1) notVulnerableWhen is literally satisfied: the credited amount IS the measured delta (line 256). (2) The stable leg fails closed — Antimatter approves and the minter pulls the full `stableAmount`, so a fee-skimming token leaves the minter's pull short and reverts, and any residue is caught by StableNotDeposited (line 254). (3) C4 known-invalid: non-USDT weird ERC20s and fee-on-transfer are not reportable on this engagement, and the token set is owner-registered on the minter."},
+    {"patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW", "signatureHits": "balanceBefore(243), yieldStrategy(284,285)", "verdict": "NON-MATCH — preconditions unmet", "reason": "The pattern's requested-vs-received gap cannot exist here: line 257 requires received == quoted EXACTLY, so there is no gap to mis-attribute. This is the pattern's own notVulnerableWhen clause. There is also no withdraw/exit path on Antimatter, so the underwater-strategy leg is inapplicable."},
+    {"patternId": "ROUNDING-DIRECTION", "signatureHits": "integer division at line 297", "verdict": "NON-MATCH — mitigation present", "reason": "Both legs are exact-or-revert. toStableAmount enforces a round-trip equality (`stableAmount * scale != amount -> AmountNotRepresentable`, lines 298-299), so a non-representable amount reverts rather than rounding in anyone's favour (profile INV-10). calculateMintAmount floors, which favours the protocol. No repeatable round-trip exists — annihilate is one-directional with no inverse operation."},
+    {"patternId": "DIVISION-PRECISION", "signatureHits": "amount / scale then stableAmount * scale (297-298)", "verdict": "NON-MATCH — mitigation present", "reason": "The div-then-mul is a deliberate exactness VERIFICATION that reverts on any precision loss, not a value computation carrying the loss forward."},
+    {"patternId": "RETURN-VALUE-IGNORE", "signatureHits": ".staticcall( at 292", "verdict": "NON-MATCH — preconditions unmet", "reason": "`ok` is checked at line 293 together with the return-data length. All token movements use SafeERC20 (safeTransferFrom/safeTransfer/forceApprove). Checked line 260 separately: IFlax.mint is declared `external` with no return value (IFlax.sol:103, FlaxToken.sol:58), so under 0.8.x a failure reverts and there is no bool to ignore."},
+    {"patternId": "REENTRANCY-ERC777", "signatureHits": "transferFrom(, IERC20", "verdict": "NON-MATCH — mitigation present", "reason": "vulnerableWhen requires state changes after the transfer AND no guard. Both fail: annihilate is nonReentrant (221), and the profile verifies strict CEI — the sole local write (_burn, 239) precedes every state-changing external call, and no Antimatter storage is written after line 239."},
+    {"patternId": "REENTRANCY-CROSS-FUNCTION", "signatureHits": "safeTransfer(, nonReentrant, transfer(", "verdict": "NON-MATCH — no inconsistent window", "reason": "Sibling set examined explicitly, not assumed. The unguarded siblings are inherited ERC20 transfer/transferFrom/approve and mint(197). Reentry from `stable` at line 246 lands after the burn has fully settled _balances and _totalSupply, so a sibling reads consistent state; there is no window in which shared state is half-written. Re-entering mint() confers nothing an approved minter cannot do at any time. annihilate and rescueERC20 share the single OZ ReentrancyGuard lock."},
+    {"patternId": "REENTRANCY-ERC721-RECEIVE", "signatureHits": "0 (grep _safeMint, onERC721Received)", "verdict": "NON-MATCH — zero signature", "reason": "No NFT surface; profile confirms no inbound callback hooks. `_mint` at 198 is plain ERC20 _mint with no receiver hook."},
+    {"patternId": "REWARD-ACCRUAL-ORDER", "signatureHits": "0 (grep accRewardPerShare/accPhusdPerShare/rewardDebt/_updatePool)", "verdict": "NON-MATCH — zero signature", "reason": "No accumulator, no shares, no staking. Both the general MasterChef identifiers and the Phoenix-specific regression hooks return zero hits across the whole file."},
+    {"patternId": "REWARD-RUNWAY-DEPLETION", "signatureHits": "0 (grep rewardRate/windowEnd/phusdPerSecond/mintDebt/committedDebt)", "verdict": "NON-MATCH — zero signature", "reason": "Linear-Depletion class explicitly checked and absent: no depletion schedule, no emission runway, no time-based accrual, no funded budget. annihilate is atomic and stateless across calls. This is the requested Linear-Depletion determination."},
+    {"patternId": "EMISSION-WINDOW-BOUNDARY", "signatureHits": "0 in src/ (grep lastRewardTime/windowEnd/depletionDuration/elapsed; block.timestamp absent entirely)", "verdict": "NON-MATCH in scope", "reason": "No time-based logic anywhere in Antimatter.sol. CROSS-REPO POINTER (not a finding here): PhusdStableMinter.mint carries a rolling-24h window with a `block.timestamp >= config.lastMintTimestamp + 1 days` boundary and a full reset of mintedToday (PhusdStableMinter.sol:215-222), which is this pattern's shape. Root cause sits in the nested lib and is OOS per CLAUDE.md; recorded so the boundary is not lost. Interacts with PATTERN-001."},
+    {"patternId": "MINT-ON-DEMAND-OVERMINT (double-mint leg)", "signatureHits": "see PATTERN-001", "verdict": "PARTIAL — reported as PATTERN-001", "reason": "Listed here only to record that the double-mint and single-writer legs were evaluated and found NOT met; the uncapped-emission leg is what carries PATTERN-001."},
+    {"patternId": "BATCH-PAYOUT-FIXED-POT", "signatureHits": "balanceOf(address(this))", "verdict": "NON-MATCH — routed partial", "reason": "No count gate, no fixed pot, no caller-chosen payout decoupled from contributed value; `recipient` receives strictly against value the CALLER surrendered (profile INV-3/INV-4). Donation-timing sub-clause routed as PATTERN-MR-003."},
+    {"patternId": "TWO-STEP-COMMIT-WINDOW", "signatureHits": "0 (grep commit/pending/block.number)", "verdict": "NON-MATCH — zero signature", "reason": "All setters (setPhUSD, setPhUSDMinter, setApprovedMinter) are single-step and immediate. No pending/commit state."},
+    {"patternId": "ERC4626-INFLATION", "signatureHits": "0", "verdict": "NON-MATCH — zero signature", "reason": "Not a vault. No deposit(assets,receiver), no shares, no totalAssets, no share-price arithmetic."},
+    {"patternId": "FIRST-DEPOSITOR-ATTACK", "signatureHits": "0 (grep 'totalSupply() == 0')", "verdict": "NON-MATCH — zero signature", "reason": "No first-deposit special case and no exchange rate derived from totalSupply. Antimatter's phUSD output is a fixed 1:1 on the AM half plus an administered rate on the stable half, independent of supply."},
+    {"patternId": "ORACLE-STALE", "signatureHits": "0 (grep latestRoundData/AggregatorV3)", "verdict": "NON-MATCH — zero signature", "reason": "No Chainlink or any push oracle. NOTE for the reasoning tiers: `config.exchangeRate` is a manually-set price with no staleness or deviation concept whatsoever, and Antimatter consumes it unverified — same risk family in spirit, but none of this pattern's signatures or preconditions apply. Captured instead under PATTERN-002."},
+    {"patternId": "ORACLE-ROUNDID", "signatureHits": "0", "verdict": "NON-MATCH — zero signature", "reason": "No Chainlink rounds."},
+    {"patternId": "FLASH-LOAN-PRICE", "signatureHits": "balanceOf(address(this)) at 243,244,254,256", "verdict": "NON-MATCH — preconditions unmet", "reason": "The balanceOf reads are conservation assertions on Antimatter's own holdings, never a price input. No getReserves/slot0 (0 hits). The settlement rate comes from an owner-set config value, not from any pool a flash loan could move, so a flash loan cannot alter the outcome."},
+    {"patternId": "SIGNATURE-REPLAY", "signatureHits": "0 (grep ecrecover/ECDSA/SignatureChecker)", "verdict": "NON-MATCH — zero signature", "reason": "No signature verification anywhere."},
+    {"patternId": "PERMIT-FRONTRUN", "signatureHits": "0 (the single 'permit' grep hit is the word 'permitted' in the comment at line 126)", "verdict": "NON-MATCH — zero signature", "reason": "No permit support; annihilate requires a conventional prior approve of the stable. UX only, not a vulnerability."},
+    {"patternId": "UNSAFE-DOWNCAST", "signatureHits": "0 (grep uint128(/uint96(/uint64(/int128()", "verdict": "NON-MATCH — zero signature", "reason": "Delta shape 1 checked specifically: uint8 `decimals` is WIDENED for comparison against a uint256 decode, never narrowed. A token returning a value above 255 fails the equality at 295 rather than truncating — the in-source comment at 288-291 shows this was the design intent."},
+    {"patternId": "INCORRECT-OPERATOR", "signatureHits": "comparison operators at 285,286,293,295,257,299", "verdict": "NON-MATCH — boundaries verified correct", "reason": "Every boundary in the delta was checked individually. `decimals > 18` (286) is correct: 18 must be allowed since it yields scale == 1. `data.length != 32` (293), `actualDecimals != decimals` (295), `mintedForStable != expectedForStable` (257) and `stableAmount * scale != amount` (299) are exact-equality tests where no adjacent value is meaningful. No deadline, expiry, window or cap comparison exists in the file. Per the pattern's own note, not flagging every require()."},
+    {"patternId": "SELFDESTRUCT-FORCE-ETH", "signatureHits": "0 (grep 'address(this).balance', selfdestruct)", "verdict": "NON-MATCH — zero signature", "reason": "No ETH handling: no payable function, no receive, no fallback (profile-verified), no balance-dependent logic."},
+    {"patternId": "DOS-UNBOUNDED-LOOP", "signatureHits": "0 (grep 'for (' and 'while (' both return 0)", "verdict": "NON-MATCH — preconditions unmet", "reason": "No loops in the file. approvedMinters() (192) returns EnumerableSet.values(), an O(n) memory copy, but the set is owner-bounded, the function is view-only, and it is not on the annihilate path."},
+    {"patternId": "UNPROTECTED-INIT", "signatureHits": "0 (grep initialize/Initializable)", "verdict": "NON-MATCH — zero signature", "reason": "Not upgradeable; constructor-only at line 137 (profile-verified)."},
+    {"patternId": "STORAGE-COLLISION", "signatureHits": "0 (grep delegatecall/ERC1967/TransparentProxy)", "verdict": "NON-MATCH — zero signature", "reason": "No proxy pattern, no delegatecall, no assembly."},
+    {"patternId": "DOUBLE-VOTING", "signatureHits": "balanceOf present, vote(/castVote absent", "verdict": "NON-MATCH — zero signature on the defining terms", "reason": "No governance surface; AM confers no voting power in this contract."},
+    {"patternId": "CROSS-CHAIN-REPLAY", "signatureHits": "0 (grep block.chainid/lzReceive/ccipReceive)", "verdict": "NON-MATCH — zero signature", "reason": "Single-chain, no bridge or messaging surface."},
+    {"patternId": "TIMELOCK-BYPASS", "signatureHits": "0 (grep timelock/execute()", "verdict": "NON-MATCH — zero signature", "reason": "No timelock exists to bypass. The ABSENCE of a timelock on the rate setter is the substance of PATTERN-002, filed there rather than here."},
+    {"patternId": "WEAK-PRNG", "signatureHits": "0 (grep block.timestamp/prevrandao/difficulty/blockhash all zero)", "verdict": "NON-MATCH — zero signature", "reason": "No randomness and no value-bearing random outcome; profile-verified."},
+    {"patternId": "CENTRALIZATION-ADMIN", "signatureHits": "onlyOwner at 142,154,169,306; onlyApprovedMinters at 197", "verdict": "SUPPRESSED — Law 3", "reason": "Pattern's own note caps this at Low/QA unless it enables a rug pull. The powers here (setPhUSD, setPhUSDMinter, setApprovedMinter, rescueERC20, unlimited AM mint) are all obvious-consequence owner capabilities and AM minting is the stated design, so a malicious-owner framing is pure noise under Law 3. The NON-OBVIOUS consequences of owner configuration are separately reported as footguns in PATTERN-001 and PATTERN-002, which is where the reportable content lives."}
+  ],
+
+  "negativeSpaceNotes": [
+    "NO DB PATTERN COVERS: an external call introduced into a `view` function that is also on a critical write path (delta shape 1, line 292). Evaluated by hand and routed as PATTERN-MR-001; consider a new pattern entry.",
+    "NO DB PATTERN COVERS: breaking removal of a public function that integrators may hold approvals for (delta shape 3). Routed as PATTERN-MR-002.",
+    "NO DB PATTERN COVERS: a registry config value consumed unvalidated by a downstream contract. The delta ADDS validation for `decimals` (292-295) but leaves `config.exchangeRate` and `config.enabled` unvalidated — profile INV-11 records that `enabled` is discarded at line 284, so a disabled stablecoin passes toStableAmount and calculateMintAmount and is rejected only inside minter.mint, after the burn but within the same reverting tx (fail-closed, no loss). exchangeRate is handed to the econ tier via PATTERN-002.",
+    "Delta shape 2 check-ordering VERIFIED CORRECT and worth crediting: the quote is taken pre-burn (234), phUSDBefore is captured after the burn but before any state-changing external call (244), and the equality is enforced post-interaction (257). Pre-transaction donations are baselined out and cannot inflate the measured delta."
+  ]
+}

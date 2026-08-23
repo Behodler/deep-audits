@@ -1,0 +1,418 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.27;
+
+// AUDIT-AUTHORED (run-03). Not part of the antimatter project's own test suite. Never cite as
+// project coverage.
+//
+// Targets story-003 (`minPhUSDOut` slippage floor on `annihilate`) at 3a96fb7.
+//
+//   INV-A  the floor's inert range [0, amount] is unsatisfiable
+//   INV-B  the settlement shortfall is exact and continuous in the exchange rate
+//   INV-C  mid-call phUSD injection is counted and forwarded (ledger L-01, ad4b779566291190)
+//
+// Every fixture below carries REAL guarded state: a GuardedYieldStrategy that reverts on an
+// unauthorised client, a paused strategy, a zero deposit or a short receipt; a live
+// PhusdStableMinter that owns the registration/decimals/rate truth. Nothing here is a
+// never-failing stub, and each claim ships with an explicit falsifiability control.
+
+import {Test, console2} from "@forge-std/Test.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {FlaxToken} from "@phUSD/FlaxToken.sol";
+import {IFlax} from "@phUSD/IFlax.sol";
+import {PhusdStableMinter} from "@phUSDMinter/PhusdStableMinter.sol";
+import {Antimatter} from "../../../src/Antimatter.sol";
+import {MockStable} from "../../mocks/MockStable.sol";
+import {GuardedYieldStrategy} from "./AuditMocks.sol";
+
+/// @dev A registered stablecoin that pushes phUSD into Antimatter from inside its own transfer
+///      hook, i.e. strictly between Antimatter's `phUSDBefore` snapshot and its `mintedForStable`
+///      delta. The run-01 INV-C shape.
+contract InjectingStable is ERC20 {
+    address public am;
+    FlaxToken public phusd;
+    uint256 public injectAmount;
+    uint256 public lastInjected;
+
+    constructor() ERC20("Injector", "INJ") {}
+
+    function wire(address _am, FlaxToken _p) external {
+        am = _am;
+        phusd = _p;
+    }
+
+    function setInjectAmount(uint256 v) external {
+        injectAmount = v;
+        lastInjected = 0;
+    }
+
+    function mint(address to, uint256 v) external {
+        _mint(to, v);
+    }
+
+    function _update(address f, address t, uint256 v) internal override {
+        super._update(f, t, v);
+        uint256 inj = injectAmount;
+        if (inj > 0 && t == am && f != address(0) && phusd.balanceOf(address(this)) >= inj) {
+            injectAmount = 0; // fire once per arming
+            phusd.transfer(am, inj);
+            lastInjected = inj;
+        }
+    }
+}
+
+contract Run03ClaimsTest is Test {
+    FlaxToken internal phUSD;
+    PhusdStableMinter internal minter;
+    GuardedYieldStrategy internal strategy;
+    Antimatter internal am;
+
+    MockStable internal usdc; // 6 decimals
+    MockStable internal dola; // 18 decimals
+
+    address internal user = address(0xA11CE);
+
+    // coverage counters — the abort-on-empty tripwires read these
+    uint256 internal covSettled;
+    uint256 internal covFloorAtAmount;
+    uint256 internal covRateZero;
+
+    function setUp() public {
+        phUSD = new FlaxToken();
+        minter = new PhusdStableMinter(address(phUSD));
+        strategy = new GuardedYieldStrategy();
+        strategy.setClient(address(minter), true);
+
+        usdc = new MockStable("USD Coin", "USDC", 6);
+        dola = new MockStable("Dola", "DOLA", 18);
+
+        am = new Antimatter(address(this));
+        phUSD.setMinter(address(minter), true);
+        phUSD.setMinter(address(am), true);
+        phUSD.setMinter(address(this), true);
+
+        minter.registerStablecoin(address(usdc), address(strategy), 1e18, 6);
+        minter.approveYS(address(usdc), address(strategy));
+        minter.registerStablecoin(address(dola), address(strategy), 1e18, 18);
+        minter.approveYS(address(dola), address(strategy));
+
+        am.setPhUSD(IFlax(address(phUSD)));
+        am.setPhUSDMinter(minter);
+
+        // ---- SEED THE GUARDED STATE. Without this the strategy books nothing and every
+        // ---- downstream assertion would compare 0 to 0.
+        usdc.mint(user, 1_000_000_000e6);
+        dola.mint(user, 1_000_000_000 ether);
+        vm.startPrank(user);
+        usdc.approve(address(am), type(uint256).max);
+        dola.approve(address(am), type(uint256).max);
+        vm.stopPrank();
+    }
+
+    // =====================================================================
+    // Control: the fixture's guarded state is real and CAN fail.
+    // A harness whose mock never reverts makes every green result meaningless.
+    // =====================================================================
+    function test_00_control_guardedStateIsReachableAndFalsifiable() public {
+        am.mint(user, 100 ether);
+        vm.prank(user);
+        am.annihilate(address(dola), user, 100 ether, 0);
+
+        // The strategy actually booked principal: the settlement path really ran end to end.
+        assertEq(strategy.totalPrincipal(address(dola)), 100 ether, "control: strategy booked no principal");
+        assertEq(strategy.depositCount(), 1, "control: strategy never saw a deposit");
+
+        // ...and the strategy is not a rubber stamp: pause it and the same call fails.
+        strategy.setPaused(true);
+        am.mint(user, 100 ether);
+        vm.prank(user);
+        vm.expectRevert(GuardedYieldStrategy.StrategyPaused.selector);
+        am.annihilate(address(dola), user, 100 ether, 0);
+        strategy.setPaused(false);
+    }
+
+    // =====================================================================
+    // INV-A. The inert range.
+    //   totalPhUSD = amount + mintedForStable, and the antimatter half `amount` is minted
+    //   unconditionally, so `totalPhUSD >= amount`. Any floor in [0, amount] is therefore
+    //   unsatisfiable regardless of the exchange rate.
+    // =====================================================================
+
+    /// R and minPhUSDOut fuzzed INDEPENDENTLY. amount fixed at 100e18 per the claim.
+    function testFuzz_INVA_floorInInertRangeNeverBinds(uint256 rateSeed, uint256 floorSeed) public {
+        uint256 amount = 100 ether;
+        uint256 R = bound(rateSeed, 0, 1e18);
+        uint256 minOut = bound(floorSeed, 0, amount);
+
+        minter.updateExchangeRate(address(dola), R);
+        am.mint(user, amount);
+
+        uint256 stableBefore = dola.balanceOf(user);
+        uint256 phBefore = phUSD.balanceOf(user);
+
+        // The whole claim: this call must not revert, for ANY (R, minOut) in the range.
+        vm.prank(user);
+        am.annihilate(address(dola), user, amount, minOut);
+
+        uint256 mintedForStable = amount * R / 1e18;
+
+        // Balance assertions, not just non-reversion: the caller's stablecoin is gone in every case.
+        assertEq(dola.balanceOf(user), stableBefore - amount, "INV-A: caller's stablecoin was not consumed");
+        assertEq(
+            phUSD.balanceOf(user) - phBefore, amount + mintedForStable, "INV-A: settled value != amount + amount*R/1e18"
+        );
+        assertEq(dola.balanceOf(address(am)), 0, "INV-A: stable residue on Antimatter");
+        assertEq(phUSD.balanceOf(address(am)), 0, "INV-A: phUSD residue on Antimatter");
+        assertEq(am.balanceOf(user), 0, "INV-A: the antimatter half was not fully burned");
+
+        covSettled++;
+        if (minOut == amount) covFloorAtAmount++;
+        if (R == 0) covRateZero++;
+    }
+
+    /// The exact boundary, deterministically, at the worst rate (R = 0, so the stable half
+    /// contributes nothing and the floor rests entirely on the antimatter half).
+    function test_INVA_boundary_floorEqualsAmount_atZeroRate() public {
+        uint256 amount = 100 ether;
+        minter.updateExchangeRate(address(dola), 0);
+        am.mint(user, amount);
+
+        vm.prank(user);
+        am.annihilate(address(dola), user, amount, amount); // minPhUSDOut == amount exactly
+
+        assertEq(phUSD.balanceOf(user), amount, "boundary: only the antimatter half was delivered");
+        assertEq(dola.balanceOf(user), 1_000_000_000 ether - amount, "boundary: the stablecoin was still consumed");
+        assertEq(strategy.totalPrincipal(address(dola)), amount, "boundary: the stable leg was still deposited");
+    }
+
+    /// FALSIFIABILITY CONTROL for INV-A. One wei ABOVE the inert range and the floor bites.
+    /// Without this, "it never reverted" would be indistinguishable from "the check is dead".
+    function test_INVA_control_oneWeiAboveTheRangeDoesBind() public {
+        uint256 amount = 100 ether;
+        minter.updateExchangeRate(address(dola), 0);
+        am.mint(user, amount);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Antimatter.InsufficientPhUSDOut.selector, amount + 1, amount));
+        am.annihilate(address(dola), user, amount, amount + 1);
+    }
+
+    // =====================================================================
+    // INV-B. The settlement shortfall is exact and continuous.
+    //   mintedForStable == amount * R / 1e18 exactly, for every registered decimals value, so the
+    //   caller's shortfall is amount * (1e18 - R) / 1e18 with no rounding edge.
+    //   Corollary: the stable leg reaches zero ONLY at R == 0 exactly.
+    // =====================================================================
+
+    function testFuzz_INVB_shortfallIsExact_18dec(uint256 rateSeed, uint256 amtSeed) public {
+        uint256 amount = bound(amtSeed, 1, 1_000_000 ether);
+        uint256 R = bound(rateSeed, 0, 1e18);
+        _invBBody(address(dola), 1, amount, R);
+    }
+
+    function testFuzz_INVB_shortfallIsExact_6dec(uint256 rateSeed, uint256 amtSeed) public {
+        // A 6-decimal stable can only express multiples of 1e12 in 18-decimal terms; anything
+        // finer is rejected by toStableAmount, so the fuzzer draws on the representable lattice.
+        uint256 amount = bound(amtSeed, 1, 1_000_000) * 1e12;
+        uint256 R = bound(rateSeed, 0, 1e18);
+        _invBBody(address(usdc), 1e12, amount, R);
+    }
+
+    function _invBBody(address stable, uint256 scale, uint256 amount, uint256 R) internal {
+        minter.updateExchangeRate(stable, R);
+        am.mint(user, amount);
+
+        uint256 stableBefore = IERC20(stable).balanceOf(user);
+        uint256 phBefore = phUSD.balanceOf(user);
+
+        vm.prank(user);
+        am.annihilate(stable, user, amount, 0);
+
+        uint256 mintedForStable = phUSD.balanceOf(user) - phBefore - amount;
+
+        // EXACTNESS: no rounding edge anywhere in [0, 1e18].
+        assertEq(mintedForStable, amount * R / 1e18, "INV-B: mintedForStable != amount * R / 1e18");
+
+        // The shortfall the caller actually eats, stated directly.
+        assertEq(amount - mintedForStable, amount - (amount * R / 1e18), "INV-B: shortfall is not amount*(1e18-R)/1e18");
+
+        // The stablecoin really left, in the stable's own decimals.
+        assertEq(IERC20(stable).balanceOf(user), stableBefore - amount / scale, "INV-B: stable leg not consumed");
+
+        // CONTINUITY / corollary: the stable leg is zero ONLY at R == 0 (for non-dust `amount`).
+        // Refutes the earlier scan claim that "any rate below 1e16" zeroes the stable leg.
+        if (amount >= 1e18) {
+            if (R == 0) {
+                assertEq(mintedForStable, 0, "INV-B: R == 0 must yield a zero stable leg");
+            } else {
+                assertGt(mintedForStable, 0, "INV-B: a non-zero rate yielded a zero stable leg");
+            }
+        }
+    }
+
+    /// Deterministic refutation of the "any rate below 1e16" claim, at the smallest possible
+    /// non-zero rate, for both decimals shapes.
+    function test_INVB_refutes_lowRateZeroClaim() public {
+        uint256 amount = 100 ether;
+
+        minter.updateExchangeRate(address(dola), 1); // R = 1 wei, ~1e-18 of parity
+        am.mint(user, amount);
+        uint256 ph0 = phUSD.balanceOf(user);
+        vm.prank(user);
+        am.annihilate(address(dola), user, amount, 0);
+        assertEq(phUSD.balanceOf(user) - ph0 - amount, 100, "18-dec: R=1 yields exactly 100 wei, not 0");
+
+        minter.updateExchangeRate(address(usdc), 1e15); // 0.001, well under the alleged 1e16 cliff
+        am.mint(user, amount);
+        ph0 = phUSD.balanceOf(user);
+        vm.prank(user);
+        am.annihilate(address(usdc), user, amount, 0);
+        assertEq(phUSD.balanceOf(user) - ph0 - amount, 0.1 ether, "6-dec: R=1e15 yields 0.1 phUSD, not 0");
+
+        // Only R == 0 zeroes it.
+        minter.updateExchangeRate(address(dola), 0);
+        am.mint(user, amount);
+        ph0 = phUSD.balanceOf(user);
+        vm.prank(user);
+        am.annihilate(address(dola), user, amount, 0);
+        assertEq(phUSD.balanceOf(user) - ph0 - amount, 0, "R=0 is the only zero point");
+    }
+
+    // =====================================================================
+    // INV-C. Mid-call phUSD injection is counted and forwarded (ledger L-01, ad4b779566291190).
+    // =====================================================================
+
+    function _injector() internal returns (InjectingStable d) {
+        d = new InjectingStable();
+        minter.registerStablecoin(address(d), address(strategy), 1e18, 18);
+        minter.approveYS(address(d), address(strategy));
+        d.wire(address(am), phUSD);
+        d.mint(user, 1_000_000 ether);
+        vm.prank(user);
+        d.approve(address(am), type(uint256).max);
+    }
+
+    /// The run-01 shape re-established at this HEAD: 500e18 injected from the stable's own
+    /// transfer hook; the annihilator walks away with 700e18 for a 100e18 pair.
+    function test_INVC_midCallInjectionIsForwarded() public {
+        InjectingStable d = _injector();
+        phUSD.mint(address(d), 500 ether);
+        d.setInjectAmount(500 ether);
+
+        am.mint(user, 100 ether);
+        uint256 ph0 = phUSD.balanceOf(user);
+
+        vm.prank(user);
+        am.annihilate(address(d), user, 100 ether, 0);
+
+        assertEq(d.lastInjected(), 500 ether, "control: the injection hook actually fired");
+        assertEq(phUSD.balanceOf(user) - ph0, 700 ether, "INV-C: 100 + 100 + 500 was not delivered");
+        assertEq(phUSD.balanceOf(address(am)), 0, "INV-C: the injection was stranded instead of forwarded");
+    }
+
+    /// The value follows the CALLER-CHOSEN recipient, not the donor and not the caller.
+    function test_INVC_injectionFollowsCallerChosenRecipient() public {
+        InjectingStable d = _injector();
+        phUSD.mint(address(d), 500 ether);
+        d.setInjectAmount(500 ether);
+
+        address mark = address(0xD00D);
+        am.mint(user, 100 ether);
+
+        vm.prank(user);
+        am.annihilate(address(d), mark, 100 ether, 0);
+
+        assertEq(phUSD.balanceOf(mark), 700 ether, "INV-C: injection did not follow `recipient`");
+        assertEq(phUSD.balanceOf(user), 0, "INV-C: caller kept nothing, as expected");
+    }
+
+    /// The floor does not see through the injection either: a floor above the honest quote but
+    /// below quote+injection passes only BECAUSE of the injected value.
+    function test_INVC_injectionSatisfiesAFloorTheQuoteAloneWouldNot() public {
+        InjectingStable d = _injector();
+        phUSD.mint(address(d), 500 ether);
+        d.setInjectAmount(500 ether);
+        minter.updateExchangeRate(address(d), 0); // honest quote contributes 0
+
+        am.mint(user, 100 ether);
+        vm.prank(user);
+        am.annihilate(address(d), user, 100 ether, 600 ether); // > amount: outside the inert range
+        assertEq(phUSD.balanceOf(user), 600 ether, "INV-C: the floor was cleared by injected value");
+
+        // Control: without the injection the same floor binds.
+        am.mint(user, 100 ether);
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Antimatter.InsufficientPhUSDOut.selector, 600 ether, 100 ether));
+        am.annihilate(address(d), user, 100 ether, 600 ether);
+    }
+
+    /// Fuzzed: the forwarded surplus tracks the injected quantity exactly.
+    function testFuzz_INVC_forwardedSurplusEqualsInjection(uint256 injSeed) public {
+        uint256 inj = bound(injSeed, 1, 1_000 ether);
+        InjectingStable d = _injector();
+        phUSD.mint(address(d), inj);
+        d.setInjectAmount(inj);
+
+        am.mint(user, 100 ether);
+        uint256 ph0 = phUSD.balanceOf(user);
+        vm.prank(user);
+        am.annihilate(address(d), user, 100 ether, 0);
+
+        assertEq(phUSD.balanceOf(user) - ph0, 200 ether + inj, "INV-C: forwarded surplus != injection");
+        assertEq(phUSD.balanceOf(address(am)), 0, "INV-C: residue");
+    }
+
+    // =====================================================================
+    // Repo-mandated controls.
+    // =====================================================================
+
+    /// "Antimatter never exposes a burn outside a completed annihilation."
+    function test_CTRL_noBurnSurfaceOutsideAnnihilation() public {
+        am.mint(user, 100 ether);
+        uint256 supply0 = am.totalSupply();
+
+        // No burn/burnFrom is exposed, and there is no fallback to absorb the call.
+        (bool ok1,) = address(am).call(abi.encodeWithSignature("burn(uint256)", 1 ether));
+        (bool ok2,) = address(am).call(abi.encodeWithSignature("burnFrom(address,uint256)", user, 1 ether));
+        (bool ok3,) = address(am).call(abi.encodeWithSignature("burn(address,uint256)", user, 1 ether));
+        assertFalse(ok1, "burn(uint256) is reachable");
+        assertFalse(ok2, "burnFrom is reachable");
+        assertFalse(ok3, "burn(address,uint256) is reachable");
+        assertEq(am.totalSupply(), supply0, "supply moved outside an annihilation");
+
+        // Transfers to address(0) are rejected by ERC20 itself, so that is no burn route either.
+        vm.prank(user);
+        vm.expectRevert();
+        am.transfer(address(0), 1 ether);
+        assertEq(am.totalSupply(), supply0, "supply moved via a zero-address transfer");
+
+        // The only supply reduction is a completed annihilation.
+        vm.prank(user);
+        am.annihilate(address(dola), user, 100 ether, 0);
+        assertEq(am.totalSupply(), supply0 - 100 ether, "annihilation is the sole burn path");
+    }
+
+    /// "Annihilation settles whole or not at all": a failing stable leg leaves NO partial state.
+    function test_CTRL_wholeOrNothing_failedLegLeavesNoPartialState() public {
+        am.mint(user, 100 ether);
+        uint256 supply0 = am.totalSupply();
+        uint256 stable0 = dola.balanceOf(user);
+
+        strategy.setPaused(true); // the deposit leg will revert mid-call, after the burn
+        vm.prank(user);
+        vm.expectRevert(GuardedYieldStrategy.StrategyPaused.selector);
+        am.annihilate(address(dola), user, 100 ether, 0);
+
+        assertEq(am.totalSupply(), supply0, "partial state: antimatter burned on a failed settlement");
+        assertEq(dola.balanceOf(user), stable0, "partial state: stablecoin taken on a failed settlement");
+        assertEq(dola.balanceOf(address(am)), 0, "partial state: stable residue on Antimatter");
+        assertEq(phUSD.balanceOf(address(am)), 0, "partial state: phUSD residue on Antimatter");
+        assertEq(dola.allowance(address(am), address(minter)), 0, "partial state: standing allowance left behind");
+
+        strategy.setPaused(false);
+        vm.prank(user);
+        am.annihilate(address(dola), user, 100 ether, 0);
+        assertEq(dola.balanceOf(address(am)), 0, "settled: no residue");
+        assertEq(phUSD.balanceOf(address(am)), 0, "settled: no residue");
+    }
+}
