@@ -1,0 +1,153 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-08-27T00:00:00Z",
+  "scanType": "pattern-matching",
+  "mode": "regression",
+  "baselineCommit": "d95f4a6",
+  "headCommit": "8856781",
+  "patternDbVersion": "1.1",
+  "patternsChecked": 35,
+  "findingsCount": 3,
+  "manualReviewCount": 4,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "batch-revert-poisoning",
+      "severity": "potential-low",
+      "contract": "src/CrossVersionMigrator.sol",
+      "line": 134,
+      "function": "migrate",
+      "description": "The `if (amounts[i] > 0)` skip guard at :134 filters on the PRE-deposit snapshot credit, but the revert it is documented (section (D), :39-47) to prevent lives on the POST-deposit quantity. StableStaker.depositFor:641-642 computes `credited = _routeDeposit(token, received)` — which for a wired strategy is `strategy.deposit(...)`, free to floor a dust amount to 0 share-units — and then `require(credited > 0, \"StableStaker: nothing credited\")`. A user with amounts[i] == 1 wei therefore passes the migrator's guard and reverts the ENTIRE batch inside the destination staker. The guard only covers the case where the OLD staker's floor division produced 0; it does not cover the NEW staker's strategy-side floor. Section (D) explicitly rejects off-chain pre-filtering as 'a landmine', so the documented mitigation is the only one, and it is one-sided.",
+      "confidence": "high",
+      "confidenceNote": "High confidence that the guard is on the wrong quantity (mechanical, both sides read). Reachability of credited==0 depends on the destination pool's strategy: trivially reachable for an ERC4626/Tokemak-backed strategy at dust amounts, unreachable when yieldStrategy[token]==0 (idle hold returns `amount` unchanged, StableStaker.sol:769-771).",
+      "exploitable": "NOT defused. onlyOwner does not help — the owner cannot see credited without simulating, and the whole point of (D) is that batches are built blind from getStakersRange. Impact is DoS/operational, not theft: the batch reverts atomically, no value moves. Owner can work around only by the off-chain pre-filter (D) rejects.",
+      "matchedSignatures": ["for (uint256 i = 0; i < users.length; i++)", "external call inside loop with no per-item failure isolation"],
+      "missingMitigations": ["No try/catch around newStaker.depositFor", "No post-deposit credited check available to the migrator", "No per-item skip on destination-side zero-credit"],
+      "relatedLedgerEntries": [
+        {"fingerprint": "bda951d9f1ce1fef93fda735ecb79d466a19354f046a0dc591ba5ab6f5dae6e8", "label": "L-01", "contract": "src/InPlaceMigrator.sol", "status": "open", "relation": "SAME ROOT-CAUSE CLASS on the sibling migrator ('Poison/zero-credit user reverts the whole migrateIn slice'). New contract => new fingerprint; this is a re-file of the class, disclosed, not a silent duplicate."},
+        {"fingerprint": "eae10d6031d96318f8e6be93cfde3bf84a7a3f3ab375b86e4cfd04de4047fec1", "label": "L-01", "status": "fixed", "relation": "The require(credited>0) guard added by that fix is precisely what this batch trips on."},
+        {"fingerprint": "59eebbf87b3d0a7117e67b88914e9b73c26d45411fdae799d70c16f2a14a6f9e", "status": "open", "relation": "Prior unbounded-loop entry naming the now-DELETED StableStakerMigrator.migrate; CrossVersionMigrator.migrate is its successor."}
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": null,
+      "candidateNewPattern": "CUSTODY-NO-RESCUE",
+      "type": "stranded-value / no-recovery-path",
+      "severity": "potential-low",
+      "contract": "src/CrossVersionMigrator.sol",
+      "line": 67,
+      "function": "contract-level",
+      "description": "CrossVersionMigrator takes physical custody of principal (StableStaker.batchMigrate:521 does `IERC20(token).safeTransfer(msg.sender, total)`) and exposes NO rescue/sweep function. Its own sibling InPlaceMigrator — same repo, same author, same custody model — DOES ship a floor-fenced `rescueERC20` (InPlaceMigrator.sol:338, fenced by `totalParked`), and the contract docs there call that fence load-bearing (section (G)). The retired StableStakerMigrator had no rescue either, so the header's 'strict functional superset' claim (:16) is technically true but carries the omission forward. Two concrete stranding paths: (a) any direct/accidental ERC20 transfer to the migrator is permanently locked; (b) the golden-rule interface (section (A)) lets ANY future staker version implement batchMigrate — if such a version returns an `amounts` array LONGER than `users`, the :122-124 sum includes credits the :133-138 loop never deposits, leaving both a residual `forceApprove` allowance and an unrecoverable token balance.",
+      "confidence": "medium",
+      "confidenceNote": "Path (a) is certain but low-value. Path (b) is contingent on a future staker version; against StableStaker V2 today `amounts = new uint256[](users.length)` (:511) makes lengths always equal, and a SHORTER array panics out-of-bounds (safe atomic revert). Filed as medium because the contract's stated design goal (:21-25) is explicitly to survive 'an arbitrary number of future staker redesigns' — the no-rescue gap is what makes that forward-compat promise unsafe.",
+      "exploitable": "Not exploitable by a third party. It is a value-recovery gap, not an attack. onlyOwner/immutable do not mitigate it — they are the reason nothing can be recovered.",
+      "matchedSignatures": ["safeTransfer(msg.sender, total) into a contract with no withdraw path", "absence of rescue/sweep/withdraw selector"],
+      "missingMitigations": ["No rescueERC20", "No length assertion `amounts.length == users.length`", "No trailing forceApprove(newStaker, 0)"],
+      "relatedLedgerEntries": [
+        {"fingerprint": "f84992e9ac16ce596c3e5d32a7a3bc6e996d166be1ebc630acce34a7c969a411", "label": "L-04", "contract": "src/InPlaceMigrator.sol", "status": "open", "relation": "Dangling-forceApprove QA on the sibling. NOTE: on CrossVersionMigrator the approval is exact-sum and fully consumed, so that specific defect is DEFUSED here — only the length-mismatch variant above can leave residue."}
+      ]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "type": "one-way-door / owner footgun",
+      "severity": "potential-medium",
+      "contract": "src/CrossVersionMigrator.sol",
+      "line": 107,
+      "function": "initiateMigration",
+      "description": "`initiateMigration` (:107-109) is an unvalidated one-way door. It forwards straight into StableStaker.initiateMigration:433, which irreversibly (a) realizes the entire strategy position, (b) revokes the strategy allowance and sets `yieldStrategy[token] = 0`, (c) freezes emissions, and (d) sets `poolState = Migrating`. The only way back to Active is `finalizeAndReset` (:602), which requires the pool be FULLY drained. Nothing in the migrator — or in step 1 of the flow — checks ANY of the destination preconditions that section (C) (:33-37) declares mandatory: that newStaker has the token registered, that newStaker's `migrator` is set to this contract, that newStaker has phUSD minter rights, or even that `oldStaker != newStaker`. Every one of those is discovered only at the FIRST `migrate` call, i.e. after the old pool is already frozen and de-strategied. Concretely for the aliasing case (constructor :89-96 checks both targets non-zero but NOT `_oldStaker != _newStaker`): a same-address deploy lets `initiateMigration` succeed and then makes EVERY non-empty `migrate` batch revert unconditionally, because depositFor:634 requires `poolState == Active` while the pool is now Migrating. Result: yield stopped, strategy unwired, migration impossible, and the entire user base must be told to self-exit via the permissionless `userMigrate` (:564) at the snapshot haircut and re-stake by hand.",
+      "confidence": "high",
+      "confidenceNote": "Mechanically certain: all four preconditions are unchecked and initiateMigration is verified irreversible-without-full-drain. The aliasing sub-case is a strict proof that the failure mode is reachable, not a hypothetical.",
+      "exploitable": "Not attacker-exploitable — onlyOwner throughout, and the immutable targets genuinely close the compromised-key retarget vector section (B) describes. This is a Law-3 FOOTGUN, not a malicious-owner vector: a competent non-malicious owner would be surprised that a wiring mistake on the DESTINATION is only detected after the SOURCE has been irreversibly frozen. In scope per CLAUDE.md Law 3 (non-obvious consequence, unknowingly disrupts the whole user base). No funds are stolen; `userMigrate` remains a genuine escape hatch, which is what holds this below High.",
+      "matchedSignatures": ["owner-only state-committing forwarder with no precondition validation", "immutable target pair with no inequality check in constructor"],
+      "missingMitigations": ["No `require(_oldStaker != _newStaker)` in constructor", "No destination pre-flight (poolExists / migrator() / minter) before engaging the source", "No dry-run or preview entry point"],
+      "relatedLedgerEntries": [
+        {"fingerprint": "ss9l1-finalizeAndReset-revival-stale-emission-rate", "status": "open", "relation": "Adjacent: the revival path this footgun forces you onto has its own open defect (stale phusdPerSecond / unwired strategy after finalizeAndReset)."}
+      ]
+    }
+  ],
+  "manualReview": [
+    {
+      "id": "MR-001",
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "severity": "potential-medium",
+      "contract": "src/CrossVersionMigrator.sol",
+      "line": 135,
+      "confidence": "low",
+      "description": "The migrator hands `amounts[i]` to depositFor, but the destination books `credited = _routeDeposit(...)` (StableStaker.sol:641) — i.e. whatever the NEW strategy returns, which for an AMM/ERC4626-backed strategy is amount-minus-execution-skew. Users can therefore be haircut a SECOND time on the destination side, on top of the `min(R,P)/P` snapshot haircut section (E) (:49-57) discloses. Section (E) says 'This contract redeposits exactly what it received and no more' — true of the transfer, silent about the credit. No minCredited / slippage parameter exists on migrate().",
+      "reasonForManualReview": "Almost certainly the same root cause already carried in the ledger as 3d61c9552f (medium, acknowledged, requested-vs-received) / b5218ab2 (medium, submitted, sequential-batch AMM haircut) / 970d7307 (medium, fixed, InPlaceMigrator re-injection underpay). Whether CrossVersionMigrator warrants its own entry or reconciles into 3d61c9552f is a dedup/sanitizer call, not a pattern-tier call. Flagging rather than dropping (Law 1).",
+      "exploitable": "Not attacker-driven; value-leak-through-execution. Impact bounded by destination strategy choice."
+    },
+    {
+      "id": "MR-002",
+      "patternId": "FEE-ON-TRANSFER-ACCOUNTING",
+      "severity": "potential-low",
+      "contract": "src/CrossVersionMigrator.sol",
+      "line": 130,
+      "confidence": "low",
+      "description": "`forceApprove(newStaker, total)` then per-user `depositFor(..., amounts[i])` assumes the migrator holds exactly `total` after batchMigrate's single `safeTransfer`. For a fee-on-transfer token the migrator receives total-minus-fee, and the final depositFor's transferFrom fails on insufficient balance, bricking cross-version migration for that token entirely.",
+      "reasonForManualReview": "C4 treats generic fee-on-transfer as OOS unless such tokens are explicitly in scope; stable-staker is a stablecoin staker with no FoT tokens declared in scope. Recorded, not filed.",
+      "exploitable": "Defused in practice by token selection, not by code."
+    },
+    {
+      "id": "MR-003",
+      "patternId": "MISSING-SLIPPAGE",
+      "severity": "potential-low",
+      "contract": "src/CrossVersionMigrator.sol",
+      "line": 118,
+      "confidence": "low",
+      "description": "migrate() exposes no minimum-credit / slippage parameter anywhere in the flow, so an owner cannot bound the destination-side execution loss described in MR-001. Duplicate lens on MR-001; kept separate so the sanitizer can see both the accounting framing and the missing-control framing.",
+      "reasonForManualReview": "Likely collapses into MR-001 at dedup.",
+      "exploitable": "No direct swap in this contract; the swap is one hop away inside the destination strategy."
+    },
+    {
+      "id": "MR-004",
+      "patternId": null,
+      "type": "ledger-hygiene / dangling reference",
+      "severity": "info",
+      "contract": "reports/ledgers/stable-staker.json",
+      "confidence": "low",
+      "description": "src/StableStakerMigrator.sol was DELETED at 8856781 (story-018). Two ledger entries still reference it by path: 59eebbf87b (low, open — 'Unbounded per-user external-call loop in batchMigrate + StableStakerMigrator.migrate') and b806f4008a (medium, false-positive). The first is half-live (the batchMigrate half survives; the migrator half moved to CrossVersionMigrator.migrate:118). A future scan will not reproduce those fingerprints against deleted code and may silently re-file or silently lose them.",
+      "reasonForManualReview": "Ledger surgery is a human/finding-manager action, never a pattern-tier one. Compare the phStaging fingerprint-drift precedent.",
+      "exploitable": "n/a — process risk, not a code vulnerability."
+    }
+  ],
+  "defusedMatches": [
+    {"patternId": "FRONTRUN-APPROVE", "location": "src/CrossVersionMigrator.sol:130", "verdict": "DEFUSED + skipped per note. `forceApprove` (SafeERC20) is used, which zeroes before setting, so the USDT-style non-zero-to-non-zero revert and the classic race are both handled. No HM twist found."},
+    {"patternId": "STALE-APPROVAL (sub-case of FRONTRUN-APPROVE)", "location": "src/CrossVersionMigrator.sol:130-138", "verdict": "DEFUSED. Approval-vs-spend is EXACT: `total` at :122-124 sums the same `amounts` array the :133-138 loop spends, zero entries contribute 0 to both, and StableStaker._pullToken:750-755 does `safeTransferFrom(from, this, amount)` so each call consumes exactly amounts[i] of allowance. Sum in == sum out => residual allowance is 0. A revert anywhere in the loop unwinds the approve atomically. Contrast InPlaceMigrator's dangling `forceApprove(staker, balanceOf)` (ledger f84992e9) — that defect does NOT exist here."},
+    {"patternId": "versionOf staticcall probe", "location": "src/CrossVersionMigrator.sol:157-161", "verdict": "DEFUSED — all three probe cases handled correctly. (1) EOA / no code: staticcall returns ok=TRUE with empty returndata (the classic trap); `data.length < 32` catches it and returns 1. (2) Self-destructed contract: identical to the EOA case, returns 1. (3) Contract that reverts for an unrelated reason: ok=false, returns 1. Short returndata (<32 bytes) is caught by the same length check, so abi.decode can never revert on truncation. Oversized returndata decodes fine for a single static uint256. Residual: a hostile target returning megabytes of returndata imposes memory-expansion gas cost — unreachable, since both probe targets are `immutable` and owner-chosen at construction."},
+    {"patternId": "Version-identity spoofing", "location": "src/CrossVersionMigrator.sol:126,141", "verdict": "DEFUSED. Section (F) (:59-62) is accurate: no control flow branches on versionOf; it only decorates the MigratedAcrossVersions event. A lying STAKER_VERSION corrupts the on-chain audit record only, and the targets are immutable and owner-chosen, so there is no adversary in position to lie. Correctly weighed as advisory."},
+    {"patternId": "Duplicate entries in `users` / double-credit", "location": "src/CrossVersionMigrator.sol:118, src/StableStaker.sol:_exitPosition", "verdict": "DEFUSED. _exitPosition returns 0 immediately when `info.amount == 0` and zeroes `info.amount` on the first pass, so a repeated address in the same or a later batch yields amounts[i] == 0, contributes 0 to `total`, and is skipped by the :134 guard. No double-credit, no double-mint of pending phUSD (which is also computed from the now-zeroed amount)."},
+    {"patternId": "Snapshot/accumulator order-dependence", "location": "src/StableStaker.sol:433-470, _exitPosition", "verdict": "DEFUSED. initiateMigration freezes (R, P) once and _updatePool no-ops while Migrating, so `credit = (amt * min(R,P)) / P` is identical regardless of batch order, batch size, or whether the user exits via batchMigrate or userMigrate. This is the design property the whole terminal-migration model rests on and it holds."},
+    {"patternId": "ROUNDING-DIRECTION", "location": "src/StableStaker.sol:_exitPosition credit = (amt * S) / P", "verdict": "DEFUSED. Multiplication precedes division (so not DIVISION-PRECISION either), and the floor rounds AGAINST the user / toward the protocol, which is the safe direction. The resulting dust is the acknowledged L-01/ss12l1 item that section (D) documents."},
+    {"patternId": "REWARD-ACCRUAL-ORDER", "location": "src/StableStaker.sol:636-645", "verdict": "DEFUSED. depositFor follows the correct MasterChef order: _updatePool -> _settle(existing position) -> mutate amount/totalStaked -> recompute rewardDebt from the NEW amount. No accrual is stranded or double-counted for a migrated-in user."},
+    {"patternId": "REWARD-RUNWAY-DEPLETION / EMISSION-WINDOW-BOUNDARY / MINT-ON-DEMAND-OVERMINT", "location": "src/StableStaker.sol:433-470, 602-615", "verdict": "DEFUSED for the migration surface. Emissions are settled to the block and then frozen for the whole Migrating window, and finalizeAndReset fast-forwards lastRewardTime to now so the frozen gap is never retro-emitted. No Linear-Depletion / rate-drift signature: this staker uses a flat phusdPerSecond, not a depleting-balance rate, so the phoenix Linear-Depletion family does not apply here. (Pre-existing ss9l1 stale-rate-on-revival remains open and is unchanged by this diff.)"},
+    {"patternId": "REENTRANCY-ERC777 / REENTRANCY-CROSS-FUNCTION / REENTRANCY-READONLY", "location": "src/CrossVersionMigrator.sol:118", "verdict": "DEFUSED despite migrate() having no nonReentrant. Three independent guards: (1) onlyOwner on migrate; (2) both staker entry points it calls (batchMigrate:500, depositFor:628) carry nonReentrant on the staker, so a token callback cannot re-enter the staker mid-flow; (3) `token` is constrained by poolExists on BOTH stakers, so an arbitrary hostile token cannot be routed through unless the owner has already registered it as a pool. The migrator itself holds no persistent state a reentrant call could corrupt — `total`/`migratedCount` are memory-local."},
+    {"patternId": "CENTRALIZATION-ADMIN", "location": "src/CrossVersionMigrator.sol:107,118", "verdict": "SUPPRESSED per Law 3. Everything is onlyOwner by design and both targets are immutable specifically to remove the compromised-key drain vector (section (B), :27-31). Reporting 'the owner controls migration' would be pure noise. The non-obvious footgun that IS in scope is filed separately as PATTERN-003."},
+    {"patternId": "RETURN-VALUE-IGNORE", "location": "src/CrossVersionMigrator.sol:130", "verdict": "DEFUSED. SafeERC20 forceApprove is used; no raw approve/transfer return value is ignored anywhere in the new contract."},
+    {"patternId": "INCORRECT-OPERATOR", "location": "src/CrossVersionMigrator.sol:159", "verdict": "DEFUSED. `data.length < 32` is the correct boundary for 'cannot decode a uint256'. Per the pattern note, not flagging every comparison — checked and correct."},
+    {"patternId": "Length-mismatch amounts[] vs users[]", "location": "src/CrossVersionMigrator.sol:122 vs :133", "verdict": "PARTIALLY DEFUSED. The two loops bound on DIFFERENT arrays (`amounts.length` then `users.length`). Against StableStaker V2 they are always equal (batchMigrate:511 allocates `new uint256[](users.length)`). A shorter returned array panics with an out-of-bounds revert — atomic and safe. A LONGER one is the only unsafe direction and is folded into PATTERN-002."}
+  ],
+  "notApplicable": [
+    "ERC4626-INFLATION", "ORACLE-STALE", "ORACLE-ROUNDID", "SIGNATURE-REPLAY", "FLASH-LOAN-PRICE",
+    "UNSAFE-DOWNCAST", "DIVISION-PRECISION", "UNPROTECTED-INIT", "STORAGE-COLLISION",
+    "SELFDESTRUCT-FORCE-ETH", "DOUBLE-VOTING", "PERMIT-FRONTRUN", "FIRST-DEPOSITOR-ATTACK",
+    "CROSS-CHAIN-REPLAY", "TIMELOCK-BYPASS", "BATCH-PAYOUT-FIXED-POT", "REENTRANCY-ERC721-RECEIVE",
+    "WEAK-PRNG"
+  ],
+  "patternsSkipped": [
+    {"patternId": "FRONTRUN-APPROVE", "reason": "note field: 'C4 typically considers this QA/known issue'. Signature matched (forceApprove at :130) but no HM twist beyond the generic QA framing was found — forceApprove already handles the zero-first requirement. Not routed to manualReview."}
+  ],
+  "errors": [],
+  "coverageNotes": [
+    "Scope scanned: src/CrossVersionMigrator.sol (NEW, 162 lines, read in full), src/versions/IStableStakerV1.sol (NEW), src/interfaces/IStableStakerMigratable.sol (NEW), and the changed migration surface of src/StableStaker.sol (initiateMigration:433, batchMigrate:497, _exitPosition, userMigrate:564, finalizeAndReset:602, depositFor:625, _pullToken:750, _routeDeposit:767). src/InPlaceMigrator.sol diff is comment-only (renames of the retired StableStakerMigrator) — no behavioural change, not re-scanned.",
+    "src/versions/IStableStakerV1.sol and src/interfaces/IStableStakerMigratable.sol are interface declarations with no executable logic; no pattern in the DB has a signature that can match a pure interface. Recorded as checked-with-no-match rather than skipped.",
+    "src/StableStaker.sol behavioural diff vs d95f4a6 is limited to adding STAKER_VERSION = 2 (:57), the IStableStaker inheritance, and `override` keywords. STAKER_VERSION is a constant with no setter — no version-mutability vector.",
+    "Linear-Depletion / rate-drift family: NOT APPLICABLE to this suite. stable-staker emits at a flat phusdPerSecond derived from phUSDPerDay, not from a depleting balance, so the phoenix-nft-staking depletion rate-drift signature has nothing to bind to. Checked explicitly because the task asked."
+  ]
+}

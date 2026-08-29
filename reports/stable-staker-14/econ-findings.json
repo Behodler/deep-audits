@@ -1,0 +1,99 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-08-27T00:00:00Z",
+  "scanType": "economic",
+  "commit": "8856781",
+  "baseline": "d95f4a6",
+  "contractsScanned": 3,
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "intent-mismatch / operator footgun",
+      "severity": "potential-low",
+      "contract": "src/CrossVersionMigrator.sol",
+      "function": "migrate",
+      "line": 49,
+      "lineStart": 49,
+      "lineEnd": 57,
+      "description": "The contract NatSpec section (E) and story-018 both scope the uncompensated destination shortfall to the case where the OLD staker's strategy is underwater. That is a mis-attribution: the destination-side deposit haircut in StableStaker._routeDeposit -> strategy.deposit is an INDEPENDENT loss that bites in full on a perfectly healthy migration (R == P). An operator reading (E) concludes 'healthy source => no user loss', which is false whenever the destination staker is wired to ERC4626MarketYieldStrategy. Story-018's own test plan makes the same conflation, describing MockYieldStrategy.setDepositSlippageBps as 'how underwater conditions are simulated' — so the healthy-source-plus-haircutting-destination case is unmodeled by the story and by the test suite.",
+      "codeSnippet": "(E) UNDERWATER HAIRCUTS ARE NOT COMPENSATED HERE. If the old staker's yield strategy is underwater, `batchMigrate` pays each user the uniform snapshot credit `p_i*min(R,P)/P`, which is LESS than their principal. This contract redeposits exactly what it received and no more; it does not top anyone up.",
+      "economicImpact": "Two orthogonal shortfalls, only one of which is documented. Source-side: credit_i = p_i * min(R,P)/P (documented). Destination-side, on top: credited_i = credit_i * (MAX_BPS - slippageToleranceBps) / MAX_BPS for ERC4626MarketYieldStrategy._creditedPrincipal. At slippageToleranceBps = 100 the migrated cohort is booked 1% below the snapshot credit even when R == P; on $10M migrated that is $100k of principal not credited to users. Of that, the portion actually consumed by AMM execution (LP fee + price impact) leaks to third-party LPs; the remainder (worst-case bound minus realised execution) is retained as protocol-owned surplus inside the strategy. The strategy's own NatSpec confirms the retained leg: 'the gap surfaces as protocol yield'.",
+      "attackScenario": "Not an attack — an operator hazard. 1. Source pool is healthy (R == P), so the operator sees no underwater condition and (E) says the no-top-up caveat does not apply. 2. Destination staker is wired to ERC4626MarketYieldStrategy with slippageToleranceBps > 0. 3. migrate() pulls amounts[i] and calls depositFor(amounts[i]); depositFor books credited = amounts[i]*(1-bps). 4. MigratedAcrossVersions emits `total` (the SOURCE sum) and DepositedFor emits only `credited`, so the migrator's own event stream never shows the delta. The loss is silent on both the docs side and the event side.",
+      "profitability": "n/a (no attacker). Magnitude = slippageToleranceBps/10000 of migrated principal, deterministic. Zero for the direct ERC4626YieldStrategy route (Tokemak autoDOLA/autoUSD), where credited = vault.convertToAssets(vault.deposit(amount)) and the shortfall is fee-free share-rounding dust (~1 wei per depositFor).",
+      "affectedParties": "Migrated stakers (booked below their snapshot credit); partial third-party leak to AMM LPs; remainder to protocol surplus.",
+      "confidence": "high",
+      "relatedLedger": ["4f143a9573a1"],
+      "dedupNote": "ADJACENT TO, NOT A DUPLICATE OF, open Low 4f143a9573a1 ('Migration credit asymmetry: operator batchMigrate books users below principal through a haircutting destination strategy while userMigrate keeps full principal'). That entry is about the ASYMMETRY between the two exit routes. This entry is about the NEW contract's documentation and story asserting a narrower trigger condition than the code has. If the triager prefers one entry, fold this in as an additional impact note on 4f143a9573a1 rather than minting a second fingerprint.",
+      "recommendation": "Reword (E) to separate the two shortfalls: (i) source-side min(R,P)/P when the OLD strategy is underwater, and (ii) destination-side strategy.deposit haircut, which applies unconditionally whenever the DESTINATION strategy haircuts. Add an operational precondition: before the first migrate() batch, confirm the destination strategy is a full-credit route (direct ERC4626), or accept and pre-announce the bps loss. Optionally emit the per-user (amount, credited) delta so the shortfall is on-chain visible."
+    },
+    {
+      "id": "ECON-002",
+      "type": "carryover-reach-change (no new fingerprint)",
+      "severity": "informational",
+      "contract": "src/CrossVersionMigrator.sol",
+      "function": "migrate",
+      "line": 135,
+      "description": "LEDGER REPOINT REQUIRED, NOT A NEW FINDING. Open Low 4f143a9573a1 was recorded against src/StableStakerMigrator.sol, which story-018 DELETED at this commit. Its root cause (StableStaker.depositFor books `credited` while the migrator pays `amount`, with no top-up) is unchanged and now lives on CrossVersionMigrator.migrate:135, the ONLY surviving cross-staker path. A regression scan that keys on the deleted file will propose 'fixed' for a live defect — the phantom-fix trap. Severity is unchanged (Low): the shortfall is a one-off migration event, not a repeatable drain; it is zero on the currently-targeted direct ERC4626 (Tokemak) destination; and the retained leg stays protocol-owned. Reach is unchanged in kind but is now the sole path.",
+      "economicImpact": "None beyond 4f143a9573a1.",
+      "confidence": "high",
+      "relatedLedger": ["4f143a9573a1"]
+    },
+    {
+      "id": "ECON-003",
+      "type": "batch-liveness (likely code-scanner duplicate)",
+      "severity": "potential-low",
+      "contract": "src/CrossVersionMigrator.sol",
+      "function": "migrate",
+      "line": 134,
+      "description": "The `if (amounts[i] > 0)` skip tests the SOURCE snapshot credit, but StableStaker.depositFor's `require(credited > 0)` tests the DESTINATION booked credit. A user whose source credit is 1 wei survives the skip and then reverts the whole batch (market strategy: credited = amount*(10000-bps)/10000 == 0 for amount == 1 wei with bps > 0; direct ERC4626: `require(sharesReceived > 0)` inside the strategy). NatSpec (D) and story-018 both claim the guard makes the batch survive a zero-credit user; it does not, in the one case that matters. Confirms profiler PROP-CVM-06 = VIOLATED.",
+      "economicImpact": "Liveness only. Recoverable: the users array is operator-supplied, so the operator drops the offending address off-chain and retries; the dropped user retains the permissionless userMigrate escape hatch. No value is lost or stranded, and no partial state survives (the whole tx reverts atomically).",
+      "attackScenario": "1. Griefer stakes a dust position while the pool is Active. 2. initiateMigration floors their credit to 1 wei. 3. Any batch containing them reverts. 4. Operator must identify and exclude them per batch. Cost to griefer: one dust stake + gas. Cost to protocol: operator inconvenience, one failed tx per attempt.",
+      "profitability": "Unprofitable — pure griefing, no extraction.",
+      "affectedParties": "Operator (retry cost).",
+      "confidence": "high",
+      "dedupNote": "Same root-cause class as open Low bda951d9f1ce ('Poison/zero-credit user reverts the whole migrateIn slice') on InPlaceMigrator. New contract + new function => new fingerprint; disclosing the prior entry explicitly so dedup can collapse if preferred. Also expected from code-scanner — this is filed for recall (Law 1), not to inflate count.",
+      "recommendation": "Either try/catch the depositFor and skip a reverting user (recording them for manual follow-up), or pre-filter with a destination-side preview. Minimally, correct NatSpec (D) so it does not overstate the guard."
+    }
+  ],
+  "refutations": [
+    {
+      "question": "Q1 — double-emission / emission-cap breach across a version hop",
+      "verdict": "REFUTED. No aggregate over-mint is possible.",
+      "arithmetic": "SOURCE: initiateMigration calls _updatePool once (settling acc to T0) BEFORE setting poolState = Migrating; thereafter _updatePool early-returns on poolState != Active (StableStaker.sol:720), so accPhusdPerShare is frozen. _exitPosition mints pending = amt*acc/PREC - rewardDebt, i.e. exactly the accrual up to T0. claim() during Migrating cannot double-mint (PROP-SS-05: it rebases rewardDebt against the same frozen acc, leaving exit pending == 0). finalizeAndReset fast-forwards lastRewardTime, so the frozen window is never retro-emitted (:609). DESTINATION: depositFor's ordering is _updatePool -> _settle -> _pullToken -> _routeDeposit -> info.amount += credited -> rewardDebt = info.amount*acc/PREC (:637-645). For a fresh arrival info.amount == 0 at _settle, so nothing is minted; the post-credit rewardDebt is set at the CURRENT acc, giving pending = credited*acc/PREC - credited*acc/PREC = 0. The arrival therefore has ZERO claim on emissions accrued before it arrived. If the destination pool was empty, _updatePool's totalStaked == 0 branch fast-forwards lastRewardTime (:727) rather than banking a bucket, so there is no dead-accrual windfall for the first batch either. ATOMICITY: _exitPosition zeroes the source position inside batchMigrate, and depositFor runs later in the SAME transaction, so no user ever holds an earning position on both stakers across a block boundary. AGGREGATE over [T0, T1]: source mints 0 (frozen) and the migrant is not yet on the destination, so the hop is an emission GAP, not an overlap — strictly under-payment relative to a no-migration baseline, never over-mint."
+    },
+    {
+      "question": "Q1b — multi-batch cohort ordering: value transfer between batches?",
+      "verdict": "REAL BUT NEGLIGIBLE. Redistribution, not over-mint. Recorded as an operational note, not filed as a finding.",
+      "arithmetic": "Let batches with principals B1, B2 land at T1 < T2, Delta = T2 - T1, destination rate rho = phusdPerSecond. Over [T1,T2] the destination's totalStaked is B1 only, so acc grows by rho*Delta*PREC/B1 and a batch-1 user with principal p earns p*rho*Delta/B1 instead of the uniform-arrival fair share p*rho*Delta/(B1+B2) — an excess factor of (B1+B2)/B1. Batch-2 users earn nothing over that window (source frozen since T0, destination not yet joined). TOTAL MINTED over [T1,T2] is exactly rho*Delta regardless of the split, so the per-day emission cap is intact — this is redistribution between cohorts, not dilution. MAGNITUDE: with phUSDPerDay = 1000 phUSD, two equal batches and a 1-hour spread, the transferred amount is 1000/24/2 = 20.8 phUSD; against a $10M migrated principal that is ~2e-6 of principal. This is a distribution artefact of any batched migration, bounded linearly by the batch spread. OPERATIONAL MITIGATION (clean and exact): set the destination's phUSDPerDay only AFTER the final batch. phUSDPerDay calls _updatePool(token) first (:192), so the pre-rate window accrues nothing and lastRewardTime is advanced — no retro-emission, and every migrant then starts from an identical acc. Per project law this is misallocation of a MINTED budget within a fixed cap, so it is neither externally-derived-yield opportunity cost nor real dilution; the cap is what makes it harmless."
+    },
+    {
+      "question": "Q1c — could two live stakers double the per-token daily budget?",
+      "verdict": "STRUCTURALLY POSSIBLE, OPERATIONALLY NULL. Not filed.",
+      "arithmetic": "The emission cap is per (staker instance, token), not global per token. If the source is still Active and the destination already has a non-zero phusdPerSecond AND non-zero totalStaked, aggregate minting for that token is up to 2x phUSDPerDay for the overlap window. In the intended cross-version cutover the destination starts empty (totalStaked == 0 => _updatePool accrues nothing), so the overlap window is null. Suppressed as an obvious consequence of running two independently-budgeted staker instances (Law 3: not a surprise to a competent operator)."
+    },
+    {
+      "question": "Q3 — does a self-exit (userMigrate) change other users' credits? Ordering exploit?",
+      "verdict": "REFUTED, firmly. No ordering exploit exists.",
+      "arithmetic": "credit_i = amt_i * S / P where S = min(mig.realized, mig.principalSnapshot) and P = mig.principalSnapshot (StableStaker.sol:536-538). Both mig fields are written exactly once, in initiateMigration (:475), and are not touched again until finalizeAndReset zeroes them on a fully-drained pool. _exitPosition writes only info.amount, info.rewardDebt, pool.totalStaked and _stakers — NONE of which appear in the credit formula. Therefore credit_i is a pure function of (amt_i, R, P) and is invariant to how many users have already exited, in what order, and by which route (batch vs. self). SOLVENCY: sum_i floor(amt_i*S/P) <= (sum_i amt_i)*S/P <= P*S/P = S <= R = the idle pile realized at initiateMigration, so the pile can never be over-drawn and an early self-exiter cannot starve a later batch. This also confirms that b5218ab27253's non-uniform-haircut class (sequential re-sum) is structurally dead here, consistent with the already-REFUTED b806f4008a43 for the destination side: within one migrate() batch, block.timestamp <= lastRewardTime after the first depositFor so every user sees an identical acc, and the market strategy's haircut is linear in amount, so identical principals receive identical credits."
+    },
+    {
+      "question": "Q3b — is there a rational incentive to front-run the operator's batch by self-exiting?",
+      "verdict": "YES, NON-ZERO BUT BOUNDED AND HARMLESS TO OTHERS.",
+      "arithmetic": "userMigrate pays credit_i to the user's WALLET with no destination haircut. Being swept pays credit_i*(1 - bps/10000) booked on the new staker. So self-exiting saves bps/10000 of principal but forfeits all future destination phUSD emissions. Self-exit is rational iff (bps/10000)*p > PV of expected destination emissions on p over the holder's expected residence. With a 1% haircut, a holder whose expected residence is short enough that accrued emissions do not reach 1% of principal should front-run; a long-horizon holder should not. Critically, per Q3 the (R,P) snapshot is frozen, so a front-runner's exit does NOT reduce anyone else's credit — the remaining cohort is unaffected in absolute terms. The only consequence is selection: the sophisticated avoid the haircut and the passive bear it, which is the equity dimension already captured by open Low 4f143a9573a1. No separate finding."
+    },
+    {
+      "question": "Q4 — floor-division dust: recoverable, and always in the protocol's favour?",
+      "verdict": "CONFIRMED on both legs.",
+      "arithmetic": "DIRECTION: credit = (amt * S) / P is integer floor division against the user, so 0 <= amt*S/P - credit < 1 unit per exit; total dust retained = S - sum_i credit_i, plus (R - S) when R > P. Every rounding decision here favours the protocol; there is no leg on which a user rounds up. Consistent with PROP-SS-10. RECOVERABILITY: the dust sits as idle balance in the OLD staker. initiateMigration clears yieldStrategy[token] to address(0) (:466), so rescueERC20's reserved = poolInfo[token].totalStaked (:820). Mid-migration, bal = R - (credits already paid) and reserved = remaining totalStaked; since remaining credits <= remaining totalStaked, the require(bal >= reserved + amount) fence correctly blocks any sweep that would eat a pending credit while permitting the already-accrued dust — the realized pile is protected exactly (PROP-SS-07). After the last exit, totalStaked == 0 => reserved == 0 => the entire residual dust is rescuable by the owner. finalizeAndReset moves no tokens and leaves yieldStrategy at address(0), so the dust remains rescuable after revival until fresh stakes arrive. NOT STRANDED. ZERO-CREDIT USERS: a user is skipped only when amt*S < P, i.e. amt < P/S = 1/r where r = R/P is the recovery ratio. For a healthy or mildly underwater pool (r near 1) that is amt < ~1-2 base units; only a catastrophic r (e.g. 1e-6) would zero a materially-sized position. The forfeited amount is by construction sub-unit at the credit scale and accrues to the protocol, matching NatSpec (D). NOTE: the migrator itself has NO rescue path (profiler ANSWER 4) — but the dust never reaches the migrator (batchMigrate transfers only sum(credits), which the loop spends exactly), so this is not a dust-stranding vector."
+    },
+    {
+      "question": "Q5 — does any economic decision branch on versionOf?",
+      "verdict": "CONFIRMED ADVISORY. No value decision branches on it: the two call sites (CrossVersionMigrator.sol:126, :141) feed only the MigratedAcrossVersions event, and StableStaker.STAKER_VERSION has no internal reader (PROP-SS-13, PROP-CVM-05). Additionally, profiler item CVM-U2 is REFUTED for the revert-propagation concern: _versionOf uses a low-level staticcall and returns 1 on `!ok || data.length < 32`, so a reverting or malformed probe target cannot revert the batch."
+    }
+  ],
+  "notes": [
+    "Deferred to Tier 1 per scope rules: single-function precision loss, per-function rounding direction, local fee arithmetic. Verified profiler properties were treated as axioms; the two non-verified ones (PROP-CVM-06 'VIOLATED', PROP-CVM-07 'likely') were re-examined against source — PROP-CVM-06 confirmed violated (ECON-003), PROP-CVM-07 confirmed (the migrator's per-call delta is zero and dust never reaches it).",
+    "Cross-repo reads used top-level lib/reflax-yield-vault HEAD (AYieldStrategy.sol, concreteYieldStrategies/*), never stable-staker's nested lib pin.",
+    "Not re-filed, reconciled only: dab5a65613c7, 69c7666eee33, 0dca43f3156b, dbdc3ac9b93a, 969722dc9eed — all setYieldStrategy / underwater-buffer root causes untouched by story-018 (StableStaker's diff is STAKER_VERSION + override keywords only)."
+  ]
+}

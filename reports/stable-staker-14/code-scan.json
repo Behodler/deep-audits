@@ -1,0 +1,187 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-08-27T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "commit": "8856781",
+  "baseline": "d95f4a6",
+  "contractsScanned": 4,
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "denial-of-service / broken documented invariant",
+      "severity": "low",
+      "severityNote": "Arguable Medium: permissionless, repeatable, costs one wei plus gas, defeats an invariant the contract's own NatSpec (D) claims to have closed, and has NO on-chain remedy. Capped at Low because no value is at risk, the exploit window is single-digit wei, and the operator can retry with an off-chain-filtered batch. Filed Low for consistency with the two open siblings in the same class (bda951d9f1, bf5018deab).",
+      "confidence": "high",
+      "contract": "src/CrossVersionMigrator.sol",
+      "function": "migrate",
+      "line": 134,
+      "lineStart": 132,
+      "lineEnd": 138,
+      "title": "The `amounts[i] > 0` batch-survival guard tests the SOURCE credit while the revert it must prevent fires on the DESTINATION credit, so a 1-wei dust position reverts the entire migrate batch",
+      "description": "CrossVersionMigrator.migrate guards its deposit loop with `if (amounts[i] > 0)` (CrossVersionMigrator.sol:134), where `amounts[i]` is the SOURCE-side snapshot credit returned by `oldStaker.batchMigrate`. The revert that guard exists to prevent is `require(credited > 0, \"StableStaker: nothing credited\")` at StableStaker.sol:640, which fires on the DESTINATION-side booked credit `credited = _routeDeposit(token, received)` (StableStaker.sol:767-773) -- a different quantity, since `credited <= received <= amount`. A user whose source credit is strictly positive but whose destination-strategy deposit books zero therefore reverts the whole batch. This is precisely the failure mode the contract NatSpec section (D) (lines 39-47) asserts is closed: 'The `if (amounts[i] > 0)` guard below skips those users so the batch survives'. Section (D) additionally states the alternative -- off-chain pre-filtering -- 'was rejected as a landmine'; that rejected landmine is now the operator's only remedy.",
+      "codeSnippet": "// CrossVersionMigrator.sol:132-138\nuint256 migratedCount;\nfor (uint256 i = 0; i < users.length; i++) {\n    if (amounts[i] > 0) {              // SOURCE-side snapshot credit\n        newStaker.depositFor(token, users[i], amounts[i]);\n        migratedCount++;\n    }\n}\n\n// StableStaker.sol:638-640 -- the revert it is supposed to prevent\nuint256 received = _pullToken(token, msg.sender, amount);\nuint256 credited = _routeDeposit(token, received);   // DESTINATION-side booked credit\nrequire(credited > 0, \"StableStaker: nothing credited\");",
+      "attackVector": "1. Any address stakes into the source pool and then withdraws down to a 1-wei residual: `stake(token, X); withdraw(token, X-1)`. `StableStaker.withdraw` (:318) has no minimum-remainder check and only removes the user from `_stakers` when `user.amount == 0`, so a 1-wei position persists and is enumerated by `getStakers`. Cost: one wei plus gas. Works whether or not the source pool has a yield strategy.\n2. The owner runs the terminal migration. For a healthy pool (R >= P) `_exitPosition` (:528) computes `credit = amt * min(R,P) / P = 1`, so `amounts[i] == 1` and the guard does NOT fire.\n3. `newStaker.depositFor(token, griefer, 1)` pulls 1 wei and calls `_routeDeposit`, which forwards it to the destination yield strategy. Two independent kill paths, both proven:\n   (a) share price above par (any yield-bearing vault, e.g. a Tokemak Autopool): `vault.deposit(1)` mints 0 shares and ERC4626YieldStrategy.sol:108 reverts `\"ERC4626YieldStrategy: no shares received\"`;\n   (b) share price below par: 1 share is minted, `convertToAssets` floors it to 0 (ERC4626YieldStrategy.sol:115), `_routeDeposit` RETURNS ZERO, and StableStaker.sol:640 reverts `\"StableStaker: nothing credited\"`.\n   The ERC4626MarketYieldStrategy path is equivalent: `_creditedPrincipal(1) = 1*(MAX_BPS-slip)/MAX_BPS == 0` (ERC4626MarketYieldStrategy.sol:106-108).\n4. The entire batch reverts, taking every honest user in it down. The old pool is already terminally `Migrating`, so those users cannot stake, withdraw, claim-accrue or emergency-exit while the operator diagnoses.",
+      "impact": "Migration availability, not funds. No value is lost or stolen; every revert is atomic (verified delta-zero conservation, PROP-CVM-02). The operator recovers by re-batching with the dust addresses filtered out off-chain. Two residuals: (i) the operator must first diagnose an error string that NatSpec explicitly claims cannot occur; (ii) the dust user can NEVER be batch-migrated, and the owner cannot force-exit them (the migrator exposes no raw `batchMigrate` passthrough and `oldStaker.batchMigrate` is `onlyMigrator`), so `oldStaker.finalizeAndReset` -- which requires `_stakers[token].length() == 0` -- is permanently blocked until the dust holder voluntarily calls `userMigrate`.",
+      "exploitWindow": "Single-digit wei. `_routeDeposit` returns 0 (or the strategy reverts) only for `received` below one share-price unit -- 1 wei for a vault near par, up to ~9 wei for a vault that has 10x'd. This is genuinely dust and is stated plainly rather than inflated; the severity rests on the DoS, not on the magnitude.",
+      "poc": "workspace/stable-staker/test/poc/PoC_CVM_DustPoison.t.sol -- 5/5 pass. test_dustUser_bricks_entire_migrate_batch (exact revert \"ERC4626YieldStrategy: no shares received\"), test_routeDeposit_RETURNS_zero_and_trips_nothing_credited (exact revert \"StableStaker: nothing credited\"), test_grief_works_with_a_strategy_backed_source_too, test_routeDeposit_books_zero_for_one_wei, test_control_batch_succeeds_when_dust_user_excluded (also proves the permanent finalizeAndReset block).",
+      "recommendation": "Make the destination deposit non-fatal to the batch: wrap the call as `try newStaker.depositFor(token, users[i], amounts[i]) { migratedCount++; } catch { /* emit a SkippedUser event */ }`, and return the un-deposited residue (or leave it approved and sweep it) so the migrator's delta-zero conservation still holds. Note this requires pairing with a rescue path (see CODE-002), since a caught failure leaves `amounts[i]` in the migrator. A cheaper partial mitigation -- raising the source-side guard to a dust threshold -- is NOT recommended: the correct threshold is a property of the destination strategy, which is exactly the version-specific coupling section (A) exists to avoid.",
+      "reconciliation": {
+        "sameRootCauseClassAs": [
+          "bda951d9f1",
+          "bf5018deab"
+        ],
+        "note": "SAME root-cause class -- 'one poisoned user reverts the whole non-atomic per-user deposit loop' -- reborn on a NEW contract, which mints a new fingerprint that dedup will not flag. bda951d9f1 (open Low) is that class on InPlaceMigrator.migrateIn; bf5018deab (open Low) is the top-up-truncation variant of it on _reinjectWithTopup. This entry is NOT a silent new finding: it is the third instance. What is genuinely NEW here, and why it is filed separately rather than folded in, is that CrossVersionMigrator SHIPS A GUARD FOR EXACTLY THIS AND THE GUARD READS THE WRONG QUANTITY -- neither sibling has a guard at all, so neither carries a false NatSpec safety claim. Fixing bda951d9f1 will not fix this, and vice versa.",
+        "distinctFrom": [
+          "4f143a9573"
+        ],
+        "distinctFromNote": "4f143a9573 (open Low, destination-strategy haircut credit asymmetry) is about credited < received on a SUCCESSFUL deposit -- a silent value shortfall. This is a REVERT/DoS. Different failure mode, different fix. However 4f143a9573's scope should be extended: the haircut asymmetry now also reaches users through CrossVersionMigrator.sol:135 (NatSpec section (E), lines 49-57, declares the missing top-up a deliberate product difference)."
+      }
+    },
+    {
+      "id": "CODE-002",
+      "type": "unrecoverable-funds / missing rescue path",
+      "severity": "qa",
+      "confidence": "high",
+      "contract": "src/CrossVersionMigrator.sol",
+      "function": "n/a (whole contract)",
+      "line": 67,
+      "lineStart": 67,
+      "lineEnd": 162,
+      "title": "CrossVersionMigrator has no rescue/sweep path while its sibling InPlaceMigrator does, and the NatSpec never records the omission as a decision",
+      "description": "The contract's complete code path inventory is `initiateMigration`, `migrate`, `versionOf`, `_versionOf` plus Ownable's three. There is no `rescueERC20`, no sweep, no `receive`, no `fallback`. InPlaceMigrator DOES expose `rescueERC20(token, to, amount)` fenced below its `totalParked[token]` floor. The NatSpec covers immutability (B), wiring (C), zero-credit skips (D), haircuts (E) and the version probe (F) but is silent on recovery -- nothing records that the omission was chosen rather than overlooked.",
+      "attackVector": "Not an attack. Per-call conservation is delta-zero (PROP-CVM-02), so `migrate` itself never leaves a residue. But any balance that arrives by another route is locked forever: an airdrop or misdirected transfer; a positive rebase between the batchMigrate inflow and the depositFor outflows; ETH forced in by selfdestruct or a coinbase payout. Most relevant operationally: an owner who pre-funds the migrator intending to cover a destination haircut achieves NOTHING and loses the funds -- the loop pulls exactly `amounts[i]` and `forceApprove` sets exactly `total`, so extra balance is never consumed. That is a non-obvious owner footgun (Law 3): section (E)'s explicit statement that haircuts are 'not compensated here' invites exactly that manual workaround.",
+      "impact": "Bounded by whatever is mistakenly sent. No user funds are ever at risk from normal operation.",
+      "recommendation": "Add `rescueERC20(address token, address to, uint256 amount) external onlyOwner`. Unlike InPlaceMigrator it needs NO reserved floor, because the contract provably holds nothing across transactions -- state that reasoning in the NatSpec so the asymmetry with InPlaceMigrator is recorded as a decision. This also becomes a prerequisite if CODE-001 is fixed with a try/catch, which by construction leaves a residue."
+    },
+    {
+      "id": "CODE-003",
+      "type": "owner footgun / operational hazard",
+      "severity": "qa",
+      "confidence": "high",
+      "contract": "src/CrossVersionMigrator.sol",
+      "function": "initiateMigration / constructor",
+      "line": 107,
+      "lineStart": 89,
+      "lineEnd": 109,
+      "title": "The terminal, irreversible initiateMigration succeeds with the destination completely unwired, and the constructor accepts oldStaker == newStaker",
+      "description": "`initiateMigration` (:107) is a bare forwarder with no probe of the destination. NatSpec section (C) states the two-sided wiring requirement (setMigrator on BOTH stakers, addToken on the destination, destination authorized as a phUSD minter) in prose only; none of it is asserted on-chain. The constructor (:89-96) rejects zero addresses but not `_oldStaker == _newStaker`.",
+      "attackVector": "Owner fires initiateMigration before wiring the destination. The source pool becomes terminally Migrating and there is NO un-migrate: stake/withdraw/emergencyWithdraw/depositFor are all blocked, emissions are frozen, and finalizeAndReset requires BOTH an empty staker set AND zero totalStaked. The same-staker misconfiguration produces the identical outcome by a different route: initiateMigration freezes the pool and every subsequent migrate reverts on `\"StableStaker: pool not active\"` (depositFor requires Active), so the migrator can never move anyone.",
+      "impact": "VERIFIED FULLY RECOVERABLE IN EVERY ORDERING, no funds ever at risk -- this is why it is QA and not Medium. (a) Missing wiring legs are ordinary owner calls on the live destination; fix them and re-run migrate. (b) A wrong immutable destination is recovered by deploying a replacement migrator and calling setMigrator on the source -- initiateMigration must NOT be re-called (it correctly reverts) and the replacement proceeds straight to batches. (c) Users are never trapped: `userMigrate` is permissionless, has no pause gate, needs no migrator, and pays the full snapshot credit -- proven even with the migrator set to a dead address. The only irreducible cost is that the freeze cannot be lifted until every staker has left.",
+      "law3Judgement": "Borderline, judged OBVIOUS-leaning and therefore filed at QA rather than as a reportable footgun. The irreversibility is documented prominently and repeatedly ('terminal', 'Must be called exactly once per token BEFORE the first migrate batch'), and section (C) spells out the wiring. The non-obvious part is narrow: every OTHER failure in this flow is atomic and self-correcting, which trains the operator to expect a safe revert -- and this one call is the sole exception. Recorded as a cheap hardening item, not asserted as a surprise.",
+      "recommendation": "Add a cheap destination liveness probe to initiateMigration before forwarding -- at minimum `require(address(oldStaker) != address(newStaker))` in the constructor, and a staticcall assertion that the destination has the token registered and this contract as its migrator. Neither couples the migrator to version-specific semantics."
+    },
+    {
+      "id": "CODE-004",
+      "type": "code quality / latent coupling",
+      "severity": "informational",
+      "confidence": "high",
+      "contract": "src/CrossVersionMigrator.sol",
+      "function": "migrate",
+      "line": 133,
+      "lineStart": 122,
+      "lineEnd": 138,
+      "title": "migrate's two loops iterate different bounds: the sum loop uses amounts.length, the deposit loop uses users.length",
+      "description": "Line 122 bounds by `amounts.length`; line 133 bounds by `users.length` while indexing `amounts[i]`. The two are equal only because the trusted, immutable `oldStaker` returns a same-length array. A staker version that returned a shorter array would produce an out-of-bounds panic rather than a clean revert. Not exploitable (both targets are immutable and owner-chosen) but the inconsistency is gratuitous given section (A)'s stated goal of surviving arbitrary future staker redesigns.",
+      "recommendation": "Bound both loops by `amounts.length`, or add `require(amounts.length == users.length)` after the batchMigrate call."
+    },
+    {
+      "id": "CODE-005",
+      "type": "documentation inaccuracy in a fidelity artifact",
+      "severity": "informational",
+      "confidence": "high",
+      "contract": "src/versions/IStableStakerV1.sol",
+      "function": "n/a (header NatSpec)",
+      "line": 63,
+      "lineStart": 63,
+      "lineEnd": 63,
+      "title": "IStableStakerV1's \"the 16 events emitted by the deployed V1 contract\" claim is false as written: it omits three inherited OZ events and the deployed custom-error set",
+      "description": "The snapshot header claims to mirror 'the 16 events emitted by the deployed V1 contract'. The 16 first-party events are exact and complete, but the deployed bytecode at 0xbce8ABC09BaEDCabE93419bF875f6186e182079A also emits OwnershipTransferred(address,address) (OZ Ownable -- V1 emitted it at construction) and Paused(address)/Unpaused(address) (OZ Pausable, emitted by the declared pause()/unpause()). The deployed revert surface likewise carries custom errors the snapshot does not declare: OwnableUnauthorizedAccount, OwnableInvalidOwner, EnforcedPause, ExpectedPause, ReentrancyGuardReentrantCall.",
+      "impact": "Not a live footgun -- no call reverts and no call misdecodes. It degrades log-indexing and revert-decoding for any consumer using the snapshot as its ABI (an on-chain probe returned selector 0x118cdaa7 = OwnableUnauthorizedAccount, which an IStableStakerV1 consumer cannot decode). Filed because this is an accuracy defect in a file whose entire declared purpose is accuracy, and because memory records that falsely-exhaustive documentation raises rather than lowers severity.",
+      "recommendation": "NatSpec-only correction at the next opportunity: 'the 16 events DECLARED BY V1, excluding inherited OpenZeppelin events'. Optionally declare the inherited events and custom errors so the snapshot is a complete ABI."
+    },
+    {
+      "id": "CODE-006",
+      "type": "documentation / undisclosed coupling",
+      "severity": "informational",
+      "confidence": "high",
+      "contract": "src/versions/IStableStakerV1.sol",
+      "function": "n/a (header NatSpec)",
+      "line": 50,
+      "lineStart": 50,
+      "lineEnd": 61,
+      "title": "The snapshot's 'Known external coupling' block omits IStableStakerMigratable, which the frozen file inherits",
+      "description": "Lines 50-54 name IYieldStrategy and IFlax as the snapshot's external couplings but not IStableStakerMigratable, which the interface INHERITS at :61 and which was created at 51700cf (2026-08-26) -- after the V1 deployment. A reshape of that first-party evergreen interface would silently mutate this supposedly-frozen file.",
+      "impact": "Enforced away in practice, hence informational: test/GoldenRule.t.sol (f56df78) pins all three golden-rule selectors to hard-coded byte constants, and .github/scripts/check-migration-surface.sh asserts every src/versions/ snapshot still reads 'is IStableStakerMigratable'. The risk is real but caught; it is simply not disclosed in the header where the other two couplings are.",
+      "recommendation": "Add IStableStakerMigratable to the 'Known external coupling' list and cross-reference the GoldenRule selector pins."
+    }
+  ],
+  "refutations": [
+    {
+      "id": "CVM-U2",
+      "verdict": "REFUTED",
+      "claim": "A version-probe target returning malformed data could revert a migration batch, making NatSpec (F)'s 'advisory only' claim inaccurate.",
+      "finding": "`abi.decode(data, (uint256))` at CrossVersionMigrator.sol:160 CANNOT revert once `data.length >= 32`. `uint256` is a STATIC type: the generated decoder performs only a minimum-length check (`if slt(sub(dataEnd, headStart), 32) { revert }`) and reads the first word. There is no offset to validate and trailing bytes are ignored. Proven empirically against six adversarial return shapes -- 32 bytes of junk, 31 bytes (short), a 200-byte blob, an ABI-encoded dynamic string, a head word of type(uint256).max, and a reverting target. All returned a value; none reverted. The `!ok || data.length < 32` early-out at :159 covers the reverting and short cases. Combined with PROP-CVM-05 (no control flow branches on the result), NatSpec section (F) is ACCURATE and the probe is genuinely advisory. A malformed target pollutes the MigratedAcrossVersions event with a garbage version number and nothing else.",
+      "residual": "One measured caveat, not a finding: a return-bomb costs returndatacopy memory-expansion gas. A 1MB return burned 4,198,604 gas in the probe. Both probe targets are immutable and owner-chosen at deployment, so this is not reachable by an attacker.",
+      "poc": "workspace/stable-staker/test/poc/PoC_CVM_VersionProbe.t.sol -- 2/2 pass."
+    },
+    {
+      "id": "CVM-U1",
+      "verdict": "REFUTED",
+      "claim": "migrate lacks nonReentrant; an ERC777/callback token could achieve something a direct call could not.",
+      "finding": "Defused on four independent grounds. (1) Both entry points are onlyOwner, so re-entering migrate or initiateMigration is impossible from a token hook. (2) The only inbound hook window is inside `newStaker.depositFor` -> `_pullToken` -> `safeTransferFrom`; `depositFor` carries `nonReentrant` (StableStaker.sol:629), so the hook cannot re-enter it to spend the migrator's remaining allowance -- and no other function on the staker spends that allowance. (3) `batchMigrate` has already returned by then, releasing its guard, but a hook calling `oldStaker.userMigrate` gains nothing: every user in the current batch was already zeroed by `_exitPosition` inside batchMigrate, and `_exitPosition` returns 0 for an empty position, so there is no double-credit and no double-pull. (4) `forceApprove` invokes no hook. Independently, a hook-bearing token is a known-invalid class for this suite. No finding."
+    },
+    {
+      "id": "no-user-escape-hatch",
+      "verdict": "REFUTED",
+      "claim": "InPlaceMigrator has permissionless claimTimedOut; CrossVersionMigrator has nothing, so a stalled cross-version migration could leave a user stuck.",
+      "finding": "A user's principal can never be trapped. `StableStaker.userMigrate` (:564) is permissionless, is not `whenNotPaused`, requires only `poolState == Migrating` and a non-zero position, and pays the full fixed snapshot credit `p_i*min(R,P)/P` -- the identical formula `batchMigrate` uses, so a self-exiting user is not penalised relative to a batch-migrated one. Proven to still work with the source staker's migrator pointed at a dead address. CrossVersionMigrator needs no escape hatch of its own because, unlike InPlaceMigrator, it never PARKS user value: its per-call conservation is delta-zero and every failure reverts atomically, so there is nothing for a timeout claim to reclaim. The only residual is qualitative -- a user who self-exits lands in their own wallet rather than in the destination staker -- which is an inferior outcome, not a lock. No finding.",
+      "poc": "workspace/stable-staker/test/poc/PoC_CVM_WiringRecovery.t.sol::test_user_always_has_an_exit_even_with_a_dead_migrator"
+    }
+  ],
+  "ledgerReconciliation": [
+    {
+      "fingerprint": "4f143a9573",
+      "status": "open Low",
+      "action": "NOT re-filed. SCOPE EXTENSION recommended: the destination-strategy haircut asymmetry now also reaches users via CrossVersionMigrator.sol:135, where NatSpec section (E) (lines 49-57) declares the absence of a top-up a deliberate product difference. Same root cause, second call site."
+    },
+    {
+      "fingerprint": "59eebbf87b",
+      "status": "open Low",
+      "action": "NOT re-filed. RELOCATION CONFIRMED: the title still names src/StableStakerMigrator.sol, which was DELETED at 8856781. The live instance of the unbounded per-user external-call loop is now CrossVersionMigrator.sol:122-124 (sum) and :133-138 (deposits). Both are O(users.length) over an owner-supplied array, owner-bounded and paged off-chain via getStakersRange; an over-large batch reverts on gas with no state corruption and is retryable smaller (PROP-CVM-09). Severity unchanged."
+    },
+    {
+      "fingerprint": "dab5a656",
+      "status": "acknowledged Medium",
+      "action": "NOT re-filed and NOT re-escalated. setYieldStrategy idle-sweep discarding creditedPrincipal (StableStaker.sol:274) is outside this Tier-2 interaction scope and is already dispositioned."
+    },
+    {
+      "fingerprint": "bda951d9f1",
+      "status": "open Low",
+      "action": "NOT re-filed. Named explicitly in CODE-001 as the same root-cause class on InPlaceMigrator.migrateIn. Fixing it does not fix CODE-001."
+    },
+    {
+      "fingerprint": "bf5018deab",
+      "status": "open Low",
+      "action": "NOT re-filed. Named explicitly in CODE-001 as the top-up-truncation variant of the same class."
+    }
+  ],
+  "priority3_v1SnapshotVerification": {
+    "verdict": "ACCURATE -- no phantom members, no signature drift, no missing callable members",
+    "method": "On-chain ground truth. Etherscan getabi FAILED (0xbce8...079A is UNVERIFIED -- 'Contract source code not verified'; the ETHERSCAN_API_KEY in the repo-root .envrc works, the contract simply is not verified). Fell back to direct selector probing over RPC_MAINNET via cast call. The deployed contract has no fallback, so a non-existent selector reverts with EMPTY return data while an existing-but-rejecting one returns a decodable revert payload. Discriminator validated with two controls: bogusNonExistentFn12345() -> empty revert, and migrateOut(address,address[]) (deleted in story-004) -> empty revert.",
+    "liveContractState": {
+      "codeSize": "29 KB",
+      "owner": "0xCad1a786...D0B6",
+      "migrator": "0x17DC492A...b342",
+      "pauser": "0x7c5A8EeF...85a3",
+      "phUSD": "0xf3B5B661...D605",
+      "registeredPools": 3,
+      "stakerCountUSDC": 12
+    },
+    "A_phantomMembers": "NONE. All 37 declared members (incl. the 3 inherited from IStableStakerMigratable) resolve on the live address. The nine scrutinised members all confirmed live: poolState (:173, landed 93b7ce6/story-009, 2026-06-09) -> 0; migrationInfo (:176, f5f6039/story-004, reshaped 93b7ce6) -> (0,0); withdrawDisabled (:156, 745fc01/story-001) -> false; finalizeAndReset (:100, a7e2f78->93b7ce6) -> OwnableUnauthorizedAccount; initiateMigration/batchMigrate/depositFor -> 'StableStaker: only migrator'; userMigrate -> 'StableStaker: pool not migrating'. Dating is internally consistent: the latest-landing declared member is 2026-06-09, c3ec65b is 2026-06-09, the claimed deploy is 2026-06-10, and the next source commit (212a6d2, 2026-06-13) is deps-only -- so c3ec65b genuinely was master HEAD on the deploy date.",
+    "STAKER_VERSION": "CORRECTLY OMITTED. Landed 01a3e66/story-016 on 2026-08-27, well after the deploy. The live probe reproduces exactly what src/versions/README.md documents under 'The V1 exception': STAKER_VERSION() reverts with empty data on 0xbce8...079A. This directly corroborates CrossVersionMigrator._versionOf's !ok -> return 1 branch (CrossVersionMigrator.sol:159) against the real deployment.",
+    "B_missingMembers": "Callable surface COMPLETE -- the external function-set diff between c3ec65b and HEAD is empty; the only public-state addition at HEAD is STAKER_VERSION (deliberately post-V1) and an `override` keyword on userInfo (no ABI effect). One cosmetic gap only: inherited events / custom errors -- filed as CODE-005.",
+    "C_signatureDrift": "NONE, verified against live returns rather than source alone. poolInfo(address) field order confirmed on-chain: (15190972222221, 1.477e29, 1787698583, 2036303494) decodes coherently as (phusdPerSecond, accPhusdPerShare, lastRewardTime=unix ts, totalStaked=2036 USDC at 6dp), matching :162-165. userInfo returns exactly 2 values (:169) -- the header's 'arity is load-bearing' warning holds. migrationInfo is the 2-tuple (realized, principalSnapshot) (:176). poolState returns uint8 not the enum -- ABI-identical. No mutability change, no payable member, no parameter reordering.",
+    "note": "A sibling agent separately grades story-015's own drift argument; this is the CODE-level member comparison only."
+  }
+}

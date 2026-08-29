@@ -1,0 +1,277 @@
+{
+  "project": "stable-staker",
+  "run": "stable-staker-14",
+  "commit": "8856781",
+  "baseline": "d95f4a6",
+  "mode": "regression",
+  "agent": "deduplicator",
+  "generatedAt": "2026-08-27",
+  "inputCandidates": 33,
+  "consolidatedFindings": 10,
+  "mergedAway": 13,
+  "routedToManualReview": 9,
+  "droppedOutright": 1,
+
+  "findings": [
+    {
+      "id": "DEDUP-001",
+      "title": "CrossVersionMigrator's batch-survival guard tests the SOURCE credit while the revert fires on the DESTINATION credit (dust poison)",
+      "originalIds": ["PROP-CVM-06 (profiler)", "PATTERN-001", "ECON-003", "CODE-001"],
+      "seenBy": ["contract-profiler", "pattern-matcher", "econ-scanner", "code-scanner", "invariant-generator (window)"],
+      "rootCause": "wrong-side-zero-credit-guard",
+      "contract": "src/CrossVersionMigrator.sol",
+      "function": "migrate",
+      "line": 134,
+      "counterparty": "src/StableStaker.sol:640 require(credited > 0)",
+      "proposedSeverity": "low",
+      "severityNote": "Liveness-only, no value loss; but see the two-layer impact - layer (ii) is a PERMANENT wedge, which the severity-classifier should weigh above a plain batch-retry annoyance.",
+      "impactLayers": [
+        {
+          "layer": "i",
+          "desc": "One batch reverts atomically; operator drops the address off-chain and re-batches. Recoverable. NOTE: this is exactly the remedy NatSpec section (D) explicitly REJECTS, so the contract's own stated design does not accept this workaround."
+        },
+        {
+          "layer": "ii",
+          "desc": "The dust user can NEVER be batch-migrated: CrossVersionMigrator has no raw passthrough and StableStaker.batchMigrate is onlyMigrator. finalizeAndReset stays blocked until that user VOLUNTARILY self-exits via userMigrate. Permanent liveness wedge outside operator control."
+        }
+      ],
+      "evidence": {
+        "poc": "workspace/stable-staker/test/poc/PoC_CVM_DustPoison.t.sol",
+        "pocResult": "5/5 passing, including against the REAL ERC4626YieldStrategy",
+        "tier3Window": "closed-form: ceil(sharePrice)-1 wei above par, 1 wei below par, 0 at par/idle; <=9 wei across 2000 fuzz runs",
+        "falseClaim": "NatSpec (D) and story-018 both assert the guard makes the batch survive a zero-credit user; it does not, in the one case that matters."
+      },
+      "ledgerDisclosure": {
+        "verdict": "KEEP SEPARATE - new fingerprint, cross-reference all three",
+        "relatedEntries": [
+          {"fingerprint": "bda951d9f1", "status": "open", "severity": "low", "where": "InPlaceMigrator.migrateIn", "title": "Poison/zero-credit user reverts the whole migrateIn slice"},
+          {"fingerprint": "bf5018deab", "status": "open", "severity": "low", "where": "InPlaceMigrator._reinjectWithTopup", "title": "small-principal top-up truncation reverts the migrateIn batch"}
+        ],
+        "sameRootCauseClass": true,
+        "whyNotMerged": "Same root-cause CLASS reborn on a NEW contract (CrossVersionMigrator) => mints a NEW fingerprint that dedup would not catch on its own. Per project law this is disclosed, not silently merged and not silently re-minted.",
+        "whatIsGenuinelyNew": "Neither sibling ships a guard for this failure. THIS contract does, and the guard reads the WRONG QUANTITY - so it carries a FALSE SAFETY CLAIM in its NatSpec. Fixing either sibling does not fix this, and fixing this does not fix either sibling."
+      }
+    },
+
+    {
+      "id": "DEDUP-002",
+      "title": "setYieldStrategy sweeps unmatched idle balance into the strategy, permanently bricking that pool's initiateMigration (\"incomplete exit\")",
+      "originalIds": ["invariant-generator newFinding (Tier-3)"],
+      "seenBy": ["invariant-generator"],
+      "rootCause": "unmatched-idle-sweep-vs-pinned-totalStaked",
+      "contract": "src/StableStaker.sol",
+      "function": "setYieldStrategy -> initiateMigration",
+      "lines": "236, 271-274 (sweep); 461-464 (post-check)",
+      "proposedSeverity": "medium",
+      "evidence": {
+        "poc": "workspace/stable-staker/test/poc/PoC_CVM_RevivalBricksMigration.t.sol",
+        "pocResult": "5/5 passing",
+        "independentlyReproducedByDeduplicator": true,
+        "reproTests": [
+          "test_revivedPool_canNeverBeMigratedAgain",
+          "test_oneWeiDonation_bricksTerminalMigrationForever",
+          "test_realERC4626Strategy_sameBrick",
+          "test_brickedMigration_forcesFCFSExitWhenUnderwater",
+          "test_mitigation_rescueIdleBeforeWiring"
+        ],
+        "note": "Per project memory (subagent tool output is not evidence) the deduplicator re-ran this suite directly: 5 passed, 0 failed."
+      },
+      "triggers": [
+        "NO ATTACKER - the protocol's OWN documented revival runbook. 62 wei of migration dust observed over 21 revivals in the Tier-3 campaign.",
+        "Permissionless 1-wei transfer front-running the owner's setYieldStrategy tx."
+      ],
+      "ledgerAdjudication": [
+        {
+          "fingerprint": "678e6fa2",
+          "status": "fixed",
+          "verdict": "DISTINCT - NOT a regression, NOT an incomplete fix",
+          "reasoning": "678e6fa2's defect was the ABSENCE of a state guard, letting setYieldStrategy run on a MIGRATING pool and sweep the realized payout pile R, bricking userMigrate. The fix landed and is INTACT at 8856781: `require(poolState[token] == PoolState.Active, \"StableStaker: pool not active\")` at :236, verified in source. DEDUP-002 does not require Migrating state and is not blocked by that guard - it fires on an ACTIVE pool the guard explicitly PERMITS. Different precondition, different victim (a FUTURE initiateMigration vs the CURRENT userMigrate), different remedy. The invariant agent's distinctness argument was tested and HOLDS.",
+          "regressionRuledOut": "The 678e6fa2 patch is present and unmodified; no restoration is owed. Sending a reader to restore an intact patch would be the error this adjudication exists to prevent."
+        },
+        {
+          "fingerprint": "dab5a656",
+          "status": "acknowledged",
+          "severity": "medium",
+          "verdict": "DISTINCT - but a MATERIAL interaction that must be surfaced BEFORE the human confirms its proposed fix",
+          "sameLine": ":271 (the discarded strategy.deposit return, also re-surfaced by SAST as SLITHER-006 unused-return)",
+          "reasoning": "dab5a656's consequence is UNDER-CREDITING withdrawers (accounting-desync) and requires a NON-empty idle pool at adoption. DEDUP-002's consequence is a permanent BRICK of a future initiateMigration and requires the pool to be EMPTY. Different rootCauseClass => different fingerprint, no collision.",
+          "CRITICAL_INTERACTION": "dab5a656 currently carries proposedStatus=fixed / proposedFixCommit=125f585 / proposedCommand='/ledger stable-staker fixed dab5a656 --commit 125f585', on the basis that story-010's empty-pool gate `require(poolInfo[token].totalStaked == 0)` collapses its root cause. DEDUP-002 proves that THAT VERY GATE is what pins totalStaked==0 while leaving the idle sweep unconditional - i.e. the proposed remedy for the fixGroup 'setyieldstrategy-empty-pool-gate' INTRODUCED this new brick. The human must weigh DEDUP-002 before confirming the proposed 'fixed' for dab5a656, dbdc3ac9b9 and 969722dc9e, all three of which share that fixGroup."
+        },
+        {
+          "fingerprint": "dbdc3ac9b9",
+          "status": "acknowledged",
+          "verdict": "DISTINCT",
+          "reasoning": "M-06 is the underwater-swap lifting the withdraw block (rootCauseClass underwater-swap-rearms-withdraw / stale-totalStaked). DEDUP-002 needs no underwater condition at all and does not touch the withdraw block. Shares only contract:function and the fixGroup."
+        },
+        {
+          "fingerprint": "969722dc9e",
+          "status": "acknowledged",
+          "verdict": "DISTINCT",
+          "reasoning": "M-07 is the rate-vs-execution residual of the M-06 guard (already recorded as incompleteFixOf dbdc3ac9). It concerns the guard's blindness to AMM execution slippage. DEDUP-002 is orthogonal: the brick occurs with a perfectly healthy, non-underwater strategy and zero slippage."
+        },
+        {
+          "fingerprint": "b197e829",
+          "label": "QA-01",
+          "status": "submitted-qa",
+          "verdict": "COMPLEMENTARY - cross-reference, do not merge",
+          "reasoning": "QA-01 observed that under the empty-pool gate the in-place DRAIN branch (:248, capped at totalStaked) is structurally DEAD. DEDUP-002 is the other half of the same observation: the SWEEP (:271-274, bounded by the raw token balance, NOT by totalStaked) is emphatically NOT dead, and is structurally unmatched by any totalStaked increment. The invariant agent's framing is confirmed by source. QA-01 is a stale-NatSpec/dead-code QA item; DEDUP-002 is a live Medium brick. Keep separate, cite each other."
+        }
+      ],
+      "disclosureRequired": {
+        "required": true,
+        "basis": "Re-filing on a root cause the owner already triaged (dab5a656 acknowledged 2026-06-09, plus dbdc3ac9b9 and 969722dc9e in the same fixGroup).",
+        "IMPORTANT_HONESTY_NOTE": "The task asked for the prior entry's `triageReason` quoted VERBATIM. No `triageReason` field exists on any of these entries - the ledger schema uses `triageNote`. Reporting this rather than fabricating a quote.",
+        "verbatimTriageNote_dab5a656": "Owner-accepted 2026-06-09, WILL FIX. Confirmed still live at HEAD 93b7ce6 (idle sweep at src/StableStaker.sol:256-259 still discards strategy.deposit credited return; first-adoption path has no old strategy so the story-008 underwater guard never runs). Fix = the shared setYieldStrategy empty-pool gate (require totalStaked==0); closes this directly by removing the non-empty-pool precondition. See fixPlan. Grouped with dbdc3ac9 (M-06) and 969722dc (M-07).",
+        "refileBasis": "DEDUP-002 is not an override of the owner's acceptance of dab5a656 - it is a NEW defect on a DIFFERENT axis (terminal-migration liveness, not withdrawer credit) that the accepted remedy for dab5a656 CREATES. The owner accepted an under-crediting risk; the owner has not been asked to accept a permanently bricked terminal-migration path. No prior triage is overridden.",
+        "noSilentOverride": true
+      }
+    },
+
+    {
+      "id": "DEDUP-003",
+      "title": "Golden-rule CI gate and PreToolUse hook both fail to prevent DELETION of src/versions/IStableStakerV1.sol",
+      "originalIds": ["F-02 (spec-conformance)"],
+      "seenBy": ["story-faithfulness"],
+      "rootCause": "enforcement-gate-blind-to-deletion",
+      "contract": "tools/check-migration-surface.sh:52-56 + PreToolUse hook",
+      "proposedSeverity": "low",
+      "law": "Law 2 (faithfulness) - the perpetual-snapshot ritual the stories rely on is unenforced",
+      "evidence": "Empirically tested 6-mutation table. check-migration-surface.sh:52-56 prints 'no version snapshots yet' on an empty set WITHOUT setting failure status; the hook counts `function <name>(` occurrences and IStableStakerV1 INHERITS rather than declares the triad, so deletion changes the count by exactly zero.",
+      "status": "NEW"
+    },
+
+    {
+      "id": "DEDUP-004",
+      "title": "story-015's snapshot-extraction ritual targets master HEAD rather than the deploy commit; its drift premise is already materially false",
+      "originalIds": ["F-01 (spec-conformance)"],
+      "seenBy": ["story-faithfulness"],
+      "rootCause": "wrong-provenance-for-perpetual-snapshot",
+      "proposedSeverity": "low",
+      "evidence": "STAKER_VERSION is an ABI member of the extracted snapshot that the LIVE deployed instance lacks - so the snapshot does not describe the deployed contract it purports to freeze. The snapshot as it stands is accurate member-by-member, but the PROCEDURE is not repeatable.",
+      "status": "NEW"
+    },
+
+    {
+      "id": "DEDUP-005",
+      "title": "NatSpec section (E) and story-018 mis-attribute the uncompensated haircut to a source-side underwater strategy; the destination-side haircut is independent and bites in full on a HEALTHY migration",
+      "originalIds": ["F-05 (spec-conformance)", "ECON-001", "MR-001", "MR-003"],
+      "seenBy": ["story-faithfulness", "econ-scanner", "pattern-matcher"],
+      "rootCause": "documentation-misattribution-of-an-independent-loss-leg",
+      "contract": "src/CrossVersionMigrator.sol",
+      "lines": "49-57 (NatSpec E), 135 (the credit leg)",
+      "proposedSeverity": "low",
+      "scopeDecision": {
+        "verdict": "SPLIT - file the DOCUMENTATION defect as new; SCOPE-EXTEND the ledger entry for the CODE defect",
+        "documentationDefect": "NEW finding (this entry). Section (E) reads as EXHAUSTIVE ('This contract redeposits exactly what it received and no more') and both the contract NatSpec and story-018 scope the shortfall to an underwater SOURCE. An operator concludes 'healthy source => no user loss', which is FALSE whenever the destination is wired to a haircutting strategy. Story-018's own test plan repeats the conflation, describing MockYieldStrategy.setDepositSlippageBps as 'how underwater conditions are simulated' - so the healthy-source-plus-haircutting-destination case is UNMODELED by the story AND by the test suite. This mis-attribution is not carried by 4f143a9573 and is genuinely new.",
+        "codeDefect": "NOT a new finding. The underlying credit asymmetry is open Low 4f143a9573 - same root cause, unchanged severity, unchanged reach in kind. Both econ-scanner and code-scanner independently recommended scope extension over a new entry, and the deduplicator concurs: minting a second fingerprint for the same asymmetry on the surviving path would double-count. See ledgerHygiene LH-01.",
+        "justification": "Splitting keeps the honest severity argument intact on both axes: the code leak is already owned by 4f143a9573 at Low, while the FALSE-EXHAUSTIVE documentation is an independent operator footgun (Law 3 - a competent non-malicious owner WOULD be surprised) that no existing entry covers. Per project memory, falsely-exhaustive docs raise severity rather than sanitize."
+      },
+      "quantification": "credited_i = credit_i * (MAX_BPS - slippageToleranceBps) / MAX_BPS. At 100 bps the cohort is booked 1% below the snapshot credit even at R == P; on $10M migrated that is $100k not credited to users.",
+      "reachCaveat": "ZERO on the currently-targeted direct ERC4626YieldStrategy route (~1 wei share-rounding only). The exposure is latent, contingent on wiring a market/AMM-backed destination.",
+      "mergedAwayNote": "MR-001 (accounting framing) and MR-003 (missing-slippage-control framing) were filed by the pattern-matcher as deliberately-separate lenses on one defect; both collapse here. MR-001's flagged alternates 3d61c9552f (acknowledged, migrateOut) and b5218ab2 (submitted, migrateOut) both sit on the DELETED migrateOut path and are NOT the right repoint target - 4f143a9573 is."
+    },
+
+    {
+      "id": "DEDUP-006",
+      "title": "initiateMigration is an unvalidated one-way door: no destination precondition checked, and the constructor omits _oldStaker != _newStaker",
+      "originalIds": ["CODE-003", "PATTERN-003"],
+      "seenBy": ["code-scanner", "pattern-matcher"],
+      "rootCause": "irreversible-action-without-precondition-validation",
+      "contract": "src/CrossVersionMigrator.sol",
+      "line": 107,
+      "proposedSeverity": "DISPUTED - do not resolve at dedup",
+      "severityDispute": {
+        "instruction": "Carry BOTH arguments to the severity-classifier verbatim. Do NOT average them. The deduplicator deliberately does not adjudicate this.",
+        "argumentA": {
+          "agent": "pattern-matcher",
+          "position": "potential-medium, Law-3 footgun",
+          "reasoning": "A competent, non-malicious owner would be SURPRISED that a DESTINATION mistake (token unregistered, migrator unwired, minter rights not granted) is only detected AFTER the SOURCE has been irreversibly frozen. Surprise => footgun => in scope at honest severity."
+        },
+        "argumentB": {
+          "agent": "code-scanner",
+          "position": "QA",
+          "reasoning": "Wrote a PASSING recovery PoC (workspace/stable-staker/test/poc/PoC_CVM_WiringRecovery.t.sol, 4/4) demonstrating that EVERY wiring order is fully recoverable after the fact, and that the irreversibility is prominently documented in NatSpec - making the hazard 'obvious-leaning' under Law 3, hence suppressible as a trusted-owner obvious misconfiguration."
+        },
+        "deduplicatorNote": "Both agents examined the same code and reached defensible opposite conclusions under Law 3's surprise test. The recovery PoC is real and passing (file verified present), which materially strengthens argument B; but recoverability addresses IMPACT, not the SURPRISE test that argument A turns on. This is exactly the 'ambiguous - flag for human review' case."
+      },
+      "constructorGap": "_oldStaker != _newStaker is unchecked; a same-address migrator is constructible."
+    },
+
+    {
+      "id": "DEDUP-007",
+      "title": "CrossVersionMigrator has no rescue/sweep path at all while sibling InPlaceMigrator does, and the NatSpec never records the omission as a decision",
+      "originalIds": ["CODE-002", "PATTERN-002"],
+      "seenBy": ["code-scanner", "pattern-matcher"],
+      "rootCause": "missing-rescue-path-undocumented-asymmetry",
+      "contract": "src/CrossVersionMigrator.sol",
+      "line": 67,
+      "proposedSeverity": "qa/low",
+      "reachBound": "Nothing can arrive via migrate() - Tier-3 invariant_01_migratorTokenConservation proved a per-call balance delta of exactly zero across 750k Foundry calls and 1.0M Medusa calls. Exposure is therefore donation / rebase / misdirected-transfer only.",
+      "law3Angle": "An owner PRE-FUNDING the migrator to cover the haircut - which section (E)'s wording arguably invites (see DEDUP-005) - permanently loses those funds, because the deposit loop pulls exactly amounts[i] and never the surplus. This couples DEDUP-007 to DEDUP-005: the documentation defect creates the very scenario the missing rescue path fails to remedy.",
+      "siblingAsymmetry": "InPlaceMigrator ships a rescue path; CrossVersionMigrator does not, and no NatSpec line records this as an intentional decision."
+    },
+
+    {
+      "id": "DEDUP-008",
+      "title": "IStableStakerV1.sol NatSpec inaccuracies: the '16 events' claim and the 'Known external coupling' block are both incomplete",
+      "originalIds": ["CODE-005", "CODE-006"],
+      "seenBy": ["code-scanner"],
+      "rootCause": "inaccurate-frozen-snapshot-natspec",
+      "contract": "src/versions/IStableStakerV1.sol",
+      "lines": "50, 63",
+      "proposedSeverity": "informational",
+      "detail": "(a) 'the 16 events emitted by the deployed V1 contract' omits OwnershipTransferred, Paused, Unpaused and the OZ custom-error set. (b) The 'Known external coupling' block omits IStableStakerMigratable, which the frozen file itself inherits.",
+      "mergeReason": "Both are the same defect class (the perpetual snapshot's self-description is not exhaustive) on the same file, two lines apart. Consolidated to one QA entry.",
+      "escalationNote": "Per project memory, a falsely-exhaustive doc block carries no suppression authority and can RAISE severity. These two are genuinely informational on their own, but they compound DEDUP-003: a snapshot whose self-description is wrong AND whose deletion is unguarded is weaker than either defect suggests alone."
+    },
+
+    {
+      "id": "DEDUP-009",
+      "title": "migrate's two loops iterate different bounds: the sum loop uses amounts.length, the deposit loop uses users.length",
+      "originalIds": ["CODE-004"],
+      "seenBy": ["code-scanner"],
+      "contract": "src/CrossVersionMigrator.sol",
+      "lines": "122 vs 133",
+      "proposedSeverity": "informational",
+      "NOT_IN_SUPPLIED_INVENTORY": true,
+      "recallNote": "This candidate was present in code-scan.json but ABSENT from the task's candidate inventory. Filed rather than dropped, per the no-silent-drop rule.",
+      "detail": "Line 122 bounds by amounts.length; line 133 bounds by users.length while indexing amounts[i]. Equal only because the trusted immutable oldStaker returns a same-length array. A staker version returning a shorter array yields an out-of-bounds panic rather than a clean revert.",
+      "whyNotDropped": "Not exploitable (both targets immutable and owner-chosen), but it directly contradicts section (A)'s stated goal of surviving arbitrary future staker redesigns - so it is a Law-2 faithfulness nick, not pure style."
+    },
+
+    {
+      "id": "DEDUP-010",
+      "title": "CLAUDE.md's description of golden-rule enforcement layer 1 over-states what the layer actually does",
+      "originalIds": ["F-03 (spec-conformance)"],
+      "seenBy": ["story-faithfulness"],
+      "proposedSeverity": "informational",
+      "NOT_IN_SUPPLIED_INVENTORY": true,
+      "recallNote": "Present in spec-conformance.md but ABSENT from the task's candidate inventory. Filed rather than dropped.",
+      "detail": "The compile-time bypass named by story-014's review IS genuinely closed - that half is faithful. But the CLAUDE.md prose describing layer 1 claims more coverage than the layer delivers. Compounds DEDUP-003, which shows the deletion axis is entirely unguarded.",
+      "noteOnF04": "F-04 (story-018's 'strict functional superset' claim) was verified TRUE by the story-faithfulness agent and correctly yields NO finding. Recorded here so its absence from the finding list is explicit rather than silent."
+    }
+  ],
+
+  "mergedAway": [
+    {"originalId": "PROP-CVM-06", "into": "DEDUP-001", "reason": "Profiler property VIOLATED - same defect, profiler lens."},
+    {"originalId": "PATTERN-001", "into": "DEDUP-001", "reason": "Same contract:line:function, same root cause."},
+    {"originalId": "ECON-003", "into": "DEDUP-001", "reason": "Econ lens on the identical guard; econ-scanner itself flagged the expected code-scanner duplicate."},
+    {"originalId": "CODE-001", "into": "DEDUP-001", "reason": "Strongest write-up; its two-layer impact analysis is the preserved detail."},
+    {"originalId": "ECON-001", "into": "DEDUP-005", "reason": "Same mis-attribution as F-05; econ supplies the quantification."},
+    {"originalId": "F-05", "into": "DEDUP-005", "reason": "Same defect, spec lens; supplies the story-018 test-plan conflation evidence."},
+    {"originalId": "MR-001", "into": "DEDUP-005", "reason": "Pattern-tier accounting lens on the destination haircut; pattern-matcher explicitly deferred the merge decision to dedup."},
+    {"originalId": "MR-003", "into": "DEDUP-005", "reason": "Missing-slippage-control lens on MR-001; pattern-matcher predicted this collapse."},
+    {"originalId": "PATTERN-003", "into": "DEDUP-006", "reason": "Same one-way-door defect; its Medium argument is PRESERVED as argumentA, not discarded."},
+    {"originalId": "CODE-003", "into": "DEDUP-006", "reason": "Same defect; its QA argument is PRESERVED as argumentB."},
+    {"originalId": "PATTERN-002", "into": "DEDUP-007", "reason": "Same missing-rescue-path defect."},
+    {"originalId": "CODE-006", "into": "DEDUP-008", "reason": "Same file, same defect class as CODE-005."},
+    {"originalId": "SLITHER-006 (StableStaker.sol:274 unused-return)", "into": "ledger entry dab5a656", "reason": "SAME LINE as the acknowledged Medium dab5a656 (the discarded strategy.deposit creditedPrincipal return). Merged into the existing ledger entry, NOT filed separately - this is the deterministic tier re-surfacing a known, already-triaged accounting-desync. Also cited as corroborating detail on DEDUP-002."}
+  ],
+
+  "droppedOutright": [
+    {
+      "originalIds": ["CVM-U1", "CVM-U2", "no-user-escape-hatch"],
+      "reason": "These are profiler/code-scanner DEFUSED items - explicit negative results, not findings. CVM-U2: abi.decode(data,(uint256)) cannot revert once data.length >= 32. CVM-U1: reentrancy defused on four independent grounds (both entry points onlyOwner, etc). no-user-escape-hatch: userMigrate is permissionless and not whenNotPaused, so principal can never be trapped. Recorded as no-finding rather than binned: each is a load-bearing NEGATIVE that supports other findings' scoping (notably DEDUP-002's claim that the FCFS hatch is the only remaining exit)."
+    }
+  ]
+}
