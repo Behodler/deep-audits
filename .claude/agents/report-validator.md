@@ -54,7 +54,7 @@ PoC File: H-01-poc.t.sol
 - **Standalone Check**: PoC only imports `forge-std/Test.sol`
 - **No External Dependencies**: All code inlined
 - **Tests Pass**: `forge test` succeeds
-- **Separate File**: PoC in `reports/<project>/pocs/<label>-poc.t.sol`
+- **Separate File**: PoC in `reports/<project>/XX/pocs/<label>-poc.t.sol`
 
 ### Quality Assessment
 - **Professional Tone**: Matches audit report standards
@@ -127,28 +127,28 @@ PoC File: H-01-poc.t.sol
 ### Format Validation Commands
 ```bash
 # Check for # headings (should return nothing for valid report)
-grep "^# " reports/<project>/submissions/<label>-submission.md
+grep "^# " reports/<project>/XX/submissions/<label>-submission.md
 
 # Check for exactly two ## headings
-grep "^## " reports/<project>/submissions/<label>-submission.md | wc -l
+grep "^## " reports/<project>/XX/submissions/<label>-submission.md | wc -l
 # Expected: 2
 
 # Check heading names
-grep "^## " reports/<project>/submissions/<label>-submission.md
+grep "^## " reports/<project>/XX/submissions/<label>-submission.md
 # Expected:
 # ## Finding description and impact
 # ## Recommended mitigation steps
 
 # Check for inline PoC code blocks (should return nothing)
-grep -E "^```(solidity|diff)" reports/<project>/submissions/<label>-submission.md | head -5
+grep -E "^```(solidity|diff)" reports/<project>/XX/submissions/<label>-submission.md | head -5
 # Code blocks for vulnerable code snippets are OK, but NOT full PoC tests
 
 # Check metadata comment
-head -10 reports/<project>/submissions/<label>-submission.md
+head -10 reports/<project>/XX/submissions/<label>-submission.md
 # Should see <!-- C4 Submission Metadata ... -->
 
 # Check PoC standalone (only forge-std imports)
-grep "^import" reports/<project>/pocs/<label>-poc.t.sol
+grep "^import" reports/<project>/XX/pocs/<label>-poc.t.sol
 # Should only show forge-std imports
 ```
 

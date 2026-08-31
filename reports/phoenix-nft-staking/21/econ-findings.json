@@ -1,0 +1,315 @@
+{
+  "project": "phoenix-nft-staking",
+  "reportDir": "reports/phoenix-nft-staking/21",
+  "commit": "c881a428c87ef4ef42ba07a71be5d49101c9006d",
+  "scanTimestamp": "2026-07-21T00:00:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "contractsScanned": 10,
+  "sourceReadJustification": "Profiles existed only for the two BatchNFTMinter files. Source was read directly for src/BatchNFTMinterMultiToken.sol (full), src/BatchNFTMinter.sol:180-313, src/NFTStakerDepletion.sol (_syncBudget/_updatePool/_recomputeSchedule/stake/unstake/claim/depositFor/_exitPosition/pendingReward), src/NFTStakerMigrator.sol:190-340, src/InPlaceNFTStakerMigrator.sol:240-410, docs/multi-token-nudge.md 4.5, test/BatchNFTMinterMultiTokenNudge.t.sol:655-680 — each to verify a suspected PROTOCOL-WIDE economic issue named in the task brief, not to re-derive local arithmetic.",
+  "structuralNote": "story-022 Stage 7 (fba4991) split the multi-token nudge out of the deployed src/BatchNFTMinter.sol into the NEW src/BatchNFTMinterMultiToken.sol. Findings below are filed against the file the code lives in at HEAD. ECON-001..004 are RELOCATIONS of run-20 lineage (new fingerprints, same root causes); ECON-005 is a genuinely NEW finding on the frozen deployed file that only became visible because the split created a hardened twin to diff against.",
+
+  "findingsCount": 8,
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "unbounded-value-extraction / free-mint via contract-funded batch",
+      "title": "Composed PAT-003 + PAT-004: `paymentAmount = 0` lets any caller mint from the contract's own payment-token balance and sweep the remainder — extraction is NOT bounded by the caller's contribution",
+      "severity": "potential-high",
+      "severityReasoning": "Run-20 settled the step-10 sweep at Medium (D-22) on the explicit bound that 'incremental extraction is capped by the caller's OWN donation — donate-forward defeat, not third-party theft'. THAT BOUND IS REFUTED BY THE COMPOSITION. `paymentAmount` is a free parameter with no lower bound and no post-loop reconciliation, so the caller's contribution can be exactly ZERO while the extraction equals the contract's entire pre-existing payment-token balance. With contribution = 0, there is nothing left for the extraction to be 'capped by'. C4 High = 'assets can be stolen directly via a valid attack path without hypotheticals'; the only precondition is that the contract holds a payment-token balance it did not receive from the current caller, which the contract's own design causes it to accumulate. Proposed High for the MECHANIC; see `presentExposure` for the honest bound on funds at risk TODAY, which is unverified at this run and must not be used to inflate OR to discount the rating.",
+      "contract": "src/BatchNFTMinterMultiToken.sol",
+      "function": "batchMint",
+      "line": 381,
+      "lineStart": 356,
+      "lineEnd": 387,
+      "alsoAffects": "src/BatchNFTMinter.sol:283-284 (pull+forceApprove) and :305-311 (sweep) — byte-equivalent on the FROZEN, MAINNET-DEPLOYED file",
+      "codeSnippet": "// 5. paymentToken.safeTransferFrom(msg.sender, address(this), paymentAmount);   // <- paymentAmount may be 0\n// 6. paymentToken.forceApprove(address(nftMinter), type(uint256).max);          // <- ceiling decoupled from paymentAmount\n// 7. for (i < count) nftMinter.mint(...);                                       // <- spends CONTRACT balance, not caller's\n// 10. uint256 remaining = paymentToken.balanceOf(address(this));\n//     if (remaining / DUST_THRESHOLD != 0) {\n//         paymentToken.safeTransfer(msg.sender, remaining);                     // <- WHOLE balance, ungated\n//         totalPaid = paymentAmount > remaining ? paymentAmount - remaining : 0; // <- floors at 0",
+      "attackScenario": "Let R = the contract's payment-token balance at call time (not the caller's), C = the dispatcher's cumulative charge for `count` mints.\n1. Attacker calls `batchMint(count, recipient = self, paymentAmount = 0, rewardTokens = [], minRewards = [])`.\n2. Step 5 pulls 0 — `safeTransferFrom(caller, this, 0)` needs no allowance and no balance, and does not revert on a standard ERC20 (USDC/USDS both permit zero-value transferFrom).\n3. Step 6 approves the minter for `type(uint256).max` — NOT for `paymentAmount`. This is the load-bearing composition: had the allowance been capped at `paymentAmount` (= 0), step 7 would revert at the funding boundary and the whole attack would be dead.\n4. Step 7 mints `count` NFTs. The dispatcher pulls C from the CONTRACT's balance R. Succeeds whenever R >= C.\n5. Step 10 reads `remaining = R - C` and sends ALL of it to `msg.sender`, gated only on `remaining >= DUST_THRESHOLD (1e6)`. There is no `nudgeSize` gate, no qualification check, and no comparison against what the caller pulled in at step 5.\n6. `totalPaid = paymentAmount > remaining ? paymentAmount - remaining : 0` evaluates `0 > remaining` = false, so `totalPaid = 0`. The return value correctly reports that the caller paid nothing — the floor-at-0 is the contract's own arithmetic admission that the sweep can exceed the caller's contribution.\nNet: attacker receives `count` NFTs (economic value C, free) PLUS `R - C` in payment token, having contributed 0.",
+      "quantifiedImpact": "Extraction = R (the entire pre-existing payment-token balance), split as C in minted NFT value and R - C in cash. Attacker cost = gas only. Optimal attacker sets `count` to the largest value with cost(count) <= R if NFTs are worth more than face, else `count = 1` to maximise the cash leg. Repeatable: every subsequent third-party payment-token inflow re-arms it. There is no upper bound on R in the contract.",
+      "preconditions": [
+        "The contract holds payment token that did not come from the current caller. Three documented sources, all live-by-design: (a) the sub-`DUST_THRESHOLD` residue the NatSpec at :63-68 says is 'intentionally left ... and is picked up by the next batch's sweep'; (b) a third-party donation, which the same NatSpec dismisses as 'simply donates to the next caller'; (c) a dispatcher/hook configured to forward payment token BACK to the batch minter — the NudgeRatchet configuration run-20 D-17 documented, where `primeToken()` is USDC and 100% of every USDC mint price is forwarded to `batchMinter`. Source (c) is the one that makes R large; (a) alone caps R at 1e6-1 wei (= 1 USDC at 6dp, negligible at 18dp).",
+        "R >= C for the free-mint leg; R >= 1e6 for the cash leg. Either leg alone is sufficient for a finding.",
+        "`tokenMinter` and `dispatcherIndex` configured (otherwise batchMint reverts) — i.e. the contract is operational."
+      ],
+      "presentExposure": "NOT VERIFIED AT THIS RUN — no mainnet reads were performed. Inherited from run-20 D-22/D-23 (read-only, block 25572875): `0x81896F48…` (RatchetBatchNFTMinter, dispatcherIndex 7, primeToken = canonical USDC) held 0 USDC/USDS/ETH and archive reads showed no inter-block pot ever existed, so no historical loss occurred via this path; `NudgeRatchet.batchMinter()` had been REPOINTED to `0x86866e01…`, which held 219.99 USDC. IMPORTANT — do NOT assert that the 219.99 USDC is sweepable: on the frozen contract `nudgePaymentToken` must differ from the derived payment token, so if that 219.99 USDC is the gated nudge bounty D-23 describes, it is reachable via the nudge gate and NOT via step 10. Which token is payment vs nudge on `0x86866e01…` is UNVERIFIED. A re-read of `dispatcherIndex()`/`primeToken()`/`nudgePaymentToken()` on both instances is required before any severity is finalised. Per the brief: the mechanic is real regardless; non-deployment of the multi-token file must not discount it, and a zero balance today must not inflate it.",
+      "affectedParties": ["whoever funded the contract's payment-token balance (protocol treasury, a dispatcher fee route, or a prior batcher's residue)", "the next honest batcher, whose expected refund is gone"],
+      "profitability": "Profitable whenever R - C > gas. On a 6-decimal payment token DUST_THRESHOLD = 1e6 = 1.00 USDC, so the cash leg is profitable from ~1 USDC upward at L1 gas only if R is tens of USDC; the free-mint leg is profitable at any R >= C regardless of the dust gate.",
+      "recommendation": "Bound the refund to the caller's own unspent budget rather than the whole balance, and cap the allowance at the funded amount. Concretely: record `uint256 spendable = paymentAmount;` and `forceApprove(minter, paymentAmount)` at step 6; at step 10 compute `refund = paymentAmount - (balanceBeforePull + paymentAmount - balanceNow)` clamped to `paymentAmount`, i.e. never refund more than was pulled. NOTE — this recommendation is REASONED, NOT VALIDATED against the suite; run-20 D-35 recorded that an invented 'durable fix' for this exact site was deleted at validation. Treat it as a property to establish ('refund <= paymentAmount, always'), not as a patch to apply unreviewed.",
+      "confidence": "high",
+      "ledgerCrossRef": ["M-01 (open, BatchNFTMinter.sol — RELOCATED to BatchNFTMinterMultiToken.sol)", "M-07 (open, BatchNFTMinter.sol — RELOCATED)", "run-20 ECON-001", "run-20 D-22 (the bound this finding refutes)", "Q-04 (open)"],
+      "boundRefuted": "run-20 D-22 / R-7: 'incremental extraction is capped by the caller's OWN donation — donate-forward defeat, not third-party theft'. Refuted because `paymentAmount` has no lower bound; a caller who contributes 0 has no donation for the extraction to be capped by, and the extracted R belongs to third parties."
+    },
+
+    {
+      "id": "ECON-002",
+      "type": "cross-contract rounding/snapshot exploitation — self-funded round-trip",
+      "title": "Duplicate `rewardTokens` entries defeat the load-bearing 'donate forward' mechanic; the 'fails closed' defence is CONDITIONAL on zero in-batch donations and the witness test proves it only under that condition",
+      "severity": "potential-medium",
+      "severityReasoning": "Medium, not High: the excess a caller captures over the honest payout is bounded by their OWN batch's donations D (they cannot reach the next claimant's future donations, only their own), so this is protocol-revenue leakage and destruction of the incentive mechanism rather than theft of an unrelated party's principal. It is not Low because the mechanic it defeats is described three times in the source as 'load-bearing' and 'the only thing preventing a caller from funding their own reward inside a single transaction' (:336-339, :393-397, :441-447) — a documented critical invariant is bypassed by adding one array element.",
+      "contract": "src/BatchNFTMinterMultiToken.sol",
+      "function": "_snapshotRewards / _payRewards",
+      "line": 424,
+      "lineStart": 416,
+      "lineEnd": 461,
+      "codeSnippet": "// _snapshotRewards, no dedupe:\n//   uint256 available = qualifies ? IERC20(rewardToken).balanceOf(address(this)) : 0;\n//   snapshot[i] = available;\n// _payRewards, pays each entry independently:\n//   uint256 amount = snapshot[i];\n//   IERC20(rewardToken).safeTransfer(recipient, amount);",
+      "arithmetic": "Let B0 = this contract's balance of token X immediately before the mint loop (the PRIOR pot), D = the reward-token X the dispatcher donates into this contract during THIS batch's `count` mints. The design's own stated premise (:330-332, 'The dispatcher donates reward token into this contract on EVERY mint') gives D > 0 in production.\n\nWith k identical entries of X in `rewardTokens`:\n  snapshot[0..k-1] = B0 (all read pre-loop, all equal).\n  Balance at payout time = B0 + D.\n  Transfer m succeeds iff balance remaining >= B0, i.e. iff (B0 + D) - (m-1)*B0 >= B0  <=>  D >= (m-1)*B0.\n  Therefore the number of entries that succeed is  m_max = 1 + floor(D / B0).\n  Total captured = min(k, m_max) * B0.\n  Excess over the honest single-entry payout = (min(k, m_max) - 1) * B0, which is <= D.\n  A caller who sets k = m_max captures floor(1 + D/B0) * B0 — up to the ENTIRE balance B0 + D truncated to a multiple of B0 — and reverts (safeTransfer -> ERC20InsufficientBalance -> whole tx rolls back) if k > m_max, so the caller simply picks k = m_max off-chain and never pays for a failed attempt.\n\nEXACT CONDITION FOR THE 'FAILS CLOSED' CLAIM TO BE FALSE:  D >= B0.  i.e. whenever this batch's own donations are at least the size of the prior pot. That is not an edge case: it is the ordinary state of a large batch minted against a small standing pot, and it is exactly the state the donate-forward mechanic exists to create.",
+      "attackScenario": "1. Attacker (or any batcher running the numbers) reads B0 = X.balanceOf(batchMinter) and estimates D = per-mint X donation * count.\n2. Sets k = 1 + floor(D / B0) and calls `batchMint(count >= nudgeSize, recipient = self, paymentAmount, rewardTokens = [X, X, ..., X] (k times), minRewards = [0,...])`.\n3. Snapshot pass reads B0 into all k slots (payment-token exclusion is satisfied — X != paymentToken).\n4. Mint loop runs; the dispatcher donates D of X into the contract.\n5. Payout pass transfers B0 k times. All k succeed by construction of k.\n6. Attacker walks away with B0 + (up to) D — the prior pot PLUS a refund of their own batch's donations.\nEffect: the next claimant's pot is B0+D - k*B0 instead of D. The 'donate forward' seed is consumed by the batcher who generated it, collapsing the incentive into the self-funded round-trip the source explicitly says must be impossible.",
+      "quantifiedImpact": "Per call: up to D of protocol-routed reward token refunded to the batcher who generated it (a discount on their own mint cost), and the successor pot reduced from D to (B0 + D) mod B0. Under run-20 D-16's production configuration (DISPATCHER_INDEX = 4, BalancerPoolerV2, primeToken() = USDS, forwarding a USDC cut to the batcher on every dispatch), USDC is simultaneously a legal reward token AND a per-mint donation, so D is the USDC cut of the whole batch — i.e. the batcher recovers the entire fee cut that was routed to the nudge. Absolute magnitude is not quantified here because the per-mint cut is set in the sibling dispatcher, which is out of this project's scope; flagged UNVERIFIED.",
+      "preconditions": [
+        "B0 > 0 (a zero snapshot is skipped by `if (amount == 0) continue` at :456, so an empty prior pot is immune).",
+        "D >= B0 for even one duplicate to succeed. Equivalently: the batch is large relative to the standing pot.",
+        "count >= nudgeSize (the caller must genuinely pay for that many real mints — the minter and dispatcher are owner-pinned, so this cost cannot be faked).",
+        "X != paymentToken (the :426-428 exclusion is unconditional and holds)."
+      ],
+      "witnessGap": "test/BatchNFTMinterMultiTokenNudge.t.sol:664 `test_DuplicateRewardTokenFailsClosed` is the declared §4.5 witness. It calls `_fundPots()` and asserts `expectRevert()` on `[rewardA, rewardA]` — but the mock configures NO per-mint rewardA donation, so it runs at D = 0, where m_max = 1 and fail-closed is TRIVIALLY true. The suite therefore certifies the property under precisely the condition that makes it unfalsifiable. This is ledger Q-01, and it is the reason the spec text at docs/multi-token-nudge.md:198-207 states the fail-closed behaviour as unconditional when it is not.",
+      "documentationMismatch": {
+        "docQuote": "docs/multi-token-nudge.md §4.5: 'both entries snapshot the same balance. The first transfer drains it; the second either reverts on insufficient balance or transfers into a now-empty pot. Either way it fails closed and harms only the caller.'  Source NatSpec :262-264: 'Duplicate entries both snapshot the same balance and the second transfer fails closed'.",
+        "actualBehaviour": "The second transfer succeeds whenever D >= B0, paying the caller a second full B0 out of a balance the same document says must stay behind ('their own batch's donations stay behind to seed the next claimant', :394-396).",
+        "discrepancy": "The spec's 'either way' enumerates two outcomes and omits the third and most likely one in production: the second transfer SUCCEEDS out of the in-batch donations. It harms the next claimant and the protocol's fee routing, not only the caller."
+      },
+      "recommendation": "Do NOT fix by re-reading `balanceOf` at the payout site — that is the exact §4.2 refactor the source forbids at three separate sites and would collapse the incentive globally (run-20 D-16 records this as a FIX TRAP). Correct fixes: (a) clamp each transfer to `min(snapshot[i], balanceOf(address(this)))` — cheap, O(1) per entry, and simultaneously closes the fee-on-transfer payout-vs-delivered gap; or (b) zero `snapshot[j]` for j > i on the first payout of each address. Then extend the §4.5 witness to configure a non-zero per-mint donation so it tests at D > 0.",
+      "confidence": "high",
+      "ledgerCrossRef": ["M-02 (open, BatchNFTMinter.sol — RELOCATED to BatchNFTMinterMultiToken.sol)", "Q-01 (open, witness gap)", "run-20 F-20-01", "run-20 D-16 (fix trap)"]
+    },
+
+    {
+      "id": "ECON-003",
+      "type": "intent-verification / documentation-vs-implementation mismatch",
+      "title": "The NatSpec's honeypot dismissal — 'the pot is by construction a fraction of the cost of the nudgeSize mints' — is asserted as an invariant but is enforced nowhere; both premises behind the accepted-nudge lineage have expired",
+      "severity": "potential-medium",
+      "severityReasoning": "Medium as an intent/spec-conformance finding, not High: no unprivileged actor can force the pot above the mint cost, so there is no attack the reader can execute at will — the harm requires a funding stream to outpace bot competition. But the claim is the SOLE stated basis on which the value-blind nudge gate (ledger H-01) and the winner-take-all MEV race (ledger M-01) were closed, and both closures are now unsupported. Per CLAUDE.md an expired closure is its own bucket, ranked for visibility rather than restored.",
+      "contract": "src/BatchNFTMinterMultiToken.sol",
+      "function": "batchMint (gate at :352, payout at :452-461)",
+      "line": 352,
+      "lineStart": 51,
+      "lineEnd": 61,
+      "codeSnippet": "// NatSpec :56-61:\n//   The \"honeypot\" framing does not apply, because the pot is by construction a\n//   fraction of the cost of the `nudgeSize` mints required to qualify — every\n//   claim is net-positive for the protocol.\n// Implementation :349-353:\n//   uint256 _nudgeSize = nudgeSize;\n//   qualifies = _nudgeSize != 0 && count >= _nudgeSize;   // purely numeric\n// Payout :455-458:\n//   uint256 amount = snapshot[i];                          // ENTIRE pre-loop balance\n//   IERC20(rewardToken).safeTransfer(recipient, amount);   // to a caller-chosen recipient",
+      "documentationMismatch": {
+        "docQuote": "src/BatchNFTMinterMultiToken.sol:56-61 — 'The \"honeypot\" framing does not apply, because the pot is by construction a fraction of the cost of the nudgeSize mints required to qualify — every claim is net-positive for the protocol.'",
+        "actualBehaviour": "Nothing in the contract relates the pot to the mint cost. `nudgeSize` is a bare count; the payout is `balanceOf(address(this))`; the funding side is entirely exogenous (anyone can transfer any ERC20 in — the same NatSpec calls this 'Permissionless top-up ... No owner transaction is involved', :45-47). The word 'construction' names an invariant the code does not construct.",
+        "discrepancy": "A claim about the live funding rate is written as a structural property. Nothing bounds the pot except bot competition — an off-chain, non-contractual mitigation."
+      },
+      "premiseReDerivation": {
+        "premise1": {
+          "statement": "pot < nudgeSize * mintPrice",
+          "status": "DEGRADED — not enforced by construction",
+          "evidenceThisRun": "Re-derived from HEAD source: the gate at :349-353 reads only `nudgeSize` and `count`; the payout at :455 reads only `snapshot[i]`; there is no term in either expression that mentions price, cost, `paymentAmount`, or `totalPaid`. The two quantities are computed from disjoint state. Verified in-scope and structural.",
+          "evidenceInherited": "run-20 D-20: the primary funder is `StableYieldAccumulator.claim()` routing `nudgeSplit`% (30, cut to 20 on 2026-06-10) to the nudge address (StableYieldAccumulator.sol:512-516) — an unbounded, time-accumulating stream with no relationship to mint cost; ~6x margin observed empirically. MARKED UNVERIFIED at this run (sibling repo, out of this project's scope)."
+        },
+        "premise2": {
+          "statement": "minted NFTs have no realizable / redemption path, so the mints are a pure cost to the claimer",
+          "status": "NO LONGER HOLDS",
+          "evidenceInherited": "run-20 D-20: NFTMinterV2 is a plain ERC1155Supply with no transfer restriction, and units stake for phUSD at 30% (NFTStaker) / 45% (NFTStakerPriceScaled) APY; on the ratchet path the mint is free. Only 'no burn-for-underlying' survives (NFTMinterV2.sol:341-345). MARKED UNVERIFIED at this run — NFTMinterV2 lives in the yield-claim-nft sibling, outside this project's scope; the staking half IS in scope and confirmed (NFTStakerDepletion/NFTStakerPriceScaled accept the units and emit phUSD).",
+          "economicConsequence": "The claimer's cost is not `nudgeSize * mintPrice` but `nudgeSize * mintPrice - resaleValue - PV(staking yield)`. The break-even pot at which the honeypot framing fails is therefore strictly BELOW the mint cost, not equal to it. The margin the NatSpec relies on is smaller than the NatSpec's own arithmetic implies."
+        }
+      },
+      "attackScenario": "Not an attack so much as a race the design invites: any bot monitoring the reward-token balances of the batch minter computes `pot_value - (nudgeSize * mintPrice - resale - PV(yield))` and fires the moment it goes positive. Because `recipient` is caller-chosen and the payout is winner-take-all on the pre-loop snapshot, the winner is decided by gas priority — a standard MEV auction in which the protocol's entire nudge budget is the prize and the intended beneficiary (a batcher doing useful work) has no advantage over a bot doing the minimum qualifying batch.",
+      "quantifiedImpact": "Bounded by pot size, which is unbounded in the contract. The `minRewards` floor (:280-291) protects the LOSER of the race from paying mint costs for a sniped pot but explicitly does not prevent the loss — the NatSpec says so itself at :288-291.",
+      "preconditions": ["nudgeSize != 0 (feature enabled)", "pot value exceeds the net cost of nudgeSize mints, where net cost is now reduced by NFT resale + staking yield (premise 2)"],
+      "ownerFootgun": "Law-3 relevant and IN SCOPE: a competent, non-malicious owner reading :56-61 would reasonably conclude that over-funding is structurally impossible and that routing a fee stream here is safe. It is not — the funding side is unbounded and permissionless, and the documented recovery procedure ('pause first, then rescue', :198-201) is unavailable on the deployed instances because `pauser == address(0)` on both (run-20 D-23, UNVERIFIED at this run). Surprise ⇒ footgun ⇒ report.",
+      "recommendation": "Either (a) enforce the claimed invariant — cap the payout at a function of realised spend (`totalPaid`), so the payout can never exceed a configured fraction of what the claimer actually paid; or (b) delete the 'by construction' claim from the NatSpec and replace it with the honest statement: the pot is bounded only by off-chain bot competition, and the owner must monitor the funding rate. (b) alone is sufficient to close the SPEC finding; only (a) closes the economic one. Independently and cheaply: set a non-zero `pauser` on every deployed instance so the documented rescue sequence is executable.",
+      "confidence": "high (spec mismatch) / medium (economic magnitude — depends on out-of-scope sibling state)",
+      "ledgerCrossRef": ["H-01 (marked fixed — EXPIRED CLOSURE, run-20 proved still-live; code now RELOCATED to BatchNFTMinterMultiToken.sol under a fingerprint dedup cannot match)", "M-01 (marked fixed — EXPIRED CLOSURE, same relocation)", "F-20-07 / WATCH-19 (open)", "run-20 D-20, D-23"],
+      "expiredClosureNote": "Per the 'expired closure vs regression' rule: H-01 and M-01 are NOT regressions. Their patches were never reverted; their RATIONALE expired. Do not send a reader to restore an intact patch. The relocation to a new file additionally means dedup will not match them on `contract`, so they must be reconciled by root cause."
+    },
+
+    {
+      "id": "ECON-004",
+      "type": "permissionless whole-balance sweep of arbitrary caller-named ERC20",
+      "title": "`rewardTokens` is a fully caller-supplied allowlist-free array: any ERC20 the contract holds except the payment token can be named by any caller clearing `count >= nudgeSize` and sent in full to a caller-chosen recipient",
+      "severity": "potential-low",
+      "severityReasoning": "PROPOSED LOW, deliberately below the pattern tier's potential-medium, and this is the one place I am ranking DOWN against a Tier-1 signal — recording the reasoning so it is not re-litigated. The mechanic is real, permissionless, and unbounded in asset choice, but it is (i) documented in the source in five separate places as INTENDED, in capitals, with an explicit 'Do not use this address as custody' warning (:51-56); (ii) not free — the caller must pay for `nudgeSize` real mints at the pinned dispatcher's ramping price, and both the minter and the dispatcher index are owner-pinned state, so the count cannot be faked; and (iii) the value at risk is only what someone mistakenly parks on a contract that warns against parking value on it. What survives at Low is the DELTA between the intent and the guardrails: the intent is 'sweep unclaimed nudge donations', the implementation is 'sweep everything', and the gap is a Law-3 owner footgun. The economically material half of this surface is ECON-003 (unbounded pot) and ECON-002 (duplicate double-pay); this entry is the residual and should not be double-counted with them.",
+      "contract": "src/BatchNFTMinterMultiToken.sol",
+      "function": "batchMint / _snapshotRewards / _payRewards",
+      "line": 429,
+      "lineStart": 416,
+      "lineEnd": 461,
+      "codeSnippet": "address rewardToken = rewardTokens[i];\nif (rewardToken == paymentToken) {\n    revert BatchMint__RewardTokenIsPaymentToken(rewardToken);   // <- the ONLY exclusion\n}\nuint256 available = qualifies ? IERC20(rewardToken).balanceOf(address(this)) : 0;",
+      "attackScenario": "1. Bot enumerates every ERC20 balance held by the batch minter (trivially, from Transfer logs).\n2. Filters out the derived `primeToken()` of the pinned dispatcher (the only excluded address).\n3. Calls `batchMint(nudgeSize, recipient = self, paymentAmount = cost(nudgeSize), rewardTokens = [every other token found], minRewards = [0, ...])`.\n4. Receives 100% of each listed balance.",
+      "quantifiedImpact": "Attacker gains: the full balance of every non-payment ERC20 held, plus `nudgeSize` NFTs. Attacker contributes: `nudgeSize * mintPrice` to the dispatcher (real, unavoidable, owner-pinned). Net-positive for the attacker iff sum(pot values) > nudgeSize * mintPrice - resale(nudgeSize NFTs) - PV(staking yield). See ECON-003 for why the right-hand side is smaller than the NatSpec's arithmetic assumes.",
+      "preconditions": ["nudgeSize != 0", "the contract holds a non-payment ERC20", "caller can fund nudgeSize mints"],
+      "isIntendedDesign": true,
+      "intendedDesignEvidence": "src/BatchNFTMinterMultiToken.sol:34-61 ('The caller declares which ERC20 balances held by this contract they want to be paid in'; 'Exogenous reward capture ... Deliberate: unclaimed value should not be stranded'; 'WARNING — tokens sent to this contract may be claimed by anyone who qualifies'), and :190-201 (rescueERC20 documented as 'a race the owner will usually lose').",
+      "ownerFootgun": "The residual, in-scope half: `rescueERC20` is the owner's only recovery primitive and the source itself says it is a race the owner will usually lose, with 'pause first, then rescue' as the only dependable sequence. run-20 D-23 found `pauser == address(0)` on both live instances (UNVERIFIED at this run), which makes that sequence unavailable. A competent non-malicious owner who routes any token to this address — or who receives an airdrop on it — would be surprised to find recovery is a mempool race they cannot win and cannot pause out of.",
+      "recommendation": "Do not change the mechanic (it is specified). Do the two cheap things: set a non-zero `pauser` on every deployed instance so the documented rescue sequence is executable, and add an owner-settable optional allowlist (empty = current permissionless behaviour) so an operator who needs custody-adjacent use can opt into it without a redeploy.",
+      "confidence": "high (mechanic) / high (intended)",
+      "ledgerCrossRef": ["PAT-001", "run-20 D-23"]
+    },
+
+    {
+      "id": "ECON-005",
+      "type": "reentrancy-enabled double-pay of the nudge snapshot (fork drift)",
+      "title": "NEW: the frozen, mainnet-DEPLOYED `BatchNFTMinter` has no reentrancy guard, so the ERC1155 receive hook lets the pre-loop nudge snapshot be paid TWICE under the same arithmetic condition as ECON-002 — the hardening was applied only to the new twin",
+      "severity": "potential-medium",
+      "severityReasoning": "Medium. The economic ceiling is identical to ECON-002 (excess bounded by this batch's own donations D), so it is not High. It is not Low — and specifically it should NOT auto-reconcile to ledger L-01 (submitted as a bare 'missing nonReentrant' Low) — because the split at fba4991 turned a precautionary observation into a demonstrated ASYMMETRY on the file that is actually deployed, and because the reentrant path reaches a VALUE site (the double nudge payout and the step-10 whole-balance sweep), not merely a state-ordering site. Realised fork drift on a deployed contract is the L-07 watch-note class.",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 243,
+      "lineStart": 238,
+      "lineEnd": 312,
+      "driftEvidence": "src/BatchNFTMinter.sol:62 `contract BatchNFTMinter is Ownable, Pausable, IPausable` and :243 `function batchMint(...) external whenNotPaused returns (uint256 totalPaid)`.  vs  src/BatchNFTMinterMultiToken.sol:82 `contract BatchNFTMinterMultiToken is Ownable, Pausable, ReentrancyGuard, IPausable` and :300 `... external whenNotPaused nonReentrant ...`, whose NatSpec at :78-81 calls the guard 'required rather than optional'. Same author, same cycle, same mint loop, opposite treatment. The file WITHOUT the guard is the mainnet-deployed one; the file WITH it is marked non-deployment (repo CLAUDE.md, commit a261604).",
+      "attackScenario": "The mint loop at :286-288 calls `nftMinter.mint(_dispatcherIndex, recipient)` with a CALLER-CHOSEN `recipient`. NFTMinterV2 mints ERC1155, so `onERC1155Received` fires on attacker-controlled code once per iteration — after the snapshot at :280, before the payout at :300-303 and before the sweep at :305.\n1. Attacker deploys a contract R implementing `onERC1155Received`.\n2. Outer call: `batchMint(count = nudgeSize, recipient = R, paymentAmount, minReward = 0)`. Step :280 snapshots `nudgeAmount = P` (the prior pot).\n3. On the first `mint`, R re-enters `batchMint(count = nudgeSize, recipient = R, paymentAmount', minReward = 0)`. Nothing blocks re-entry. The inner call snapshots the SAME P (the pot is untouched), mints, and pays P to R at :301.\n4. The outer call resumes, finishes its loop, and at :300-303 transfers its own snapshotted P again.\n5. The outer transfer succeeds iff the nudge-token balance at that point >= P. Balance = P - P(paid inner) + D_outer + D_inner, so the condition is D_total >= P — THE SAME CONDITION AS ECON-002, reached without any array at all.\nIf the condition fails, SafeERC20 reverts and the whole tx rolls back at no cost to the attacker, so the attacker computes D and P off-chain and only fires when it holds.",
+      "arithmetic": "Identical to ECON-002 with k = nesting depth instead of array length: total captured = min(depth, 1 + floor(D_total / P)) * P; excess over honest = up to D_total. Nesting depth is bounded only by gas and by each level's mint cost.",
+      "secondaryPath": "The inner call's step-10 sweep at :305-307 reads the WHOLE payment-token balance while the outer call's pulled-but-unspent `paymentAmount` is sitting in the contract, and sends it to the inner `msg.sender`. Composed with the max approval at :284 (which is granted by the outer call and not yet revoked when the inner call runs), the inner call can also mint against the outer call's budget. Both legs are the same actor in the scenario above, so this leg adds no direct profit — but it does mean the guard omission is on a VALUE path, which is why this should not be closed as a bare ordering nit. Whether an outer caller can ever be a distinct victim depends on whether any integration passes a `recipient` it does not control; NOT VERIFIED, and I found no such integration in scope.",
+      "quantifiedImpact": "Same ceiling as ECON-002: up to D_total (this batch's own nudge-token donations) refunded to the batcher, plus the prior pot P they would have received honestly. Deprives the next claimant of the seed the donate-forward mechanic exists to leave behind.",
+      "preconditions": [
+        "nudgePaymentToken configured and nudgeSize != 0.",
+        "The dispatcher donates nudge token per mint (D_total > 0) — the design's own premise.",
+        "D_total >= P for the second payout to clear.",
+        "NFTMinterV2's mint reaches `_doSafeTransferAcceptanceCheck` — VERIFIED-BY-INHERITANCE from run-20 D-21, which proved the mid-loop hook is real and attacker-controlled by wiring a hook-firing minter (the guard on the MultiToken twin reverted with the exact `ReentrancyGuardReentrantCall` selector). The same hook fires here with nothing to catch it. Marked verified-inherited, not re-executed this run."
+      ],
+      "testCoverageGap": "run-20 D-21 also recorded that `MockERC1155.mint()` skips `_checkOnERC1155Received` entirely, so no test in either suite ever reaches the hook. Ledger Q-02 records that no test exercises this attacker surface at all. The deployed contract's reentrancy behaviour is therefore untested in both directions.",
+      "recommendation": "Add `ReentrancyGuard` + `nonReentrant` to `BatchNFTMinter.batchMint`, matching the twin. If the frozen file must stay byte-frozen because it mirrors deployed bytecode, then say so explicitly in the file header and record the deployed instances' exposure — do not leave the asymmetry undocumented, because the next reader will diff the two files and assume the guard was considered and rejected. Separately, fix `MockERC1155.mint()` to run the acceptance check so the surface becomes testable.",
+      "confidence": "medium-high",
+      "ledgerCrossRef": ["L-01 (submitted, Low — do NOT auto-reconcile; see severityReasoning)", "Q-02 (open)", "L-07 (open, fork-drift watch — this is a REALISED instance)", "run-20 D-21"],
+      "forkDriftWatchNote": "The standing fork-drift watch (memory: phoenix-nft-staking run-17/18/19) now covers a THIRD clone pair: BatchNFTMinter.sol vs BatchNFTMinterMultiToken.sol, in addition to NFTStakerPriceScaled and NFTStakerDepletion. Next run must diff all three pairs."
+    },
+
+    {
+      "id": "ECON-006",
+      "type": "reward-accrual rate drift / inter-user value transfer (Linear-Depletion class)",
+      "title": "`depositFor`'s unconditional tail `_recomputeSchedule()` restarts the whole depletion window on every migration slice — the justifying comment ('parity with stake') is factually wrong, because `stake` in this variant does NOT tail-recompute",
+      "severity": "potential-medium",
+      "severityReasoning": "Medium, confirming open ledger M-03/M-04 rather than minting a new class. Value moves between users of the same pool with no attacker and no privilege beyond the operator's ordinary batching choice, and the contract's own stated strong invariant is violated. Not High: no principal is at risk, the total budget is conserved (it is a redistribution plus a schedule stretch), and the operator has an off-chain mitigation (`setDepletionWindow` fixed / single-slice migration). Ranked as a POSSIBLE INCOMPLETE FIX of ledger M-01 (marked fixed by story-020, which fixed the `unstake` path and not this one) — CLAUDE.md ranks an incomplete fix second only to a regression.",
+      "contract": "src/NFTStakerDepletion.sol",
+      "function": "depositFor",
+      "line": 766,
+      "lineStart": 745,
+      "lineEnd": 767,
+      "alsoAffects": "src/NFTStakerPriceScaledMigrateReady.sol (same clone family — NOT re-verified this run, flagged for the code-scanner); consumed by src/InPlaceNFTStakerMigrator.sol:253-300 (migrateIn slices) and src/NFTStakerMigrator.sol:189-194",
+      "codeSnippet": "// depositFor, :763-766\nemit DepositedFor(user, amount);\n// Tail recompute: rate is `budget / windowSeconds`, totalStaked-\n// independent, but pin `windowEnd` for parity with `stake`.\n_recomputeSchedule();",
+      "theTell": "The comment's own first clause defeats its second. `rewardRate = budget / windowSeconds` (:517) is INDEPENDENT of `totalStaked` — the comment says so — which is exactly why `stake` (:544-557) and `unstake` (:560-576) and `claim` (:577-586) have NO tail `_recomputeSchedule()` in this variant; they call `_syncBudget()` at the head and stop. I read all four functions: `depositFor` is the ONLY user-crediting path in NFTStakerDepletion that unconditionally recomputes at the tail. The stated justification, 'parity with `stake`', describes a behaviour `stake` does not have — this is inherited NatSpec from the APY-based `NFTStaker`, where the tail recompute IS required because `R` scales with `totalStaked`. The line is a copy-forward artefact from the parent contract, and deleting it is therefore the minimal, semantics-preserving fix.",
+      "mechanism": "`_recomputeSchedule()` (:512-533) does four things unconditionally: `rewardRate = budget / windowSeconds`, `rewardBudget = budget`, `windowEnd = block.timestamp + windowSeconds`, `lastRewardTime = block.timestamp`. Every call therefore RESTARTS the full depletion window from now and re-spreads the REMAINING budget across it. Note by contrast that `_syncBudget` (:423-435) is careful — it only recomputes `if (inflow > 0)`, so ordinary user traffic does not restart the window. `depositFor` has no such condition.",
+      "attackScenario": "No attacker required. The designed operating mode is the trigger:\n1. Operator calls `initiateMigration`, users exit (or are parked), `finalizeAndReset` returns the pool to Active.\n2. Operator calls `InPlaceNFTStakerMigrator.migrateIn(0, n)` — slice 1. Each `depositFor` restarts the window at `now + W` with rate `B/W`. `totalStaked` is now only slice 1.\n3. Time T passes before slice 2 (a separate transaction — `migrateIn` is explicitly paginated and `parkedUsersRange` exists to drive it, so this is not an edge case).\n4. During T, `_updatePool` accrues `r1 * T` and divides it across slice-1 units ALONE. Slice-2 users are parked in the migrator, staked nowhere, and accrue nothing.\n5. Operator calls `migrateIn(n, 2n)` — slice 2. `_syncBudget` settles, then the tail recompute restarts the window AGAIN at `now + W` with the reduced remaining budget.",
+      "arithmetic": "Let B = budget at the first slice, W = `depletionWindowMonths * SECONDS_PER_MONTH` (:513, SECONDS_PER_MONTH = 365 days / 12 = 2,628,000 s), k slices at interval T, n stake units per slice.\n\nPer-interval emission:  e_j = r_j * T = B_j * T / W,  with B_{j+1} = B_j * (1 - T/W).\nSo after k slices the remaining budget is  B * (1 - T/W)^k  — GEOMETRIC decay, not linear.\n\nExclusive mis-allocation to slice 1 over the first gap:  e_1 = B * T / W, shared by n units instead of the eventual k*n.\nSlice-1 per-unit advantage that persists for the rest of the schedule:  (B * T / W) / n.\nAs a fraction of the whole budget, the mis-allocated share is  T/W per gap, k-1 gaps.\n\nWorked, W = 12 months = 31,536,000 s:\n  T = 1 day    -> T/W = 0.274%  of the budget mis-allocated per gap\n  T = 1 week   -> T/W = 1.92%\n  T = 30 days  -> T/W = 8.22%\nWith the run-20 PoC's compressed timescales the ratio was slice-1 : slice-2 = 120% (48.98 vs 40.76 phUSD, `test_ECON_G`); run-18 measured 63.26% mis-allocation to an active staker on the earlier `unstake` path; run-20 measured 1000 bps on the price-scaled copy (`test_ECON_A`) and 1666 bps for the self-advancing user (`test_ECON_H`). These are inherited measurements, NOT re-executed this run — the formulas above are derived from HEAD source and are the verified part.",
+      "storyViolation": {
+        "specQuote": "src/NFTStakerDepletion.sol:57-61 — 'Stakers deposit ERC1155 units of `stakedId` and earn per-second emissions of `rewardToken` (phUSD) that drain `rewardBudget` over exactly `depletionWindowMonths`. The strong invariant ... [is] preserved'.",
+        "actualBehaviour": "Every `depositFor` pushes `windowEnd` to `block.timestamp + windowSeconds` and re-spreads the remaining budget over a fresh full window. After k re-injections the budget remaining is B*(1-T/W)^k and the effective drain horizon is (k-1)*T + W, strictly greater than W. The pool does not drain in exactly `depletionWindowMonths`; it approaches the budget asymptotically.",
+        "discrepancy": "The word 'exactly' in the contract's own strong-invariant statement is false on any path that calls `depositFor` more than once, i.e. on every paginated migration. This is a Law-2 story-faithfulness violation in addition to the Law-1 inter-user transfer."
+      },
+      "quantifiedImpact": "Two distinct harms: (1) inter-user — slice-1 users capture T/W of the whole pool budget that was notionally shared with slice-2..k users, permanently; (2) protocol-level — the depletion schedule stretches geometrically, so the advertised runway is wrong and the emission rate decays rather than staying flat. Total budget is conserved; nothing is stolen from the contract.",
+      "preconditions": ["More than one `migrateIn`/`migrate` transaction, OR any real time between `finalizeAndReset` and the last slice. Both are the DESIGNED operating mode — `migrateIn(start, end)` is explicitly paginated."],
+      "recommendation": "Delete the tail `_recomputeSchedule()` at :766. The comment justifying it is wrong for this variant (the rate is totalStaked-independent and `stake` does not do it), and `_syncBudget()` at the head already settles accrual and recomputes when — and only when — the budget actually grew. If a recompute IS wanted after migration, expose it as an explicit owner call the operator makes ONCE after the LAST slice, not per-slice. Verify the same line is not present on the price-scaled clone before closing.",
+      "doNotCollapse": "STANDING REGISTER ENTRY (run-20 D-28). This finding (operator slice ordering, ledger M-03, fingerprint a0967cce) must NOT be merged with the `userMigrate` self-advance finding (ledger M-08, fingerprint 6d2d6284). Different actor (operator batching vs. a user front-running the operator's queue), different mechanism (window restart across slices vs. self-service exit-and-re-enter), and fixing either one leaves the other fully live. The measured edges differ too (1000 bps vs 1666 bps).",
+      "confidence": "high",
+      "ledgerCrossRef": ["M-01 (marked fixed by story-020 — POSSIBLE INCOMPLETE FIX, class recurrence via the migration path)", "M-03 (open)", "M-04 (open)", "L-02 (open, finalizeAndReset does not re-arm the window)", "PAT-006", "run-20 D-24, D-28"],
+      "references": ["memory: phlimbo-ea-audit-notes (Linear-Depletion)", "memory: phoenix-nft-staking-run18-notes", "memory: phoenix-nft-staking-run19-notes"]
+    },
+
+    {
+      "id": "ECON-007",
+      "type": "operational DoS / owner footgun on a value-settlement path",
+      "title": "story-023's `require(captured <= owed)` tripwire is EXACT, not slack — a single wei of reward-token inflow during `depositFor` hard-reverts the entire owner migration batch with no per-user skip",
+      "severity": "potential-low",
+      "severityReasoning": "Low, ceiling Medium. No value is lost or stolen — the tripwire is doing its job, and failing closed on a value-misattribution is the correct choice. The finding is the BLAST RADIUS of the correct choice: it is batch-wide and unrecoverable-in-place, converting a wiring error into a total migration DoS with no partial-progress path. Not Medium at present because no unprivileged actor can trigger it (see the refutation in `refuted`), so it is purely a configuration footgun; raise to Medium if the reward token ever gains a transfer callback or if any hook is discovered whose `recipient` can be set by a non-owner.",
+      "contract": "src/NFTStakerMigrator.sol",
+      "function": "_depositForAndForward",
+      "line": 221,
+      "lineStart": 214,
+      "lineEnd": 241,
+      "alsoAffects": "src/InPlaceNFTStakerMigrator.sol:311-338 (verified line-for-line identical this run — plan decision D-6 HELD, no drift)",
+      "codeSnippet": "uint256 owed = IStakerViews(address(newStaker)).pendingReward(user);\nuint256 pre = rewardToken.balanceOf(address(this));\nnewStaker.depositFor(user, amount);\nuint256 captured = rewardToken.balanceOf(address(this)) - pre;\nrequire(captured <= owed, \"Migrator: capture exceeds owed\");",
+      "arithmetic": "The tripwire has ZERO slack in the intended case, which is what makes it brittle. `pendingReward` (NFTStakerDepletion:~900) computes `elapsed = min(now, windowEnd) - lastRewardTime` and `acc += reward * ACC_PRECISION / totalStaked` — the IDENTICAL formula `_updatePool` (:462-470) uses. `depositFor`'s head `_syncBudget()` runs in the SAME transaction and therefore the SAME `block.timestamp`, so `elapsed` is the same and the settled `pending` equals the `owed` read one line earlier, exactly. Therefore in the intended case `captured == owed` and the inequality is tight: ANY additional inflow of >= 1 wei during the `depositFor` call trips the revert. It is a `require`, so it reverts the whole `migrate` / `migrateIn` transaction — every user in the slice, including those already successfully forwarded earlier in the loop.",
+      "attackScenario": "Configuration path, not an attack. `depositFor` -> `_syncBudget()` -> `dispatcherHook.pull()` is an external call to an owner-configured hook. If that hook's `recipient` is (mis)pointed at the migrator instead of the staker, the pulled phUSD lands on the migrator mid-call, `captured` becomes `owed + inflow > owed`, and every `migrate`/`migrateIn` call reverts with `Migrator: capture exceeds owed` until the hook is repointed. There is no per-user skip and no partial-progress path — a slice that is 99 users deep loses all 99.",
+      "quantifiedImpact": "No value loss. Complete unavailability of the migration path (both migrators) until an owner transaction repoints the hook. Parked principal remains recoverable via the stakers' `emergencyWithdraw` / the migrator's `rescueERC1155`, so this is a stall, not a strand.",
+      "ownerFootgun": "In scope under Law 3. A competent, non-malicious operator would be surprised that a hook-recipient misconfiguration — a setting with no obvious relationship to the migrator — bricks the entire migration with an error message that names neither the hook nor the cause. The surprise test is met.",
+      "preconditions": ["A reward-token inflow to the migrator during `depositFor`. Only two sources exist and both are privileged: a mis-pointed `dispatcherHook.recipient`, or a reward token with a transfer callback (phUSD has none — the migrators' own NatSpec says the guard 'pre-closes the hole if the reward token is ever a callback-bearing one')."],
+      "recommendation": "Keep the tripwire — failing closed on misattribution is right. Change only the blast radius: replace the batch-wide `require` with a per-user skip that records the anomaly (`emit CaptureExceedsOwed(user, captured, owed)`, leave that user parked, continue the loop), so one bad user or one transient inflow cannot cost the whole slice. Alternatively add an explicit pre-flight owner view that asserts `dispatcherHook.recipient() == address(staker)` before the batch, so the failure surfaces as a named precondition rather than an opaque mid-batch revert.",
+      "confidence": "high (mechanism) / high (severity floor — the unprivileged trigger is refuted below)",
+      "ledgerCrossRef": ["H-01 (fix-pending — `NFTStakerDepletion.depositFor` pays the migrator; this forwarding IS the compensating fix, so this finding is about the fix's failure mode, NOT a re-report of the root cause)", "PAT-007", "pns20h1"]
+    },
+
+    {
+      "id": "ECON-008",
+      "type": "escrow accounting brittleness",
+      "title": "`rescueERC20`'s reward-token floor uses unchecked subtraction against an escrow counter that can only be credited, so any balance shortfall permanently bricks reward-token rescue AND the last claimant",
+      "severity": "potential-low",
+      "severityReasoning": "Low. Requires a token property the repo's Known Invalid Findings list excludes (an ERC20 that returns `false` while still moving tokens), and phUSD is standard. Filed rather than dropped because it is a hard revert on an escrow path and Law 1 prefers a visible parked entry to a silent drop. Should close as known-invalid weird-ERC20 once phUSD's `transfer` is confirmed to have no false-with-effect branch.",
+      "contract": "src/InPlaceNFTStakerMigrator.sol",
+      "function": "rescueERC20 / claimForwarded",
+      "line": 394,
+      "lineStart": 390,
+      "lineEnd": 398,
+      "alsoAffects": "src/NFTStakerMigrator.sol:272 (identical)",
+      "codeSnippet": "uint256 balance = rewardToken.balanceOf(address(this));\nuint256 surplus = balance - totalUnforwarded;      // unchecked-by-construction: underflows and reverts\nrequire(amount <= surplus, \"InPlace: cannot touch unforwarded\");",
+      "arithmetic": "`totalUnforwarded` is credited ONLY in the two failure branches of the forwarding try/catch, both of which assume `transfer` returning false (or reverting) means no tokens moved. If a token ever moves tokens AND returns false, the escrow is credited for value that is no longer held, and the invariant `balance >= totalUnforwarded` breaks permanently — there is no path that decrements `totalUnforwarded` other than a successful `claimForwarded`, which itself would revert on the shortfall. Result: `rescueERC20(rewardToken, ...)` reverts on the underflow at :394 forever, and the last claimant's `claimForwarded` reverts on the `safeTransfer`.",
+      "quantifiedImpact": "Bricked reward-token rescue plus a DoS on the final claimant. No theft; the shortfall is caused by the token, not by the contract.",
+      "preconditions": ["A reward token whose `transfer` returns false while still transferring, or which otherwise reduces the migrator's balance outside `claimForwarded`/`_depositForAndForward`. Not the case for phUSD."],
+      "recommendation": "Use `balance > totalUnforwarded ? balance - totalUnforwarded : 0` so the rescue degrades to 'nothing rescuable' rather than reverting. One-line, no behaviour change in the normal case.",
+      "confidence": "low-medium",
+      "ledgerCrossRef": ["PAT-010"]
+    }
+  ],
+
+  "refuted": [
+    {
+      "candidate": "An unprivileged griefer bricks the owner's migration by donating 1 wei of phUSD to the migrator, tripping `require(captured <= owed)`.",
+      "verdict": "REFUTED",
+      "evidence": "`pre` is snapshotted PER ITERATION and INSIDE `_depositForAndForward`, one line before the `depositFor` call (NFTStakerMigrator.sol:219, InPlaceNFTStakerMigrator.sol:316). Any donation that lands before the transaction, or between iterations, is already inside `pre` and contributes 0 to the delta. To trip the tripwire the inflow must land DURING `depositFor`, and I enumerated every external call `depositFor` makes: `dispatcherHook.pull()` (owner-configured), `stakedToken.safeTransferFrom(migrator -> staker)` (the acceptance callback fires on the STAKER, which is an `ERC1155Holder` with no user code, not on the migrator), and `_safePay` (phUSD, no transfer hook). None is reachable by an unprivileged third party. The residual privileged path is filed as ECON-007 at Low.",
+      "inheritBy": "future runs — do not re-raise the donation-griefing variant without first showing a new attacker-reachable inflow path into `depositFor`."
+    },
+    {
+      "candidate": "`captured` can exceed `owed` legitimately because reward accrues between the `pendingReward` read and the settlement inside `depositFor`, making the tripwire fire on honest batches.",
+      "verdict": "REFUTED",
+      "evidence": "Same transaction, same `block.timestamp`. `pendingReward` (NFTStakerDepletion) projects with `end = min(block.timestamp, windowEnd); elapsed = end - lastRewardTime` — byte-for-byte the same expression `_updatePool` uses at :462-464. `_syncBudget`'s `_updatePool` therefore computes `elapsed` from the same `lastRewardTime` to the same `now`, yielding the same accrual, and the `pull()` that may precede it changes only `rewardBudget`/`rewardRate`, which cannot affect an accrual whose `elapsed` is 0 relative to the view. In the intended case `captured == owed` exactly. (This is what makes ECON-007 brittle rather than harmless — recorded on both sides.)"
+    },
+    {
+      "candidate": "`rescueERC20` on either migrator can over-release escrowed user reward, letting the owner reach `unforwarded` balances.",
+      "verdict": "REFUTED",
+      "evidence": "Both migrators floor the reward-token sweep at `amount <= balance - totalUnforwarded` (NFTStakerMigrator.sol:270-273, InPlaceNFTStakerMigrator.sol:392-395), and `totalUnforwarded` is credited only on a transfer that did not move tokens, so `balance >= totalUnforwarded` is preserved by construction for a standard ERC20. `claimForwarded` is permissionless, self-only, and strict-CEI (mapping zeroed and counter decremented before the transfer) — no owner path can redirect it. The only residual is the underflow-brittleness filed as ECON-008 at Low."
+    },
+    {
+      "candidate": "`totalUnforwarded` desyncs from the held balance across a paginated migration because earlier iterations move value out.",
+      "verdict": "REFUTED",
+      "evidence": "Explicitly handled and documented: `pre` is re-read every iteration precisely because 'earlier iterations forward value out and failed forwards leave value in' (NFTStakerMigrator.sol:211-213). Escrowed value from a failed forward stays on the migrator and is therefore inside the NEXT iteration's `pre`, so it is never double-counted into a later user's `captured`. I traced the loop; the accounting is consistent."
+    },
+    {
+      "candidate": "The multi-token nudge payout can be self-funded within one transaction by a single well-formed call (the round-trip the source warns about).",
+      "verdict": "REFUTED for the single-entry case",
+      "evidence": "`_snapshotRewards` is invoked at :354, strictly BEFORE the payment pull at :357 and the mint loop at :363, and `_payRewards` at :378 consumes the memory array without re-reading `balanceOf`. The donate-forward mechanic is correctly implemented as written. It is defeated only by (a) duplicate array entries — ECON-002, and (b) reentrancy on the unguarded frozen twin — ECON-005. Both are the SAME arithmetic condition (in-batch donations >= prior pot) reached by two different routes; a fix that addresses only one leaves the other live."
+    },
+    {
+      "candidate": "Rounding in the depletion schedule favours the user, allowing a profitable round-trip.",
+      "verdict": "REFUTED",
+      "evidence": "Walked the rounding checklist against source. `rewardRate = budget / windowSeconds` floors (:517, and the NatSpec at :508-511 explicitly forbids flipping to ceiling: 'that would let users draw against rewards the contract has not budgeted for'). `_updatePool` clamps `if (reward > rewardBudget) reward = rewardBudget` (:467) and floors `accRewardPerShare += reward * ACC_PRECISION / totalStaked` (:470). `pending = user.amount * accRewardPerShare / ACC_PRECISION - user.rewardDebt` floors on what the user RECEIVES, and `rewardDebt` is recomputed with the same floor after every mutation. Composed round-trip (stake then unstake in the same block): `_syncBudget` -> `elapsed == 0` -> `reward == 0` -> `pending == 0`; the user ends with exactly their principal, never more. Every leg rounds toward the protocol; no symmetric or round-half rounding anywhere. Confirms the profiler's direction — not re-reported."
+    },
+    {
+      "candidate": "`minRewards` is a broken slippage guard because a front-runner still takes the pot.",
+      "verdict": "NOT A FINDING (documented, correct as specified)",
+      "evidence": "The NatSpec states the limitation itself at :286-291: 'this does NOT stop a front-runner from winning the pot — whoever qualifies first still takes the entire balance-based payout; the floor only stops the loser from minting for less than they declared.' The guard does exactly what it claims. The winner-take-all race itself is the real issue and is filed as ECON-003, not here."
+    },
+    {
+      "candidate": "`totalPaid` flooring at 0 (:384) is an independent arithmetic bug.",
+      "verdict": "FOLDED, not independent",
+      "evidence": "It is a correct report of an incorrect state — the return value accurately says 'the caller paid nothing' in exactly the case ECON-001 describes. It is the arithmetic TELL of the sweep, not a separate defect, and filing it twice would double-count. Folded into ECON-001."
+    },
+    {
+      "candidate": "A hostile caller-supplied `rewardToken` can mutate state during the snapshot pass.",
+      "verdict": "REFUTED (inherited, run-20 D-21)",
+      "evidence": "`IERC20.balanceOf` is `view`, so solc emits a STATICCALL at :429 — the snapshot read cannot mutate state (run-20 proved it: a storage-writing `balanceOf` bricks the batch). The only mutative hostile-token hook is `safeTransfer` at :458, which runs AFTER the approval is revoked at :368 and under `nonReentrant`. Marked verified-inherited, not re-executed."
+    }
+  ],
+
+  "assumptionsAndGaps": [
+    "NO mainnet reads were performed this run. Every statement about live instance state (`0x81896F48…`, `0x86866e01…`, balances, `pauser == 0`, `batchMinter()` repointing) is INHERITED from run-20 D-22/D-23 at block 25572875 and is explicitly marked unverified. ECON-001's severity should not be finalised without a fresh read of `dispatcherIndex()` / `primeToken()` / `nudgePaymentToken()` / balances on both instances.",
+    "NFTMinterV2, ITokenDispatcherV2, NudgeRatchet and StableYieldAccumulator live in sibling repos outside this project's scope. Claims about per-mint donation rates, the `nudgeSplit` funding stream, and NFT transferability/resale are inherited from run-20 and marked unverified here.",
+    "src/NFTStakerPriceScaledMigrateReady.sol was NOT re-read this run for the ECON-006 tail-recompute line. The clone-drift watch requires the next run to diff BatchNFTMinter/BatchNFTMinterMultiToken, NFTStaker/NFTStakerPriceScaled, and NFTStaker/NFTStakerDepletion — three pairs now.",
+    "No PoCs were written or executed. The workspace at workspace/phoenix-nft-staking does not compile (known bit-rot: prior PoCs reference the pre-story-022 single-argument batchMint API). Every arithmetic claim above is derived from HEAD source with cited line numbers; every measurement (63.26%, 120%, 1000 bps, 1666 bps) is an inherited run-18/run-20 PoC figure and is labelled as such.",
+    "The docs/ set (design.md, multi-token-nudge.md, runway-dynamics-and-apy-as-policy.md) is current for story-022. lib/phoenix-nft-staking/CLAUDE.md has not been touched since 2026-04-25 and describes only the APY-based NFTStaker — it is NOT a valid spec source for the depletion variant or the multi-token nudge (run-20 D-04)."
+  ],
+
+  "doNotCollapseRegister": [
+    {
+      "pair": ["ECON-006 (ledger M-03, a0967cce — operator slice ordering)", "ledger M-08 (6d2d6284 — userMigrate self-advance)"],
+      "reason": "Different actor, different mechanism, different measured edge (1000 vs 1666 bps). Fixing either leaves the other fully live. Standing entry from run-20 D-28."
+    },
+    {
+      "pair": ["ECON-002 (duplicate array entries)", "ECON-005 (reentrancy on the frozen twin)"],
+      "reason": "Same arithmetic condition (in-batch donations >= prior pot), two independent routes, two different FILES — one of which is the mainnet-deployed one. A dedupe pass on `rewardTokens` fixes ECON-002 and does nothing for ECON-005; adding `nonReentrant` fixes ECON-005 and does nothing for ECON-002."
+    },
+    {
+      "pair": ["ECON-005", "ledger L-01 (submitted, Low — missing nonReentrant)"],
+      "reason": "L-01 was a bare guard-omission observation. ECON-005 is the realised fork-drift instance on the DEPLOYED file with a quantified value path. Auto-reconciling ECON-005 to L-01 would bury the drift and the value leg."
+    }
+  ]
+}

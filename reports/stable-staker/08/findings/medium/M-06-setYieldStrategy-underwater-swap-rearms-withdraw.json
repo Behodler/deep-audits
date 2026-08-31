@@ -1,0 +1,67 @@
+{
+  "id": "M-06",
+  "project": "stable-staker",
+  "status": "ready",
+  "severity": "medium",
+  "plausibility": "plausible",
+  "footgun": true,
+  "regression": false,
+  "faithfulness": false,
+  "title": "setYieldStrategy underwater-swap silently lifts the underwater-withdraw block and FCFS-concentrates the realized loss on the last withdrawer",
+  "contract": "src/StableStaker.sol",
+  "function": "setYieldStrategy",
+  "line": 214,
+  "lineStart": 202,
+  "lineEnd": 238,
+  "entryPoint": null,
+  "fingerprint": "dbdc3ac9b93afce47d5a3f7eb63c816ebf382402e564c24a012faff3b9999c28",
+  "fingerprintPreimage": "StableStaker:setYieldStrategy:underwater-swap-rearms-withdraw / stale-totalStaked",
+  "rootCauseClass": "underwater-swap-rearms-withdraw / stale-totalStaked",
+  "origin": "new",
+  "description": "A residual of the story-006 fix. When the owner swaps a token's yield strategy via setYieldStrategy while the OLD strategy is underwater (totalBalanceOf < principalOf), the drain at L214-217 runs with the underwater guard OFF (_routeExit(token, totalStaked, false)) and recovers only R_old = totalStaked * factor < totalStaked. R_old is redeposited into the NEW strategy at L231-233 (the deposit return value is discarded) but pool.totalStaked is NEVER rewritten. The new strategy therefore reads at par (principalOf == totalBalanceOf == R_old), so _isUnderwater (L666-668) returns false and withdrawDisabled (L612-617) flips TRUE->FALSE. The pre-swap underwater-withdraw block (which existed precisely so non-migrating users would not be forced to realize a loss) is silently erased while a real totalStaked - R_old shortfall still exists. The blocked/deferred underwater loss is converted into a REALIZED loss that is distributed first-come-first-served at par: early withdrawers are paid in full out of the recovered principal, and the last withdrawer(s) absorb the entire shortfall (the strategy caps their redeem to the remaining principal while StableStaker still zeroes their full recorded position).",
+  "rootCauseDistinction": "Distinct from the two same-function siblings via rootCauseClass: NOT M-01 dab5a656 (healthy-pool adoption-haircut desync, where the discarded strategy.deposit credited-principal return shorts last withdrawers over a non-empty IDLE pool); NOT M-02 678e6fa2 (missing !active guard, which strands migrants' principal during an active terminal migration). This finding is the underwater-swap path: the OLD strategy is underwater, the drain under-recovers, and the swap re-arms (lifts) the withdraw block on a still-shortfalled pool. Fingerprint dbdc3ac9 does not collide with dab5a656 or 678e6fa2.",
+  "impact": "Value leak / inter-user loss socialization (concentrated, not socialized): a routine owner strategy swap performed while the old strategy is underwater silently lifts the protective underwater-withdraw block and lets withdrawals proceed at par against a pool that is really short by totalStaked - R_old. The realized loss lands FCFS entirely on the last withdrawer(s), who lose principal that the underwater guard had been protecting. Total payout never exceeds realizable value (no protocol theft), but a pre-existing strategy shortfall that users were shielded from is converted into a concrete, lopsided principal loss. Law-3 non-obvious owner footgun: a competent, non-malicious owner swapping to a healthy strategy to fix an underwater position would be surprised that the swap itself unblocks par withdrawals against the shortfall and concentrates the loss on the slowest staker.",
+  "attackPath": [
+    "Owner sets strategy YS1 for token; Alice stakes 50e6, Bob stakes 50e6; pool.totalStaked = 100e6; YS1.principalOf = 100e6.",
+    "YS1 goes underwater (-10%): YS1.totalBalanceOf = 90e6 < principalOf = 100e6. withdrawDisabled(token) == true; a normal withdraw reverts 'StableStaker: strategy underwater' (stakers are protected from realizing the loss).",
+    "Owner performs a routine swap to healthy YS2 via setYieldStrategy. The drain at L214-217 runs guard OFF, recovers only R_old = 90e6 from YS1, redeposits 90e6 into YS2 (return discarded), and leaves pool.totalStaked at 100e6.",
+    "DESYNC: YS2.principalOf == 90e6 (10e6 shortfall not migrated), pool.totalStaked == 100e6 (10e6 phantom backing). YS2 is at par, so _isUnderwater is false and withdrawDisabled flips TRUE->FALSE.",
+    "FCFS realization: Alice (first out) withdraws 50e6 and is paid in FULL at par; YS2.principalOf drops to 40e6, totalStaked to 50e6, still 'at par' so still not blocked.",
+    "Bob (last out) requests his full 50e6 but YS2 only has 40e6 principal left; the strategy caps the redeem to 40e6, StableStaker still zeroes Bob's full 50e6 position. Bob alone absorbs the entire 10e6 (20%) shortfall; the loss was concentrated on the late staker, not socialized."
+  ],
+  "recommendation": "Code fix: after an underwater drain in setYieldStrategy, rewrite pool.totalStaked to the amount actually recovered (R_old) so the new strategy correctly reads underwater and the withdraw block stays armed until the position genuinely heals (equivalently, decrement totalStaked by totalStaked - R_old). Crediting the actual strategy.deposit return at L233 into totalStaked accomplishes the same reconciliation (principalOf == totalStaked at source). Safe-config guidance (operational): never call setYieldStrategy while withdrawDisabled(token) == true / the current strategy is underwater; drain and heal the position first, or swap only at par or when totalStaked == 0.",
+  "safeConfig": "Never call setYieldStrategy while withdrawDisabled(token) == true or the current strategy is underwater. Drain/heal first, or swap only at par / totalStaked == 0.",
+  "poc": {
+    "file": "workspace/stable-staker/test/PoC_B_SetStrategyUnderwaterSwapFootgun.t.sol",
+    "test": "test_B_swapWhileUnderwater_erasesProtection_concentratesLossOnLateStaker",
+    "status": "passing",
+    "lastRun": "2026-06-08",
+    "result": "CONFIRMED runnable: Alice (first) paid full 50e6; Bob (last) paid 40e6, losing the entire 10e6 (20%) shortfall; loss concentrated on the late staker (alicePaid - bobPaid == 10e6), not socialized."
+  },
+  "verificationTrail": {
+    "severityClassifier": "Medium",
+    "severityAuditor": "CONFIRM Medium (high confidence)",
+    "validityChecker": "VALID",
+    "sanitizer": "KEEP (not covered by known issue #6/#7/#8; story-006 superseded KI#7's HEALTHY-pool-rewire premise)"
+  },
+  "crossReferences": {
+    "comparables": [
+      "0dca43f3 (M-05, acknowledged Medium, emergencyWithdraw FCFS-at-par loss socialization — structurally parallel)",
+      "69c7666e (wont-fix, KI#6 underwater buffer FCFS at par — does NOT bless this finding; different path/cause)"
+    ],
+    "siblings": [
+      "dab5a656 (M-01, submitted — same function setYieldStrategy, distinct root cause: healthy-pool adoption-haircut desync)",
+      "678e6fa2 (M-02, acknowledged/fixed — same function setYieldStrategy, distinct root cause: missing !active guard)"
+    ],
+    "thematicAdjacent": "a56f8778 (F-02, withdrawDisabled view over-reports _isUnderwater) — same withdrawDisabled/_isUnderwater signal, but F-02 is over-reporting (conservative false-positive); this finding is the opposite-direction operational hazard (the signal is silently lifted to false against a real shortfall). Cross-referenced, kept distinct."
+  },
+  "lawBasis": "Law 3 — non-obvious owner footgun (in scope as an operational hazard). NOT Law-2 faithfulness: story-006 is faithful per the faithfulness scanner; this is a downstream operational hazard, not a story deviation. NOT a regression: it is a residual of the story-006 fix, not a reappearance of a previously-fixed bug.",
+  "metadata": {
+    "createdAt": "2026-06-08",
+    "updatedAt": "2026-06-08",
+    "scanOrigin": "stable-staker-08 regression scan",
+    "classificationOrigin": "stable-staker-08 severity-classifier",
+    "auditedCommit": "f85450b6d73a728f530a97854ecc882151695cd8"
+  },
+  "reportPath": "reports/stable-staker/08/submissions/M-06-setYieldStrategy-underwater-swap-rearms-withdraw.md"
+}

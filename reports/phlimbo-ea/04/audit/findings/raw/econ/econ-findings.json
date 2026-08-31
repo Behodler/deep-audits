@@ -1,0 +1,166 @@
+{
+  "project": "phlimbo-ea",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "contractsScanned": 1,
+  "source": "src/Phlimbo.sol (PhlimboEA V1, deployed)",
+  "inputs": {
+    "profile": "reports/phlimbo-ea/04/audit/profiles/Phlimbo.profile.md",
+    "storyIntents": "reports/phlimbo-ea/04/audit/story-intents.md",
+    "ledger": "reports/phlimbo-ea/ledger.json"
+  },
+  "notes": "Tier-2 economic / value-flow analysis. Builds economic models (curves, attacker-cost-vs-payoff, leak magnitude) on top of Tier-1 LOCAL findings; does not re-derive single-function arithmetic. Verified LOCAL properties trusted; 'likely'/'violated' properties re-examined against source. Reconciliation hints provided for the sanitizer where a finding overlaps a ledger entry or a registry designDecision.",
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "spec-deviation / reward-stream-mispricing (value-delay + stranding)",
+      "title": "\"Linear Depletion\" pays out as exponential decay: rewardPerSecond is re-anchored to remainingBalance/duration after EVERY distribution, so stakers receive only ~63% of a funding window within its intended duration and a long tail is effectively stranded",
+      "severity": "potential-medium",
+      "confidence": "high",
+      "contract": "src/Phlimbo.sol",
+      "function": "_updatePool",
+      "rootCauseLine": 416,
+      "lineStart": 389,
+      "lineEnd": 426,
+      "alsoAt": [
+        "collectReward re-anchor L283 (intended: on deposit)",
+        "setDepletionDuration re-anchor L188 (intended: on duration change)"
+      ],
+      "codeSnippet": "if (toDistribute > 0) {\n    accStablePerShare += (toDistribute * PRECISION) / totalStaked;\n    rewardBalance -= toDistribute;\n    rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration; // <-- re-anchor on every distribution\n}",
+      "intent": {
+        "story": "story-005 / commit 2f678c3 (EMA -> Linear Depletion): 'rewardPerSecond = rewardBalance / depletionDuration, recalculating ONLY when the balance changes (deposits or claims)'. Intent = pay out rewardBalance EVENLY (linearly) over depletionDuration; the rate is meant to be anchored once at funding/duration-change and held constant while the balance bleeds down.",
+        "implementation": "rewardPerSecond is additionally recomputed inside _updatePool every time a non-zero amount is distributed (i.e. on every stake/withdraw/claim/collectReward/setDepletionDuration that advances time with rewards outstanding)."
+      },
+      "economicModel": {
+        "continuousLimit": "With frequent interactions the recurrence B_{k+1} = B_k*(1 - dt/D) approaches the ODE dB/dt = -B/D, giving B(t) = B0*e^(-t/D) instead of the intended linear B(t) = B0*(1 - t/D).",
+        "cumulativeDelivered_vs_intended": [
+          {"t_over_D": 0.5, "intendedPct": 50.0, "actualPct": 39.3, "shortfallPP": 10.7},
+          {"t_over_D": 1.0, "intendedPct": 100.0, "actualPct": 63.2, "shortfallPP": 36.8},
+          {"t_over_D": 2.0, "intendedPct": 100.0, "actualPct": 86.5, "shortfallPP": 13.5},
+          {"t_over_D": 3.0, "intendedPct": 100.0, "actualPct": 95.0, "shortfallPP": 5.0},
+          {"t_over_D": 5.0, "intendedPct": 100.0, "actualPct": 99.3, "shortfallPP": 0.7}
+        ],
+        "pathDependence": "Distribution is monotonically WORSE the more often _updatePool runs: over a window T=D, distributed = 1 - (1 - T/(N*D))^N, which falls from 100% at N=1 poke (a single late poke catches up linearly / fully if the gap >= D, because potentialReward gets capped at rewardBalance) to 75% at N=2, ~64.8% at N=12, and ->63.2% as N->inf. So the realized rate is interaction-path-dependent, controlled by whoever pokes the pool.",
+        "strandedTail": "Two stranding effects compound: (a) the e^(-t/D) tail never reaches zero, so a residual always remains undistributed beyond any finite horizon; (b) integer-floor stranding (LOCAL-004): rewardBalance -= toDistribute debits the full amount while accStablePerShare += toDistribute*PRECISION/totalStaked floors, so up to (totalStaked/PRECISION) reward-wei per update is removed from rewardBalance without ever being credited to a share. Both residuals are recoverable ONLY by the trusted owner via emergencyTransfer (or by a single very-long-gap poke, which the live deployment's periodic collectReward prevents)."
+      },
+      "economicImpact": "Stable-reward stream is chronically under-delivered relative to the advertised Linear-Depletion schedule. For the canonical deployment (StableYieldAccumulator pushes USDC via collectReward roughly each cycle, plus normal staker claims), each funding tranche delivers only ~63% of its value within its own depletionDuration; the remaining ~37% is pushed into later windows (a value transfer from current stakers to future stakers / late claimers) with a permanently-stranded residual at the tail. No tokens are stolen, but reward delivery timing and per-cohort fairness diverge materially from intent, and a slice is locked until an owner emergencyTransfer.",
+      "attackScenario": "Passive (no attacker required): the live accumulator calls collectReward periodically and stakers claim; each such interaction re-anchors rewardPerSecond downward, driving the realized curve toward e^(-t/D). Active amplification is ECON-002.",
+      "attackerCostVsPayoff": "N/A for the passive bug (it is a design defect, not an exploit-for-profit). The value does not accrue to any single party; it is delayed/stranded and redistributed across cohorts/time. Active griefing economics are quantified in ECON-002.",
+      "preconditions": [
+        "totalStaked > 0 and rewardBalance > 0 (active stable stream)",
+        "More than one interaction per depletionDuration (true by construction in the live deployment: periodic collectReward + staker claims)"
+      ],
+      "affectedParties": "Current stakers (under-receive within window; near-term reward time-value lost), protocol (advertised schedule not honored), with a partial transfer to future stakers/late claimers; tail residual stranded until owner intervention.",
+      "severityHypothesis": {
+        "c4": "Medium",
+        "reasoning": "C4 Medium: protocol's core advertised function (Linear Depletion of stable rewards) is materially impaired and there is a quantifiable value-delay/leak (~37% under-delivery within a window + stranded tail) under normal operation with no special assumptions. Not High because no party steals funds and the bulk is recoverable/eventually-distributable (the stranded slice is recoverable by the trusted owner). Plausible (occurs in steady-state operation).",
+        "lawMapping": "Law 2 (faithfulness): contradicts story-005 ('recalculate only when balance changes'). Law 1 contrast: PhlimboV2 (story-020) deliberately removes this exact recompute, and lib/phlimbo-ea/CLAUDE.md explicitly labels it 'the V1 rate-recompute bug' -> upstream itself treats it as a defect, not intended behavior."
+      },
+      "reconciliation": {
+        "knownIssueStatus": "NOT in registered knownIssues[] for phlimbo-ea. HOWEVER registered designDecisions[] contains 'Rate recalculates after each balance change (collection or distribution)', which arguably describes this behavior as intended. This is a genuine three-way tension: (registry designDecision = blessed) vs (submodule CLAUDE.md = 'V1 rate-recompute bug') vs (PhlimboV2 = fixed). Surfaced per Law 1 (recall over tidiness); SANITIZER must decide whether the designDecision blessing downgrades/suppresses or whether the explicit 'bug' label + V2 fix keeps it reportable. Recommendation: keep reportable at honest Medium with the designDecision noted, since upstream's own remediation in V2 contradicts the blessing.",
+        "ledgerRelation": "Shares root cause (L416 re-anchor) with ledger M-02 but is the PASSIVE design-defect framing (occurs in normal operation), distinct from M-02's permissionless-griefing framing. ECON-002 carries the active-attacker economics that map to M-02."
+      }
+    },
+    {
+      "id": "ECON-002",
+      "type": "griefing / value-delay (permissionless rate re-anchor)",
+      "title": "Permissionless poke griefing: anyone can force the worst-case exponential decay and stall the stable-reward tail at gas-only cost (free via claim() as a non-staker; or dust via collectReward) — quantified economics of ledger M-02",
+      "severity": "potential-medium",
+      "confidence": "high",
+      "contract": "src/Phlimbo.sol",
+      "function": "collectReward / claim / _updatePool",
+      "rootCauseLine": 416,
+      "lineStart": 270,
+      "lineEnd": 286,
+      "secondaryLocations": [
+        "claim() L374-381 -> _updatePool() runs unconditionally before _claimRewards early-returns for a non-staker, so a non-staker calling claim() pokes _updatePool for GAS ONLY (no token cost, no MINIMUM_STAKE gate)",
+        "collectReward L270-286 -> re-anchor + window restart, requires forfeiting >=1 wei of rewardToken",
+        "_updatePool L425 always advances lastRewardTime even when toDistribute floors to 0"
+      ],
+      "economicModel": {
+        "mechanism": "Each poke that distributes a non-zero amount re-anchors rewardPerSecond = rewardBalance/D (L416), and each collectReward re-anchors + effectively restarts the D-window from 'now'. Because distributed = 1 - (1 - T/(N*D))^N is decreasing in N (poke count), a griefer maximizing pokes drives delivery from the honest single-poke linear curve (100% at t=D) down to the e^(-t/D) floor (63.2% at t=D). The griefer cannot make it worse than the exponential floor, but can force it there and hold it there.",
+        "tailStall": "When rewardBalance gets small, potentialReward = floor(rewardBalance*timeElapsed/D) floors to 0 for short inter-poke gaps; with per-block poking (timeElapsed ~12s) this happens once rewardBalance < D/12 reward-wei (e.g. < 0.0504 USDC for D=1 week, < 0.216 USDC for D=1 month). Each such poke advances lastRewardTime (L425) while distributing nothing, so the consumed time is permanently lost and the dust tail is stranded (recoverable only via owner emergencyTransfer). Per-block poking also maximizes integer-floor stranding (LOCAL-004), up to ~totalStaked/PRECISION reward-wei per poke."
+      },
+      "economicImpact": "Stable rewards owed to honest stakers are delayed (time-value loss) and the tail is stalled/stranded. Funds are not stolen and the griefer gains nothing — pure value-denial.",
+      "attackScenario": "1. Pool has rewardBalance funded by the accumulator with a target window D.\n2. Griefer calls claim() every block (as a non-staker: _claimRewards early-returns, but _updatePool still runs and re-anchors at L416). Cost = base gas only.\n3. Realized stable distribution is pinned to e^(-t/D) instead of linear; at t=D honest stakers have received ~63% instead of 100%.\n4. As the balance bleeds into the dust regime, per-block pokes distribute 0 while consuming time, stranding the tail. Optionally the griefer can also dust collectReward to keep restarting the window.",
+      "attackerCostVsPayoff": "Attacker cost: ~21k-60k gas per poke (claim path), repeated each block; zero token outlay for the claim() vector, >=1 wei rewardToken forfeited per collectReward vector. Attacker payoff: ZERO direct profit (griefing) — value is denied to stakers, not captured. Profitability as theft: none; rational only for a griefer who values harming stakers above gas. Sustained per-block griefing over a 1-week window is on the order of ~50k blocks of gas, non-trivial but feasible for a motivated adversary; even sparse poking (a few times per window) already pulls delivery well below linear.",
+      "preconditions": [
+        "Contract not paused (claim/collectReward gated whenNotPaused / no pause for collectReward)",
+        "totalStaked > 0, rewardBalance > 0"
+      ],
+      "affectedParties": "Stakers (delayed/denied stable yield), protocol reputation (advertised schedule unmet). Griefer bears cost with no offsetting gain.",
+      "severityHypothesis": {
+        "c4": "Medium",
+        "reasoning": "C4 Medium: protocol function/availability (timely reward distribution) is impaired by an unprivileged actor at low cost, and a portion can be permanently stranded. Aligns with ledger M-02 (medium). Could be argued Low because there is no attacker profit and funds are not lost (only delayed/owner-recoverable); kept at Medium because the cost is trivial, the effect is persistent, and it can drive permanent dust stranding. Plausible.",
+        "lawMapping": "Law 1: matches story-intents Law-1 candidate #3 (permissionless collectReward + window reset). Reconciles to ledger M-02 (which was 'code-analysis only'); this finding supplies the quantified attacker-cost-vs-damage model and broadens the cheapest vector to claim()-by-non-staker."
+      },
+      "reconciliation": {
+        "ledgerRelation": "Maps to ledger M-02 (fingerprint phlimbo:collectReward:permissionless-window-extension). SANITIZER should merge/upgrade M-02 with this quantified economics rather than create a duplicate. Net-new content vs M-02: (a) the free claim()-as-non-staker poke vector, (b) the decreasing-in-N distribution proof, (c) the floor-to-zero tail-stall threshold (D/12 reward-wei)."
+      }
+    },
+    {
+      "id": "ECON-003",
+      "type": "over-emission / supply inflation (stale emission rate)",
+      "title": "pauseWithdraw shrinks totalStaked without refreshing phUSDPerSecond or advancing lastRewardTime, so the next accrual mints phUSD at a rate sized for the pre-pause (larger) stake — direct, uncapped phUSD supply inflation to remaining stakers across a pause cycle",
+      "severity": "potential-medium",
+      "confidence": "high",
+      "contract": "src/Phlimbo.sol",
+      "function": "pauseWithdraw",
+      "rootCauseLine": 254,
+      "lineStart": 245,
+      "lineEnd": 261,
+      "relatedLines": [
+        "pauseWithdraw decrements totalStaked (L254) but does NOT call _updatePool/_updatePhUSDEmissionRate and does NOT advance lastRewardTime",
+        "_updatePhUSDEmissionRate L461-470 (the refresh that is skipped)",
+        "claim() L374-381 also never refreshes phUSDPerSecond, prolonging the stale rate after unpause",
+        "_updatePool L420-423 credits phUSDReward = timeElapsed * (stale) phUSDPerSecond, divided by the now-smaller totalStaked"
+      ],
+      "economicModel": {
+        "setup": "Let S0 = totalStaked when phUSDPerSecond was last refreshed (last stake/withdraw/APY-commit before pause), so phUSDPerSecond = r0 = S0*APYbps/10000/YEAR. During pause, some stakers exit via pauseWithdraw, reducing totalStaked to S1 < S0; lastRewardTime stays frozen and r0 is NOT refreshed.",
+        "onUnpause": "First _updatePool computes timeElapsed = now - lastRewardTime (>= the full pause duration Tp) and does accPhUSDPerShare += timeElapsed*r0*PRECISION/S1. Total phUSD minted for that interval across the S1 remaining shares = timeElapsed*r0 = Tp*S0*APY/(10000*YEAR), whereas the rate-correct amount for the remaining stake is Tp*S1*APY/(10000*YEAR).",
+        "overMint": "extra_phUSD = (S0 - S1) * Tp * APYbps / (10000 * SECONDS_PER_YEAR). Per-staker the effective APY over the stale interval is inflated by factor S0/S1. The over-rate persists past unpause until the next stake/withdraw (claim does NOT refresh), so a run of claim-only activity prolongs the inflation at rate r0 against the smaller S1.",
+        "worked": [
+          {"S0_phUSD": 13615, "S1_phUSD": 6807, "Tp_days": 7, "APYpct": 10, "extraPhUSD": 13.06},
+          {"S0_phUSD": 13615, "S1_phUSD": 6807, "Tp_days": 30, "APYpct": 10, "extraPhUSD": 55.96},
+          {"S0_phUSD": 13615, "S1_phUSD": 0.001, "Tp_days": 7, "APYpct": 10, "extraPhUSD": 26.11}
+        ]
+      },
+      "economicImpact": "Direct phUSD supply inflation: PhlimboEA holds phUSD mint authority and the phUSD stream has NO balance cap (unlike the stable stream's rewardBalance cap), so over-emission is minted out of thin air to remaining stakers. Magnitude scales with exited stake (S0-S1), pause duration Tp, and APY. Because phUSD is BOTH the staking asset and a minted reward (ledger L-11), excess mint compounds into the wider phUSD peg/supply, not just this pool.",
+      "attackScenario": "Opportunistic (requires a pauser-triggered pause; pause itself is a trusted action):\n1. Pauser pauses (legitimate emergency/maintenance).\n2. Some stakers exit via pauseWithdraw, dropping totalStaked S0 -> S1; LOCAL-005 lets an actor even leave a sub-MINIMUM_STAKE dust position, pushing S1 toward 0 and maximizing the S0/S1 inflation factor.\n3. Pauser unpauses. The first _updatePool mints phUSD for the entire pause interval at the stale rate r0 (sized for S0) spread over S1 -> remaining stakers receive up to (S0/S1)x their fair APY emission.\n4. If only claim() activity follows, the stale rate keeps over-minting at r0 against S1 until a stake/withdraw refreshes it.",
+      "attackerCostVsPayoff": "Not a pay-to-profit exploit (pause is pauser-gated, not attacker-triggerable). As a passive bug it is a deterministic over-mint to whoever remains staked across a pause+pauseWithdraw+unpause cycle. A self-interested remaining staker gains extra phUSD at zero marginal cost; an actor trying to be the dust 'last staker standing' to concentrate the over-mint to themselves may have their OWN subsequent claim revert via ledger M-01 (pauseWithdraw leaves their phUSDDebt stale -> _claimRewards underflow), so the clean, reliable beneficiaries are stakers who did NOT pauseWithdraw.",
+      "preconditions": [
+        "A pause occurs (pauser-gated, trusted) and is later lifted",
+        "At least one staker exits via pauseWithdraw during the pause (S1 < S0)",
+        "desiredAPYBps > 0 (zero-APY deployments are immune to this stream; note the live deployment is documented as expecting zero-APY operation, which lowers real-world likelihood)"
+      ],
+      "affectedParties": "phUSD holders / peg (dilution from uncapped mint), protocol; benefit accrues to stakers who remain across the pause cycle.",
+      "severityHypothesis": {
+        "c4": "Medium",
+        "reasoning": "C4 Medium: a quantifiable value leak (uncapped phUSD inflation) that materializes under a stated external requirement (a pause+pauseWithdraw+unpause cycle). Not High because it is gated on a trusted-role pause event, the per-cycle magnitude is bounded by (S0-S1)*Tp*APY, and the live deployment is documented as zero-APY (which would zero this stream). Severity could fall to Low if pauses are rare and APY stays zero; kept at Medium because when APY is non-zero the inflation is direct, mint-backed, and not obvious to a non-malicious operator (Law-3 footgun: a competent owner would be surprised that an emergency pause + user exits silently over-mints phUSD on resume).",
+        "lawMapping": "Law 2: violates story-006 ('rate recomputed whenever totalStaked changes') and INV-7. Law 3: non-obvious operator footgun (in scope). Law 1: direct supply inflation."
+      },
+      "reconciliation": {
+        "ledgerRelation": "Distinct from ledger M-01 (which is the claim REVERT/DoS after pauseWithdraw->unpause->claim, a different root cause: stale phUSDDebt underflow) and from L-06 (exiting user forfeits/orphans accrual). This is the OVER-MINT to REMAINING stakers via stale phUSDPerSecond + frozen lastRewardTime — appears NOT covered by any existing ledger entry. Likely net-new. Interacts with M-01 (limits the self-dust variant).",
+        "localOrigin": "Economic quantification of profile LOCAL-003 (+ LOCAL-005 amplification)."
+      }
+    }
+  ],
+  "clearedItems": [
+    {
+      "id": "ECON-CLEAR-APY",
+      "area": "story-014 two-step APY preview->commit window",
+      "conclusion": "No NEW economic value-leak in the preview->commit window itself. Commit correctly accrues at the old rate (_updatePool) BEFORE applying the new APY and refreshing the rate, so no retroactive over/under-credit. A single call never changes state and state can always progress (matches intent). Only owner can drive the window (no third-party manipulation of pending value). The known economic edges are already ledgered: L-02 (commit is mempool-visible; stakers can front-run a rate increase by staking before commit / a decrease by withdrawing) and C-03 (uncapped APY magnitude -> phUSD mint pressure; gate is delay-only). No additional finding raised; defer to L-02/C-03."
+    },
+    {
+      "id": "ECON-CLEAR-FIRSTDEP",
+      "area": "first-depositor / share-price inflation",
+      "conclusion": "No standalone exploit. This is a MasterChef-style debt accounting (user.amount tracks staked phUSD 1:1; there is no mintable share token), so the classic ERC4626 first-deposit share-price inflation does not apply. MINIMUM_STAKE=1e15 (registered as intended mitigation) plus the withdraw dust-forces-full-exit rule hold for stake/withdraw. The only residual is that pauseWithdraw can drive totalStaked to dust (LOCAL-005), inflating accStablePerShare/accPhUSDPerShare per-share on the next accrual; checked-math overflow is not reached for realistic magnitudes (amount*accX stays < 2^256), and the only real economic consequence is the ECON-003 over-mint path. No separate finding raised."
+    },
+    {
+      "id": "ECON-CLEAR-FLASHSTAKE",
+      "area": "flash-stake / sandwich capture of reward streams",
+      "conclusion": "Both streams accrue strictly over elapsed time (rewardPerSecond/phUSDPerSecond * timeElapsed); collectReward adds to rewardBalance to be distributed forward over D, not instantly. New stakers set debt to amount*accX/PRECISION AFTER _updatePool, so they cannot capture already-accrued per-share. No instant flash-stake-claim capture of either stream. (Mempool front-running of collectReward funding is the separate, already-ledgered L-07.)"
+    }
+  ]
+}

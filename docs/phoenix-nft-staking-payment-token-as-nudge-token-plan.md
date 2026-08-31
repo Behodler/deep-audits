@@ -13,7 +13,7 @@ is subsumed by §3.1 here, in a strictly tighter form. Do not implement both.
 `fcaca0025…` (M-01, step-10 sweep, `wont-fix`) · `7a1718e9a…` (M-01, composition, `wont-fix`) ·
 `2d34673536…` (L-04, streamer-flush leak, open) · `fb17fc6d07…` (M-06, `setDispatcherIndex` guard, open) ·
 `a62fe01a…` (M-02, dedupe, `fix-pending`) · yield-claim-nft submission **`ycn19h1`** (CONDITIONAL High,
-`reports/yield-claim-nft-19/submissions/H-01.md`)
+`reports/yield-claim-nft/19/submissions/H-01.md`)
 
 ---
 
@@ -304,7 +304,7 @@ Per `lib/phoenix-nft-staking/CLAUDE.md`: TDD, Foundry only, **no `script/` direc
 
 1. `test_PaymentTokenAsNudge_nonQualifyingBatchTakesNothing` — port
    `Run19_T1_PaymentTokenCollision` from
-   `reports/yield-claim-nft-19/pocs/run19-Tier3Nudge.patch`. 20 honest mints seed a 200 USDC pot via the
+   `reports/yield-claim-nft/19/pocs/run19-Tier3Nudge.patch`. 20 honest mints seed a 200 USDC pot via the
    real `NudgeStreamer`; `setDispatcherIndex` to the USDC-prime index; attacker calls
    `batchMint(1, attacker, 1, …)`. **Must fail before the change** (extracts 190 USDC) and revert
    `BatchMint__PaymentBudgetExhausted` after. PoC convention is **PASS = defect reproduced**, so these

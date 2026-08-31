@@ -1,0 +1,104 @@
+{
+  "project": "stable-yield-accumulator",
+  "commit": "f7041304e4a71cc2325cf406974f5cc16a5b5322",
+  "reportDir": "reports/stable-yield-accumulator/14",
+  "channel": "manual-review",
+  "emittedBy": "deduplicator",
+  "emittedAt": "2026-07-26T00:00:00Z",
+  "purpose": "Law-1 visible parked channel. Items here were NOT dropped — they are routed for human adjudication at /ledger triage. A dedup run that parked items but wrote no manual-review.json is a bug.",
+  "entryCount": 5,
+
+  "entries": [
+    {
+      "id": "PARK-001",
+      "originalId": "PARK-001 (code-scanner)",
+      "reason": "cross-repo — root cause OUT OF SCOPE for stable-yield-accumulator",
+      "confidence": "medium (severity) / high (mechanism, machine-verified this run)",
+      "severityEstimate": "potential-low",
+      "subject": "NudgeStreamer.collectNudge is PERMISSIONLESS and recomputes rewardPerSecond over the FULL duration on every deposit — a 1-wei donor can reset the streaming window at will (Linear-Depletion / rate-drift class)",
+      "rootCauseLocation": "lib/phoenix-nft-staking/src/NudgeStreamer.sol:137-156 (recompute at :150-153)",
+      "whyNotFiledAgainstSYA": "C4: issues in parent/forked contracts where the root cause is OOS. Verified that SYA adds NO new capability — collectNudge is already fully permissionless, so an attacker resets the window directly for 1 wei plus gas; reaching it via SYA.claim is strictly MORE expensive (burns an NFT, pays actualPayment).",
+      "machineEvidenceObtainedThisRun": "Tier-3 Property 2 verified the resulting fixed point directly: standing float = donationRate x duration, cadence-independent (14,999.98e6 observed vs 15,000e6 expected at both 1-day and 6-hour cadences), fuzz-confirmed within 1% over T in [D/100, D/4].",
+      "econRuling": "Pure griefing, STRICTLY NEGATIVE-EV: the griefer's own potential batchMint take shrinks by exactly what they delay, no competitor is excluded, value is never destroyed or redirected. Damage is delay, not destruction.",
+      "inScopeConsequenceFiled": "DEDUP-004 — the donor's own honest claim cadence produces the same reset, so the float is a normal-operation property requiring no attacker.",
+      "routing": {
+        "targetProject": "phoenix-nft-staking",
+        "action": "Re-weigh against run-24's conclusion that the NudgeStreamer port is 'phlimbo port faithful (no rate-drift)'. New material: in the SYA integration the depositor is PERMISSIONLESS and the honest donor deposits at HIGH FREQUENCY, so rate-drift is present in practice even if the port is textually faithful to PhlimboV2 (where the depositor is privileged). Do NOT silently override run-24.",
+        "checkForDuplicateOnArrival": "phoenix-nft-staking ledger aaebb4b9 (Low, open) 'collectNudge dust window-reset griefing throttles the nudge incentive to a decaying trickle' likely already covers this — reconcile INTO it rather than minting a new entry.",
+        "alsoRelated": ["phoenix-nft-staking 6f46ec80 (Low, open)", "phoenix-nft-staking run-18 M-01 (PoC 63.26%)"],
+        "memoryRefs": ["disclose-when-refiling-owner-wontfix"]
+      }
+    },
+
+    {
+      "id": "PARK-003",
+      "originalId": "PATTERN-003 (pattern-matcher manualReview)",
+      "reason": "low reportability confidence — dust magnitude and byte-identical to pre-story-026 behaviour, but a real and distinct policy bypass; human adjudicates, not the scanner",
+      "confidence": "low",
+      "severityEstimate": "potential-low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 586,
+      "subject": "nudgeSplit is silently unhonored below the rounding threshold: nudgeAmount floors to 0 and 100% of the payment routes to phlimbo, skipping the streamer branch entirely",
+      "content": "`nudgeAmount = (actualPayment * nudgeSplit) / 100` floors. When actualPayment < 100/nudgeSplit the nudge share rounds to zero, the `nudgeAmount > 0` guard skips the streamer branch, and phlimboAmount takes 100%. The configured donation policy is silently not applied. Rounding favours phlimbo over the nudge sink, NEVER the claimer.",
+      "whyLowConfidence": "With nudgeSplit=10 and a 6-dp reward token the threshold is actualPayment < 10, i.e. 1e-5 USDC, and every claim burns an NFT and requires non-zero skimmed yield — the NFT cost dwarfs any starve-the-nudge-pot gain by orders of magnitude. Not attacker-repeatable for profit.",
+      "strongestArgumentForTriagingOut": "code-scanner and econ-scanner (POS-003) independently confirmed the behaviour is BYTE-FOR-BYTE IDENTICAL to pre-story-026 — the old safeTransfer sat under the same `> 0` guard — so story-026 introduces nothing new here.",
+      "distinctFrom": {
+        "0da2e7cf4f (L-01, open)": "L-01 concerns actualPayment ITSELF flooring to 0. This concerns the SPLIT flooring to 0 while actualPayment is NON-ZERO — different divisor, different victim (the nudge sink, not the protocol), and it SURVIVES even if L-01 is fixed by re-guarding actualPayment > 0.",
+        "ecc2d126dd (M-01, acknowledged)": "No decimal-config fail-open involved; this triggers with a fully and correctly configured token.",
+        "RECON-001": "RECON-001 is the actualPayment==0 path (BOTH legs skipped); this is the actualPayment>0 / nudgeAmount==0 path (only the nudge leg skipped)."
+      }
+    },
+
+    {
+      "id": "PARK-004",
+      "originalId": "LOCAL-001 (contract-profiler)",
+      "reason": "declined an available collapse — folding this into ledger L-05 would silently overwrite that entry's central scoping qualifier with a contradicting fact",
+      "confidence": "verified (property) / low (reportability)",
+      "severityEstimate": "potential-low / qa",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim (:538); calculateClaimAmount (:742, identical shape)",
+      "subject": "claim's inner loop over the CALLER-SUPPLIED exemptStrategies array is O(n*m) with m caller-controlled and duplicates not rejected",
+      "content": "The strategy loop (yieldStrategies, owner-bounded) contains an inner loop over the caller-supplied `exemptStrategies` calldata array, giving O(n*m) work with m FULLY CALLER-CONTROLLED. Duplicates are NOT rejected — the same registered strategy may appear m times and still pass validation, so m is unbounded independent of n.",
+      "impact": "Self-inflicted gas burn only: a caller cannot use this to grief anyone else, since each claim is independent and the cost lands on the caller. Secondary: claim's gas is not statically bounded, which matters for any bundler/relayer that pre-estimates.",
+      "humanDecisionRequired": "Ledger L-05 (d60ab75159, open) is explicitly scoped as 'owner/OOS-bounded, NOT a permissionless DoS'. This item identifies a CALLER-controlled, unbounded, duplicate-tolerant multiplier on the same loop. It is NOT an escalation (impact is self-inflicted), but the human should decide whether L-05's scoping sentence needs amending — the dedup stage should not make that edit silently.",
+      "recommendation": "Bound exemptStrategies.length by yieldStrategies.length, or reject duplicates."
+    },
+
+    {
+      "id": "PARK-005a",
+      "originalId": "LOCAL-002 (contract-profiler)",
+      "reason": "victim is a downstream on-chain integrator; NOT covered by any existing ledger entry",
+      "confidence": "verified (property) / low (reportability)",
+      "severityEstimate": "potential-low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "canClaim",
+      "line": 789,
+      "subject": "canClaim loops i = 1..INFTMinterV2(nftMinter).nextIndex()-1, issuing one external balanceOf staticcall per dispatcher index",
+      "content": "nextIndex is monotonically increasing and controlled by the NFTMinter owner, never by SYA. View-only and primarily bot-facing (eth_call has generous gas), BUT any ON-CHAIN caller using canClaim as a gate inherits an unbounded, monotonically growing cost that can eventually exceed the block gas limit. Unchanged by story-026 except that nextIndex now resolves through INFTMinterV2.",
+      "explicitlyNotCoveredBy": "Ledger L-05 (d60ab75159) covers the yieldStrategies x authorized-clients product, NOT the nextIndex dispatcher loop — different array, different owner, different growth driver. Do not assume the SLITHER-002 -> L-05 reconciliation closes this.",
+      "recommendation": "Offer a paginated variant, or have bots use the O(1) balanceOf(caller, index) directly."
+    },
+
+    {
+      "id": "PARK-005b",
+      "originalId": "PATTERN-005 (pattern-matcher manualReview)",
+      "reason": "cannot be closed on the merits at this tier — the victim (ClaimArbitrage) is OUT OF this run's scope",
+      "confidence": "low",
+      "severityEstimate": "potential-low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "calculateClaimAmount (:734) / getTotalYield (:821) / getYield (:806)",
+      "subject": "Value-reporting views are readable mid-claim while the strategy set is transiently half-skimmed",
+      "content": "During claim's loop (:538-566) strategies at index < k have been skimmed and report zero surplus while those at index > k have not. The three views read that state unguarded, so an integrator reading them inside a callback window sees a value that is neither the pre-claim nor the post-claim figure.",
+      "codeScannerRuling": "Read-only-reentrancy check returned 'cleared with a caveat': no callback window is currently reachable — skimSurplus pays in hook-free stablecoins (USDC/USDT/DAI/USDS), strategies are owner-registered rather than permissionless, and the two external calls story-026 added or kept (collectNudge :599, collectReward :602) both run AFTER the loop closes, so the inconsistent window is already shut by then.",
+      "whyStillParked": "The REENTRANCY-READONLY pattern prescribes recording the finding even when the contract is itself safe, because the victim is a downstream integrator — and the project docs describe exactly such an integrator: ClaimArbitrage, which calls SYA.claim inside a Uniswap V4 unlockCallback. ClaimArbitrage is not in this run's scope, so neither the code-scanner nor this dedup stage can adjudicate reachability.",
+      "humanDecisionRequired": "Scope decision: bring ClaimArbitrage into scope for a reachability check, or accept the current 'safe by absence of hooks' argument on the record.",
+      "relatedLedger": "L-06 (90bcf3764e, open) covers getTotalYield's snapshot divergence and the paused-token view inconsistency — a DIFFERENT view defect on the same functions. Check for overlap if this is ever promoted."
+    }
+  ],
+
+  "notRoutedHere": {
+    "statement": "The only raw inputs removed outright were the two permitted categories: (a) exact/near duplicates consolidated with named `originalIds` lineage, and (b) confirmed false positives / pure tool noise with a stated and independently source-verified reason (SLITHER-001, ADERYN-003). Everything else that was set aside is in this file.",
+    "droppedIds": ["SLITHER-001 (confirmed false positive — see dedup/deduplicated-findings.json DROP-001)", "ADERYN-003 (contextual FP + tool noise — see DROP-002)"]
+  }
+}

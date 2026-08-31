@@ -1,0 +1,193 @@
+{
+  "project": "stable-yield-accumulator",
+  "commit": "f7041304e4a71cc2325cf406974f5cc16a5b5322",
+  "baseCommit": "0fef726",
+  "story": "story-026 (nudge share routed through NudgeStreamer)",
+  "reportDir": "reports/stable-yield-accumulator/14",
+  "scanTimestamp": "2026-07-26T00:00:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "mode": "regression",
+  "contractsScanned": 2,
+  "scope": ["src/StableYieldAccumulator.sol", "src/interfaces/IStableYieldAccumulator.sol"],
+  "crossContractSurfacesRead": [
+    "lib/phoenix-nft-staking/src/NudgeStreamer.sol @ 5015f1b (TOP-LEVEL authoritative clone, full read)",
+    "lib/phoenix-nft-staking/src/BatchNFTMinterMultiToken.sol @ 5015f1b (batchMint steps 3.5/4/9/10, _snapshotRewards, _resolvePaymentPath)",
+    "lib/stable-yield-accumulator/lib/yield-claim-nft/src/interfaces/INFTMinterV2.sol"
+  ],
+  "nestedPinCheck": {
+    "result": "clean",
+    "note": "Confirms code-scanner: SYA nested pin lib/phoenix-nft-staking == 5015f1b == top-level HEAD. NudgeStreamer + BatchNFTMinterMultiToken read at the authoritative commit (memoryRef: nested-submodule-pin-stale-trap)."
+  },
+  "findingsCount": 2,
+  "parkedItemsAnswered": ["PARK-002", "PARK-001"],
+
+  "valueFlowMap": {
+    "summary": "story-026 inserts one new custody hop and one new timing gate into an otherwise unchanged claim value flow, and — critically — the flow is CIRCULAR.",
+    "path": [
+      "1. Claimer burns 1 ERC1155 NFT (NFTMinterV2, yield-claim-nft) as the claim gate — StableYieldAccumulator.sol:532/:619",
+      "2. Claimer is PAID FIRST: skimSurplus(token, msg.sender) delivers externally-derived strategy surplus straight to the claimer — :558",
+      "3. Claimer PAYS SECOND: safeTransferFrom(claimer -> SYA, actualPayment) in rewardToken — :583",
+      "4. actualPayment splits: nudgeAmount = actualPayment*nudgeSplit/100 (floor), phlimboAmount = remainder — :586-587",
+      "5. NEW: nudgeAmount -> forceApprove(streamer) -> NudgeStreamer.collectNudge(nudge, rewardToken, amt) — :595-600. Value now RESTS in streams[nudge][rewardToken].buffer.",
+      "6. NudgeStreamer._settle drips the buffer linearly to the `nudge` sink (BatchNFTMinterMultiToken) on any collectNudge / pullPendingStream.",
+      "7. BatchNFTMinterMultiToken.batchMint pays the ENTIRE pre-loop snapshot balance of every whitelisted nudge token to the first caller who qualifies (count >= nudgeSize) — BatchNFTMinterMultiToken.sol:602-609/:744-760. Winner-take-all.",
+      "8. CIRCULARITY: those batch-minted NFTs are NFTMinterV2 ERC1155s — the same family SYA burns at step 1. The nudge share is SYA paying to subsidise the production of its own claim-gate supply."
+    ],
+    "circularityConfidence": "high on interface identity (INFTMinterV2 is ITokenMinterV2; BatchNFTMinterMultiToken mints via ITokenMinterV2.mint at a pinned dispatcherIndex, SYA burns via INFTMinterV2.burn), medium on deployment identity (whether SYA.nftMinter == BatchNFTMinterMultiToken.tokenMinter is a config fact, not a code fact — see verificationNeeded on ECON-002)."
+  },
+
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "mechanism-design / intent-vs-implementation gap",
+      "rootCauseClass": "throttle placed on arrival rate, not on capture size; settled value is PUSHED out of the throttle into a winner-take-all balance that accumulates without limit",
+      "severity": "potential-low",
+      "confidence": "high",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 599,
+      "lineStart": 595,
+      "lineEnd": 600,
+      "crossContractLines": [
+        "phoenix-nft-staking/src/NudgeStreamer.sol:186-192 (_settle transfers to recipient)",
+        "phoenix-nft-staking/src/BatchNFTMinterMultiToken.sol:744-760 (_snapshotRewards: full balanceOf)",
+        "phoenix-nft-staking/src/BatchNFTMinterMultiToken.sol:525-534 (batchMint step 3.5 flush)"
+      ],
+      "description": "NudgeStreamer's own stated purpose is 'so that whoever calls batchMint right after a burst can no longer capture a disproportionate share of the reward pot' (NudgeStreamer.sol contract NatSpec). The streamer delivers on exactly half of that: it throttles the RATE AT WHICH value arrives in the pot. It does not throttle CAPTURE, because `_settle` PUSHES the accrued amount out of the streamer and into the sink's raw ERC20 balance, and `_snapshotRewards` pays the FULL balance of each whitelisted token to the first caller who qualifies (`count >= nudgeSize`). Unclaimed settled value therefore accumulates in the sink with no cap and no per-caller limit. Streaming converts an instantaneous winner-take-all capture into a DELAYED winner-take-all capture of the same total; it does not make the share proportionate.",
+      "economicMechanism": "Let r = nudge donation rate (rewardToken/sec), D = stream duration, p = NFT mint price, n = nudgeSize. In the idle case the sink's pot after an idle interval t is ~r*t (everything settled is capturable). A batcher's capture becomes profitable once r*t > n*p, i.e. at cadence t* = n*p/r. The streamer sets a MINIMUM cadence between profitable captures; it does not divide the pot. If real batchMint demand is slower than t* (the low-liquidity / bootstrap case, which is precisely when the nudge subsidy exists), a single batcher still takes 100% of everything the stream has delivered since the last qualifying batch. The protection is demand-dependent: it is real only when batchMint frequency >> 1/D, and vanishes as batchMint frequency falls.",
+      "attackScenario": "1. SYA claims run for 30 days at nudgeSplit=20; the streamer settles the nudge share into BatchNFTMinterMultiToken continuously.\n2. No one qualifies for batchMint during that window (nudgeSize mints exceed the pot early on, so rational batchers wait).\n3. Attacker monitors the sink's balanceOf(rewardToken) — public, no view function required, no privileged information.\n4. The moment balance > nudgeSize*price, attacker calls batchMint(nudgeSize, self, ...) and takes the entire 30 days of streamed donations in one transaction, plus receives nudgeSize NFTs which carry independent claim-gate utility against SYA itself.\n5. Net cost = nudgeSize*price (recovered as NFTs); net take = the whole pot. Identical outcome to the pre-story-026 push, delayed by t*.",
+      "profitability": "Profitable for the batcher whenever accumulated pot > nudgeSize*price, which is the steady state under any batchMint cadence slower than t*. Not an attack in the adversarial sense — it is the mechanism working as coded. The loss is to the INTENT (proportionate distribution), not to the treasury.",
+      "affectedParties": "Honest/small batchers (crowded out by whoever wins the race); the nudge subsidy's stated purpose (broad minting incentive) is not achieved. No party loses principal.",
+      "quantifiedScenario": "nudgeSplit=20%, claim throughput $10k/day of rewardToken -> r = $2k/day. D=30d, nudgeSize=10, price=$50 -> n*p=$500 -> t* = 6 hours. At >6h between qualifying batches (very likely at bootstrap), the winner takes the full interval's donations. At $2k/day and a 3-day gap, that is a $6k single-transaction capture for a $500 outlay in NFTs the winner keeps.",
+      "intentQuote": "NudgeStreamer.sol NatSpec: 'Buffers bursty donations per (batchMinter, token) and streams them linearly to zero over a configured duration, so that whoever calls batchMint right after a burst can no longer capture a disproportionate share of the reward pot.'",
+      "actualBehaviour": "NudgeStreamer.sol:186-192 `_settle` -> `IERC20(token).safeTransfer(recipient, settled)`; BatchNFTMinterMultiToken.sol:748 `uint256 available = qualifies ? IERC20(rewardToken).balanceOf(address(this)) : 0;` then paid in full via `_payRewards`. Nothing between the streamer and the winner-take-all sweep retains a proportionality constraint.",
+      "discrepancy": "The design would have to hold value IN the streamer and meter it per-batcher (or cap the payout to a rate) to deliver 'no disproportionate share'. Pushing settled value into an unmetered balance re-creates the burst it was built to remove, on a longer clock.",
+      "possiblyIntentional": "Plausibly accepted: story-026's narrow, literal goal — kill the SAME-BLOCK back-run of a claim — IS achieved (see positives[0], which is a genuine and material improvement). This finding is that the broader claim in the NatSpec overstates what the mechanism delivers. Owner may reasonably accept it.",
+      "recommendation": "Either (a) narrow the NatSpec claim to 'removes atomic same-transaction burst capture' — the property actually delivered — or (b) have batchMint pull from the streamer per-call with a per-caller cap rather than sweeping the sink's whole balance. (b)'s root cause is in phoenix-nft-staking, not SYA.",
+      "dedup": {
+        "isDuplicate": false,
+        "vs_ledger": "No SYA ledger entry covers nudge-pot capture economics. New.",
+        "vs_codeScanner": "DISTINCT from CODE-001..004 (all availability/custody). This is mechanism-effectiveness.",
+        "vs_phoenix_858e9e80": "RELATED, do not collapse. phoenix-nft-staking 858e9e80 (wont-fix) is the BatchNFTMinter MEV front-run of the pot from the MINTER side. This is the DONOR-side assessment of whether story-026's streamer actually mitigates that class — the answer being 'partially, and only under high batchMint demand'. Route a copy to the phoenix-nft-staking ledger as evidence bearing on 858e9e80's residual, per memory disclose-when-refiling-owner-wontfix. Do NOT re-open 858e9e80 from here.",
+        "vs_phoenix_run22_M01": "DISTINCT. run-22's aggregate-nudge over-funding is Sigma-pots-exceed-cost; this is single-pot capture concentration."
+      },
+      "answers": "PARK-002 (primary)"
+    },
+
+    {
+      "id": "ECON-002",
+      "type": "unbounded value-delivery horizon by normal operation / circular funding dependency",
+      "rootCauseClass": "the streaming window is reset by the donor's own routine deposit, so donated value has no bounded delivery deadline — and the delayed value funds the donor's own claim-gate supply",
+      "severity": "potential-low",
+      "confidence": "medium-high",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 599,
+      "lineStart": 595,
+      "lineEnd": 600,
+      "crossContractLines": [
+        "phoenix-nft-staking/src/NudgeStreamer.sol:150 (s.rewardPerSecond = (s.buffer * PRECISION) / s.duration — recompute over FULL duration on every deposit)"
+      ],
+      "description": "PARK-001 framed the window reset as a griefing vector requiring a 1-wei donor. The SYA-specific finding is stronger and requires no attacker: SYA's OWN claim() is the deposit. Every claim calls collectNudge, which settles at the old rate and then recomputes rewardPerSecond over the FULL duration from `now`. Under any claim cadence T < D, the stream never reaches zero — linear depletion becomes geometric decay with an infinite tail, driven entirely by intended, honest protocol activity. There is therefore no bounded timeline on which any given donation is delivered to the nudge sink. SYA's design does implicitly assume bounded delivery: the nudge share is a subsidy with a purpose, and the value routed away from phlimbo is only justified if it arrives.",
+      "economicMechanism": "Steady state is well-behaved in RATE but not in FLOAT. With donation rate r and duration D, the streamer's standing undelivered buffer converges to B = r*D (per-interval delivery B*T/D must equal per-interval donation r*T). Delivery rate equals donation rate in steady state, so no value is permanently lost in the healthy case — but a PERMANENT float of r*D sits in a third contract with no rescue function. The reset dynamic makes the tail of any individual donation infinite: a donation made at t is still ~e^-1 undelivered after one full duration (the ~63.2%/duration result from phoenix-nft-staking run-18 M-01), and asymptotically never fully delivered while claims continue.",
+      "impactOnCODE003": "This is the quantified magnitude for code-scanner's CODE-003, which described the buffer as 'bounded and continuously drained under normal claim cadence, hence Low'. That is directionally right but understates the exposure: the standing float is structurally r*D and INCREASES with claim throughput — i.e. it is largest exactly when the protocol is working best. At nudgeSplit=20%, $10k/day claim throughput and D=30 days, the permanently-at-risk float is ~$60k, not dust. CODE-003's severity floor should be set against r*D, not against a single claim's nudge share. I still support Low (realisation requires an exceptional trigger: sink retirement, streamer blacklist, or claims stopping) but the magnitude line in CODE-003 should be corrected.",
+      "circularityImpact": "The nudge sink is BatchNFTMinterMultiToken, whose output is NFTMinterV2 ERC1155s — the same claim gate SYA burns at :619. SYA is therefore paying, out of claimer-supplied revenue, to subsidise the production of the NFTs that gate its own permissionless consolidation rail. Delaying nudge delivery delays batch-mint incentive, which thins NFT supply, which thins the claimer population, which slows SYA's yield consolidation. The feedback is negative but weak (NFTs also mint for direct payment, so supply is not gated on the subsidy) — it does not make this a Medium, but it is why the delay is a protocol concern rather than a marketing-spend concern.",
+      "valuationRuling": "CONFIRMED: the streamed nudge value is claimer-paid CONSIDERATION, not externally-derived yield. The claimer pays actualPayment in rewardToken in exchange for skimmed strategy surplus; that payment is new value entering the protocol and is split phlimbo/nudge. The memory note 'externally-derived-yield = opportunity cost, not loss' governs the OTHER leg (the surplus handed to the claimer, which IS Tokemak-style yield on protocol-owned capital). It does NOT govern the nudge share. Stranding the nudge share is a REAL loss of protocol revenue that would otherwise have reached phlimbo. Code-scanner's distinction is VALIDATED, not refuted.",
+      "attackScenario": "No attacker required — normal operation. Adversarial amplification (PARK-001): any address calls collectNudge(nudge, rewardToken, 1) to force an extra reset. Cost: ~60-90k gas plus 1 wei, PER RESET, repeated indefinitely to hold the tail. Damage: additional delay only; the value is never destroyed, never redirected to the attacker, and the attacker's own potential batchMint take shrinks in lockstep. Strictly negative-EV for the attacker.",
+      "profitability": "UNPROFITABLE for any attacker on every path examined. There is no state in which delaying the stream pays the delayer: the pot they could capture via batchMint shrinks by exactly what they delay, and no competitor is excluded (batchMint remains open). Pure griefing with unbounded cost against bounded, temporary damage — this CAPS the severity at Low regardless of the SYA-side amplification.",
+      "affectedParties": "phlimbo/protocol revenue (float at risk under CODE-003 triggers); prospective batch-minters (subsidy arrives slower than nominal); SYA's own claimer throughput (second-order, via the NFT supply loop).",
+      "quantifiedScenario": "D=30 days, claims every 6 hours (T=0.25d): a single donation is ~63% delivered after 30 days and ~86% after 60 days, never 100%. Standing streamer float at r=$2k/day is ~$60k.",
+      "recommendation": "SYA-side: none available (root cause is NudgeStreamer's recompute-on-deposit). Ops-side: size `duration` against expected claim cadence, not against intuition — D should be chosen so r*D is a float the protocol is willing to leave uninsured in a contract with no rescue function. phoenix-nft-staking-side: recompute the rate over the REMAINING window rather than the full duration on deposit, or add an owner rescue (this is the same ask as CODE-003).",
+      "dedup": {
+        "isDuplicate": false,
+        "vs_CODE003": "OVERLAPPING but distinct and both should stand. CODE-003 is 'the streamer has no escape hatch' (a custody/recoverability defect). ECON-002 is 'the delivery horizon is unbounded and the float is r*D' (a timing/magnitude property). ECON-002 should be attached to CODE-003 as its magnitude correction rather than filed as a second Low if the deduplicator prefers a merge — but do NOT drop the r*D quantification or the valuationRuling in the merge, they are the load-bearing parts.",
+        "vs_PARK001": "This IS the SYA-side economic answer to PARK-001. PARK-001's root cause stays OUT OF SCOPE for SYA and routes to phoenix-nft-staking; this entry is the in-scope consequence for SYA's donation design.",
+        "vs_phoenix_run18_M01": "SAME CLASS (Linear-Depletion rate-drift, PoC 63.26%), different contract and different actor. Note the tension with phoenix-nft-staking run-24's assessment that the NudgeStreamer port is 'faithful (no rate-drift)' — that conclusion was reached against phlimbo's PhlimboV2 semantics where the depositor is privileged. Here the depositor is permissionless AND the honest donor deposits at high frequency, so the rate-drift is present in practice even if the port is textually faithful. Route to phoenix-nft-staking for a re-weigh of run-24's conclusion; do not silently override it (memoryRef: disclose-when-refiling-owner-wontfix)."
+      },
+      "verificationNeeded": "Confirm on the live deployment that SYA.nftMinter and BatchNFTMinterMultiToken.tokenMinter resolve to the same NFTMinterV2, which is what makes the circularity real rather than notional. If they are different minters, drop the circularityImpact paragraph; the rest of the finding is unaffected.",
+      "answers": "PARK-001 (economic consequence for SYA)"
+    }
+  ],
+
+  "positives": [
+    {
+      "id": "POS-001",
+      "subject": "story-026 CLOSES a pre-existing atomic claimer self-rebate loop — a genuine and material economic improvement",
+      "importance": "This is the strongest economic argument FOR the change and should be recorded so the change is not read as pure downside.",
+      "analysis": "Pre-story-026, claim() pushed nudgeAmount directly into BatchNFTMinterMultiToken's balance. `_snapshotRewards` reads that balance BEFORE the mint loop (BatchNFTMinterMultiToken.sol:748), so a donation that landed in a PRIOR transaction is fully capturable. A claimer could therefore back-run their own claim in the same block with batchMint(nudgeSize, self, ...) and recover the entire nudge share they had just paid, while keeping nudgeSize NFTs — i.e. buy the claim-gate NFTs at a discount of exactly nudgeAmount, funded by their own donation. The nudge subsidy was recapturable by the person paying it, deterministically and atomically-adjacent, with no competition. Post-story-026 the donation lands in the streamer buffer and collectNudge SETTLES FIRST then deposits, so accrued at that instant is 0: an immediate back-run captures nothing of the new donation. The self-rebate is converted into a delayed, competitive claim. Story-026's core economic intent is DELIVERED on this axis.",
+      "residual": "A claimer can still return later and compete for the accumulated pot like anyone else. That is ordinary open MEV, not a self-rebate, and is covered by ECON-001. No finding."
+    },
+    {
+      "id": "POS-002",
+      "subject": "Claimer P&L is unchanged by story-026 — no new value-extraction path for the claimer",
+      "analysis": "The claimer's gain (skimSurplus proceeds, :558) and cost (actualPayment, :583) are both computed and settled before the nudge leg is reached, and neither depends on nudgeStreamer, on stream state, or on delivery timing. The nudge/phlimbo split is downstream of the claimer's payment and un-enveloped (no try/catch), so a claimer cannot keep the skim while suppressing either leg — a revert in collectNudge reverts the whole claim including the skim. No path was found on which a claimer profits at the protocol's expense as a result of story-026."
+    },
+    {
+      "id": "POS-003",
+      "subject": "Rounding-direction checklist — cleared, no round-trip and no user-favouring leg",
+      "analysis": "The only conversion in the changed path is nudgeAmount = (actualPayment*nudgeSplit)/100 (floor) with phlimboAmount = actualPayment - nudgeAmount (remainder). Both legs are protocol-side; the floor sends the dust to phlimbo, never to a user. There is no share/asset round-trip in SYA at all (no per-user accounting, no mint/redeem). Downstream, NudgeStreamer._accrued floors the settled amount and leaves the remainder in the buffer, which also favours retention over release. No symmetric/round-half rounding anywhere. No finding. (Unchanged from pre-story-026 — the old safeTransfer sat under the same `> 0` guard.)"
+    }
+  ],
+
+  "crossScannerRulings": [
+    {
+      "subject": "CODE-003 severity input — is stranded nudge value real loss or opportunity cost?",
+      "ruling": "REAL LOSS. Claimer-paid consideration, not externally-derived yield. Code-scanner's distinction is VALIDATED. See ECON-002.valuationRuling for the full reasoning.",
+      "severityGuidance": "Low is still correct, but for the right reason. It is Low because realisation needs an exceptional trigger (sink retirement / streamer blacklist / claims ceasing), NOT because the amount is dust. The amount at risk is the standing float r*D (~$60k at the illustrative parameters), which is Medium-sized value behind a Low-likelihood trigger. If any of CODE-003's triggers is judged likely rather than exceptional, this becomes a Medium — flagging for the severity-classifier rather than pre-empting it."
+    },
+    {
+      "subject": "CODE-DEDUP-001 (zero-payment claim disarms the mandatory-streamer guarantee)",
+      "ruling": "AGREE with code-scanner's dedup verdict; no economic escalation. Economically the zero-payment path is a claimer taking skimmed surplus for free — that severity already lives in M-01 (ecc2d126dd, acknowledged) and L-01 (0da2e7cf4f, open). story-026 neither worsens nor improves it. No econ finding."
+    },
+    {
+      "subject": "PARK-001 routing",
+      "ruling": "CONFIRMED out of scope for SYA at the root-cause level (NudgeStreamer.sol:150, phoenix-nft-staking). Economically: pure griefing, strictly negative-EV for the griefer, damage is delay not destruction. Route to phoenix-nft-staking for a re-weigh against run-24's 'no rate-drift' conclusion, with the added observation that the donor here is permissionless and high-frequency, which makes the drift a normal-operation property rather than an attack. The in-scope SYA consequence is filed as ECON-002."
+    }
+  ],
+
+  "ledgerInteractions": [
+    {
+      "fingerprint": "63cff232c499c3f8f1a89dbe7e9de81d104ee3568b809f8d79b20be60a348674",
+      "label": "QA-01",
+      "status": "open",
+      "verdict": "NOT re-filed. MILDLY WORSENED by story-026, and the reason is worth attaching to the entry.",
+      "reasoning": "QA-01 is the permissionless first-claimer capturing the whole accumulated discount in one shot. Streaming does not touch the discount mechanism itself (the discount is computed off strategy surplus at :569-571 and is entirely independent of nudge routing), so there is no direct interaction. The INDIRECT interaction is via gas: the nudge leg is no longer a leaf transfer — collectNudge performs an outbound settle transfer plus an inbound transferFrom plus storage writes inside the claim, so claim() is measurably more expensive (per the story's own NatSpec and the new .gas-snapshot). A higher fixed cost per claim raises the surplus threshold at which claiming is profitable at all, which lengthens the idle period between claims, which makes the first-claimer's single-shot capture LARGER. The effect is second-order and does not change QA-01's severity.",
+      "action": "Attach as a story-026 consequence note on QA-01. Do not re-file, do not re-rank."
+    },
+    {
+      "fingerprint": "d60ab75159eb0ea5032ac46aea11c1233ffa754ac010a0ff134437503c74aad2",
+      "label": "L-05",
+      "status": "open",
+      "verdict": "NOT re-filed. Same gas mechanism as the QA-01 note above.",
+      "reasoning": "L-05 is 'claim/preview gas scales with (strategies x clients); above the discount-vs-gas threshold permissionless consolidation stalls'. story-026 adds a fixed gas increment to every claim with a payable nudge share, moving the whole curve up and shrinking the profitable operating window. Availability-by-apathy is therefore marginally more likely than before. It is an increment on an existing finding, not a new one.",
+      "action": "Attach as a story-026 consequence note on L-05."
+    },
+    {
+      "fingerprint": "8c48864824161ffc92e144478f9b4faa9b1465abbf67ba5d3bc198e93ea5f742",
+      "label": "L-02",
+      "status": "open",
+      "verdict": "No econ change. Referenced only because code-scanner's CODE-001 discloses lineage against it; econ concurs the two are distinct."
+    }
+  ],
+
+  "availabilityByApathyAssessment": {
+    "question": "Does story-026 make claiming unprofitable enough that the consolidation rail stalls?",
+    "verdict": "No, not on its own — but it moves the threshold in the wrong direction and the effect compounds with two existing open findings.",
+    "reasoning": [
+      "The claimer's economics are structurally unchanged: gain = skimmed surplus, cost = actualPayment + gas. Only the gas term moves.",
+      "The gas increment is fixed per claim, while the gain scales with accumulated surplus, so the rail cannot be permanently stalled — a long enough idle period always makes a claim profitable again. This is self-correcting and is why this is not a finding in its own right.",
+      "What it does change is the cadence: a higher fixed cost means longer idle periods, larger per-claim captures, and (per ECON-002) a larger standing streamer float. Recorded as consequence notes on L-05 and QA-01 rather than as a new finding.",
+      "The genuine stall risks in this change are the BRICK paths, which are code-scanner's CODE-001 (setRewardToken re-arms NudgeStreamer__NotRegistered) and CODE-003(a) (streamer blacklisted). Not duplicated here."
+    ]
+  },
+
+  "assumptionsAndGaps": [
+    "Deployment identity of SYA.nftMinter vs BatchNFTMinterMultiToken.tokenMinter is assumed-same (drives ECON-002's circularity paragraph only). Config fact, not verifiable from source.",
+    "Illustrative parameters (nudgeSplit=20%, $10k/day claim throughput, D=30d, nudgeSize=10, price=$50) are ILLUSTRATIVE — no deployed values were read. The structural results (float = r*D; capture cadence t* = n*p/r; ~63%/duration decay) are parameter-independent and are the load-bearing claims.",
+    "No PoC was written. ECON-001 and ECON-002 are mechanism-level and are provable from source reading plus arithmetic; a Foundry PoC for ECON-001 (idle-then-sweep) would be straightforward against the phoenix-nft-staking suite if the deduplicator promotes it above Low.",
+    "phoenix-nft-staking run-24's characterisation of NudgeStreamer as a 'timing throttle, not a value cap' was taken as given per the task brief and is CONFIRMED by independent reading of _settle/_snapshotRewards. ECON-001 is the observation that a timing throttle is materially weaker than what the NatSpec claims."
+  ],
+
+  "errors": []
+}

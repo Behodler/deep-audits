@@ -31,7 +31,7 @@ Invoke **project-manager**: "Resolve friendly name, get scope, known issues, rep
 - Confirm `<npm-script-name>` exists as a key in `lib/<submodule>/package.json` (project-manager or a read-only check); if not, list the closest keys and stop.
 
 ## 1.5. Create versioned report directory
-Invoke **project-manager**: "Create versioned report directory for this audit run" → `reports/<project>-XX/`. All artifacts for this entry point go under `reports/<project>-XX/script-audits/<entryPoint>/`.
+Invoke **project-manager**: "Create versioned report directory for this audit run" → `reports/<project>/XX/`. All artifacts for this entry point go under `reports/<project>/XX/script-audits/<entryPoint>/`.
 
 ## 2. Load environment and probe RPC (unless `--no-fork`)
 - Source the **repo-root `.envrc`** (`direnv export bash`, or read it) to obtain `RPC_MAINNET` and `ETHERSCAN_API_KEY`. The user always keeps keys there (see project memory).
@@ -83,7 +83,7 @@ Run the standard back half on the candidate findings:
 - Invoke **deduplicator**: collapse duplicates/common issues.
 - Invoke **sanitizer**: filter known issues, then reconcile against the ledger by `fingerprint` (which now folds in `entryPoint`, so reconciliation is per-script). Mark new / still-open / regression / suppressed.
 - Invoke **severity-classifier**: C4 severity on new + regressed findings.
-- Invoke **finding-manager**: write `reports/<project>-XX/findings/<sev>/`, set `entryPoint` on each record, upsert the ledger (full carryover copies for still-open: H/M as `submissions/<label>-C<n>.md`, QA as `submissions/carryover/qa-report-<NN>.md`).
+- Invoke **finding-manager**: write `reports/<project>/XX/findings/<sev>/`, set `entryPoint` on each record, upsert the ledger (full carryover copies for still-open: H/M as `submissions/<label>-C<n>.md`, QA as `submissions/carryover/qa-report-<NN>.md`).
 
 ## 7. Narrative review
 Invoke **report-writer** (script-review mode): assemble `script-audits/<entryPoint>/review.md` from `intent.md`, `side-effects.json`, the cluster analysis, and the classified findings — structured around the three questions (intent / side effects / knock-on), linking each structured finding and its location.
@@ -96,7 +96,7 @@ For each new/regressed High/Medium whose impact is concretely reproducible (e.g.
 - Invoke **finding-manager**: attach PoC + status.
 
 ## 8.5 Submissions (same output contract as `/full-audit`)
-A script audit produces the **same submission artifacts** as a contract audit — the entry point changes what was scanned, not what a reader is owed. Everything lands in `reports/<project>-XX/submissions/`, alongside the carryover copies step 6 already writes there.
+A script audit produces the **same submission artifacts** as a contract audit — the entry point changes what was scanned, not what a reader is owed. Everything lands in `reports/<project>/XX/submissions/`, alongside the carryover copies step 6 already writes there.
 
 **Per High/Medium** — invoke **report-writer**, then **report-validator**, then **finding-manager** (status → `submitted`):
 - One file per finding: `submissions/<label>.md` (e.g. `submissions/M-01.md`).
@@ -125,7 +125,7 @@ PoC File: workspace/<project>/test/<poc>.t.sol   (or: none — <why>)
 ```
 Script Audit Complete: phoenix-phase-2-staging :: RestoreMintAtIndex4
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Run: reports/phoenix-phase-2-staging-XX/   Mode: fork-preview | static   Regression | --full
+Run: reports/phoenix-phase-2-staging/XX/   Mode: fork-preview | static   Regression | --full
 
 Closure:   3 sol · 4 on-chain (2 mutated) · 4 cluster siblings
 Intent:    2/2 purposes met · 4/4 pre · 2/2 post
@@ -133,13 +133,13 @@ Side fx:   0 unintended on-chain writes
 Findings:  High 0 · Medium 1 (incomplete remediation: index-4 pooler not authorized) · Low 0
            ledger: 1 new · 0 still-open · 0 regression   (entryPoint=RestoreMintAtIndex4)
 
-Review:    reports/phoenix-phase-2-staging-XX/script-audits/RestoreMintAtIndex4/review.md
-Submissions: reports/phoenix-phase-2-staging-XX/submissions/
+Review:    reports/phoenix-phase-2-staging/XX/script-audits/RestoreMintAtIndex4/review.md
+Submissions: reports/phoenix-phase-2-staging/XX/submissions/
              Medium: M-01.md (fingerprint 4f2a1c9e…)
              QA:     qa-report.md (0 Low + 0 Centralization)
              Carryover: 0 still-open from prior runs
 Artifacts: entry-manifest.json · closure-manifest.json · intent.md · side-effects.json
-Ledger:    reports/ledgers/phoenix-phase-2-staging.json (updated)
+Ledger:    reports/phoenix-phase-2-staging/ledger.json (updated)
 
 Next: /list-findings phoenix-phase-2-staging · /ledger phoenix-phase-2-staging
 ```

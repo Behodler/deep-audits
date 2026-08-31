@@ -21,7 +21,7 @@ Invoke **project-manager**: "Resolve friendly name to submodule path"
 
 ## 1.5. Create Versioned Report Directory
 Invoke **project-manager**: "Create versioned report directory for this audit run"
-- Creates `reports/<project>-XX/` (next sequential, zero-padded). Legacy unversioned `reports/<project>/` counts as version 0.
+- Creates `reports/<project>/XX/` (next sequential two-digit dir inside the project's own directory). The run's label remains `<project>-XX`.
 - Store the versioned path for all subsequent steps. All findings, profiles, and submissions go under it.
 
 ## 2. Get Scope and Known Issues
@@ -32,7 +32,7 @@ Invoke **project-manager**: "Get scope and known issues for project"
 
 ## 3. Load Ledger and Determine Run Mode
 Invoke **project-manager**: "Load the persistent ledger and compute changed files"
-- Read `reports/ledgers/<project>.json` (the persistent findings ledger).
+- Read `reports/<project>/ledger.json` (the persistent findings ledger).
 - **Resolve the baseline per branch** via `project-manager` → `audit_baseline`: the diff base is `branchBaselines[<current branch>]`, or — for a branch never audited before — `git merge-base <current branch> <defaultBranch>`, so the delta is exactly this branch's own commits. **Never** diff against another branch's `lastAuditedCommit`; that would drop unscanned code from the scan (Law 1). See `registered-projects.json` → `branchPolicy`.
 - Compute `changed_since(<baseline>, HEAD)` via read-only `git -C lib/<submodule> diff --name-only`.
 - **Run mode:**
@@ -45,7 +45,7 @@ Invoke **project-manager**: "Load the persistent ledger and compute changed file
 ```
 Run Mode
 ────────
-Ledger: reports/ledgers/phoenix-nft-staking.json (12 findings: 3 open, 7 fixed, 2 acknowledged)
+Ledger: reports/phoenix-nft-staking/ledger.json (12 findings: 3 open, 7 fixed, 2 acknowledged)
 Branch: feat/nudge-v3 (default main) — findings from this run are tagged branch=feat/nudge-v3
 Baseline: a1b2c3d (merge-base with main — first audit on this branch)
 Changed since: src/Staking.sol, src/RewardVault.sol (2 files)
@@ -137,7 +137,7 @@ Invoke **deduplicator**: "Filter obvious and common issues from all sources"
 ## 8. Sanitize Against Known Issues and Ledger
 Invoke **sanitizer**: "Remove known issues, then reconcile against the ledger"
 - First filter against the project's documented known issues.
-- Then reconcile each remaining finding against `reports/ledgers/<project>.json` by fingerprint:
+- Then reconcile each remaining finding against `reports/<project>/ledger.json` by fingerprint:
   - matches an `open` entry → mark **still-open**, bump `lastSeenRun`, do not regenerate a report
   - matches a `fix-pending` entry → **never suppress**; treat exactly like `open` (still-open + full carryover copy). If the code changed since `lastAuditedCommit` and the finding survived, flag **⚠ FIX-PENDING STILL LIVE (possible incomplete fix)** — second only to REGRESSION in signal.
   - matches `acknowledged` / `wont-fix` / `false-positive` → suppress (like a known issue)
@@ -157,7 +157,7 @@ Invoke **finding-manager**: "Create finding records and upsert the ledger"
 - For each **still-open** (or re-validated) entry, **copy its original report forward in full** — never a pointer stub (see finding-manager → CARRYOVER):
   - **High/Medium** (including reopened ones) → `<report-dir>/submissions/<label>-C<n>.md`, in the **same dir** as the new submissions, with a metadata header naming the originating audit, the original fingerprint, and why it is still/again valid. `<n>` ascends with the originating audit number; no `REOPEN` in filenames.
   - **Low/QA/Centralization** → `<report-dir>/submissions/carryover/qa-report-<NN>.md`, one whole-QA-report copy per originating audit `<NN>` — never one file per Low finding.
-- Upsert `reports/ledgers/<project>.json`: add new entries, bump `lastSeenRun` for still-open, mark entries whose code changed and are no longer flagged as `fixed` at the current commit, set `lastAuditedCommit = HEAD`.
+- Upsert `reports/<project>/ledger.json`: add new entries, bump `lastSeenRun` for still-open, mark entries whose code changed and are no longer flagged as `fixed` at the current commit, set `lastAuditedCommit = HEAD`.
 - **Branch stamping:** every new entry gets `branch` = the branch this run scanned and `branchesSeen = [<that branch>]`; re-seen entries keep their original `branch` and append the current one to `branchesSeen`. Write `branchBaselines[<branch>] = { lastAuditedCommit: HEAD, lastRun, updatedAt }`. This is what makes findings retirable when a branch is discarded (`/ledger <project> abandon-branch <branch>`) without disturbing findings that also live on the trunk.
 
 ## 11. Save Analysis Report
@@ -168,7 +168,7 @@ Save raw analysis to `<report-dir>/analysis-<timestamp>.json` (scan metadata, co
 ```
 Analysis Complete: phoenix-nft-staking
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Run: reports/phoenix-nft-staking-12/   Mode: REGRESSION (changed: 2 files)
+Run: reports/phoenix-nft-staking/12/   Mode: REGRESSION (changed: 2 files)
 
 Tier 1:  profiles 3 · slither 15 · aderyn 9 · semgrep 4 · patterns 3
 Tier 2:  code 28 · econ 14
@@ -185,8 +185,8 @@ Carried over (still open from prior runs):  M-01 (run 09), L-02 + L-04 (run 09)
   → submissions/M-01-C1.md                    (full copy, beside the new findings)
   → submissions/carryover/qa-report-09.md     (whole QA report from audit 09)
 
-Output:  reports/phoenix-nft-staking-12/
-Ledger:  reports/ledgers/phoenix-nft-staking.json (updated)
+Output:  reports/phoenix-nft-staking/12/
+Ledger:  reports/phoenix-nft-staking/ledger.json (updated)
 
 Next:
   /list-findings phoenix-nft-staking

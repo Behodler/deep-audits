@@ -225,7 +225,7 @@ function check_depositWithdrawRoundTrip(uint256 assets) public {
 ```json
 {
   "project": "phoenix-nft-staking",
-  "reportDir": "reports/phoenix-nft-staking-12",
+  "reportDir": "reports/phoenix-nft-staking/12",
   "criticalFunctions": [
     {"contract": "RewardVault", "function": "deposit"},
     {"contract": "RewardVault", "function": "calculateShares"}

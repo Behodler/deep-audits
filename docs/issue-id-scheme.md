@@ -42,7 +42,7 @@ Given a submission living at `reports/<run-dir>/submissions/...` with a C4 label
    still how a *new* project's prefix is proposed — but once written it is fixed, so a later
    rename or collision-override never silently changes existing IDs.
 2. **report#** — the run number with leading zeros removed (`05` → `5`, `26` → `26`).
-   A bare family dir with no `-NN` suffix (legacy/seed run) is report `0`.
+   The pre-versioning seed run lives in `00/` and is report `0`.
 3. **type** — the label letter, lowercased: `h` (High), `m` (Medium), `l` (Low),
    `c` (Centralization), `f` (Faithfulness / spec-conformance), `q` (QA / hardening note —
    both `Q-0x` and `QA-0x` labels map to `q`), `g` (Gas, if ever labeled).
@@ -71,11 +71,11 @@ unpadded forms as equivalent, so `sya14m2` finds `sya14m02`. Mint new IDs unpadd
 
 | ID | Resolves to |
 |----|-------------|
-| `ryv5m2` | `reports/reflax-yield-vault-05/submissions/M-02-*.md` |
-| `ryv5m1` | `reports/reflax-yield-vault-05/submissions/M-01-*.md` |
-| `ryv5c1` | the `### [C-01]` section inside `reports/reflax-yield-vault-05/submissions/qa-report.md` |
-| `ryv5l2` | the `### [L-02]` section inside `reports/reflax-yield-vault-05/submissions/qa-report.md` |
-| `sya9c1` | first `[C-01]` of `reports/stable-yield-accumulator-09/` |
+| `ryv5m2` | `reports/reflax-yield-vault/05/submissions/M-02-*.md` |
+| `ryv5m1` | `reports/reflax-yield-vault/05/submissions/M-01-*.md` |
+| `ryv5c1` | the `### [C-01]` section inside `reports/reflax-yield-vault/05/submissions/qa-report.md` |
+| `ryv5l2` | the `### [L-02]` section inside `reports/reflax-yield-vault/05/submissions/qa-report.md` |
+| `sya9c1` | first `[C-01]` of `reports/stable-yield-accumulator/09/` |
 
 ## Current project acronyms
 

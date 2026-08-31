@@ -17,7 +17,7 @@ Every audit decision — what to scan, what to report, how to rank, what to supp
 ## Terminology
 
 - **Source repo** - A repository containing the Solidity project to be audited. Source repos are added as git submodules in `lib/`.
-- **Project name** - Always the upstream repo name. The submodule dir (`lib/<name>`), the registry key in `registered-projects.json`, the report-dir family (`reports/<name>-XX/`), the ledger (`reports/ledgers/<name>.json`), and the workspace dir (`workspace/<name>/`) are all the **same canonical string**. There is no separate "friendly name" alias — project name and repo name must agree.
+- **Project name** - Always the upstream repo name. The submodule dir (`lib/<name>`), the registry key in `registered-projects.json`, the report-dir family (`reports/<name>/XX/`), the ledger (`reports/<name>/ledger.json`), and the workspace dir (`workspace/<name>/`) are all the **same canonical string**. There is no separate "friendly name" alias — project name and repo name must agree.
 
 ## Critical Rules
 
@@ -46,8 +46,8 @@ Every audit decision — what to scan, what to report, how to rank, what to supp
 - `lib/` - Git submodules containing auditable Solidity projects (read-only audit references)
 - `~/code/product-owner/stories/<storyDir>/` - **External, read-only** story documents; the Law-2 source of truth (see Critical Rules → Stories)
 - `workspace/<project>/` - Writable clones for PoC/test development (gitignored; PoCs and Tier-3 tests live here)
-- `reports/<project>-XX/` - Per-run audit output, sequentially versioned
-- `reports/ledgers/<project>.json` - Persistent findings ledger (open/fixed/triaged across runs)
+- `reports/<project>/XX/` - Per-run audit output, sequentially versioned
+- `reports/<project>/ledger.json` - Persistent findings ledger (open/fixed/triaged across runs)
 - `patterns/` - Vulnerability pattern database
 - `tools/` - Cloned auditing tools (e.g. 4naly3er)
 - `documentation/` - C4 official documentation for reference

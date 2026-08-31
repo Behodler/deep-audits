@@ -1,0 +1,246 @@
+{
+  "project": "stable-yield-accumulator",
+  "commit": "f7041304e4a71cc2325cf406974f5cc16a5b5322",
+  "baseCommit": "0fef726",
+  "story": "story-026 (nudge share routed through NudgeStreamer)",
+  "reportDir": "reports/stable-yield-accumulator/14",
+  "scanTimestamp": "2026-07-26T00:00:00Z",
+  "scanType": "pattern-matching",
+  "mode": "regression",
+  "scope": [
+    "src/StableYieldAccumulator.sol",
+    "src/interfaces/IStableYieldAccumulator.sol"
+  ],
+  "patternsChecked": 35,
+  "patternDbVersion": "1.1",
+  "findingsCount": 2,
+  "manualReviewCount": 3,
+  "errors": [],
+
+  "crossRepoNotes": [
+    {
+      "note": "SYA's nested pin lib/phoenix-nft-staking == 5015f1b == top-level lib/phoenix-nft-staking HEAD. No stale-nested-pin trap on this run; NudgeStreamer.sol was read at the authoritative commit.",
+      "memoryRef": "nested-submodule-pin-stale-trap"
+    }
+  ],
+
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "LOCAL-AVAILABILITY-COUPLING",
+      "patternSource": "requested class 1 + 2 (mandatory-external-dependency availability coupling / removed-fallback). NO equivalent pattern exists in vulnerability-patterns.json v1.1 - see dbCoverageGaps.",
+      "type": "availability-coupling / owner-footgun",
+      "severity": "potential-medium",
+      "confidence": "high",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "setRewardToken",
+      "line": 417,
+      "secondaryLines": [595, 596, 597, 598, 599, 78, 79, 86],
+      "title": "setRewardToken is an undocumented re-arm trigger for the mandatory-streamer brick: it silently re-keys the (nudge, rewardToken) stream, halting every yielding claim, and SYA's owner cannot unilaterally recover",
+      "description": "story-026 removed the direct `safeTransfer(nudge, nudgeAmount)` leg with NO fallback and NO try/catch, making `claim()` liveness depend on registration state held in a SEPARATELY-OWNED contract: `NudgeStreamer.streams[nudge][rewardToken].duration != 0`. The contract's own ops NatSpec (lines 74-79) enumerates the re-arm triggers for that brick and names ONLY `setNudgeAddress`. It omits `setRewardToken`, which re-keys the SAME `(sink, token)` pair. `setRewardToken` (:417-420) has a zero-address check and nothing else: no NatSpec, no event, no guard on `nudgeSplit`/`nudgeStreamer` state. After an owner switches the reward token, `claim()` reaches :599 and calls `collectNudge(nudge, NEW_token, amt)`; the streamer reads `streams[nudge][NEW_token].duration == 0` and reverts `NudgeStreamer__NotRegistered()`. Every claim carrying a payable nudge share bricks permanently, which halts the entire yield-consolidation rail (no strategy surplus is skimmed, phlimbo receives nothing).",
+      "whyItMatches": [
+        "Class 1 (mandatory-external-dependency): a PERMISSIONLESS entry point (`claim`, the contract's only one) now has its liveness gated on registration state in a contract SYA does not own.",
+        "Class 2 (removed-fallback): the push leg was deleted, not retained. There is no try/catch envelope, so a streamer-side revert is terminal for the whole claim, not degraded.",
+        "The recovery path spans THREE contracts and potentially three owner keys: NudgeStreamer.registerStream (streamer owner) which itself calls nudge.isNudgeToken (batch-minter owner must whitelist the new token FIRST, else NudgeStreamer__NotWhitelisted). SYA's own owner has NO unilateral fix.",
+        "SYA's only unilateral escape is setNudgeSplit(0), which restores claims by permanently abandoning the nudge funding stream - a capability loss, not a fix."
+      ],
+      "matchedSignatures": [
+        "IERC20(rewardToken).forceApprove(streamer, nudgeAmount)",
+        "INudgeStreamer(streamer).collectNudge(nudge, rewardToken, nudgeAmount)",
+        "function setRewardToken(address _rewardToken) external onlyOwner"
+      ],
+      "missingMitigations": [
+        "setRewardToken does not require nudgeSplit == 0, nor probe the streamer for a registered (nudge, newToken) stream",
+        "setRewardToken emits no event, so the re-arm is invisible to off-chain monitoring",
+        "no try/catch around collectNudge and no retained push fallback",
+        "the ops-ordering NatSpec (:81-88) is not reproduced or enforced on the setter that re-arms the failure"
+      ],
+      "lawBasis": "Law 3 (owner footgun). The owner is trusted and non-malicious, but the test is 'would a competent, non-malicious owner be surprised by this consequence?' The contract's own documentation asserts the re-arm trigger set and this setter is absent from it - surprise is DOCUMENTED-IN, not speculative. Footgun => in scope.",
+      "notAutoSuppressed": "The NatSpec pre-declares failure mode 2 (forgotten registerStream) as 'the accepted consequence of the mandatory-streamer decision, not an audit finding'. That acceptance is scoped to the DOCUMENTED triggers (deploy-time unset, setNudgeAddress). It does not cover a trigger the document itself omits - a pre-accepted risk cannot immunize the path nobody was told about.",
+      "distinctFrom": {
+        "ecc2d126dd": "ledger M-01 (acknowledged) is the _normalizeAmount/_denormalizeAmount decimal FAIL-OPEN. Different root cause: this is external-registration coupling on the donation rail, no decimal math involved. Not a re-file.",
+        "8c48864824161ffc": "ledger Low 'Phlimbo allowance depletion bricks permissionless claim() until owner re-approves' is the SAME CLASS (claim liveness gated on owner-maintained external state) but a different mechanism and a different contract boundary - that one is an allowance SYA itself can restore via approvePhlimbo; this one is registration state in a foreign contract SYA cannot touch. Disclosing lineage per memory disclose-when-refiling-owner-wontfix; that entry is 'open', not wont-fix, so no override is implied.",
+        "a53f5b408939": "ledger Low 'setNudgeSplit(>0) does not require nudge != address(0)' is the deploy-time-unwired variant; this is the RECONFIGURE-TIME variant on a different setter."
+      },
+      "recommendation": "Either (a) gate setRewardToken on nudgeSplit == 0, or (b) have it probe INudgeStreamer for a registered (nudge, newToken) stream and revert otherwise, or (c) at minimum emit RewardTokenUpdated(old,new) and add setRewardToken to the ops-ordering NatSpec as failure mode 4. Note the same setter also strands any standing approvePhlimbo allowance, which is denominated in the OLD token.",
+      "verificationNeeded": "Confirm on the deployment whether SYA, NudgeStreamer and the BatchNFTMinterMultiToken share one owner key. Shared ownership reduces this to an ordering hazard; split ownership makes recovery a cross-party coordination problem and supports the Medium.",
+      "references": [
+        "src/StableYieldAccumulator.sol:417-420 (setter)",
+        "src/StableYieldAccumulator.sol:595-600 (mandatory branch)",
+        "src/StableYieldAccumulator.sol:74-88 (ops NatSpec that omits it)",
+        "lib/phoenix-nft-staking/src/NudgeStreamer.sol:137-156 (collectNudge / NotRegistered)",
+        "lib/phoenix-nft-staking/src/NudgeStreamer.sol:110-128 (registerStream / isNudgeToken gate)"
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "LOCAL-UNWIRED-CONFIG-BRICK",
+      "patternSource": "requested class 2 (removed-fallback / no-degradation-path); sibling of ledger a53f5b408939",
+      "type": "config-ordering / availability",
+      "severity": "potential-low",
+      "confidence": "medium",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "setNudgeSplit",
+      "line": 454,
+      "secondaryLines": [580, 595, 596, 597],
+      "title": "setNudgeSplit(>0) still does not require a wired donation rail - story-026 added a THIRD unwired-config brick (nudgeStreamer) and a FOURTH that is external (registerStream), on the same unguarded setter",
+      "description": "Ledger entry a53f5b408939 (Low, open) records that `setNudgeSplit(>0)` does not require `nudge != address(0)`, so enabling the split before wiring the recipient bricks every yielding claim with `NudgeNotConfigured`. story-026 widened that same unguarded setter's blast radius without addressing it: the claim path now has four ordered preconditions, only two of which are checked locally - `nudge != 0` (:580, NudgeNotConfigured), `nudgeStreamer != 0` (:597, NudgeStreamerNotConfigured), plus the two UNCHECKABLE external ones (`registerStream` done, and `isNudgeToken(rewardToken)` true on the sink). `setNudgeSplit` validates none of them.",
+      "whyItMatches": [
+        "The new NudgeStreamerNotConfigured revert (:597) is a fail-loud check placed at the point of USE, not at the point of CONFIGURATION - identical shape to the NudgeNotConfigured check already filed as a53f5b40.",
+        "nudgeStreamer is setter-only and defaults to address(0) by design (:169), so the unwired state is the POST-DEPLOY DEFAULT, not an edge case.",
+        "There is no degradation path: the branch reverts the entire claim rather than falling back or deferring the nudge share."
+      ],
+      "matchedSignatures": [
+        "if (_split > 100) revert InvalidNudgeSplit();",
+        "if (streamer == address(0)) revert NudgeStreamerNotConfigured();",
+        "if (nudgeSplit > 0 && nudge == address(0)) revert NudgeNotConfigured();"
+      ],
+      "missingMitigations": [
+        "setNudgeSplit(>0) does not assert nudge != address(0)",
+        "setNudgeSplit(>0) does not assert nudgeStreamer != address(0)",
+        "no view/probe helper lets ops confirm the full four-precondition rail is armed before flipping the split"
+      ],
+      "siblingOf": "a53f5b408939 (Low, open) - same setter, same class, extended by story-026. Filed separately rather than folded in because the new precondition set includes an EXTERNAL, un-assertable leg the original entry does not contemplate. Recommend the deduplicator consider collapsing these two into one Low with a widened description if the owner prefers a single entry.",
+      "recommendation": "Guard setNudgeSplit(_split > 0) on both nudge != address(0) and nudgeStreamer != address(0), and expose a `nudgeRailArmed()` view that additionally probes INudgeStreamer for a registered stream so ops can verify the full ordering from step 1-4 of the NatSpec before enabling the split."
+    }
+  ],
+
+  "manualReview": [
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "ROUNDING-DIRECTION",
+      "type": "rounding / silent policy bypass",
+      "severity": "potential-low",
+      "confidence": "low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 586,
+      "title": "nudgeSplit is silently unhonored below the rounding threshold: nudgeAmount floors to 0 and 100% of the payment routes to phlimbo, skipping the streamer branch entirely",
+      "description": "`nudgeAmount = (actualPayment * nudgeSplit) / 100` (:586) floors. When actualPayment < 100/nudgeSplit the nudge share rounds to zero, the `nudgeAmount > 0` guard (:595) skips the streamer branch, and `phlimboAmount = actualPayment` routes the whole payment to phlimbo. The configured donation policy is silently not applied. Rounding favours phlimbo over the nudge sink, never the claimer.",
+      "whyLowConfidence": "Magnitude is dust and it is not attacker-repeatable for profit. With nudgeSplit=10 and a 6-dp reward token the threshold is actualPayment < 10, i.e. 1e-5 USDC, and every claim burns an NFT and requires non-zero skimmed yield - the NFT cost dwarfs any starve-the-nudge-pot gain by orders of magnitude. Flagged because the parent brief asked for distinct root causes near ledger M-01 and because the value-direction is a real, if immaterial, policy bypass.",
+      "distinctFrom": {
+        "0da2e7cf4f5ff": "ledger Low 'claim() charges 0 payment while delivering skimmed yield (post-denormalize floor not re-guarded)' concerns actualPayment ITSELF flooring to 0. This concerns the SPLIT flooring to 0 while actualPayment is non-zero - a different divisor, a different victim (the nudge sink, not the protocol), and it survives even if 0da2e7cf is fixed by re-guarding actualPayment > 0.",
+        "ecc2d126dd": "no decimal-config fail-open involved; this triggers with a fully and correctly configured token."
+      },
+      "routedNotDropped": "Low confidence is about whether this is worth reporting at all, not about its severity ceiling. Recorded here per the no-silent-drop rule so a human adjudicates rather than the scanner."
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "REWARD-RUNWAY-DEPLETION",
+      "patternSource": "requested class 6 (Linear-Depletion / rate-drift)",
+      "type": "doc-overclaim / inherited assumption",
+      "severity": "potential-low",
+      "confidence": "low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "N/A (contract NatSpec)",
+      "line": 62,
+      "title": "SYA NatSpec inherits the NudgeStreamer 'smooth linear stream' overclaim already filed upstream; SYA states the timing guarantee as a settled property of the rail it now mandates",
+      "description": "Line 62 asserts the sink 'receives a smooth linear stream instead of a lumpy push', and lines 96-97 describe collectNudge as settling then pulling. The parent brief's framing is correct and the assumption is stated: SYA treats the streamer as delivering a smoothness guarantee. Upstream phoenix-nft-staking ledger already carries 6f46ec80 (Low, open) 'Time-throttle not value-cap: NudgeStreamer NatSpec overclaims burst-capture prevention' and aaebb4b9 (Low, open) 'collectNudge dust window-reset griefing throttles the nudge incentive to a decaying trickle'. SYA's doc now re-states the overclaimed property one layer up.",
+      "ruledOutAsNewVector": "Checked whether story-026 makes the aaebb4b9 dust-griefing WORSE by giving attackers a new trigger. It does not. NudgeStreamer.collectNudge is already fully permissionless (no access control, msg.sender is merely the donor), so an attacker can reset the window directly for 1 wei plus gas. Reaching it via SYA.claim is strictly more expensive - it burns an NFT and pays actualPayment. SYA adds NO new capability, so this is non-additive and the root cause remains OOS for this project.",
+      "whyLowConfidence": "Root cause is upstream and already filed twice. The only SYA-local artifact is a documentation assertion. Recorded so the sanitizer can reconcile by fingerprint rather than have the linkage disappear.",
+      "crossRepoRef": ["phoenix-nft-staking:6f46ec80", "phoenix-nft-staking:aaebb4b9"],
+      "recommendation": "Soften the :62 NatSpec to state the streamer is a TIMING throttle with no value cap, and cross-reference the upstream entries so a reader of SYA is not left believing burst-capture is structurally prevented."
+    },
+    {
+      "id": "PATTERN-005",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-READONLY",
+      "type": "read-only reentrancy",
+      "severity": "potential-low",
+      "confidence": "low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "calculateClaimAmount / getTotalYield / getYield",
+      "line": 734,
+      "title": "Value-reporting views are readable mid-claim while the strategy set is transiently half-skimmed",
+      "description": "During claim's loop (:538-566) strategies at index < k have been skimmed and report zero surplus while those at index > k have not. `calculateClaimAmount` (:734), `getTotalYield` (:821) and `getYield` (:806) all read that state and are unguarded, so any integrator reading them inside a callback window sees a value that is neither the pre-claim nor the post-claim figure.",
+      "whyLowConfidence": "No callback window is currently reachable. `skimSurplus` pays the claimer in stablecoins (USDC/USDT/DAI/USDS per the project docs) which have no transfer hooks; strategies are owner-registered, not permissionless. The two external calls story-026 added or kept (collectNudge at :599, collectReward at :602) both run AFTER the loop closes, so the inconsistent window is already shut by then. Per the REENTRANCY-READONLY pattern note the finding is recorded even though this contract is itself safe, because the victim would be a downstream integrator - and the project docs describe exactly such an integrator (ClaimArbitrage, which calls SYA.claim inside a Uniswap V4 unlockCallback).",
+      "routedNotDropped": "Kept visible rather than discarded so the code-scanner/econ-scanner tier can decide whether the ClaimArbitrage integration path makes this reachable. ClaimArbitrage is not in this run's scope."
+    }
+  ],
+
+  "ruledOut": [
+    {
+      "patternId": "ROUNDING-DIRECTION / DIVISION-PRECISION",
+      "target": "_normalizeAmount (:669-692) vs _denormalizeAmount (:700-723)",
+      "verdict": "RULED OUT - the prior-run SLITHER-001 premise is incorrect",
+      "reason": "SLITHER-001 reports the two helpers 'apply inverse ops in OPPOSITE order' and treats that as an asymmetry bug. Opposite order is the MATHEMATICALLY CORRECT inversion. _normalizeAmount composes f = rate o decimals (scale decimals first at :680-684, then apply rate at :687-689). The correct inverse is f^-1 = decimals^-1 o rate^-1, i.e. reverse the rate FIRST then the decimals - which is exactly what _denormalizeAmount does (:711-713 then :716-720). Reversing in the same order would be the bug. The only residual is floor truncation at each step, which is inherent to integer math and already filed as ledger 0da2e7cf. No new finding; recommend the static-analyzer entry be downgraded to a false positive.",
+      "confidence": "high"
+    },
+    {
+      "patternId": "FRONTRUN-APPROVE / approve-then-call allowance griefing",
+      "target": "claim :598-599 forceApprove(streamer, nudgeAmount) -> collectNudge",
+      "verdict": "RULED OUT",
+      "reason": "The requested class-4 check clears. forceApprove grants the EXACT amount (not unlimited, not incremental), and NudgeStreamer.collectNudge consumes precisely that amount via safeTransferFrom(msg.sender, address(this), amount) at NudgeStreamer.sol:149 - the allowance is fully drained in the same transaction and nothing lingers, exactly as the NatSpec at :99-101 claims. forceApprove (not approve) correctly handles USDT-shaped tokens that reject non-zero-to-non-zero. Residual noted but not filed: if a FUTURE streamer implementation pulled less than `amount`, a stale allowance to an owner-set contract would persist and SYA has no reset path - that callee is owner-selected and the consequence is obvious, so Law 3 suppresses it.",
+      "confidence": "high"
+    },
+    {
+      "patternId": "REENTRANCY-CROSS-FUNCTION / REENTRANCY-ERC777",
+      "target": "claim (:517-606), collectNudge callback surface",
+      "verdict": "RULED OUT",
+      "reason": "Requested class-4 callback-reentry check clears. `claim` is the contract's ONLY permissionless state-changing entry point (14 setters are all onlyOwner, unreachable by an attacker), so the cross-function sibling set that a reentrancy could target is empty - a single nonReentrant on claim is sufficient here. The callee is also independently guarded: NudgeStreamer.collectNudge is nonReentrant (NudgeStreamer.sol:140) and CEI-clean (_settle writes buffer/lastUpdate before its transfer, :182-190). Its inner safeTransfer targets `nudge`, an owner-set BatchNFTMinterMultiToken receiving a plain ERC20 transfer with no hook. Separately noted: ledger 0d66c2a9 already records that nonReentrant is not the FIRST modifier on claim.",
+      "confidence": "high"
+    },
+    {
+      "patternId": "LOCAL-PAY-FIRST-CHARGE-SECOND",
+      "target": "skimSurplus pays claimer at :558; safeTransferFrom charges at :583",
+      "verdict": "RULED OUT as exploitable (documentation issue only, already filed)",
+      "reason": "Requested class-3 check. The ordering is real - the claimer is PAID FIRST and CHARGED SECOND, inverting the NatSpec - but it is not exploitable. Atomicity is the mitigation: actualPayment is derived at :571-572 from totalNormalizedYield accumulated during the same loop, and if the charge at :583 fails the entire transaction unwinds, so no path delivers yield without payment. Seizing control mid-loop would require a transfer hook on a strategy's underlying token; the registered token set is stablecoins with no hooks, and strategies are owner-registered. Even granted control, an attacker cannot lower a later strategy's surplus without equally lowering their own receipts. Already captured as ledger 7e6197ae (doc/impl mismatch, Low, open) - not re-filed.",
+      "confidence": "medium"
+    },
+    {
+      "patternId": "REWARD-ACCRUAL-ORDER / EMISSION-WINDOW-BOUNDARY / MINT-ON-DEMAND-OVERMINT",
+      "target": "whole contract",
+      "verdict": "RULED OUT - signatures absent",
+      "reason": "SYA holds NO accrual state. It has no accRewardPerShare, no rewardDebt, no lastRewardTime, no windowEnd, no _updatePool, no mint path, and per the prior-run profiler claim() writes no SYA storage at all. All depletion/rate math lives in NudgeStreamer (OOS root cause, upstream ledger). The staking-yield pattern family is checked-and-clean here rather than skipped.",
+      "confidence": "high"
+    },
+    {
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "target": "claim :538 (strategies) x :547 (exempt) ; _getYieldForStrategy :639 (clients)",
+      "verdict": "MATCHED but ALREADY FILED - not re-filed",
+      "reason": "The nested unbounded iteration is real: yieldStrategies x exemptStrategies, plus authorized-clients inside _getYieldForStrategy. Both arrays are owner-controlled, not attacker-growable, so this is not a permissionless DoS. Exactly captured by ledger d60ab75159 (Low, open). story-026 adds a constant-cost external call to the claim path, raising the floor slightly but not changing the asymptotics.",
+      "confidence": "high"
+    },
+    {
+      "patternId": "FEE-ON-TRANSFER-ACCOUNTING",
+      "target": "claim :583 safeTransferFrom, :586 nudge split",
+      "verdict": "RULED OUT",
+      "reason": "SYA credits the requested `actualPayment` rather than a measured balance delta, so a fee-on-transfer reward token would leave the nudge+phlimbo legs over-committed relative to tokens actually received, reverting the claim. However C4 treats fee-on-transfer as invalid unless explicitly in scope, the reward token is a single owner-set stablecoin (USDC), and memory records fee-on-transfer as PERMANENTLY INVALID for this codebase family (phlimbo-ea run-11).",
+      "confidence": "high"
+    },
+    {
+      "patternId": "ERC4626-INFLATION, FIRST-DEPOSITOR-ATTACK, ORACLE-STALE, ORACLE-ROUNDID, FLASH-LOAN-PRICE, SIGNATURE-REPLAY, CROSS-CHAIN-REPLAY, UNPROTECTED-INIT, STORAGE-COLLISION, WEAK-PRNG, DOUBLE-VOTING, TIMELOCK-BYPASS, PERMIT-FRONTRUN, SELFDESTRUCT-FORCE-ETH, UNSAFE-DOWNCAST, REENTRANCY-ERC721-RECEIVE, MISSING-SLIPPAGE, RETURN-VALUE-IGNORE, INCORRECT-OPERATOR, TWO-STEP-COMMIT-WINDOW, BATCH-PAYOUT-FIXED-POT, YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "target": "whole contract",
+      "verdict": "RULED OUT - no signature match",
+      "reason": "No shares/vault math (not ERC4626, no totalSupply/totalAssets conversion); no oracle (docs state 'No Oracles/AMMs', rates are owner-set constants); no reserve/spot price read; no ecrecover/permit/EIP-712; no chain-id or bridge surface; not upgradeable (plain constructor, no delegatecall/Initializable); no randomness; no voting or timelock; no payable functions and no address(this).balance read; no downcasts (all uint256/uint8-from-config); ERC1155 burn at :619 is a burn not a safe-mint, and the ERC1155 receive hook is never triggered inbound; MISSING-SLIPPAGE is affirmatively MITIGATED via the minRewardTokenSupplied parameter checked at :575; all ERC20 calls use SafeERC20; INCORRECT-OPERATOR checked on the two real boundaries (rate > 10000 at :382 and _split > 100 at :455) and both match their documented inclusive semantics; no two-step commit; the nudge payout here is a proportional split of the caller's own payment, not a count-gated winner-take-all pot (that pattern belongs to the downstream BatchNFTMinter, already filed upstream); no principal/balanceBefore/balanceAfter accounting - SYA forwards skimSurplus's return value and never tracks principal.",
+      "confidence": "high"
+    }
+  ],
+
+  "patternsSkipped": [
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "reason": "Pattern `note` field explicitly states C4 treats this as QA/known-issue, which is the sole permitted skip condition. Suppressed as a PRIMARY finding only.",
+      "hmTwistChecked": true,
+      "hmTwistFound": false,
+      "hmTwistNote": "Checked for a concrete exploit beyond the generic QA framing at the :598 forceApprove site and found none - exact-amount allowance, fully consumed in the same transaction, owner-set callee. Nothing routed to manualReview on this basis. See the ruledOut entry for the full reasoning."
+    }
+  ],
+
+  "dbCoverageGaps": [
+    {
+      "gap": "MANDATORY-EXTERNAL-DEPENDENCY / REMOVED-FALLBACK",
+      "detail": "vulnerability-patterns.json v1.1 has NO pattern for 'a permissionless function's liveness newly depends on registration/config state in a separately-owned contract, with a previously-existing fallback removed'. PATTERN-001 - the highest-value match on this run - was found from the parent brief's requested classes, NOT from the DB. This class recurs across the Phoenix suite (ledger 8c48864824 phlimbo allowance, a53f5b40 unwired nudge, phStaging YS-20 minter-repoint ABI drift, YS-31 SYA-brick selector drift).",
+      "recommendation": "Add a pattern with codeSignatures for setter-only address fields consumed on a permissionless path (`address public X;` + `if (X == address(0)) revert` inside a non-owner function), vulnerableWhen 'the external contract requires prior registration keyed on a locally-mutable value' / 'a prior fallback branch was deleted rather than retained' / 'the local owner cannot unilaterally restore the dependency', notVulnerableWhen 'try/catch degradation retained' / 'the setter that re-keys the dependency validates it'."
+    },
+    {
+      "gap": "STALE-DOC-AS-SAFETY-ARGUMENT",
+      "detail": "PATTERN-001 turns on the contract's NatSpec enumerating a set of triggers and OMITTING one. Several Phoenix findings share this shape (upstream 75305ec0 'NatSpec honeypot dismissal asserted as invariant but enforced nowhere', 6f46ec80 'NatSpec overclaims'). The DB has no pattern for 'documentation asserts an exhaustive trigger list / invariant that the code does not enforce'.",
+      "recommendation": "Add a pattern targeting NatSpec blocks that pre-dismiss a risk ('this is the accepted consequence, not an audit finding', 'by construction', 'so nothing lingers') and check each such claim against the code, since a pre-accepted risk is frequently used to immunize paths outside the accepted scope."
+    }
+  ]
+}

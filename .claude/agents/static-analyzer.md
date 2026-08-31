@@ -17,7 +17,7 @@ Run all available tools and merge their findings (tag each with `source`). If a 
 
 The orchestrator provides:
 ```json
-{ "project": "phoenix-nft-staking", "reportDir": "reports/phoenix-nft-staking-12", "contractsPath": "lib/phoenix-nft-staking/src" }
+{ "project": "phoenix-nft-staking", "reportDir": "reports/phoenix-nft-staking/12", "contractsPath": "lib/phoenix-nft-staking/src" }
 ```
 If only the project name is given, resolve paths from `registered-projects.json` (`.projects["<project>"].submodule`) and look for `src/` then `contracts/`.
 

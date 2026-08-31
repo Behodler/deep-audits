@@ -1,0 +1,20 @@
+{
+  "id": "CS-02",
+  "title": "rewardBudget < windowDuration permanently strands funds at rewardRate = 0",
+  "severity": "medium",
+  "contract": "src/NFTStaker.sol",
+  "location": "src/NFTStaker.sol:194, 204, 228",
+  "description": "Every site that (re)computes the emission rate uses integer floor division: `rewardRate = rewardBudget / windowDuration`. If `rewardBudget < windowDuration` (in seconds), the result floors to zero. Because `_updatePool` computes accrual as `elapsed * rewardRate`, a zero rate means no phUSD is ever emitted and `rewardBudget` never decreases. The only way out is another `pull()` or `topUp()` that pushes the budget above `windowDuration` seconds of emissions — otherwise the residual budget is permanently trapped in the contract.\n\nExample: with the default `windowDuration = 540 days = 46,656,000 s`, any `rewardBudget < 46,656,000` wei of phUSD yields `rewardRate = 0`. That is a tiny absolute amount but it applies after every window/top-up reset — an attacker repeatedly triggering pull() during periods when the incoming mint-debt is below the threshold can permanently strand each tranche under this floor.\n\nMore importantly, the same rounding happens on each reset: `rewardBudget / windowDuration` truncates the sub-second dust. Over many reset cycles this dust accumulates and is never distributed.",
+  "impact": "Small reward-token balances can be permanently trapped; the protocol owes `totalDebt` but cannot emit because the per-second rate rounds to zero. This is a direct failure of the stated invariant `balance == rewardBudget + totalDebt`.",
+  "proof": "Consider: post-deploy, owner triggers `pull()` which yields 1,000,000 wei of phUSD (1e-12 phUSD). `rewardRate = 1,000,000 / 46,656,000 = 0`. All subsequent `_updatePool` calls accrue zero regardless of elapsed time. The 1,000,000 wei is stuck in the budget until someone top-ups enough to clear the floor — which itself produces new residual dust below the floor on its own reset.",
+  "recommendation": "Option A (simplest): when setting a new rate, if `rewardBudget > 0` and the floor-division rate is 0, bump the rate to 1 wei/sec so depletion eventually completes. Option B: track accrual as `rewardBudget * elapsed / windowDuration` directly instead of via a pre-divided rate. Option C: re-absorb the stranded dust by emitting any residual `rewardBudget` as a final chunk when the window closes. Option D: use a higher-precision rate representation (e.g. `rewardRate = (rewardBudget * ACC_PRECISION) / windowDuration`) and correspondingly scale down in `_updatePool`. Option E: short-circuit in `_syncBudget`/`topUp` to skip the window/rate reset when the new rate would round to zero. Whichever route, ensure the direction of rounding continues to favor the protocol.",
+  "mergedFrom": ["ES-04"],
+  "mergeNote": "ES-04 merged in: same root cause (integer floor division at lines 194/204/228 producing rewardRate = 0 when rewardBudget < windowDuration). ES-04 adds the adversarial angle: because pullAndRefresh is permissionless, an attacker can deliberately trigger _syncBudget when only a dust-sized mint-debt has accumulated, pushing the rate to zero and freezing emissions until the next sufficiently-large top-up. This is especially relevant under MAX_WINDOW = 10 years where the floor is reachable at rewardBudget < ~3.15e8 wei.",
+  "poc_status": "validated",
+  "status": "rejected",
+  "submissionLabel": "M-02",
+  "submissionPath": "reports/phoenix-nft-staking/01/audit/submissions/rejected/M-02-submission.md",
+  "submittedAt": "2026-04-22T00:00:00Z",
+  "rejectedAt": "2026-04-23T00:00:00Z",
+  "rejectionReason": "Invalid at claimed Medium severity. The floor-division dust stranding is real but value-bounded: rewardBudget is denominated in wei of an 18-decimal token (phUSD), and windowDuration is capped at MAX_WINDOW = 10 years (~3.15e8 seconds). The stranded residue per reset is therefore at most ~3.15e8 wei, or ~3.15e-10 phUSD — sub-nanocent dust, not a Medium-severity value leak. Does not meet C4 Medium threshold (material value leak with stated assumptions)."
+}

@@ -10,8 +10,8 @@ You are the severity-auditor agent responsible for providing an independent seve
 ### Output Location
 ALL severity audit reports MUST be saved to project-specific directories:
 ```
-reports/<project-name>/SEVERITY-AUDIT-REPORT.md
-reports/<project-name>/severity-audit-report.json
+reports/<project>/XX/SEVERITY-AUDIT-REPORT.md
+reports/<project>/XX/severity-audit-report.json
 ```
 
 **NEVER save to:**

@@ -1,0 +1,674 @@
+{
+  "project": "stable-yield-accumulator",
+  "commit": "f7041304e4a71cc2325cf406974f5cc16a5b5322",
+  "baseCommit": "0fef726",
+  "story": "story-026 (nudge share routed through NudgeStreamer)",
+  "reportDir": "reports/stable-yield-accumulator/14",
+  "stage": "deduplication",
+  "dedupTimestamp": "2026-07-26T00:00:00Z",
+  "mode": "regression",
+
+  "counts": {
+    "rawInputsInBrief": 30,
+    "additionalUpstreamItemsCarried": 7,
+    "totalDispositionRows": 37,
+    "survivingFindings": 9,
+    "collapsedInto": 13,
+    "reconciledToLedger": 4,
+    "droppedWithReason": 2,
+    "parkedVisibly": 5,
+    "answeredAndClosed": 1,
+    "positivesAndConfirmatoryClean": 4,
+    "noSilentDrops": true
+  },
+  "accountingCheck": "The brief's raw inventory is 30 items (7 LOCAL + 6 static + 2 PATTERN + 5 CODE/CODE-DEDUP + 3 econ incl. POS-001 + 4 F + 3 Tier-3). 7 further upstream items were carried in and dispositioned rather than ignored: PATTERN-003/004/005 (pattern-matcher's own manualReview channel), PARK-001/002 (code-scanner parks), POS-002/POS-003 (econ positives). Total 37 = 8 kept-as-primary rows + 13 collapsed-into + 4 reconciled-to-ledger + 2 dropped-with-reason + 5 parked-visibly + 1 answered-and-closed + 4 positive/confirmatory. Two further ledger reconciliations (RECON-005 gas consequence notes, RECON-006 pay-first-charge-second) derive from upstream sub-sections rather than numbered raw IDs and are recorded in `ledgerReconciliations` for auditability. Every raw ID appears EXACTLY ONCE in `dispositionTable` — verified programmatically, zero duplicates, zero omissions.",
+
+  "independentVerification": [
+    {
+      "claim": "SLITHER-001 is a false positive (upstream: pattern-matcher + code-scanner, independently)",
+      "verdict": "CONFIRMED, and on a STRONGER basis than either upstream agent gave",
+      "evidence": "Read src/StableYieldAccumulator.sol:669-723 at f704130 directly. _normalizeAmount computes N = R o D (scale decimals :680-684, then rate :687-689). _denormalizeAmount computes N^-1 = D^-1 o R^-1 (un-rate :711-713, then unscale :716-720). Opposite textual order IS the correct inversion of a composition; same-order would be the bug. ADDITIONALLY: the literal `divide-before-multiply` site Slither reports requires the `decimals > 18` branch (`scaled * (10 ** (decimals - 18))`), and setTokenConfig:339 reverts InvalidDecimals() on decimals > 18 — so the flagged sequence sits in an UNREACHABLE branch (corroborates LOCAL-007). On the reachable decimals<18 path there is no divide-then-multiply at all, only two sequential floor divisions, which is ordinary integer truncation already tracked as ledger L-01."
+    },
+    {
+      "claim": "LOCAL-003 / PATTERN-001 / CODE-001 / F-02 / Tier-3 P1 share one root cause",
+      "verdict": "CONFIRMED",
+      "evidence": "src/StableYieldAccumulator.sol:417-420 read directly — `setRewardToken` is a bare assignment with a zero-address check, no event, no nudge-rail guard. claim():595-600 calls collectNudge(nudge, rewardToken, amt) unconditionally when nudgeAmount > 0. All five inputs describe exactly this contract:function:rootCauseClass tuple. Tier-3 P1 supplies the constructive proof (revert selector 0xd62cbfe8, storage assertion that the old (sink,oldReward) stream survives with duration==DURATION while (sink,newReward) has duration==0 — 'nothing broke, the key moved')."
+    },
+    {
+      "claim": "ADERYN-003 (missing zero-address checks) is tool noise",
+      "verdict": "CONFIRMED, with one leg upgraded from 'noise' to 'confirmed false positive'",
+      "evidence": "setNudgeAddress:442-447 read directly: its own NatSpec states the parameter is the sink address 'or address(0) to clear'. Accepting zero is the DOCUMENTED, INTENDED behaviour, backed by the NudgeNotConfigured guard at :580. Aderyn flagging it is a contextual false positive, not a missing check. The setPauser / setNftMinter legs are ordinary QA noise with no fund-loss path."
+    }
+  ],
+
+  "findings": [
+    {
+      "id": "DEDUP-001",
+      "label": "setRewardToken is an undocumented re-arm trigger for the mandatory-streamer brick",
+      "severityEstimate": "potential-medium",
+      "confidence": "high",
+      "consolidatedFrom": {
+        "survivingEvidenceFrom": "Tier-3 P1 (constructive proof) + CODE-001 (recovery-key analysis)",
+        "originalIds": ["LOCAL-003", "PATTERN-001", "CODE-001", "F-02", "ADERYN-002", "LOCAL-005", "TIER3-P1"],
+        "reason": "Exact-match Phase-1/Phase-2 collapse: identical contract:function (src/StableYieldAccumulator.sol :417 setRewardToken) and identical rootCauseClass (a local setter silently re-keys registration state held in a separately-owned contract, on which a permissionless entry point's liveness now depends). Five agents found the same bug from five lenses."
+      },
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "setRewardToken (trigger) / claim (manifestation)",
+      "line": 417,
+      "lineStart": 417,
+      "lineEnd": 420,
+      "secondaryLines": [595, 596, 597, 598, 599, 600, 74, 79, 88],
+      "rootCauseClass": "mandatory-external-dependency with removed fallback; undocumented re-arm trigger for a cross-contract liveness precondition",
+      "description": "story-026 deleted the `safeTransfer(nudge, nudgeAmount)` push leg with no fallback and no try/catch, so `claim()` — SYA's ONLY permissionless entry point and the sole mechanism converting strategy surplus into phlimbo rewards — has its liveness gated on `NudgeStreamer.streams[nudge][rewardToken].duration != 0`, state held in a separately-owned contract. `setRewardToken` (:417-420) re-keys exactly that pair with a bare assignment: no NatSpec, no event, no guard on nudgeSplit/nudgeStreamer. The contract's own ops NatSpec (:74-88) presents a CLOSED enumeration of the re-arm triggers ('there are three failure modes') and names only `setNudgeAddress`; `setRewardToken` is absent from both the failure-mode list and the ordered runbook.",
+      "facets": [
+        {
+          "facet": "availability / owner footgun (primary)",
+          "from": ["LOCAL-003", "PATTERN-001", "CODE-001"],
+          "content": "One owner call takes down the whole yield-consolidation rail. Law-3 test: a competent, non-malicious owner rotating the reward denomination would be SURPRISED that claim() dies. Surprise => footgun => in scope."
+        },
+        {
+          "facet": "Law-2 documentation deviation (from F-02, preserved deliberately)",
+          "from": ["F-02"],
+          "content": "F-02's distinct contribution is that the NatSpec's own COMPLETENESS CLAIM is what makes the consequence non-obvious: an owner following the documented runbook to the letter still bricks claim(). The deviation is documentation-vs-code (lawImpacted 2), and the remedy has a documentary leg (add setRewardToken as failure mode 4) separate from the code leg. Absorbed as a facet per instruction, NOT dropped — this facet must survive into the report body, and F-02's spec-conformance framing is what links DEDUP-001 to DEDUP-003."
+        },
+        {
+          "facet": "invisibility aggravator (from ADERYN-002 + LOCAL-005)",
+          "from": ["ADERYN-002", "LOCAL-005"],
+          "content": "setRewardToken is the ONLY load-bearing address setter in the contract that emits no event (every sibling — setPauser, setPhlimbo, setNudgeAddress, setNudgeSplit, setNudgeStreamer, setNFTMinter, setTokenConfig, setDiscountRate — emits one). Standing alone this is filtered tool-noise QA; absorbed here because it makes the re-arm invisible to off-chain monitoring, which converts a detectable outage into a silent one. It is an aggravator of DEDUP-001, not a finding."
+        },
+        {
+          "facet": "secondary blast radius (from LOCAL-003)",
+          "from": ["LOCAL-003"],
+          "content": "setRewardToken also strands the standing approvePhlimbo allowance, which remains denominated in the OLD token, so the phlimbo leg breaks independently of the streamer leg. See DEDUP-008 for the generalized allowance-hygiene finding."
+        }
+      ],
+      "provenEvidence": {
+        "source": "verification/tier3-nudgestreamer-verification.md — Property 1, test/NudgeStreamerLiveness_SYA.t.sol",
+        "status": "VERIFIED (constructive, not a fuzz absence-result)",
+        "tests": [
+          "test_P1_A_PositiveControl_ConfiguredClaimSucceeds (gates everything: 500e6 nudge, 500e6 phlimbo, 1000e6 yield all move)",
+          "test_P1_B_setRewardToken_BricksClaim_NotRegistered — REVERT SELECTOR 0xd62cbfe8 (NudgeStreamer__NotRegistered())",
+          "test_P1_C_setNudgeAddress_BricksClaim_NotRegistered — identical mechanism via the DOCUMENTED trigger, which is what isolates the asymmetry as documentary",
+          "test_P1_D_UnsetStreamer_Reverts_NudgeStreamerNotConfigured — 0xb94406b2, post-deploy default state",
+          "test_P1_E_Remediation_RequiresWhitelistThenRegister — 0x0dc85695 NudgeStreamer__NotWhitelisted(address,address) if ordered wrong",
+          "test_P1_F_ZeroSplit_SurvivesBrokenStreamKey — confirms the only unilateral escape"
+        ],
+        "keyAssertion": "Storage asserted directly: the old (sink, oldReward) stream is STILL registered with duration == DURATION while (sink, newReward) has duration == 0. Nothing broke — the key moved. Warping 365 days and retrying reverts identically, so the brick is permanent, not transient.",
+        "antiVacuity": "_assertNotVacuous() tripwire plus a meta-test (test_P0_TripwireFiresOnEmptyState) proving the tripwire fires. Real NudgeStreamer @ 5015f1b used, never a mock. memoryRef: vacuous-invariant-harness-mock-never-fails."
+      },
+      "recoveryAnalysis": {
+        "whoCanCause": "SYA owner, unilaterally, in one transaction",
+        "byWhom": "Repair needs an ORDERED 2-key (potentially 3-party) sequence across three contracts: (1) BatchNFTMinterMultiToken owner setNudgeTokenWhitelist(newToken, true), else step 2 reverts NudgeStreamer__NotWhitelisted; (2) NudgeStreamer owner registerStream(nudge, newToken, duration). SYA's owner has NO unilateral fix on the intended path — verified empirically by test_P1_E.",
+        "unilateralEscape": "setNudgeSplit(0) restores claims but permanently abandons the nudge funding stream and does not release the streamer's residual buffer (DEDUP-004). A capability sacrifice, not a fix.",
+        "boundingFactor": "registerStream reverts on duration == 0, so an existing stream can never be UN-registered — the brick can only be armed by moving to a NEW pair, never by the streamer owner revoking an existing one. This materially bounds the finding (from code-scanner clearedChecks)."
+      },
+      "notAutoSuppressed": "The in-source NatSpec (:73-75) pre-declares failure mode 2 as 'the accepted consequence of the mandatory-streamer decision, not an audit finding'. That acceptance is SCOPED to the triggers the document itself enumerates (post-deploy unset; setNudgeAddress) and cannot immunize a trigger the document omits — an owner cannot have accepted a consequence they were never told about. A source comment carries no sanitizer authority in any case (no ledger status exists for it); see DEDUP-003.",
+      "ledgerDedup": {
+        "vs_8c48864824161ffc": "DISTINCT (L-02, open). Same impact class (claim liveness gated on owner-maintained external state) but L-02 is an ERC20 allowance SYA restores ITSELF via approvePhlimbo (one owner, one key, one tx); this is registration state in a foreign Ownable SYA cannot touch. Fingerprint differs on function AND rootCauseClass. Lineage disclosed per memory disclose-when-refiling-owner-wontfix; L-02 is 'open', not wont-fix, so no override is implied.",
+        "vs_ecc2d126dd": "DISTINCT (M-01, acknowledged). Decimal fail-open; no decimal math here.",
+        "vs_a53f5b408939": "RELATED, distinct (L-04, open). L-04 is the deploy-time-unwired variant on setNudgeSplit; this is the reconfigure-time variant on a different setter with an EXTERNAL, un-assertable precondition L-04 does not contemplate. See ledgerReweighs[0].",
+        "isNewEntry": true
+      },
+      "crossReferences": ["DEDUP-002 (the story-level version of the same exposure)", "DEDUP-003 (the NatSpec that both omits this trigger and self-certifies against audit)", "DEDUP-005 (the same setter also orphans the old pair's buffer)", "DEDUP-008 (stale phlimbo allowance on repoint)"],
+      "recommendation": "Gate setRewardToken on nudgeSplit == 0, OR have it staticcall INudgeStreamer for a registered (nudge, newToken) stream and revert otherwise. At minimum: emit RewardTokenUpdated(old, new), add setRewardToken to the ops-ordering NatSpec as failure mode 4, and zero the stale phlimbo allowance on repoint.",
+      "severityNote": "Held at potential-medium (availability, not asset loss; loud, owner-recoverable). The severity-classifier should weigh the open question below — it is the single largest swing factor.",
+      "verificationNeeded": "Confirm on the live deployment whether SYA, NudgeStreamer and BatchNFTMinterMultiToken share one owner key. SHARED ownership reduces this to an ordering hazard (Low); SPLIT ownership makes it a cross-party coordination outage and supports the Medium."
+    },
+
+    {
+      "id": "DEDUP-002",
+      "label": "story-026's own intent makes an external, post-deploy-zero contract a hard precondition of the only permissionless entry point (story-unsafe, Law 1 over Law 2)",
+      "severityEstimate": "potential-medium",
+      "confidence": "high",
+      "consolidatedFrom": {
+        "originalIds": ["F-01"],
+        "reason": "NOT collapsed. Kept as an independent Law-2/Law-1 spec-conformance finding per the brief and per the three-law hierarchy."
+      },
+      "keptSeparateFrom": {
+        "DEDUP-001": "DEDUP-001 is a specific undocumented TRIGGER of the brick (a defect in a setter — fixable by guarding that setter). DEDUP-002 is the DESIGN DECISION that the brick exists at all — the story explicitly instructed 'the old transfer is removed, not kept as a fallback', so the implementation is perfectly faithful and there is nothing to fix at the setter level. Different mitigation (retain a degradation path / try-catch envelope vs. guard one setter), different adjudicator (the story owner, not the developer). Collapsing them would make a faithful-but-exposed design read as an implementation slip and would erase the Law-1-overrides-Law-2 escalation."
+      },
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 596,
+      "lineStart": 594,
+      "lineEnd": 599,
+      "lawImpacted": 1,
+      "type": "story-unsafe",
+      "faithfulness": true,
+      "securityEscalation": true,
+      "storyTag": "story-026",
+      "specText": "story-026 (2dc2426): 'The old transfer is removed, not kept as a fallback.' / NatSpec :58-59, :68-69: 'Once a nudge share is actually payable there are three failure modes, all deliberate and loud (there is no try/catch envelope here)'",
+      "description": "The implementation is exactly faithful — every one of story-026's seven explicit acceptance criteria is SATISFIED (see story-faithfulness conformanceSummary, including RED/GREEN TDD discipline with zero test lines edited in GREEN). The exposure IS the story's intent: story-026 deliberately makes an external, owner-configured, post-deploy-defaulted-to-zero contract a hard precondition of claim(), which is SYA's only permissionless entry point and the only path by which yield-strategy surplus is skimmed and phlimbo is funded. A SYA whose owner sets nudgeSplit > 0 before setNudgeStreamer has a fully bricked claim rail; the conversion pipeline and every downstream ClaimArbitrage run stall until the owner acts. Law 1 overrides Law 2: a faithful implementation of a no-fallback mandatory-dependency design is flagged as the unsafe story, not blessed.",
+      "provenEvidence": "Tier-3 test_P1_D confirms the post-deploy default empirically: nudgeStreamer is setter-only, defaults to address(0), and a payable-nudge claim in that state reverts NudgeStreamerNotConfigured() (0xb94406b2).",
+      "mitigating": "The failure is loud, non-value-destroying, and owner-recoverable (setNudgeSplit(0), or setNudgeStreamer + registerStream) — which is why this is potential-medium (availability), not High.",
+      "crossReferences": ["DEDUP-001", "DEDUP-003"],
+      "isNewEntry": true
+    },
+
+    {
+      "id": "DEDUP-003",
+      "label": "In-source NatSpec self-certifies the mandatory-streamer exposure as 'not an audit finding' with no story artefact behind it",
+      "severityEstimate": "potential-low",
+      "confidence": "high",
+      "consolidatedFrom": {
+        "originalIds": ["F-03"],
+        "reason": "NOT collapsed. Kept as an independent Law-2 spec-conformance finding per the brief."
+      },
+      "keptSeparateFrom": {
+        "DEDUP-001 / DEDUP-002": "This finding is about the ARTEFACT that dispositions the other two, not about the brick. Its remedy is a governance/process action (record the acceptance as a real triage decision in the ledger or registered-projects designDecisions, and delete the self-exculpating sentence) that is orthogonal to any code change. Folding it into DEDUP-001 would let the very comment under audit shape how the finding it dismisses is presented — the exact circularity the finding objects to."
+      },
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "N/A (contract-level NatSpec)",
+      "line": 74,
+      "lineStart": 73,
+      "lineEnd": 75,
+      "lawImpacted": 2,
+      "specText": "NatSpec :73-75: 'If the streamer is set but ops forgot registerStream(nudge, rewardToken, duration) on it, every claim reverts NudgeStreamer__NotRegistered(). **That is the accepted consequence of the mandatory-streamer decision, not an audit finding.**'",
+      "description": "No story artefact records any such acceptance decision. All five [story-026] commit bodies were read in full (3e1259b, e7f8a45, 2dc2426, b14522d, f704130): 2dc2426 states the design facts but nowhere records an owner decision to ACCEPT the availability exposure and nowhere pre-adjudicates it as a non-finding. The project CLAUDE.md is silent on the nudge rail entirely; registered-projects.json carries no matching designDecision. Under Law 1 a source comment cannot suppress a finding — and this comment is precisely a suppression written into the artefact under audit. Note the same NatSpec block simultaneously fails its own completeness bar (it omits setRewardToken — see DEDUP-001), which independently weakens it as a self-certification.",
+      "dedupRelevance": "This finding is load-bearing for the DEDUP stage itself: had the comment been honoured, DEDUP-001 and DEDUP-002 would have been suppressed. It is flagged so the assertion is adjudicated by the owner in the ledger rather than by the code it describes.",
+      "recommendation": "Either record the acceptance as a real triage decision (/ledger status or registered-projects designDecisions) and drop the self-exculpating sentence, or drop the claim.",
+      "crossReferences": ["DEDUP-001", "DEDUP-002"],
+      "isNewEntry": true
+    },
+
+    {
+      "id": "DEDUP-004",
+      "label": "Nudge value rests in a third contract with no rescue path, and the standing undelivered float converges to donationRate x duration",
+      "severityEstimate": "potential-low",
+      "confidence": "high",
+      "consolidatedFrom": {
+        "survivingEvidenceFrom": "CODE-003 (the custody/recoverability defect) with ECON-002's magnitude correction and Tier-3 P2's empirical fixed point folded in",
+        "originalIds": ["CODE-003", "ECON-002", "TIER3-P2"],
+        "reason": "Phase-2 root-cause collapse per the brief. Both describe the same stranded-float concern on the same value hop. ECON-002 CORRECTS CODE-003's magnitude line (float converges to donationRate*duration, i.e. structurally ~30 days of donations, NOT one claim's nudge share) and Tier-3 P2 verified that fixed point empirically. Merged with ECON-002's r*D quantification and valuationRuling explicitly preserved — those were named by the econ-scanner as the load-bearing parts that must not be lost in a merge."
+      },
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 599,
+      "lineStart": 595,
+      "lineEnd": 600,
+      "crossContractLines": ["phoenix-nft-staking/src/NudgeStreamer.sol:150-153 (rewardPerSecond recompute over FULL duration on every deposit)"],
+      "rootCauseClass": "new custody hop on the value path; custodian has no rescue function and a msg.sender-keyed sole release path, combined with a donor-reset streaming window that gives the float no bounded delivery deadline",
+      "description": "Before story-026 the nudge share went sink-to-sink in one transfer. It now rests in NudgeStreamer as streams[nudge][rewardToken].buffer. NudgeStreamer exposes exactly four functions — registerStream, collectNudge, pullPendingStream, pendingStream — with NO owner sweep, NO emergency withdraw and NO recipient-agnostic release. Compounding this: collectNudge recomputes rewardPerSecond over the FULL duration on every deposit, and SYA's own claim() IS the deposit, so under any claim cadence T < D the stream never depletes. The standing undelivered float is therefore not a transient — it converges to a permanent balance of donationRate x duration in a contract nobody can rescue.",
+      "magnitudeCorrection": {
+        "supersedes": "CODE-003's original line 'bounded and continuously drained under normal claim cadence, hence Low'",
+        "correctedTo": "The float is structurally B* = d*D/T = donationRate x duration, and it INCREASES with claim throughput — it is largest exactly when the protocol is working best. At the illustrative nudgeSplit=20%, $10k/day claim throughput and D=30 days, the permanently-at-risk float is ~$60k, not dust.",
+        "derivation": "B_{n+1} = B_n(1 - T/D) + d  =>  B* = d*D/T",
+        "severityLogic": "Low is still correct, but for the RIGHT REASON: realisation requires an exceptional trigger (sink retirement / streamer blacklist / claims ceasing), NOT because the amount is dust. Medium-sized value behind a Low-likelihood trigger. If the severity-classifier judges any trigger LIKELY rather than exceptional, this becomes a Medium."
+      },
+      "valuationRuling": {
+        "ruling": "REAL LOSS, not opportunity cost",
+        "reasoning": "The streamed nudge value is claimer-paid CONSIDERATION: the claimer pays actualPayment in rewardToken in exchange for skimmed strategy surplus; that payment is new value entering the protocol and is split phlimbo/nudge. The memory note 'externally-derived-yield = opportunity cost, not loss' governs the OTHER leg (the surplus handed to the claimer, which IS Tokemak-style yield on protocol-owned capital). It does NOT govern the nudge share. Stranding it is a real loss of protocol revenue that would otherwise have reached phlimbo.",
+        "memoryRef": "externally-derived-yield-opportunity-cost-not-loss (checked and ruled INAPPLICABLE to this leg)",
+        "status": "PRESERVED VERBATIM through the merge at the econ-scanner's explicit request"
+      },
+      "failureTriggers": [
+        "(a) rewardToken is USDC and the STREAMER address is blacklisted by the issuer — every subsequent claim reverts inside safeTransferFrom AND the buffer is frozen forever",
+        "(b) sink is retired/replaced and never calls pullPendingStream again",
+        "(c) SYA owner sets nudgeSplit(0) or claims simply stop, so no further collectNudge ever settles the tail"
+      ],
+      "provenEvidence": {
+        "source": "verification/tier3-nudgestreamer-verification.md — Property 2, StreamFloatConvergenceTest",
+        "status": "VERIFIED (constructive)",
+        "tests": [
+          "test_P2_A_FloatConvergesTo_DonationRateTimesDuration_CadenceIndependent — expected 15,000e6; observed 14,999.98e6 @ 1-day cadence and 14,999.98e6 @ 6-hour cadence (same donation rate, same float, within 0.01%) — cadence-independence demonstrated directly",
+          "test_P2_B_StreamNeverDepletes_UnderSubDurationCadence — buffer strictly positive and monotonically non-decreasing across 200 daily claims; standing float 14,982.96e6",
+          "testFuzz_P2_C_FloatLimit — fuzzed T in [D/100, D/4], d in [100e6, 10000e6]; float within 1% of d*D/T on every run",
+          "test_P2_D_NoOwnerSweep_FloatIsUnrescuable — ten sweep/rescue/withdraw/recover signatures probed against the real NudgeStreamer, ALL revert (no such function, no fallback)"
+        ],
+        "importantNuance": "test_P2_D also established that the float is NOT LOST — it is permanently IN TRANSIT to the intended recipient. registerStream re-spreads the same buffer over a new window (owner balance unchanged across it), and shrinking duration to 1 second accelerates delivery TO THE SINK. So the value is un-redirectable and unreclaimable by anyone, but it is not destroyed absent one of the failure triggers above. This nuance CAPS the severity at Low and must survive into the report."
+      },
+      "circularityNote": {
+        "content": "The nudge sink is BatchNFTMinterMultiToken, whose output is NFTMinterV2 ERC1155s — the same claim gate SYA burns at :619. SYA pays, out of claimer-supplied revenue, to subsidise production of the NFTs that gate its own permissionless consolidation rail. Delaying nudge delivery delays batch-mint incentive, thins NFT supply, thins the claimer population, slows SYA's yield consolidation. The feedback is negative but WEAK (NFTs also mint for direct payment, so supply is not gated on the subsidy) — it does not make this a Medium, but it is why the delay is a protocol concern rather than a marketing-spend concern.",
+        "verificationNeeded": "Confirm on the live deployment that SYA.nftMinter and BatchNFTMinterMultiToken.tokenMinter resolve to the same NFTMinterV2. If they are DIFFERENT minters, drop this paragraph only; the rest of the finding is unaffected."
+      },
+      "attackerAnalysis": "No attacker required — this is normal operation. Adversarial amplification (see PARK-001) is strictly negative-EV: a griefer's own potential batchMint take shrinks by exactly what they delay, no competitor is excluded, and the value is never destroyed or redirected to them. Pure griefing with unbounded cost against bounded temporary damage. This independently caps severity at Low.",
+      "recommendation": "SYA-side: none available (root cause is NudgeStreamer's recompute-on-deposit). Ops-side: size `duration` against expected CLAIM CADENCE, not intuition — D should be chosen so that r*D is a float the protocol is willing to leave uninsured in a contract with no rescue function. phoenix-nft-staking-side: recompute the rate over the REMAINING window rather than the full duration on deposit, and/or add an owner rescue.",
+      "crossReferences": ["DEDUP-005 (routine migration orphans the buffer)", "PARK-001 (the OOS root cause of the window reset)"],
+      "ledgerDedup": { "isNewEntry": true, "note": "No prior SYA entry involves streamer custody or float." }
+    },
+
+    {
+      "id": "DEDUP-005",
+      "label": "Performing the DOCUMENTED nudge migration exactly as written still orphans the old pair's streamer buffer",
+      "severityEstimate": "potential-low",
+      "confidence": "medium",
+      "consolidatedFrom": { "originalIds": ["CODE-004"], "reason": "Kept standalone." },
+      "keptSeparateFrom": {
+        "DEDUP-004": "Same custody dead-end, but a DIFFERENT TRIGGER (a routine, documented migration vs. an exceptional failure) and a DIFFERENT FIX (add a drain step to the ops runbook vs. add a rescue function upstream). Under the 'separate mitigation required' rule these do not merge. It is the amplifier that turns DEDUP-004 from an exceptional-trigger risk into a scheduled-operation risk."
+      },
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "setNudgeAddress / setRewardToken",
+      "line": 442,
+      "lineStart": 442,
+      "lineEnd": 446,
+      "secondaryLines": [417, 599],
+      "rootCauseClass": "keyed external state orphaned by a local setter",
+      "description": "The streamer buffer is keyed on the pair (nudge, rewardToken). Repointing EITHER key on SYA orphans the old pair's buffer: new claims fund the new pair, and the old buffer's only remaining drain is the old sink calling pullPendingStream itself. The NatSpec ops-ordering block tells the operator to register the NEW pair first; it says nothing about draining the OLD one. An owner performing the documented migration (registerStream(B_new, USDC, d) then setNudgeAddress(B_new)) leaves buffer X reachable only if B_old still runs batchMint with its nudgeStreamer pointer set — and if B_old is being retired, which is the usual reason to repoint, X is stranded in DEDUP-004's dead end.",
+      "recommendation": "Add a step 0 to the ops-ordering NatSpec: drain the old (sink, token) stream via the old sink's batchMint before repointing, and verify pendingStream(old, token) == 0 and buffer == 0.",
+      "crossReferences": ["DEDUP-001 (setRewardToken is the second trigger)", "DEDUP-004"],
+      "ledgerDedup": { "isNewEntry": true }
+    },
+
+    {
+      "id": "DEDUP-006",
+      "label": "Nudge-token whitelist is a registration-time-only invariant; collectNudge never re-checks it, so SYA keeps donating into a sink that can no longer distribute",
+      "severityEstimate": "potential-low",
+      "confidence": "medium",
+      "consolidatedFrom": { "originalIds": ["CODE-002"], "reason": "Kept standalone; no other input covers whitelist decay." },
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 599,
+      "lineStart": 595,
+      "lineEnd": 600,
+      "rootCauseClass": "registration-time-only invariant; the guard runs on the registration path but never on the value path",
+      "description": "NudgeStreamer.registerStream enforces IMultiTokenNudgeWhitelist(batchMinter).isNudgeToken(token) (NudgeStreamer.sol:112-114) — the structural 'this sink can actually distribute this token' guard. collectNudge (:137-156) does NOT re-check it, and neither does SYA. The whitelist is therefore a registration-time-only invariant that silently decays. If the BatchNFTMinterMultiToken owner calls setNudgeTokenWhitelist(USDC, false) — e.g. rotating the reward pot — SYA's claims keep SUCCEEDING and keep pushing USDC into the streamer and, via _settle, into the sink's balance. But the sink's batchMint no longer iterates USDC, so (a) the streamer's residual buffer loses its only flusher (pullPendingStream is msg.sender-keyed) and (b) the USDC already settled into the sink sits as dead balance batchMint will never distribute. Claimer-paid value is silently diverted into a sink that cannot distribute it, with no revert and no event on the SYA side.",
+      "newInStory026": "Partly. Pre-story-026 a de-whitelist also stranded pushed funds inside the minter. The NEW component is the streamer buffer losing its flusher — an additional, separately-custodied pool of value whose only release path is severed by the same owner action.",
+      "lawBasis": "Law 3 footgun: the BatchNFTMinterMultiToken owner de-whitelisting a token would not expect it to silently strand an active donor's future flow.",
+      "recommendation": "Have NudgeStreamer.collectNudge re-assert isNudgeToken (fail-loud on the value path), or expose an owner-callable flush on NudgeStreamer keyed by (batchMinter, token). Root cause is arguably in phoenix-nft-staking; filed here because SYA is the donor that keeps the flow alive after the invariant breaks.",
+      "crossReferences": ["DEDUP-004"],
+      "ledgerDedup": { "isNewEntry": true }
+    },
+
+    {
+      "id": "DEDUP-007",
+      "label": "NudgeStreamer throttles the ARRIVAL RATE, not the CAPTURE SIZE — the NatSpec's burst-capture claim (restated one layer up in SYA's own docs) overstates what the mechanism delivers",
+      "severityEstimate": "potential-low",
+      "confidence": "high",
+      "routing": "CROSS-REPO — root cause OOS for stable-yield-accumulator; kept VISIBLE here, NOT suppressed",
+      "consolidatedFrom": {
+        "survivingEvidenceFrom": "ECON-001 (the quantified mechanism) with F-04's Law-2 dependency-spec framing and PATTERN-004's SYA-local documentary hook folded in",
+        "originalIds": ["ECON-001", "F-04", "PATTERN-004"],
+        "reason": "Phase-2 collapse per the brief: all three are the same 'throttle caps arrival rate, not capture size' concern. F-04 is the story-faithfulness lens on the same NatSpec over-claim; PATTERN-004 is the pattern-DB lens noting SYA's own :62 NatSpec RESTATES the over-claimed property one layer up. PATTERN-004 was in the pattern-matcher's manualReview channel — it is promoted into this finding rather than left parked, because it supplies the only IN-SCOPE, SYA-LOCAL remedy in the group (soften the :62 assertion), which is what keeps this item actionable here instead of vanishing into cross-repo routing."
+      },
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim (donor) / NatSpec :62 (the SYA-local artefact)",
+      "line": 599,
+      "secondaryLines": [62],
+      "rootCauseContract": "lib/phoenix-nft-staking/src/NudgeStreamer.sol (OUT OF SCOPE for this project)",
+      "intentQuote": "NudgeStreamer.sol NatSpec: 'Buffers bursty donations per (batchMinter, token) and streams them linearly to zero over a configured duration, so that whoever calls batchMint right after a burst can no longer capture a disproportionate share of the reward pot.'",
+      "actualBehaviour": "NudgeStreamer.sol:186-192 _settle PUSHES the accrued amount out of the streamer into the sink's raw ERC20 balance; BatchNFTMinterMultiToken.sol:748 then reads `IERC20(rewardToken).balanceOf(address(this))` in FULL and pays it to the first caller who qualifies (count >= nudgeSize). Nothing between the streamer and the winner-take-all sweep retains a proportionality constraint. Streaming converts an INSTANTANEOUS winner-take-all capture into a DELAYED winner-take-all capture of the same total; it does not divide the pot.",
+      "economicMechanism": "With donation rate r, duration D, mint price p and nudgeSize n, a batcher's capture becomes profitable once r*t > n*p, i.e. at cadence t* = n*p/r. The streamer sets a MINIMUM CADENCE between profitable captures; it does not bound any single batcher's share. The protection is demand-dependent: real only when batchMint frequency >> 1/D, and it vanishes as batchMint frequency falls — i.e. it is weakest in the low-liquidity/bootstrap case, which is precisely when the nudge subsidy exists.",
+      "quantifiedScenario": "nudgeSplit=20%, $10k/day claim throughput -> r = $2k/day; D=30d, nudgeSize=10, price=$50 -> n*p=$500 -> t* = 6 hours. At >6h between qualifying batches (very likely at bootstrap), the winner takes the full interval's donations: at a 3-day gap that is a $6k single-transaction capture for a $500 outlay in NFTs the winner keeps. ILLUSTRATIVE parameters; the structural results (t* = n*p/r) are parameter-independent.",
+      "impactFraming": "Not an attack — the mechanism working as coded. No party loses principal and there is no treasury loss. The loss is to the INTENT (proportionate distribution); affected parties are honest/small batchers crowded out of the race, and the nudge subsidy's stated purpose (broad minting incentive) is not achieved.",
+      "syaLocalArtefact": "SYA's contract NatSpec :62 asserts the sink 'receives a smooth linear stream instead of a lumpy push' and treats the streamer's smoothness as a settled property of the rail it now MANDATES. This is the only in-scope artefact in the group and the only thing fixable here.",
+      "scopingHonesty": "SYA's first-party story-026 text makes only the WEAKER, TRUE claim ('a smooth linear stream instead of a lumpy push'), which the code does deliver — so SYA's own story is FAITHFUL. The over-claim lives in the nested dependency. Reported rather than dropped because story-026's justification for the whole migration rests on the imported claim.",
+      "crossRepoRouting": {
+        "targetProject": "phoenix-nft-staking",
+        "relatesTo": [
+          "858e9e80 (WONT-FIX) — the BatchNFTMinter MEV front-run of the pot from the MINTER side. This finding is the DONOR-side assessment of whether story-026's streamer actually mitigates that class; the answer is 'partially, and only under high batchMint demand'. Route as EVIDENCE bearing on 858e9e80's residual. Do NOT re-open 858e9e80 from here.",
+          "6f46ec80 (Low, open) — 'Time-throttle not value-cap: NudgeStreamer NatSpec overclaims burst-capture prevention'. This is the same claim, now restated one layer up in SYA.",
+          "run-24 assessment 'streamer is a timing-throttle NOT a value-cap' — CONFIRMED by independent reading of _settle/_snapshotRewards on this run. This finding is the observation that a timing throttle is materially weaker than what the NatSpec claims."
+        ],
+        "distinctFrom": "phoenix-nft-staking run-22 M-01 (aggregate-nudge over-funding, Sigma-pots-exceed-cost) — that is aggregate over-funding, this is single-pot capture concentration. Do not collapse.",
+        "memoryRef": "disclose-when-refiling-owner-wontfix — lineage disclosed, no silent override of 858e9e80's wont-fix"
+      },
+      "recommendation": "SYA-side (in scope, actionable here): soften the :62 NatSpec to state the streamer is a TIMING throttle with no value cap, and cross-reference the upstream entries so a reader of SYA is not left believing burst-capture is structurally prevented. Upstream (OOS): either narrow the NudgeStreamer NatSpec claim to 'removes atomic same-transaction burst capture' — the property actually delivered — or have batchMint pull from the streamer per-call with a per-caller cap rather than sweeping the sink's whole balance.",
+      "importantCounterweight": "See positives[0] (POS-001): story-026's narrow, literal goal — killing the SAME-BLOCK claimer self-rebate — IS achieved, and that is a genuine and material improvement. This finding must not be reported in a way that reads as 'story-026 achieved nothing'.",
+      "ledgerDedup": { "isNewEntry": true, "note": "No SYA ledger entry covers nudge-pot capture economics." }
+    },
+
+    {
+      "id": "DEDUP-008",
+      "label": "Standing phlimbo allowance is never revoked on setPhlimbo or setRewardToken repoint",
+      "severityEstimate": "potential-low",
+      "confidence": "high (property verified by profiler)",
+      "consolidatedFrom": { "originalIds": ["LOCAL-004"], "reason": "Kept standalone; escalated from the profiler tier because no Tier-2 agent picked it up." },
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "approvePhlimbo / setPhlimbo / setRewardToken",
+      "line": 426,
+      "rootCauseClass": "standing-approval not revoked on repoint",
+      "description": "approvePhlimbo grants an owner-chosen (typically large) standing rewardToken allowance to `phlimbo`. Neither setPhlimbo nor setRewardToken revokes it, so a repointed-away phlimbo retains spending rights over SYA's rewardToken balance indefinitely.",
+      "impact": "SYA is designed to hold ~zero rewardToken between claims, so the exploitable window is thin — a stale phlimbo could only skim mid-claim balances, and claim is nonReentrant. Pre-existing; NOT introduced by story-026.",
+      "whyNotFiltered": "This is the mirror image of ledger L-02 (allowance DEPLETION bricks claim) — L-02 covers too-little allowance, this covers allowance that outlives its grantee. Different direction, different root cause, different fix. It also supplies the second leg of DEDUP-001's blast radius (setRewardToken leaves the allowance denominated in the OLD token, breaking the phlimbo leg independently of the streamer leg).",
+      "ledgerDedup": {
+        "vs_8c48864824161ffc": "DISTINCT from L-02 (open). Same variable, opposite failure mode and opposite fix.",
+        "isNewEntry": true
+      },
+      "recommendation": "Have setPhlimbo forceApprove(oldPhlimbo, 0) before repointing, and have setRewardToken zero the old token's allowance."
+    },
+
+    {
+      "id": "DEDUP-009",
+      "label": "Interface and dead-code hygiene: shipped red-phase stub error, unused error, incomplete interface, unreachable decimals>18 branches",
+      "severityEstimate": "qa",
+      "confidence": "high",
+      "consolidatedFrom": {
+        "originalIds": ["LOCAL-006", "LOCAL-007", "ADERYN-004"],
+        "reason": "Phase-2 collapse: one root cause class (declarations that do not match the shipped implementation) across one file pair. ADERYN-004 and LOCAL-007 report the SAME two unused errors — an exact Phase-1 duplicate between the static and profiler tiers."
+      },
+      "contract": "src/interfaces/IStableYieldAccumulator.sol + src/StableYieldAccumulator.sol",
+      "instances": [
+        { "item": "error NotImplemented() declared and never thrown — self-described 'red phase stub' left in a SHIPPED interface", "file": "src/interfaces/IStableYieldAccumulator.sol", "line": 119, "from": ["ADERYN-004", "LOCAL-007"] },
+        { "item": "error InsufficientPending() declared and never thrown — suggests a pending-rewards check specced but never wired", "file": "src/interfaces/IStableYieldAccumulator.sol", "line": 156, "from": ["ADERYN-004", "LOCAL-007"] },
+        { "item": "Interface omits public implementation members: setRewardToken, approvePhlimbo, setPauser, pauser(), discountRate(), isRegisteredStrategy(), yieldStrategies(uint256). An integrator typed through this interface cannot perform reward-token or allowance ops.", "file": "src/interfaces/IStableYieldAccumulator.sol", "from": ["LOCAL-006"] },
+        { "item": "decimals > 18 branches in _normalizeAmount/_denormalizeAmount are unreachable — setTokenConfig:339 reverts InvalidDecimals(). VERIFIED directly this run; also the reason SLITHER-001's divide-before-multiply site is unreachable.", "file": "src/StableYieldAccumulator.sol", "line": 682, "from": ["LOCAL-007"] }
+      ],
+      "mitigating": "The members ClaimArbitrage actually depends on (rewardToken(), claim(), calculateClaimAmount(), strategyTokens()) ARE all present, so no live integration is broken. story-026 correctly added setNudgeStreamer(), nudgeStreamer(), NudgeStreamerUpdated and NudgeStreamerNotConfigured to the interface — the interface is FAITHFUL TO THE DELTA.",
+      "whyNotFiltered": "Borderline against the tool-noise filter. Kept as a single consolidated QA line (not four) because a self-described 'red phase stub' surviving into a shipped interface is a TDD-discipline signal for a project whose CLAUDE.md mandates RED-then-GREEN, and because the unreachable-branch instance is load-bearing evidence for the SLITHER-001 drop. Routed to the qa-bundler, not to the H/M report.",
+      "destination": "qa-bundler",
+      "ledgerDedup": { "isNewEntry": true }
+    }
+  ],
+
+  "ledgerReconciliations": [
+    {
+      "id": "RECON-001",
+      "rawIds": ["CODE-DEDUP-001"],
+      "disposition": "reconciled-to-ledger — consequence note, NOT a new finding",
+      "attachTo": [
+        { "fingerprint": "0da2e7cf4f5ff209ef327a860420345b531a1b6fcc884f74fa33597d7cec713d", "label": "L-01", "status": "open" },
+        { "fingerprint": "ecc2d126dd", "label": "M-01", "status": "acknowledged" }
+      ],
+      "verifiedNotBlindlyAccepted": "Confirmed against source at :586-600: `nudgeAmount = (actualPayment * nudgeSplit) / 100` and the ENTIRE streamer block including the NudgeStreamerNotConfigured check sits inside `if (nudgeAmount > 0)`. With actualPayment == 0 the branch is skipped in full. Upstream verdict correct.",
+      "substantiveNewObservation": "PRESERVED — this is the reason the note exists rather than being discarded as a duplicate. story-026's central safety claim is that once a nudge share is payable the streamer is MANDATORY and failure is 'deliberate and loud'. THAT GUARANTEE IS VOID ON EXACTLY THE PATH WHERE VALUE IS LOST: if actualPayment == 0 (fail-open decimals per M-01, or post-denormalize floor per L-01), then nudgeAmount == 0, the whole branch is skipped, phlimboAmount == 0 skips that leg too, and claim() SUCCEEDS having emitted RewardsClaimed(claimer, 0, n) while the claimer walks away with all skimmed surplus. The fail-loud design fails OPEN precisely in the loss state.",
+      "impactOnSeverity": "None. This does not change the exploitability or magnitude of M-01/L-01. It is an ASSURANCE-COVERAGE note: the new revert cannot be relied on as a backstop for the zero-payment path.",
+      "law1Check": "M-01 is `acknowledged` (suppressed from future scans), but L-01 is OPEN, so the note stays visible via L-01. No Law-1 recall loss. Had BOTH been acknowledged this would have been escalated to manual-review.json instead.",
+      "corroboration": "Tier-3 invariant campaign reports `zero-pay-with-yield events (diagnostic): 0` across 128,000 calls — the harness instrumented for this path and did not randomly hit it, which is consistent with (not evidence against) a misconfiguration-gated path.",
+      "econConcurrence": "econ-scanner independently agreed: 'no economic escalation; story-026 neither worsens nor improves it.'"
+    },
+    {
+      "id": "RECON-002",
+      "rawIds": ["PATTERN-002"],
+      "disposition": "reconciled-to-ledger — RE-WEIGH of an existing entry, no new finding minted",
+      "attachTo": [{ "fingerprint": "a53f5b408939", "label": "L-04", "status": "open", "title": "setNudgeSplit(>0) does not require nudge != address(0)" }],
+      "action": "WIDEN L-04's scope rather than mint a sibling duplicate (per the brief, and per the pattern-matcher's own `siblingOf` recommendation).",
+      "widenedScope": "L-04 currently records ONE unguarded precondition on setNudgeSplit. story-026 widened that same unguarded setter's blast radius to FOUR ordered preconditions, only two of which are checkable locally: (1) nudge != 0 (:580, NudgeNotConfigured) — the original L-04; (2) nudgeStreamer != 0 (:597, NudgeStreamerNotConfigured) — NEW, and the unwired state is the POST-DEPLOY DEFAULT by design, not an edge case; (3) registerStream(nudge, rewardToken, duration) done on the streamer — NEW and EXTERNAL/UN-ASSERTABLE; (4) isNudgeToken(rewardToken) true on the sink — NEW and EXTERNAL/UN-ASSERTABLE. setNudgeSplit validates none of the four.",
+      "whyReweighNotNewEntry": "Same contract, same function (setNudgeSplit :454), same rootCauseClass (config-ordering brick from an unguarded setter). A new fingerprint would be a near-duplicate under Phase-1. The genuinely new material — legs 3 and 4 being EXTERNAL and un-assertable, which the original entry does not contemplate — is carried as a scope widening on the existing entry.",
+      "severityImpact": "L-04 stays Low. The widening does not change severity; it changes the recommended fix.",
+      "recommendation": "Guard setNudgeSplit(_split > 0) on both nudge != address(0) and nudgeStreamer != address(0), and expose a `nudgeRailArmed()` view that additionally probes INudgeStreamer for a registered stream, so ops can verify the full 1-4 ordering from the NatSpec runbook before enabling the split.",
+      "crossReferences": ["DEDUP-001 (the reconfigure-time variant on a different setter)", "DEDUP-002"]
+    },
+    {
+      "id": "RECON-003",
+      "rawIds": ["SLITHER-002"],
+      "disposition": "reconciled-to-ledger — already filed, not re-reported",
+      "attachTo": [{ "fingerprint": "d60ab75159eb", "label": "L-05", "status": "open" }],
+      "reason": "External calls inside unbounded loops (getAuthorizedClients / totalBalanceOf / principalOf over yieldStrategies x per-strategy clients) is exactly L-05: 'claim/preview gas scales with (strategies x authorized-clients); above the discount-vs-gas threshold permissionless consolidation stalls (owner/OOS-bounded, NOT a permissionless DoS)'. Corroborated by aderyn; pattern-matcher independently mapped DOS-UNBOUNDED-LOOP to the same entry.",
+      "story026Delta": "story-026 adds a CONSTANT-cost external call to the claim path, raising the floor slightly but not changing the asymptotics. Attach as a consequence note (see RECON-005), do not re-rank.",
+      "caveat": "SLITHER-002 does NOT cover the profiler's LOCAL-001 (caller-controlled exemptStrategies) or LOCAL-002 (canClaim nextIndex loop) — those are routed to manual-review.json, see parked[3] and parked[4]. Do not treat this reconciliation as closing the whole gas family."
+    },
+    {
+      "id": "RECON-004",
+      "rawIds": ["ADERYN-001"],
+      "disposition": "reconciled-to-ledger — already filed, not re-reported",
+      "attachTo": [{ "fingerprint": "0d66c2a9e4e0", "label": "QA-02", "status": "open" }],
+      "reason": "'nonReentrant is not the first modifier on claim()' is verbatim QA-02, already recorded as a likely contextual false positive kept visible for Law-1 recall. whenNotPaused is a pure storage read with no external call, so no reentrancy window exists ahead of the guard. story-026 does not change the modifier list. Single-source (aderyn) tool nit.",
+      "story026Delta": "none"
+    },
+    {
+      "id": "RECON-005",
+      "rawIds": ["(econ-scanner ledgerInteractions — gas-increment consequence notes)"],
+      "disposition": "reconciled-to-ledger — consequence notes only, no re-file, no re-rank",
+      "attachTo": [
+        { "fingerprint": "63cff232c499", "label": "QA-01", "status": "open" },
+        { "fingerprint": "d60ab75159eb", "label": "L-05", "status": "open" }
+      ],
+      "note": "story-026 makes the nudge leg a non-leaf call (outbound settle transfer + inbound transferFrom + storage writes inside the claim), so claim() is measurably more expensive per the story's own .gas-snapshot. A higher fixed cost per claim raises the surplus threshold at which claiming is profitable, which lengthens idle periods between claims, which (a) makes QA-01's first-claimer single-shot discount capture LARGER and (b) shrinks L-05's profitable operating window. Both effects are second-order increments on existing findings, not new findings.",
+      "linkage": "The same longer-idle-period mechanism ALSO enlarges DEDUP-004's standing float, since float = donationRate x duration is cadence-independent but the per-claim donation grows. Noted for the report writer.",
+      "availabilityByApathyRuling": "NOT a finding in its own right: the gas increment is fixed per claim while the gain scales with accumulated surplus, so a long enough idle period always makes a claim profitable again. Self-correcting. The genuine stall risks in this change are the BRICK paths (DEDUP-001, DEDUP-004 trigger (a)), not the gas."
+    },
+    {
+      "id": "RECON-006",
+      "rawIds": ["(pattern-matcher ruledOut: LOCAL-PAY-FIRST-CHARGE-SECOND)"],
+      "disposition": "reconciled-to-ledger — already filed, not re-reported",
+      "attachTo": [{ "fingerprint": "7e6197ae677a", "label": "L-03", "status": "open" }],
+      "reason": "Claimer is PAID FIRST (skimSurplus :558) and CHARGED SECOND (safeTransferFrom :583), inverting the NatSpec. Real but not exploitable — atomicity is the mitigation; if the charge fails the whole transaction unwinds. Exactly ledger L-03 (doc/impl mismatch, Low, open). Recorded here so the ruled-out chain is auditable rather than invisible."
+    }
+  ],
+
+  "dropped": [
+    {
+      "id": "DROP-001",
+      "rawIds": ["SLITHER-001"],
+      "disposition": "dropped-with-stated-reason — CONFIRMED FALSE POSITIVE",
+      "originalSeverityClaim": "potential-medium (would have been the run's second Medium had it stood)",
+      "reason": "The detector's premise is factually wrong, and I verified this against source rather than accepting the two upstream arguments. SLITHER-001 asserts that _normalizeAmount and _denormalizeAmount 'apply the inverse ops in the opposite order' and treats that as an asymmetry bug. Opposite order IS the mathematically correct inversion: _normalizeAmount computes N = R o D (scale decimals :680-684, THEN apply rate :687-689); the correct inverse of a composition is N^-1 = D^-1 o R^-1, i.e. reverse the rate FIRST (:711-713) then the decimals (:716-720) — which is exactly what _denormalizeAmount does. Reversing in the SAME order would be the bug. Slither is pattern-matching on textual ordering and mistaking correct function inversion for an inconsistency.",
+      "additionalGroundsFoundThisRun": "STRONGER than either upstream agent stated: the literal `divide-before-multiply` sequence Slither reports requires the `decimals > 18` branch (`scaled * (10 ** (decimals - 18))`), and setTokenConfig:339 reverts InvalidDecimals() on decimals > 18. The flagged sequence is therefore in an UNREACHABLE branch. On the reachable decimals<18 path there is no divide-then-multiply at all — only two sequential floor divisions, which is ordinary integer truncation already tracked as ledger L-01 (0da2e7cf4f).",
+      "independentCorroboration": "pattern-matcher (ruledOut / ROUNDING-DIRECTION, high confidence) and code-scanner (falsePositivesConfirmed, 'recommend killing it') reached this conclusion independently of each other; this dedup pass is the third independent confirmation, on stronger grounds.",
+      "notLostEntirely": "The residual truncation IS real and IS reported — via ledger L-01, and the unreachable-branch observation is preserved in DEDUP-009. Nothing security-relevant leaves the run.",
+      "recommendationToPipeline": "Record as a persistent false positive so future static-analyzer runs do not re-surface it at potential-medium."
+    },
+    {
+      "id": "DROP-002",
+      "rawIds": ["ADERYN-003"],
+      "disposition": "dropped-with-stated-reason — tool noise, plus one confirmed contextual false positive",
+      "originalSeverityClaim": "potential-low",
+      "reason": "'Missing zero-address checks' is explicitly listed as a filtered common finding unless it leads to fund loss. Split per leg after direct source verification:",
+      "perLeg": [
+        {
+          "leg": "setNudgeAddress (:442-447)",
+          "verdict": "CONFIRMED CONTEXTUAL FALSE POSITIVE, not merely noise",
+          "evidence": "Read at f704130: the setter's own NatSpec declares the parameter as the sink address 'or address(0) to clear'. Accepting zero is DOCUMENTED, INTENDED behaviour, backed by the NudgeNotConfigured guard at :580 which fails loud at the point of use. Aderyn cannot see the intent."
+        },
+        { "leg": "setPauser (:249)", "verdict": "tool noise — owner-set operational role, no fund-loss path, obvious consequence (Law 3 suppresses)" },
+        { "leg": "setNftMinter (:490)", "verdict": "tool noise — same; a zero minter fails loud on the first claim's burn call" }
+      ],
+      "notLostEntirely": "The genuinely interesting member of this family — that the nudge rail's preconditions are unguarded at CONFIGURATION time and only fail at USE time — is fully captured by RECON-002's widening of ledger L-04 and by DEDUP-001. Aderyn also correctly did NOT flag setNudgeStreamer (zero is its intended post-deploy state), which is the one place a zero-check would have been actively wrong.",
+      "law1Check": "Considered for manual-review.json and rejected: this is pure informational/style noise in the explicitly-permitted outright-removal category (b), with the one substantive angle already carried by two other live items. No plausibly-security-relevant content is lost."
+    }
+  ],
+
+  "parkedVisibly": [
+    {
+      "id": "PARK-001",
+      "carriedFrom": "code-scanner parked[0]; econ-scanner crossScannerRulings[2]; pattern-matcher manualReview PATTERN-004 (related)",
+      "subject": "NudgeStreamer.collectNudge is PERMISSIONLESS and recomputes rewardPerSecond over the FULL duration on every deposit — a 1-wei donor can reset the streaming window at will (Linear-Depletion / rate-drift class)",
+      "disposition": "PARKED VISIBLY for cross-repo routing — MUST NOT be dropped",
+      "whyParkedNotFiled": "Root cause is entirely in lib/phoenix-nft-staking/src/NudgeStreamer.sol:137-156 (:150-153 for the recompute), OUT OF SCOPE for stable-yield-accumulator per C4 'issues in parent/forked contracts where root cause is OOS'. Parked rather than dropped per Law 1 (recall beats tidiness).",
+      "analysis": "collectNudge has no donor allowlist. Any address can call collectNudge(nudge, rewardToken, 1) — settling the tiny accrual, then resetting s.rewardPerSecond = buffer * 1e18 / duration from `now`. Repeated resets convert linear-depletion-to-zero into geometric decay: ~63% delivered per nominal duration with an infinitely long tail. The NudgeStreamer NatSpec explicitly names this as 'V1's bug' it claims to have fixed by recomputing on deposit only — but deposit is PERMISSIONLESS, so 'deposit only' is not a meaningful restriction against a griefer.",
+      "empiricalSupport": "Tier-3 Property 2 verified the resulting fixed point directly (float = donationRate x duration, cadence-independent, within 0.01% at two cadences and within 1% under fuzz). That is machine evidence for the rate-drift claim, obtained on this run.",
+      "econRuling": "Pure griefing, STRICTLY NEGATIVE-EV for the griefer: the pot they could capture via batchMint shrinks by exactly what they delay, no competitor is excluded, and the value is never destroyed or redirected. Damage is delay, not destruction. Cost ~60-90k gas plus 1 wei PER RESET, repeated indefinitely.",
+      "syaAdditionality": "NONE, and this was checked rather than assumed (pattern-matcher ruledOutAsNewVector): collectNudge is already fully permissionless, so an attacker can reset the window directly for 1 wei plus gas. Reaching it via SYA.claim is STRICTLY MORE EXPENSIVE (burns an NFT, pays actualPayment). SYA adds no new capability. This is why it is parked rather than filed against SYA.",
+      "inScopeConsequence": "The SYA-side economic consequence IS filed, as DEDUP-004 (the donor's own honest claim cadence produces the same reset, so the float is a normal-operation property requiring no attacker at all).",
+      "routing": {
+        "targetProject": "phoenix-nft-staking",
+        "targetContract": "src/NudgeStreamer.sol:150-153",
+        "action": "Route for a RE-WEIGH against run-24's conclusion that the NudgeStreamer port is 'phlimbo port faithful (no rate-drift)', with the added observation that in the SYA integration the depositor is PERMISSIONLESS and the honest donor deposits at HIGH FREQUENCY — so the rate-drift is present in practice even if the port is textually faithful to PhlimboV2 (where the depositor is privileged). Do NOT silently override run-24's conclusion.",
+        "priorArt": ["phoenix-nft-staking run-18 M-01 (Linear-Depletion rate-drift, PoC 63.26%)", "phoenix-nft-staking ledger aaebb4b9 (Low, open) — 'collectNudge dust window-reset griefing throttles the nudge incentive to a decaying trickle'", "phoenix-nft-staking ledger 6f46ec80 (Low, open)"],
+        "memoryRefs": ["disclose-when-refiling-owner-wontfix", "nested-submodule-pin-stale-trap"]
+      },
+      "confidence": "medium (on severity); high (on the mechanism, now machine-verified)",
+      "duplicateCheckAgainstTarget": "aaebb4b9 already covers dust window-reset griefing in phoenix-nft-staking. This park may reconcile INTO that entry on arrival rather than mint a new one — the new material is the machine-verified float fixed point and the permissionless-high-frequency-donor framing. Flagged so the receiving run does not file a duplicate."
+    },
+    {
+      "id": "PARK-002",
+      "carriedFrom": "code-scanner parked[1]",
+      "subject": "Nudge-pot MEV/front-run economics under streamed (vs lumpy) arrival",
+      "disposition": "ANSWERED — closed, not left parked",
+      "resolution": "This was a hand-off from code-scanner to econ-scanner, and econ-scanner took it: ECON-001 answers it in full and is now DEDUP-007. Additionally POS-001 answers the specific sub-question (whether streamed arrival stops a batchMint caller capturing a disproportionate share right after a donation burst) with a NEGATIVE-direction result that is also a positive: the SAME-BLOCK self-rebate is genuinely closed, the DELAYED winner-take-all capture is not.",
+      "noResidual": "Nothing from PARK-002 remains unaddressed. Recorded so the park does not appear abandoned."
+    },
+    {
+      "id": "PARK-003",
+      "carriedFrom": "pattern-matcher manualReview PATTERN-003",
+      "subject": "nudgeSplit silently unhonored below the rounding threshold: nudgeAmount floors to 0 and 100% of the payment routes to phlimbo, skipping the streamer branch entirely",
+      "disposition": "PARKED to manual-review.json — carried forward from the pattern-matcher's own visible-park channel, NOT re-adjudicated downward",
+      "severityEstimate": "potential-low",
+      "confidence": "low",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 586,
+      "content": "`nudgeAmount = (actualPayment * nudgeSplit) / 100` floors. When actualPayment < 100/nudgeSplit the nudge share rounds to zero, the `nudgeAmount > 0` guard skips the streamer branch, and phlimboAmount takes 100%. The configured donation policy is silently not applied. Rounding favours phlimbo over the nudge sink, NEVER the claimer.",
+      "whyParkedNotDropped": "Magnitude is dust and it is not attacker-repeatable for profit (with nudgeSplit=10 and a 6-dp token the threshold is actualPayment < 10, i.e. 1e-5 USDC, and every claim burns an NFT). Low CONFIDENCE is about whether it is worth reporting at all, not about a severity ceiling — so per the no-silent-drop rule it goes to manual-review.json for a human to adjudicate, not to /dev/null.",
+      "distinctFrom": {
+        "0da2e7cf4f (L-01)": "L-01 concerns actualPayment ITSELF flooring to 0. This concerns the SPLIT flooring to 0 while actualPayment is NON-ZERO — different divisor, different victim (the nudge sink, not the protocol), and it survives even if L-01 is fixed by re-guarding actualPayment > 0. Verified this distinction against source; it holds.",
+        "ecc2d126dd (M-01)": "No decimal-config fail-open involved; this triggers with a fully and correctly configured token.",
+        "RECON-001": "Related but distinct: RECON-001 is the actualPayment==0 path (both legs skipped); this is the actualPayment>0 / nudgeAmount==0 path (only the nudge leg skipped)."
+      },
+      "corroboration": "econ-scanner POS-003 and code-scanner both independently noted the behaviour is BYTE-FOR-BYTE IDENTICAL to pre-story-026 (the old safeTransfer sat under the same `> 0` guard), so story-026 introduces nothing new here. That is the strongest argument for triaging it out — but it is a human call."
+    },
+    {
+      "id": "PARK-004",
+      "carriedFrom": "contract-profiler LOCAL-001",
+      "subject": "claim's inner loop over the CALLER-SUPPLIED exemptStrategies array is O(n*m) with m caller-controlled and duplicates not rejected",
+      "disposition": "PARKED to manual-review.json — NOT reconciled into ledger L-05",
+      "severityEstimate": "potential-low / qa",
+      "confidence": "verified (property), low (reportability)",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim (:538) / calculateClaimAmount (:742, identical shape)",
+      "content": "The strategy loop (yieldStrategies, owner-bounded) contains an inner loop over the caller-supplied `exemptStrategies` calldata array, giving O(n*m) work with m FULLY CALLER-CONTROLLED. Duplicates are NOT rejected — the same registered strategy may appear m times and still pass validation, so m is unbounded independent of n.",
+      "whyNotFoldedIntoL05": "This is the one item where I declined an available collapse. Ledger L-05 (d60ab75159, open) is explicitly scoped as 'owner/OOS-bounded, NOT a permissionless DoS'. LOCAL-001 identifies a CALLER-controlled, unbounded, duplicate-tolerant multiplier on the same loop — which is in tension with L-05's scoping sentence. Folding it in would quietly overwrite an existing entry's central qualifier with a contradicting fact. The impact is self-inflicted only (a caller cannot grief anyone else; each claim is independent and the cost lands on the caller), so it is not an escalation — but the human should decide whether L-05's scoping line needs amending rather than have the dedup stage do it silently.",
+      "secondaryImpact": "claim's gas is not statically bounded, which matters for any bundler/relayer that pre-estimates.",
+      "recommendation": "Bound exemptStrategies.length by yieldStrategies.length, or reject duplicates."
+    },
+    {
+      "id": "PARK-005",
+      "carriedFrom": "contract-profiler LOCAL-002 + pattern-matcher manualReview PATTERN-005",
+      "subject": "Two view-surface items whose victim is a DOWNSTREAM INTEGRATOR (ClaimArbitrage), which is not in this run's scope",
+      "disposition": "PARKED to manual-review.json — awaiting a scope decision, not adjudicated here",
+      "severityEstimate": "potential-low",
+      "confidence": "low",
+      "items": [
+        {
+          "from": "LOCAL-002",
+          "subject": "canClaim (:789) loops i = 1..INFTMinterV2(nftMinter).nextIndex()-1 issuing one external balanceOf staticcall per dispatcher index",
+          "content": "nextIndex is monotonically increasing and controlled by the NFTMinter owner, never by SYA. View-only and primarily bot-facing (eth_call has generous gas), BUT any ON-CHAIN caller using canClaim as a gate inherits an unbounded, monotonically growing cost that can eventually exceed the block gas limit. Unchanged by story-026 except that nextIndex now resolves through INFTMinterV2.",
+          "notCoveredBy": "Ledger L-05 covers the yieldStrategies x authorized-clients product, NOT the nextIndex dispatcher loop. Different array, different owner, different growth driver. Do not assume RECON-003 closes this.",
+          "recommendation": "Offer a paginated variant, or have bots use the O(1) balanceOf(caller, index) directly."
+        },
+        {
+          "from": "PATTERN-005",
+          "subject": "Value-reporting views readable mid-claim while the strategy set is transiently half-skimmed",
+          "content": "During claim's loop (:538-566) strategies at index < k have been skimmed and report zero surplus while those at index > k have not. calculateClaimAmount (:734), getTotalYield (:821) and getYield (:806) read that state unguarded, so an integrator reading them inside a callback window sees a value that is neither pre-claim nor post-claim.",
+          "codeScannerRuling": "code-scanner's read-only-reentrancy check returned 'cleared with a caveat': no callback window is currently reachable — skimSurplus pays in hook-free stablecoins, strategies are owner-registered, and the two external calls story-026 added or kept (collectNudge :599, collectReward :602) both run AFTER the loop closes, so the inconsistent window is already shut by then.",
+          "whyStillParked": "The pattern's own note says to record it even when the contract is itself safe, because the VICTIM is a downstream integrator — and the project docs describe exactly such an integrator (ClaimArbitrage, which calls SYA.claim inside a Uniswap V4 unlockCallback). ClaimArbitrage is NOT in this run's scope, so neither this dedup stage nor the code-scanner can close it on the merits. Parked for a scope decision.",
+          "relatedLedger": "L-06 (90bcf3764e, open) covers getTotalYield's snapshot divergence and the paused-token view inconsistency — a DIFFERENT view defect on the same functions. Check for overlap if this is ever promoted."
+        }
+      ]
+    }
+  ],
+
+  "positivesPreserved": [
+    {
+      "id": "POS-001",
+      "subject": "story-026 CLOSES a pre-existing atomic claimer self-rebate loop — a genuine and material economic improvement",
+      "whyPreserved": "This is the strongest economic argument FOR the change. DEDUP-007 must not be reported in a way that reads as 'story-026 achieved nothing'; this is the counterweight.",
+      "content": "Pre-story-026, claim() pushed nudgeAmount directly into BatchNFTMinterMultiToken's balance, and _snapshotRewards reads that balance BEFORE the mint loop — so a donation landed in a PRIOR transaction was fully capturable. A claimer could back-run their own claim in the same block with batchMint(nudgeSize, self, ...) and recover the entire nudge share they had just paid while KEEPING nudgeSize NFTs — buying the claim-gate NFTs at a discount of exactly nudgeAmount, funded by their own donation, deterministically and with no competition. Post-story-026 the donation lands in the streamer buffer and collectNudge SETTLES FIRST then deposits, so accrued at that instant is 0: an immediate back-run captures nothing of the new donation. The self-rebate is converted into a delayed, competitive claim. story-026's core economic intent is DELIVERED on this axis."
+    },
+    {
+      "id": "POS-002",
+      "subject": "Claimer P&L is unchanged by story-026 — no new value-extraction path for the claimer",
+      "content": "The claimer's gain (skimSurplus :558) and cost (actualPayment :583) are both computed and settled before the nudge leg is reached, and neither depends on nudgeStreamer, stream state, or delivery timing. Both downstream legs are un-enveloped (no try/catch), so a claimer cannot keep the skim while suppressing either leg — a revert in collectNudge reverts the whole claim including the skim.",
+      "machineVerified": "Tier-3 Property 3 (NO-VALUE-EXTRACTION) VERIFIED: test_P3_A (nudge leg broken), test_P3_B (phlimbo leg broken) and test_P3_C (no residual allowance or balance) all confirm full rollback and allowance == 0 after every claim.",
+      "honestyCaveat": "Property 3's clean result is 'no counterexample in 128,000 Foundry calls and a 50,000-sequence Medusa campaign' — ABSENCE OF EVIDENCE, NOT PROOF OF SAFETY. Nothing was verified symbolically; no Halmos [PASS] was obtained. The Tier-3 agent explicitly flagged that if claim-atomicity becomes LOAD-BEARING for a finding's disposition it should go to the symbolic-analyzer for an actual proof. It is currently load-bearing for POS-002 only, not for any finding's severity, so this is acceptable as-is — but the report must not overstate it."
+    },
+    {
+      "id": "POS-003",
+      "subject": "Rounding-direction and allowance-hygiene checklists — cleared",
+      "content": "Rounding: the only conversion in the changed path is nudgeAmount = (actualPayment*nudgeSplit)/100 (floor) with phlimboAmount = actualPayment - nudgeAmount (remainder). Both legs are protocol-side; the floor sends dust to phlimbo, NEVER to a user. No share/asset round-trip exists in SYA at all. Allowance: forceApprove grants EXACTLY nudgeAmount, collectNudge transferFroms exactly `amount` (verified against phoenix-nft-staking@5015f1b), the allowance is fully consumed in-transaction, and no external call sits between the forceApprove and the collectNudge — so it cannot be intercepted or griefed. The profiler's trust assumption here is CONFIRMED, not merely assumed.",
+      "caveat": "PARK-003 is the one place where the rounding direction has a (dust-magnitude) policy consequence."
+    },
+    {
+      "id": "POS-004",
+      "subject": "INFTMinter -> INFTMinterV2 migration is genuinely compile-fix-only — no selector drift",
+      "whyPreserved": "Explicitly checked because of the phStaging YS-31 selector-drift precedent (0x3C69 vs 0x3bBE). A clean negative on a known trap class is worth recording.",
+      "content": "src/interfaces/INFTMinter.sol no longer EXISTS upstream in yield-claim-nft (deleted in that repo's story-039 flatten refactor), so the swap was FORCED, not elective. SYA consumes exactly two members through this interface — burn(address,uint256,uint256) at :619 and nextIndex() at :788 — and both are declared byte-identically in the old blob and in INFTMinterV2.sol. Both selectors unchanged; no call-site behaviour moved. Confirmed independently by code-scanner (clearedChecks) and story-faithfulness (git ls-tree on the f46a5cb blob).",
+      "residualOpsNote": "NOT a finding: the same untagged 'fixed broken build' commit (3c9c54e) also tightened the setNFTMinter NatSpec from 'must implement INFTMinter' to 'must implement INFTMinterV2', i.e. narrowed a DOCUMENTED integration requirement inside an untagged build fix. Harmless today (the code still requires only the two unchanged selectors), mentioned only because doc-requirement changes should not ride along in untagged build fixes."
+    }
+  ],
+
+  "processNotes": [
+    {
+      "id": "PROC-001",
+      "subject": "The pre-existing Tier-3 invariant harness had silently gone vacuous — an AUDIT TOOLING defect, not a contract defect",
+      "severity": "n/a — not a project finding, must NOT be filed against stable-yield-accumulator",
+      "content": "test/Invariant_SYA.t.sol predates story-026. It used nudge = makeAddr('nudge') (an EOA) and never set a nudgeStreamer. Since story-026 a payable nudge share requires a configured streamer, and the sink can never be an EOA (registerStream calls isNudgeToken on it). Measured on the unmodified harness across 60 driven claims: 1 successful claim (only the split==0 case), 0 nudge received. invariant_splitConservation and invariant_globalConservation were passing on essentially empty state — 59 of 60 claims reverted and were swallowed by the handler's catch.",
+      "impact": "It invalidated the PRIOR run's Tier-3 result for this project. Ledger L-01 (0da2e7cf4f) cites 'PoC replay PASS at HEAD (Invariant_SYA.t.sol 8/8)' in its run-13 reconciliation — that reconciliation rested partly on the vacuous harness and should be re-read in that light. Flagged for the finding-manager rather than silently corrected.",
+      "resolution": "Fixed this run: real NudgeStreamer + SyaNudgeSinkMock wired into SYAHandler in the documented ops order, nudge leg measured as the combined (streamer + sink) delta, advanceTime action added so linear depletion actually settles. Two tripwires added: afterInvariant() -> _assertNotVacuous() and property_noUnexpectedClaimFailure() (Medusa-compatible, inverted into a failure counter true at genesis). Post-fix: 60/60 claims succeed, nudge leg carries 35,400e6.",
+      "memoryRef": "vacuous-invariant-harness-mock-never-fails — this is exactly that failure mode, caught by the discipline that memory prescribes.",
+      "medusaNonVacuityEvidence": "Confirmed from lcov coverage rather than asserted: :583 safeTransferFrom 13,850 hits; :598 forceApprove 13,469; :599 collectNudge 13,469; NudgeStreamer.sol:149 13,469; NudgeStreamer.sol:153 rewardPerSecond recompute 13,469. The nudge leg was driven 13,469 times through the REAL streamer, so the clean Medusa result is about exercised code, not skipped code."
+    },
+    {
+      "id": "PROC-002",
+      "subject": "Static-analysis coverage gap — do not read the clean SAST result as assurance",
+      "content": "semgrep p/smart-contracts contains only gas/style INFO rules (50 rules, 59 hits, 0 security): treat as NO COVERAGE, not a clean result. More importantly, NO tool produced any finding on the story-026 forceApprove/collectNudge external-call sequence (claim():596-599) — deterministic SAST is entirely blind to this run's whole subject matter. Every finding in this document came from LLM reasoning tiers or Tier-3 verification. memoryRef: slither-lib-filter-false-clean.",
+      "consequenceForDedup": "This is why the two SAST inputs that DID fire were both dispositioned away (DROP-001 false positive, DROP-002 noise) while all nine survivors came from Tier 1 profiling, Tier 2 reasoning and Tier 3 verification. That distribution is expected here, not a sign of over-filtering."
+    },
+    {
+      "id": "PROC-003",
+      "subject": "Pattern-DB coverage gaps identified by the pattern-matcher — carried forward",
+      "content": "Two gaps in vulnerability-patterns.json v1.1, both directly responsible for this run's highest-value finding having to be found WITHOUT DB support: (1) MANDATORY-EXTERNAL-DEPENDENCY / REMOVED-FALLBACK — no pattern for 'a permissionless function's liveness newly depends on registration/config state in a separately-owned contract, with a previously-existing fallback removed'. This class RECURS across the Phoenix suite (ledger 8c48864824 phlimbo allowance, a53f5b40 unwired nudge, phStaging YS-20 minter-repoint ABI drift, YS-31 selector drift). (2) STALE-DOC-AS-SAFETY-ARGUMENT — no pattern for 'documentation asserts an exhaustive trigger list or invariant that the code does not enforce', which is the exact shape of DEDUP-001 and DEDUP-003 (and upstream 75305ec0, 6f46ec80).",
+      "action": "Route to the pattern-DB maintainer. Not a project finding."
+    },
+    {
+      "id": "PROC-004",
+      "subject": "Nested submodule pin check — CLEAN this run",
+      "content": "SYA's nested pin lib/phoenix-nft-staking == 5015f1b == top-level lib/phoenix-nft-staking HEAD, independently confirmed by code-scanner, econ-scanner and pattern-matcher. NudgeStreamer.sol and BatchNFTMinterMultiToken.sol were read at the AUTHORITATIVE commit, so every cross-repo claim in DEDUP-001/004/006/007 and PARK-001 rests on current source, not a stale nested pin. memoryRef: nested-submodule-pin-stale-trap."
+    }
+  ],
+
+  "dispositionTable": [
+    { "rawId": "LOCAL-001", "source": "contract-profiler", "disposition": "parked-visibly", "target": "PARK-004 / manual-review.json", "reason": "Caller-controlled unbounded multiplier on claim's loop; in TENSION with ledger L-05's 'owner/OOS-bounded, NOT permissionless' qualifier. Declined an available fold-in so a human decides whether L-05's scoping needs amending. Self-inflicted gas only." },
+    { "rawId": "LOCAL-002", "source": "contract-profiler", "disposition": "parked-visibly", "target": "PARK-005 / manual-review.json", "reason": "canClaim nextIndex loop — victim is an on-chain integrator; NOT covered by ledger L-05 (different array/owner/growth driver). Awaiting scope decision on ClaimArbitrage." },
+    { "rawId": "LOCAL-003", "source": "contract-profiler", "disposition": "collapsed-into", "target": "DEDUP-001", "reason": "Exact-match root cause (setRewardToken :417). Contributed the secondary-effect facet (stale phlimbo allowance + missing event)." },
+    { "rawId": "LOCAL-004", "source": "contract-profiler", "disposition": "kept", "target": "DEDUP-008", "reason": "Distinct from ledger L-02 (opposite failure direction, opposite fix). No Tier-2 agent picked it up; escalated from the profiler tier rather than lost." },
+    { "rawId": "LOCAL-005", "source": "contract-profiler", "disposition": "collapsed-into", "target": "DEDUP-001 (facet: invisibility aggravator)", "reason": "Missing event on setRewardToken. Standing alone this is filtered tool-noise QA; absorbed because it converts a detectable outage into a silent one." },
+    { "rawId": "LOCAL-006", "source": "contract-profiler", "disposition": "collapsed-into", "target": "DEDUP-009", "reason": "Interface-completeness; same declarations-vs-implementation root cause class as LOCAL-007/ADERYN-004." },
+    { "rawId": "LOCAL-007", "source": "contract-profiler", "disposition": "collapsed-into", "target": "DEDUP-009", "reason": "Dead code + unused errors. Its unreachable-decimals>18 observation is ALSO load-bearing evidence for DROP-001 and is preserved there." },
+    { "rawId": "SLITHER-001", "source": "static-analyzer", "disposition": "dropped-with-stated-reason", "target": "DROP-001", "reason": "CONFIRMED FALSE POSITIVE — opposite order IS correct function inversion; flagged divide-before-multiply site is additionally in an unreachable branch (setTokenConfig:339 reverts InvalidDecimals). Verified against source, not merely accepted from two upstream agents." },
+    { "rawId": "SLITHER-002", "source": "static-analyzer", "disposition": "reconciled-to-ledger", "target": "RECON-003 -> L-05 (d60ab75159)", "reason": "Unbounded loop with external calls; already filed. story-026 adds constant cost only." },
+    { "rawId": "ADERYN-001", "source": "static-analyzer", "disposition": "reconciled-to-ledger", "target": "RECON-004 -> QA-02 (0d66c2a9e4)", "reason": "nonReentrant modifier ordering; already filed as a contextual FP kept visible." },
+    { "rawId": "ADERYN-002", "source": "static-analyzer", "disposition": "collapsed-into", "target": "DEDUP-001 (facet: invisibility aggravator)", "reason": "Exact duplicate of LOCAL-005 (same line :417, same issue) — a genuine Phase-1 cross-tier duplicate." },
+    { "rawId": "ADERYN-003", "source": "static-analyzer", "disposition": "dropped-with-stated-reason", "target": "DROP-002", "reason": "Missing zero-address checks: setNudgeAddress leg is a CONFIRMED contextual FP (zero is documented-intentional, 'or address(0) to clear'); setPauser/setNftMinter legs are tool noise with no fund-loss path. Substantive angle already carried by RECON-002 and DEDUP-001." },
+    { "rawId": "ADERYN-004", "source": "static-analyzer", "disposition": "collapsed-into", "target": "DEDUP-009", "reason": "Unused errors NotImplemented/InsufficientPending — exact duplicate of LOCAL-007's second half." },
+    { "rawId": "PATTERN-001", "source": "pattern-matcher", "disposition": "collapsed-into", "target": "DEDUP-001", "reason": "Exact-match root cause. Contributed the missingMitigations list and the Law-3 surprise-is-documented-in framing." },
+    { "rawId": "PATTERN-002", "source": "pattern-matcher", "disposition": "reconciled-to-ledger", "target": "RECON-002 -> L-04 (a53f5b408939) RE-WEIGH", "reason": "Sibling of L-04 on the same setter and same root cause class. Widened L-04's scope (2 local + 2 external un-assertable preconditions) rather than minting a near-duplicate fingerprint — per the brief AND the pattern-matcher's own siblingOf recommendation." },
+    { "rawId": "PATTERN-003", "source": "pattern-matcher (manualReview)", "disposition": "parked-visibly", "target": "PARK-003 / manual-review.json", "reason": "Split-floors-to-zero policy bypass. Dust magnitude, byte-identical to pre-story-026 behaviour, but distinct from L-01 and M-01. Low confidence = reportability question, not severity ceiling; human adjudicates." },
+    { "rawId": "PATTERN-004", "source": "pattern-matcher (manualReview)", "disposition": "collapsed-into", "target": "DEDUP-007", "reason": "PROMOTED out of manual-review into a live finding: it is the same NatSpec-overclaim root cause as ECON-001/F-04, and it supplies the only IN-SCOPE, SYA-LOCAL remedy in the group (soften the :62 assertion). Keeping it parked would have left the collapsed item with no actionable in-scope leg." },
+    { "rawId": "PATTERN-005", "source": "pattern-matcher (manualReview)", "disposition": "parked-visibly", "target": "PARK-005 / manual-review.json", "reason": "Read-only reentrancy on value views; code-scanner cleared it 'with a caveat' (no reachable callback window TODAY), but the victim is ClaimArbitrage, which is OUT OF this run's scope — so it cannot be closed on the merits here." },
+    { "rawId": "CODE-001", "source": "code-scanner", "disposition": "kept (survivor)", "target": "DEDUP-001", "reason": "SURVIVING PRIMARY. Contributed the recovery-key analysis (2-3 ordered keys across three Ownables), the unilateral-escape-is-a-capability-sacrifice finding, and the natspecPreDismissalWeighed reasoning." },
+    { "rawId": "CODE-002", "source": "code-scanner", "disposition": "kept", "target": "DEDUP-006", "reason": "Whitelist decay — no other input covers it, no ledger entry covers it. Standalone Low." },
+    { "rawId": "CODE-003", "source": "code-scanner", "disposition": "kept (survivor)", "target": "DEDUP-004", "reason": "SURVIVING PRIMARY for the custody/recoverability defect; magnitude line CORRECTED by the absorbed ECON-002." },
+    { "rawId": "CODE-004", "source": "code-scanner", "disposition": "kept", "target": "DEDUP-005", "reason": "Kept separate from DEDUP-004: different trigger (routine documented migration vs exceptional failure) and different fix (runbook drain step vs upstream rescue function) — 'separate mitigation required' rule." },
+    { "rawId": "CODE-DEDUP-001", "source": "code-scanner", "disposition": "reconciled-to-ledger", "target": "RECON-001 -> L-01 (0da2e7cf4f) + M-01 (ecc2d126dd)", "reason": "Duplicate in root cause; attached as a NEW CONSEQUENCE note. The substantive new observation (story-026's 'fails loud' guarantee is VOID on the zero-payment path) is preserved verbatim. Stays visible via L-01, which is open — Law-1 check passed." },
+    { "rawId": "POS-001", "source": "econ-scanner", "disposition": "kept (positive, not a finding)", "target": "positivesPreserved[0]", "reason": "Material economic improvement delivered by story-026; the required counterweight to DEDUP-007." },
+    { "rawId": "ECON-001", "source": "econ-scanner", "disposition": "kept (survivor)", "target": "DEDUP-007", "reason": "SURVIVING PRIMARY for the throttle-vs-capture concern; absorbs F-04 and PATTERN-004. Root cause OOS (phoenix-nft-staking) so it is ROUTED and kept visible, NOT suppressed." },
+    { "rawId": "ECON-002", "source": "econ-scanner", "disposition": "collapsed-into", "target": "DEDUP-004", "reason": "Same stranded-float root cause as CODE-003. Its r*D magnitude correction, the cadence-independence result and the valuationRuling (claimer-paid consideration = REAL LOSS, externally-derived-yield memory note INAPPLICABLE) are all preserved verbatim — the econ-scanner named these as the load-bearing parts that must not be lost in a merge." },
+    { "rawId": "F-01", "source": "story-faithfulness", "disposition": "kept", "target": "DEDUP-002", "reason": "NOT collapsed into DEDUP-001 per the brief and per the law hierarchy: DEDUP-001 is a defective setter (fixable locally), F-01 is the story's own intent (Law 1 overrides Law 2 — flag the unsafe story). Different mitigation, different adjudicator. Cross-referenced." },
+    { "rawId": "F-02", "source": "story-faithfulness", "disposition": "collapsed-into", "target": "DEDUP-001 (facet: Law-2 documentation deviation)", "reason": "Same setRewardToken root cause. Its distinct contribution — that the NatSpec's own COMPLETENESS CLAIM is what makes the consequence non-obvious, plus the separate documentary remedy — is preserved as an explicit named facet, not merged into prose." },
+    { "rawId": "F-03", "source": "story-faithfulness", "disposition": "kept", "target": "DEDUP-003", "reason": "NOT collapsed per the brief: this is about the ARTEFACT that dispositions DEDUP-001/002, and its remedy is a governance action orthogonal to any code change. Folding it in would let the comment under audit shape the presentation of the finding it dismisses." },
+    { "rawId": "F-04", "source": "story-faithfulness", "disposition": "collapsed-into", "target": "DEDUP-007", "reason": "Same NudgeStreamer NatSpec over-claim as ECON-001. Its scoping honesty (SYA's own first-party story text makes only the WEAKER, TRUE claim, so SYA's story is FAITHFUL) is preserved as the scopingHonesty field." },
+    { "rawId": "TIER3-P1", "source": "invariant-generator (Tier 3)", "disposition": "collapsed-into", "target": "DEDUP-001 (provenEvidence)", "reason": "VERIFIED — the strongest evidence in the group and the reason DEDUP-001 survives at potential-medium. Revert selector 0xd62cbfe8, direct storage assertion, permanence check at +365 days, anti-vacuity tripwire, remediation ordering trap." },
+    { "rawId": "TIER3-P2", "source": "invariant-generator (Tier 3)", "disposition": "collapsed-into", "target": "DEDUP-004 (provenEvidence)", "reason": "VERIFIED — supplies the empirical fixed point (float = donationRate x duration, cadence-independent) that corrects CODE-003's magnitude, plus test_P2_D's ten-signature probe proving the float is unrescuable AND the nuance that it is in-transit rather than destroyed." },
+    { "rawId": "TIER3-P3", "source": "invariant-generator (Tier 3)", "disposition": "kept (confirmatory clean result, not a finding)", "target": "positivesPreserved[1] (POS-002)", "reason": "VERIFIED-clean: no value-extraction path. Recorded WITH the Tier-3 agent's honesty caveat (absence of evidence, not proof of safety; no symbolic verification obtained)." },
+    { "rawId": "PARK-001", "source": "code-scanner", "disposition": "parked-visibly", "target": "parkedVisibly[0] + manual-review.json + cross-repo routing to phoenix-nft-staking", "reason": "Root cause entirely in NudgeStreamer.sol:150-153 (OOS). MUST NOT be dropped. SYA adds NO new capability (verified: collectNudge is already permissionless and reaching it via claim is strictly more expensive). The in-scope consequence IS filed as DEDUP-004." },
+    { "rawId": "PARK-002", "source": "code-scanner", "disposition": "answered-and-closed", "target": "DEDUP-007 + POS-001", "reason": "Hand-off to econ-scanner was taken up and fully answered. No residual." },
+    { "rawId": "POS-002", "source": "econ-scanner", "disposition": "kept (positive)", "target": "positivesPreserved[1]" },
+    { "rawId": "POS-003", "source": "econ-scanner", "disposition": "kept (positive)", "target": "positivesPreserved[2]" }
+  ],
+
+  "handoffToSanitizer": {
+    "newLedgerEntriesProposed": ["DEDUP-001", "DEDUP-002", "DEDUP-003", "DEDUP-004", "DEDUP-005", "DEDUP-006", "DEDUP-007", "DEDUP-008", "DEDUP-009"],
+    "existingLedgerEntriesTouched": [
+      { "fingerprint": "0da2e7cf4f5ff209ef327a860420345b531a1b6fcc884f74fa33597d7cec713d", "label": "L-01", "action": "append consequence note (RECON-001)", "statusChange": "none" },
+      { "fingerprint": "ecc2d126dd", "label": "M-01", "action": "append consequence note (RECON-001)", "statusChange": "none — remains acknowledged" },
+      { "fingerprint": "a53f5b408939", "label": "L-04", "action": "WIDEN scope (RECON-002)", "statusChange": "none — remains open, remains Low" },
+      { "fingerprint": "d60ab75159eb", "label": "L-05", "action": "append consequence notes (RECON-003, RECON-005); NOTE the L-05-vs-PARK-004 scoping tension", "statusChange": "none" },
+      { "fingerprint": "0d66c2a9e4e0", "label": "QA-02", "action": "confirm still-live (RECON-004)", "statusChange": "none" },
+      { "fingerprint": "63cff232c499", "label": "QA-01", "action": "append consequence note (RECON-005)", "statusChange": "none" },
+      { "fingerprint": "7e6197ae677a", "label": "L-03", "action": "confirm still-live (RECON-006)", "statusChange": "none" },
+      { "fingerprint": "8c48864824161ffc", "label": "L-02", "action": "cross-reference only (DEDUP-001 lineage, DEDUP-008 mirror-image)", "statusChange": "none" }
+    ],
+    "sanitizerWarnings": [
+      "DEDUP-003 exists BECAUSE the source contains a self-suppressing NatSpec claim ('That is the accepted consequence ... not an audit finding'). The sanitizer MUST NOT treat that comment as a known-issues entry or a triage decision — no ledger status and no registered-projects designDecision backs it. Suppressing DEDUP-001/002/003 on the strength of that comment would be a Law-1 violation and is exactly what DEDUP-003 objects to.",
+      "DEDUP-007's root cause is OOS (phoenix-nft-staking) and it relates to 858e9e80 (WONT-FIX). Do NOT auto-suppress under the OOS-parent rule: the SYA-local artefact (NatSpec :62 restating the over-claim) IS in scope and IS actionable here, and the item must stay visible for cross-repo routing regardless.",
+      "PARK-001 must reach the phoenix-nft-staking routing channel. Check it against phoenix-nft-staking aaebb4b9 (Low, open) on arrival — it may reconcile INTO that entry rather than mint a new one.",
+      "Fee-on-transfer, weird-ERC20 and approve-race findings were all checked and correctly ruled out upstream; none reached this stage. memoryRef: phlimbo-ea run-11 (FoT permanently invalid for this family)."
+    ],
+    "severityClassifierInputs": [
+      "DEDUP-001: the SHARED-vs-SPLIT owner-key question is the single largest severity swing factor (shared => ordering hazard, Low; split => cross-party outage, supports Medium).",
+      "DEDUP-004: value at risk is the standing float r*D (~$60k at illustrative parameters), which is MEDIUM-SIZED value behind a LOW-LIKELIHOOD trigger. Low is correct only while the triggers (sink retirement / streamer blacklist / claims ceasing) are judged exceptional. Note the counterweight: test_P2_D proved the float is in-transit to the intended recipient, not destroyed, absent a trigger.",
+      "DEDUP-002: availability-only, loud, owner-recoverable — potential-medium ceiling, should not be escalated to High.",
+      "No finding in this set puts assets at direct risk of theft. The run's H/M candidates are all availability or spec-conformance."
+    ]
+  },
+
+  "manualReviewEmitted": {
+    "path": "reports/stable-yield-accumulator/14/manual-review.json",
+    "entryCount": 5,
+    "entries": ["PARK-001", "PARK-003", "PARK-004", "PARK-005 (2 items)"],
+    "law1Statement": "Every raw input that was NOT kept, collapsed with named lineage, reconciled to a named ledger fingerprint, or dropped with a stated and independently-verified reason was routed here. No finding left this run invisibly."
+  },
+
+  "errors": []
+}

@@ -60,11 +60,11 @@ Invoke **project-manager**: "Extract known issues from project documentation"
 - Store known issues path in registration
 
 ## 7. Initialize Ledger
-Create an empty persistent ledger so the first run is treated as a full cold scan:
+Create `reports/<repo-name>/` and an empty persistent ledger inside it, so the first run is treated as a full cold scan:
 ```
-reports/ledgers/<repo-name>.json   →  { "project": "<repo-name>", "lastAuditedCommit": null, "findings": [] }
+reports/<repo-name>/ledger.json   →  { "project": "<repo-name>", "lastAuditedCommit": null, "findings": [] }
 ```
-Run directories (`reports/<repo-name>-XX/`) are created per-run by `/analyze`, not here.
+Run directories (`reports/<repo-name>/XX/`) are created per-run by `/analyze`, not here.
 
 ## 8. Completion Report
 Present to user:

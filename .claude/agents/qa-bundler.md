@@ -133,7 +133,7 @@ report 09, C-01). This is the finding's **primary human handle** and the value w
 ledger's `issueId` field. Derive it from the run-dir name and the label:
 1. **project-acronym** — read `projects.<name>.idPrefix` from `registered-projects.json`;
    that field is **authoritative, never re-derived** when already present.
-2. **report#** — the `NN` with leading zeros removed (`09` → `9`, `26` → `26`; bare family dir = `0`).
+2. **report#** — the run dir's `NN` with leading zeros removed (`09` → `9`, `26` → `26`; the seed run `00` = `0`).
 3. **type** — `l` Low, `c` Centralization, `q` QA (both `Q-0x` and `QA-0x`), `f` Faithfulness.
 4. **issue#** — the label number with leading zeros removed, **unpadded** (`C-01` → `1`).
 

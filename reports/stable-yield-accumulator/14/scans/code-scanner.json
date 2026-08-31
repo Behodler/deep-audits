@@ -1,0 +1,254 @@
+{
+  "project": "stable-yield-accumulator",
+  "commit": "f7041304e4a71cc2325cf406974f5cc16a5b5322",
+  "baseCommit": "0fef726",
+  "story": "story-026 (nudge share routed through NudgeStreamer)",
+  "reportDir": "reports/stable-yield-accumulator/14",
+  "scanTimestamp": "2026-07-26T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "mode": "regression",
+  "contractsScanned": 2,
+  "scope": [
+    "src/StableYieldAccumulator.sol",
+    "src/interfaces/IStableYieldAccumulator.sol"
+  ],
+  "crossContractSurfacesRead": [
+    "lib/phoenix-nft-staking/src/NudgeStreamer.sol @ 5015f1b (TOP-LEVEL authoritative clone)",
+    "lib/phoenix-nft-staking/src/BatchNFTMinterMultiToken.sol @ 5015f1b (flush loop, whitelist)",
+    "lib/stable-yield-accumulator/lib/yield-claim-nft/src/interfaces/INFTMinterV2.sol (selector check)"
+  ],
+  "nestedPinCheck": {
+    "result": "clean",
+    "note": "SYA's nested pin lib/phoenix-nft-staking == 5015f1b == top-level lib/phoenix-nft-staking HEAD. NudgeStreamer read at the authoritative commit. memoryRef: nested-submodule-pin-stale-trap"
+  },
+  "findingsCount": 4,
+  "dedupNotesCount": 1,
+  "parkedCount": 2,
+  "falsePositivesConfirmed": 1,
+
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "availability-coupling / cross-contract owner footgun",
+      "rootCauseClass": "mandatory-external-dependency with removed fallback; undocumented re-arm trigger for a cross-contract liveness precondition",
+      "severity": "potential-medium",
+      "confidence": "high",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "setRewardToken (trigger) / claim (manifestation)",
+      "line": 417,
+      "lineStart": 417,
+      "lineEnd": 420,
+      "secondaryLines": [595, 596, 597, 598, 599, 600, 74, 79, 88],
+      "description": "story-026 deleted the `safeTransfer(nudge, nudgeAmount)` push leg with no fallback and no try/catch, so `claim()` — SYA's ONLY permissionless entry point and the sole mechanism that converts strategy surplus into phlimbo rewards — now has its liveness gated on `NudgeStreamer.streams[nudge][rewardToken].duration != 0`, state held in a separately-owned contract. `setRewardToken` (:417-420) re-keys exactly that pair. It has a zero-address check and nothing else: no NatSpec, no event, no guard on `nudgeSplit`/`nudgeStreamer`. The contract's own ops NatSpec (:74-88) enumerates the re-arm triggers for this brick and names only `setNudgeAddress`; `setRewardToken` is absent.",
+      "codeSnippet": "function setRewardToken(address _rewardToken) external onlyOwner {\n    if (_rewardToken == address(0)) revert ZeroAddress();\n    rewardToken = _rewardToken;\n}\n// ... claim():595-600\nif (nudgeAmount > 0) {\n    address streamer = nudgeStreamer;\n    if (streamer == address(0)) revert NudgeStreamerNotConfigured();\n    IERC20(rewardToken).forceApprove(streamer, nudgeAmount);\n    INudgeStreamer(streamer).collectNudge(nudge, rewardToken, nudgeAmount);\n}",
+      "failureScenario": {
+        "state": "nudgeSplit = 20, nudge = BatchNFTMinterMultiToken B, nudgeStreamer = S, streams[B][USDC].duration = 30 days, phlimbo allowance denominated in USDC.",
+        "action": "Owner calls SYA.setRewardToken(USDS) (e.g. a routine reward-denomination change).",
+        "result": "Next claim: skimSurplus pays the claimer, transferFrom pulls USDS, then collectNudge(B, USDS, amt) reads streams[B][USDS].duration == 0 and reverts NudgeStreamer__NotRegistered(). Whole claim reverts. Every claim with a payable nudge share is bricked; strategy surplus stops being harvested and phlimbo receives nothing. The phlimbo leg is separately broken too (standing allowance is in the OLD token).",
+        "wrongOutcome": "Permanent halt of the entire yield-consolidation rail from a setter whose stated purpose has nothing to do with the nudge rail."
+      },
+      "recoveryAnalysis": {
+        "whoCanCause": "SYA owner, unilaterally, in one transaction.",
+        "reversible": "Yes, but not by SYA's owner alone on the intended path.",
+        "byWhom": "Requires an ordered 2-key (potentially 3-party) sequence across three contracts: (1) BatchNFTMinterMultiToken owner: setNudgeTokenWhitelist(newToken, true) — otherwise step 2 reverts NudgeStreamer__NotWhitelisted; (2) NudgeStreamer owner: registerStream(nudge, newToken, duration). SYA's owner has NO unilateral fix on this path.",
+        "unilateralEscape": "SYA owner CAN restore claims alone via setNudgeSplit(0) — but that permanently abandons the nudge funding stream. It is a capability sacrifice, not a fix, and it does not release the streamer's residual buffer (see CODE-003).",
+        "natspecPreDeclared": "NO. This is the crux. The in-source block (:74-88) declares three failure modes and three re-arm triggers, and this setter is not among them."
+      },
+      "natspecPreDismissalWeighed": "The source asserts failure mode 2 (forgotten registerStream) is 'the accepted consequence of the mandatory-streamer decision, not an audit finding'. That in-source assertion carries no sanitizer authority — it is not a triaged ledger entry, and no `/ledger` status exists for it. Weighed on the merits: the pre-acceptance is scoped to the triggers the document itself enumerates (post-deploy unset; setNudgeAddress). It cannot immunize a trigger the document omits — an owner cannot have accepted a consequence they were never told about. Law 3 test: 'would a competent, non-malicious owner be surprised?' Here surprise is documented-in, not speculative. Footgun => in scope.",
+      "dedup": {
+        "isDuplicate": false,
+        "vs_8c48864824161ffc": "DISTINCT, same impact class. L-02 'Phlimbo allowance depletion bricks permissionless claim() until owner re-approves' shares the class (claim liveness gated on owner-maintained external state) but differs on both root cause and contract boundary: L-02 is an ERC20 allowance SYA can restore ITSELF via approvePhlimbo (one owner, one key, one tx); CODE-001 is registration state in a foreign Ownable contract SYA cannot touch, whose repair needs a second and possibly third key in a fixed order. Fingerprint differs on function (setRewardToken vs approvePhlimbo) and rootCauseClass. NOT a re-file of L-02; disclosing lineage per memory disclose-when-refiling-owner-wontfix (L-02 is 'open', not wont-fix, so no override is implied).",
+        "vs_ecc2d126dd": "DISTINCT. M-01 (acknowledged) is the decimal fail-open; no decimal math is involved here.",
+        "vs_a53f5b408939": "RELATED, distinct. L-04 is the deploy-time-unwired variant on setNudgeSplit; this is the reconfigure-time variant on a different setter, with an external (uncheckable) precondition L-04 does not have."
+      },
+      "tier1Lineage": "Escalates contract-profiler LOCAL-003 and pattern-matcher PATTERN-001. Tier-2 value-add is the recovery-key analysis (2-3 keys, ordered, cross-Ownable) and the confirmation that SYA's only unilateral escape is a capability sacrifice.",
+      "recommendation": "Gate setRewardToken on nudgeSplit == 0; OR have it staticcall INudgeStreamer for a registered (nudge, newToken) stream and revert otherwise. At minimum: emit RewardTokenUpdated(old,new), add setRewardToken to the ops-ordering NatSpec as failure mode 4, and zero the stale phlimbo allowance on repoint.",
+      "verificationNeeded": "Confirm on the live deployment whether SYA, NudgeStreamer and BatchNFTMinterMultiToken share one owner key. Shared ownership reduces this to an ordering hazard (Low); split ownership makes it a cross-party coordination problem and supports the Medium."
+    },
+
+    {
+      "id": "CODE-002",
+      "type": "cross-contract invariant not re-checked at use",
+      "rootCauseClass": "registration-time-only invariant; the guard runs on the registration path but never on the value path",
+      "severity": "potential-low",
+      "confidence": "medium",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 599,
+      "lineStart": 595,
+      "lineEnd": 600,
+      "description": "`NudgeStreamer.registerStream` enforces `IMultiTokenNudgeWhitelist(batchMinter).isNudgeToken(token)` (NudgeStreamer.sol:112-114) — the structural 'this sink can actually distribute this token' guard. `collectNudge` (NudgeStreamer.sol:137-156) does NOT re-check it, and neither does SYA. The whitelist is therefore a registration-time-only invariant that silently decays. BatchNFTMinterMultiToken.setNudgeTokenWhitelist(token, false) removes the token from `getNudgeTokens()`, which is the exact array `batchMint` iterates at BatchNFTMinterMultiToken.sol:526-530 to call `pullPendingStream`.",
+      "failureScenario": {
+        "state": "streams[B][USDC] registered; SYA nudgeSplit = 20.",
+        "action": "BatchNFTMinterMultiToken owner calls setNudgeTokenWhitelist(USDC, false) (e.g. rotating the reward pot to a different token), unaware SYA is still donating USDC into it.",
+        "result": "SYA claims keep succeeding — collectNudge never re-checks the whitelist — so USDC keeps flowing into the streamer buffer and, via _settle, into B's balance. But B's batchMint no longer iterates USDC, so (a) the streamer's residual buffer loses its only flusher (pullPendingStream is msg.sender-keyed and B is the only address that can call it for its own stream), and (b) the USDC already settled into B sits as dead balance that batchMint will never distribute.",
+        "wrongOutcome": "Claimer-paid value is silently diverted into a sink that can no longer distribute it, with no revert and no event on the SYA side to signal it."
+      },
+      "newInStory026": "Partly. Pre-story-026 a de-whitelist also stranded pushed funds inside the minter. The NEW component is the streamer buffer losing its flusher: an additional, separately-custodied pool of value whose only release path (pullPendingStream via batchMint's whitelist loop) is severed by the same owner action.",
+      "dedup": { "isDuplicate": false, "note": "No ledger entry covers the SYA<->BatchNFTMinterMultiToken whitelist decay. New." },
+      "recommendation": "Have NudgeStreamer.collectNudge re-assert isNudgeToken (fail-loud on the value path), or expose an owner-callable flush on NudgeStreamer keyed by (batchMinter, token). Root cause is arguably in phoenix-nft-staking; flagged here because SYA is the donor that keeps the flow alive after the invariant breaks."
+    },
+
+    {
+      "id": "CODE-003",
+      "type": "value custody in a third contract with no escape hatch",
+      "rootCauseClass": "new custody hop introduced on the value path; custodian has no rescue function and a msg.sender-keyed sole release path",
+      "severity": "potential-low",
+      "confidence": "medium",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "claim",
+      "line": 599,
+      "lineStart": 595,
+      "lineEnd": 600,
+      "description": "Before story-026 the nudge share went sink-to-sink in one transfer. It now rests in NudgeStreamer as `streams[nudge][rewardToken].buffer`. NudgeStreamer (read in full at phoenix-nft-staking@5015f1b) exposes exactly four functions — registerStream, collectNudge, pullPendingStream, pendingStream — and has NO owner sweep, NO emergency withdraw, and NO recipient-agnostic release. The only ways buffer leaves are `_settle` inside a subsequent collectNudge (i.e. another SYA claim) or `pullPendingStream` called BY the sink itself. Story-026 therefore adds a second address to the value path whose failure is unrecoverable by anyone, including all three owners.",
+      "failureScenario": {
+        "state": "streams[B][USDC].buffer holds accumulated donations.",
+        "actions": "Any of: (a) rewardToken is USDC and the STREAMER address is blacklisted by the issuer — every subsequent claim reverts inside safeTransferFrom AND the buffer is frozen forever; (b) sink B is retired/replaced and never calls pullPendingStream again; (c) SYA owner sets nudgeSplit(0) or claims simply stop, so no further collectNudge ever settles the tail.",
+        "result": "The residual buffer is permanently locked. SYA's documented unilateral escape (setNudgeSplit(0)) restores claim liveness but recovers nothing.",
+        "wrongOutcome": "Permanent loss of claimer-paid protocol value, bounded by the undrained buffer."
+      },
+      "noteOnValuation": "This is claimer-paid reward-token value, NOT externally-derived yield, so the memory note 'externally-derived-yield = opportunity cost, not loss' does NOT apply — stranding here is a real loss. Magnitude is bounded and continuously drained under normal claim cadence, hence Low.",
+      "dedup": { "isDuplicate": false, "note": "New. No prior SYA entry involves streamer custody." },
+      "recommendation": "Add an owner-callable rescue on NudgeStreamer (root cause is in phoenix-nft-staking), or have SYA keep a degraded push path so value never has to rest in a third contract."
+    },
+
+    {
+      "id": "CODE-004",
+      "type": "state stranded across a cross-contract repoint",
+      "rootCauseClass": "keyed external state orphaned by a local setter",
+      "severity": "potential-low",
+      "confidence": "medium",
+      "contract": "src/StableYieldAccumulator.sol",
+      "function": "setNudgeAddress / setRewardToken",
+      "line": 442,
+      "lineStart": 442,
+      "lineEnd": 446,
+      "secondaryLines": [417, 599],
+      "description": "The streamer buffer is keyed on the pair (nudge, rewardToken). Repointing EITHER key on SYA orphans the old pair's buffer: new claims fund the new pair, and the old buffer's only remaining drain is the old sink calling pullPendingStream itself. The NatSpec ops-ordering block tells the operator to register the NEW pair first; it says nothing about draining the OLD one.",
+      "failureScenario": {
+        "state": "streams[B_old][USDC].buffer = X, still streaming.",
+        "action": "Owner performs the documented migration: registerStream(B_new, USDC, d) then SYA.setNudgeAddress(B_new).",
+        "result": "SYA stops calling collectNudge on the B_old pair entirely, so nothing ever settles it again from the donor side. X only reaches B_old if B_old still runs batchMint with its nudgeStreamer pointer set. If B_old is being retired (the usual reason to repoint), X is stranded — CODE-003's dead end.",
+        "wrongOutcome": "Migration performed exactly as documented still orphans value."
+      },
+      "dedup": { "isDuplicate": false, "note": "Amplifier of CODE-003; keep separate — different trigger (routine documented migration vs. exceptional failure) and a different fix (add a drain step to the ops runbook)." },
+      "recommendation": "Add a step 0 to the ops-ordering NatSpec: drain the old (sink, token) stream via the old sink's batchMint before repointing, and verify pendingStream(old, token) == 0 and buffer == 0."
+    }
+  ],
+
+  "dedupNotes": [
+    {
+      "id": "CODE-DEDUP-001",
+      "subject": "Zero-payment claim silently disarms the story-026 mandatory-streamer guarantee",
+      "verdict": "DUPLICATE in root cause — do NOT file as a new finding. Recorded as a NEW CONSEQUENCE of two existing entries.",
+      "dedupsAgainst": [
+        "ecc2d126dd (M-01, acknowledged) — decimal fail-open producing actualPayment == 0",
+        "0da2e7cf4f (L-01, open) — post-denormalize floor to zero not re-guarded"
+      ],
+      "newConsequence": "story-026's central safety claim is that once a nudge share is payable the streamer is MANDATORY and failure is 'deliberate and loud'. That guarantee is void on exactly the path where value is lost: if actualPayment == 0 (fail-open decimals per M-01, or post-denormalize floor per L-01), then nudgeAmount == 0, the `if (nudgeAmount > 0)` branch is skipped in full, the NudgeStreamerNotConfigured check is never reached, phlimboAmount == 0 skips that leg too, and claim() SUCCEEDS having emitted RewardsClaimed(claimer, 0, n) while the claimer walks away with all skimmed surplus. The fail-loud design fails open precisely in the loss state. This does not change the exploitability or magnitude of M-01/L-01 — it is an assurance-coverage note: the new revert cannot be relied on as a backstop for the zero-payment path.",
+      "action": "Attach to ecc2d126dd and 0da2e7cf4f as a story-026 consequence note. M-01 is acknowledged (suppressed) but L-01 is OPEN, so the note stays visible via L-01 — no Law-1 recall loss.",
+      "alsoChecked": "Rounding asymmetry: with a small actualPayment, (actualPayment * nudgeSplit)/100 can floor to 0 while phlimboAmount takes 100%. Behaviour is byte-for-byte identical to pre-story-026 (the old safeTransfer was under the same `> 0` guard), so story-026 introduces nothing new here. Not filed."
+    }
+  ],
+
+  "reentrancyChecklist": [
+    {
+      "class": "Classic single-fn reentrancy",
+      "verdict": "cleared",
+      "reasoning": "claim() is nonReentrant. No .call{value:} anywhere; SYA is not payable. Value moves only via SafeERC20."
+    },
+    {
+      "class": "Cross-contract reentrancy (A->B->A)",
+      "verdict": "cleared",
+      "reasoning": "New path SYA.claim -> NudgeStreamer.collectNudge -> (a) safeTransfer(nudge, settled) then (b) safeTransferFrom(SYA, streamer). Re-entry into SYA.claim is blocked by SYA's nonReentrant; re-entry into collectNudge is blocked by the streamer's own nonReentrant. Critically, claim() writes NO SYA storage (established fact carried in), so there is no stale-state window to re-read. Re-entry into a SIBLING SYA function is moot: claim is the only permissionless state-mutating entry point; every other mutator is onlyOwner or pauser-gated."
+    },
+    {
+      "class": "Cross-function reentrancy",
+      "verdict": "cleared",
+      "reasoning": "No sibling permissionless mutator shares state with claim. No per-user accounting exists in SYA at all."
+    },
+    {
+      "class": "Read-only reentrancy",
+      "verdict": "cleared with a caveat",
+      "reasoning": "Enumerated SYA's external views consumed as an oracle by ClaimArbitrage: getTotalYield, previewClaimPayment/calculateClaimAmount, canClaim, getPendingYield. All read strategy state, not SYA state, and SYA holds no state that goes transiently inconsistent — claim mutates no SYA storage. During the collectNudge window SYA transiently holds phlimboAmount and a live allowance, but no view exposes either as a price/rate. Caveat (unchanged by story-026, pre-existing): getTotalYield is a snapshot that already diverges from the charged amount — that is ledger L-06 (90bcf3764e), not a reentrancy issue."
+    },
+    {
+      "class": "ERC721 receive-hook reentrancy",
+      "verdict": "not applicable",
+      "reasoning": "No ERC721 anywhere in the path. The NFT gate is ERC1155 and is a BURN, not a mint or safeTransfer."
+    },
+    {
+      "class": "ERC1155 receive-hook reentrancy",
+      "verdict": "cleared",
+      "reasoning": "_validateAndBurnNFT (:614-623) calls balanceOf then INFTMinterV2.burn. OZ _burn invokes no receive hook (hooks fire only on mint/transfer). No inbound callback exists."
+    },
+    {
+      "class": "ERC777 tokensReceived / tokensToSend",
+      "verdict": "cleared-by-assumption, PARKED (see parked[0])",
+      "reasoning": "The profiler's deferred question #2 asked whether a hook-bearing rewardToken can exploit collectNudge's settle-before-pull ordering. Answer: even with a hook, the attacker-controlled surface is `nudge` (the sink) receiving `settled` while SYA has a live exact-amount allowance to the streamer. The hook cannot re-enter collectNudge (nonReentrant) nor claim (nonReentrant), and it cannot consume the allowance because only the streamer is the approved spender and the streamer's only transferFrom is the one already in flight. No exploit. Additionally, hook-bearing/weird ERC20s are a documented C4 known-invalid for this suite and rewardToken is USDC in the live config."
+    }
+  ],
+
+  "orderingAndValueExtractionAnalysis": {
+    "question": "Claimer is paid first (skimSurplus :558), pays second (safeTransferFrom :583), and the owner-set streamer is called after funds are pulled in (:599). Any path to a claim that succeeds while shortchanging the nudge or phlimbo legs?",
+    "verdict": "No NEW path introduced by story-026.",
+    "reasoning": [
+      "The two legs are strictly downstream of the transferFrom, and both are un-enveloped (no try/catch). A revert in either reverts the entire claim, including the skim — so a claimer cannot obtain surplus while suppressing a leg. Positive property, worth recording.",
+      "Allowance hygiene on the new leg is sound: forceApprove sets EXACTLY nudgeAmount, and NudgeStreamer.collectNudge (:149) transferFroms exactly `amount` — verified against the authoritative source at 5015f1b. Allowance is fully consumed in-transaction; no residue, no standing approval, and no external call sits between the forceApprove and the collectNudge, so the allowance cannot be intercepted. The profiler's trust assumption on this is CONFIRMED, not merely assumed.",
+      "Griefing the allowance from outside is impossible: the approval is created and consumed atomically in one call frame.",
+      "The ONLY shortchange path is actualPayment == 0 / nudgeAmount floored to 0 — pre-existing, see CODE-DEDUP-001.",
+      "Note for completeness (pre-existing, ledger QA-02 0d66c2a9e4): nonReentrant is not the first modifier on claim(); story-026 does not change this."
+    ]
+  },
+
+  "falsePositivesConfirmed": [
+    {
+      "id": "SLITHER-001",
+      "subject": "_normalizeAmount / _denormalizeAmount apply decimal-scaling and exchange-rate in 'opposite order'",
+      "verdict": "CONFIRMED FALSE POSITIVE — independently sanity-checked, agree with pattern-matcher, recommend killing it.",
+      "reasoning": "_normalizeAmount (:669-692) computes N(x) = R(D(x)): scale by 10^(18-dec) first (:680-684), then multiply by exchangeRate/1e18 (:687-689). _denormalizeAmount (:700-...) computes D^-1(R^-1(y)): divide by exchangeRate first (:711-713), then unscale the decimals. For a composition N = R o D, the correct inverse is N^-1 = D^-1 o R^-1 — the operations MUST appear in the opposite order. The detector is pattern-matching on the textual ordering and mistaking correct function inversion for an inconsistency. Both branches also share an identical `decimals == 0 && exchangeRate == 0` fail-open early return, so the two functions are symmetric on the unconfigured path as well (that fail-open IS a real issue, but it is ledger M-01 ecc2d126dd, a different thing entirely)."
+    }
+  ],
+
+  "clearedChecks": [
+    {
+      "subject": "INFTMinter -> INFTMinterV2 migration: selector drift",
+      "verdict": "CLEARED. The claim that this is compile-fix-only is CONFIRMED, and the reason is stronger than stated: src/interfaces/INFTMinter.sol no longer EXISTS upstream in yield-claim-nft (deleted in that repo's story-039 flatten refactor), so the change was forced, not elective. SYA consumes exactly two members through this interface — burn(address,uint256,uint256) at :619 and nextIndex() at :788 — and both are declared byte-identically in INFTMinterV2.sol (:16, :78). No selector drift. Explicitly checked because of the phStaging YS-31 selector-drift precedent (0x3C69 vs 0x3bBE).",
+      "residual": "The diff also bumps SYA's lib/yield-claim-nft pin. SYA calls the DEPLOYED NFTMinter, so only those two selectors matter; the bump is behaviourally inert for SYA."
+    },
+    {
+      "subject": "setNudgeStreamer zero-address rejection",
+      "verdict": "CLEARED as correct. Rejecting address(0) is the right call: allowing a clear would let the donation rail silently disarm (nudgeAmount computed, streamer zero, revert at use rather than at config). The documented escape (setNudgeSplit(0)) is the fail-loud equivalent. No finding."
+    },
+    {
+      "subject": "Streamer under-collateralisation bricking _settle",
+      "verdict": "CLEARED. NudgeStreamer.buffer only ever increases via a real transferFrom and _accrued caps settlement at `buffer` (NudgeStreamer.sol:195-200), so the streamer's token balance always covers the sum of its buffers. No path where _settle reverts for insufficiency. (This is also why the absence of a rescue function is a lock-in rather than a solvency risk — see CODE-003.)"
+    },
+    {
+      "subject": "Streams cannot be de-registered",
+      "verdict": "CLEARED as a positive. registerStream reverts on duration == 0 (NudgeStreamer.sol:111), so once a (sink, token) stream exists it cannot be un-registered — the streamer owner has no 'turn off SYA's claims' lever beyond the initial non-registration. This materially bounds CODE-001: the brick can only be armed by a NEW pair, never by revoking an existing one."
+    }
+  ],
+
+  "parked": [
+    {
+      "id": "PARK-001",
+      "subject": "NudgeStreamer.collectNudge is PERMISSIONLESS and recomputes rewardPerSecond over the FULL duration on every deposit — a 1-wei donor can reset the streaming window at will (Linear-Depletion / rate-drift class)",
+      "why parked, not filed": "Root cause is entirely in phoenix-nft-staking/src/NudgeStreamer.sol:137-156, OUT OF SCOPE for this project per C4 'issues in parent/forked contracts where root cause is OOS'. Filed here as a visible cross-repo note rather than dropped (Law 1: recall beats tidiness). This is the profiler's deferred item #1, answered.",
+      "analysis": "collectNudge has no donor allowlist. Any address can call collectNudge(nudge, rewardToken, 1) — settling the tiny accrual, then resetting s.rewardPerSecond = buffer * 1e18 / duration from `now`. Repeated resets convert linear-depletion-to-zero into exponential decay: ~63% delivered per nominal duration with an infinitely long tail. SYA's own claim cadence does the same thing for free. The NudgeStreamer NatSpec explicitly names this as 'V1's bug' it claims to have fixed by recomputing on deposit only — but deposit is permissionless, so 'deposit only' is not a meaningful restriction against a griefer.",
+      "priorArt": "Same class as phoenix-nft-staking run-18 M-01 (Linear-Depletion rate-drift, PoC 63.26%). phoenix-nft-staking run-24 assessed NudgeStreamer as 'phlimbo port faithful (no rate-drift)' and characterised it as a timing-throttle, not a value-cap — which, if that assessment stands, makes this a throttle-stretching nuisance rather than a value issue.",
+      "action": "Route to the phoenix-nft-staking ledger for a re-weigh against run-24's 'no rate-drift' conclusion. Do NOT file against stable-yield-accumulator.",
+      "confidence": "medium"
+    },
+    {
+      "id": "PARK-002",
+      "subject": "Nudge-pot MEV/front-run economics under streamed (vs lumpy) arrival",
+      "why parked": "The profiler's deferred item #3. This is arrival-timing and incentive analysis — econ-scanner's lens, explicitly OUT OF SCOPE for code-scanner. Recorded so it is not lost between the two scanners.",
+      "note": "story-026's stated purpose is to stop a batchMint caller capturing a disproportionate share right after a donation burst. Whether the streamed arrival actually achieves that, and how it interacts with phoenix-nft-staking 858e9e80 and the run-22 aggregate-nudge Medium, needs the econ lens.",
+      "action": "Hand to econ-scanner."
+    }
+  ],
+
+  "errors": []
+}

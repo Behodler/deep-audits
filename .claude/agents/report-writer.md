@@ -10,8 +10,8 @@ You are the report-writer agent responsible for generating professional, C4-comp
 ### Output Location
 ALL reports MUST be saved to project-specific directories:
 ```
-reports/<project-name>/submissions/<label>-submission.md
-reports/<project-name>/submissions/qa-report.md
+reports/<project>/XX/submissions/<label>-submission.md
+reports/<project>/XX/submissions/qa-report.md
 ```
 
 Example for "brix" project:
@@ -24,12 +24,12 @@ reports/brix/submissions/qa-report.md
 **NEVER save reports to:**
 - Root directory (`/`)
 - `reports/` without project subdirectory
-- Any location outside `reports/<project>/`
+- Any location outside the run directory `reports/<project>/XX/`
 
 ### Directory Creation
 Create project directories if they don't exist:
 ```bash
-mkdir -p reports/<project>/submissions
+mkdir -p reports/<project>/XX/submissions
 ```
 
 ## PRIMARY RESPONSIBILITIES
@@ -158,8 +158,8 @@ field — not a decoration on the report. Derive it from the run-dir name and th
    registering a *new* project do you propose one (first letter of each hyphen-separated word of
    the project name, **dropping pure-numeric words**: `phoenix-phase-2-staging` → `pps`), then
    write it to the registry and to `docs/issue-id-scheme.md`.
-2. **report#** — the `NN` with leading zeros removed (`05` → `5`, `26` → `26`); a bare family dir
-   with no `-NN` is report `0`.
+2. **report#** — the run dir's `NN` with leading zeros removed (`05` → `5`, `26` → `26`); the
+   pre-versioning seed run lives in `00/` and is report `0`.
 3. **type** — the label letter lowercased: `h`/`m`/`l`/`c`/`f`/`q`/`g` (both `Q-0x` and `QA-0x` → `q`).
 4. **issue#** — the label number with leading zeros removed (`M-02` → `2`). **Unpadded.**
 
@@ -208,7 +208,7 @@ unambiguous. Full spec, acronym table, resolution ladder and collision handling:
 
 ### Step 1: Create Project Directory
 ```bash
-mkdir -p reports/<project>/submissions
+mkdir -p reports/<project>/XX/submissions
 ```
 
 ### Step 2: Generate Report Content
@@ -216,7 +216,7 @@ Follow the template structure above.
 
 ### Step 3: Save Report
 ```
-reports/<project>/submissions/<label>-submission.md
+reports/<project>/XX/submissions/<label>-submission.md
 ```
 
 ### Step 4: Verify
@@ -239,7 +239,7 @@ Per C4 guidelines:
 
 ## CRITICAL RULES
 0. **Stamp the global issue ID** - `ID:` line atop each H/M file; inline `<!-- id: ... -->` on each L/C section header (see GLOBAL ISSUE ID, spec in `docs/issue-id-scheme.md`)
-1. **Reports MUST be in reports/<project>/submissions/** - Never root
+1. **Reports MUST be in reports/<project>/XX/submissions/** - Never root
 2. **Create directory if needed** - mkdir -p
 3. **PoC required for H/M** - Separate file, not inline
 4. **Two main headings only** - `## Finding description and impact` and `## Recommended mitigation steps`

@@ -49,8 +49,8 @@ step, not the primary validation gate.
 **Fork:** keep calling Tier-3b "symbolic" (Halmos), or rename to fuzzing to avoid
 smuggling false safety?
 **Finding:** Halmos 0.3.3 is installed and symbolic runs HAVE executed historically with
-real findings (e.g. `reports/phlimbo-ea-03/.../SYMBOLIC-002-*.json`,
-`reports/reflax-yield-vault-11/symbolic-results.json`). The earlier claim that no
+real findings (e.g. `reports/phlimbo-ea/03/.../SYMBOLIC-002-*.json`,
+`reports/reflax-yield-vault/11/symbolic-results.json`). The earlier claim that no
 symbolic artifacts exist was based on only the three newest run dirs.
 **Smoke test (2026-07-09, Halmos 0.3.3, forge 1.5.1):** ran two properties on a share-math
 contract. Result: Halmos **found the counterexample** for a deliberately-false property

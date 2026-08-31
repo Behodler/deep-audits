@@ -1,0 +1,1037 @@
+{
+  "project": "antimatter",
+  "commit": "0bb82d867dba43bc514a508800826f90436c2ee3",
+  "reportDir": "reports/antimatter/01",
+  "scanTimestamp": "2026-08-18T00:00:00Z",
+  "stage": "deduplication",
+  "inputsConsumed": [
+    "tier1/static-analysis-findings.json (SA-001..SA-013)",
+    "tier2/code-scan-findings.json (CODE-001..CODE-009, MR-01..MR-05)",
+    "tier2/econ-findings.json (ECON-001..ECON-007, PARK-001..PARK-004)",
+    "tier2/faithfulness-findings.json (FAITH-001..FAITH-004)",
+    "tier3/invariant-results.md (invariant_01..10; 06/07/09/10 FAIL on Foundry AND Medusa)",
+    "tier3/symbolic-results.md (Halmos 0.3.3: 6 PASS proofs, refutations 3b + 4d, 11 TIMEOUT)",
+    "profiles/Antimatter.json (AM-LOCAL-001..AM-LOCAL-005)"
+  ],
+  "counts": {
+    "before": {
+      "SA": 13,
+      "CODE": 9,
+      "ECON": 7,
+      "FAITH": 4,
+      "AM-LOCAL": 5,
+      "totalNamedFindings": 38,
+      "tier3EvidenceItems": {
+        "brokenInvariants": 4,
+        "symbolicRefutations": 2,
+        "symbolicNewEdge": 1
+      },
+      "parkedItemsCarriedIn": {
+        "MR-xx": 5,
+        "PARK-xxx": 4,
+        "total": 9
+      }
+    },
+    "after": {
+      "consolidatedFindings": 19,
+      "bySeverity": {
+        "high": 1,
+        "medium": 6,
+        "low": 7,
+        "qa": 5
+      },
+      "ofWhichParkedManualReview": 1,
+      "parkedItemsCarriedOut": 11,
+      "removedOutright": 8,
+      "netCollapse": "38 named findings + 7 tier3 evidence items -> 19 consolidated entries; 0 findings deleted without a recorded reason"
+    }
+  },
+  "findings": [
+    {
+      "id": "DEDUP-001",
+      "severity": "high",
+      "confidence": "high",
+      "title": "An ERC20 allowance over ANTIMATTER is silently a dual-asset authority: it lets a third party spend the grantor's STABLECOIN and keep the entire ~2x phUSD proceeds",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "allowanceSpend": 214,
+        "burn": 215,
+        "stablePull": 222,
+        "amLegMint": 236,
+        "stableLegTransfer": 237,
+        "range": "201-239"
+      },
+      "sources": [
+        "SA-001",
+        "AM-LOCAL-001",
+        "CODE-001",
+        "invariant_06_noStableSpentBeyondCallerAllowance",
+        "invariant_07_noValueRedirectedAwayFromOwner",
+        "symbolic:check_callerCannotSpendStableWithoutStableAllowance_d6",
+        "symbolic:check_callerCannotSpendStableWithoutStableAllowance_d6_k"
+      ],
+      "mergeAction": "5-way consolidation (static seed + profiler local-high + Tier-2 code finding + 2 broken invariants on 2 independent engines + symbolic refutation over the whole amount domain). Verified before collapsing: all seven cite the same defect at the same lines (:214 spends only the AM allowance, :222 debits a second asset, :236-237 credit a caller-chosen address).",
+      "strongestFraming": "CODE-001",
+      "framingRationale": "CODE-001 is kept verbatim as the primary narrative: it is the only source that states the exposure in ERC20-approval terms (approve(bob,N) on antimatter is de facto also approve(bob,toStableAmount(N)) on every stablecoin approved to Antimatter, plus a redirection right), carries the legitimate-flow analysis proving the mitigation costs no functionality, and pre-empts the intentionality defence.",
+      "rootCause": "annihilateFrom derives TWO asset movements and one value redirection from ONE grant of authority. Only the antimatter allowance is checked and spent; the stablecoin leg rides on Antimatter's own standing approval from `from`, and `recipient` is validated only against address(0).",
+      "impact": "Direct, uncompensated theft of the grantor's stablecoin. Loss per victim is bounded by min(antimatter allowance, stablecoin approval to Antimatter) - which for the universal max-approval pattern is the full antimatter allowance. Victim also loses the antimatter and receives nothing.",
+      "invariantViolated": "lib/antimatter/CLAUDE.md 'Antimatter must never expose a burn outside a completed annihilation'. From `from`'s ledger, annihilateFrom with msg.sender != from and recipient != from is indistinguishable from burn().",
+      "evidence": {
+        "poc": {
+          "file": "workspace/antimatter/test/audit/Tier2.t.sol",
+          "tests": [
+            "test_H01_amAllowanceDrainsGrantorStablecoinToAttacker - Alice USDC 100e6 -> 0, phUSD to Alice 0, phUSD to Bob 200e18, usdc.allowance(alice,bob)==0 throughout",
+            "test_H01_baselineTransferFromTakesOnlyAM - control: plain transferFrom leaves Alice's USDC at 100e6",
+            "test_H01_violatesNoBurnOutsideAnnihilationInvariant - AM supply falls 100e18 while phUSD.balanceOf(alice)==0"
+          ],
+          "status": "passing"
+        },
+        "invariant": {
+          "engines": [
+            "Foundry (512 runs x depth 150)",
+            "Medusa 1.5.1 (210,604 calls)"
+          ],
+          "failures": [
+            "invariant_06: 'caller moved stablecoin it was never approved for: 335696647 != 0'",
+            "invariant_07: 'phUSD proceeds of a holder's assets delivered to a caller-chosen third party: 6646395452000000000000 != 0'"
+          ],
+          "deterministicReplay": "test_counterexample_allowanceConservation (PASSES = reproduces): victim approves attacker 100e18 AM only -> attacker annihilateFrom(usdc,victim,attacker,100e18) -> victim USDC -100e6, usdc.allowance(victim,attacker) still 0, phUSD.balanceOf(attacker)==200e18, victim 0",
+          "medusaShrink": "clean 2-call minimisation (approveAntimatter, annihilateOnBehalf)",
+          "shrinkerCaveat": "Foundry's shrinker is unreliable here (cumulative ghosts report a non-reproducing 1-call sequence); Medusa's shrink and the hand-built replay are the load-bearing artifacts."
+        },
+        "symbolic": {
+          "tool": "halmos 0.3.3",
+          "artifacts": [
+            "tier3/halmos-p3b.txt",
+            "tier3/halmos-p3b-k.txt"
+          ],
+          "result": "REFUTED - the naive safety claim (a caller with zero stablecoin allowance cannot move `from`'s stablecoin) is false",
+          "witnesses": [
+            "amount = 0xe8d4a5100000000000000000 (~7.2e10 AM)",
+            "k = 2**79 (amount ~ 6.04e17 AM)"
+          ],
+          "domain": "fully concrete d=6, rate=1e18 - unaffected by the symbolic-EXP over-approximation caveat",
+          "significance": "establishes the defect over the whole amount domain, not just a hand-picked value",
+          "corroborating": "symbolic 3a PROVED the antimatter allowance itself falls by exactly `amount` - i.e. the AM leg is correct, which is precisely why the stablecoin leg's missing authority check is the defect"
+        }
+      },
+      "recommendation": "Require `recipient == from` whenever `msg.sender != from`. This closes the theft window while preserving both legitimate flows (keeper/router annihilating on your behalf and delivering to you; self-annihilation to another recipient). Alternatives: additionally require and spend `IERC20(stable).allowance(from, msg.sender) >= stableAmount`, or drop the `from` parameter and make annihilation self-only.",
+      "intentionalityNote": "Asserted as correct by the project's own test_thirdPartySpendsAntimatterAllowance (test/Annihilation.t.sol:130-141). Not a defence: an ERC20 approver cannot consent to a second asset they were never asked about, and in-source NatSpec (:189-192) carries no suppression authority. Law 1: intended-but-exploitable is still reportable.",
+      "notes": "SA-001 (slither arbitrary-send-erc20, impact=High confidence=High) is the deterministic seed and is retained in `sources` for traceability, not re-filed."
+    },
+    {
+      "id": "DEDUP-002",
+      "severity": "medium",
+      "confidence": "high",
+      "title": "PhusdStableMinter's daily phUSD issuance cap governs only half the phUSD an annihilation issues: a cap of X permits 2X",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "cappedStableLeg": 227,
+        "uncappedAmLeg": 236,
+        "range": "227-237"
+      },
+      "sources": [
+        "AM-LOCAL-002",
+        "CODE-003",
+        "ECON-002",
+        "invariant_09_dailyCapGovernsAllIssuance",
+        "invariant_10_minterCapChargedForFullIssuance"
+      ],
+      "mergeAction": "4-way consolidation. Verified identical root cause and identical line (:236 mints outside the capped path). ECON-002 itself instructs 'Dedup should collapse these two'; AM-LOCAL-002 is the profiler's local half.",
+      "strongestFraming": "BOTH RETAINED BY DESIGN - CODE-003's code framing (which line bypasses which counter, and that the antimatter leg is the structurally uncollateralised half) AND ECON-002's operator/economic framing (the breaker under-counts by exactly 2x at the moment it is most needed). Neither subsumes the other; the task's instruction to keep both is honoured verbatim below.",
+      "rootCause": "Antimatter routes the stable leg through PhusdStableMinter.mint (which charges maxMintPerDay with phUSDAmount) but mints the antimatter leg itself on its own FlaxToken authorisation, where the counter cannot see it. Issuance is amount*(1 + rate/1e18); cap consumption is amount*rate/1e18.",
+      "impact": "The only per-day issuance rail anywhere on the annihilation path is exactly half the size its operator configured, and the mis-sizing is invisible: the counter reports 100% utilisation, not 50%. Antimatter has no cap of its own, no pause, and mint() (:179) has no supply ceiling.",
+      "footgunTest": "Law 3 - a competent, non-malicious operator entering X as a daily phUSD issuance cap WOULD be surprised that 2X is issued. The consequence requires knowing a second contract holds an independent FlaxToken mint authorisation. Surprise => footgun => in scope.",
+      "safeConfigGuidance": "PRESERVED FROM ECON-002 VERBATIM: 'Until the code is changed, set maxMintPerDay to HALF the phUSD issuance you intend to permit, for every stablecoin that Antimatter can annihilate - and only while exchangeRate == 1e18. The correct divisor is (1 + exchangeRate/1e18), so it changes the moment the rate is moved (see DEDUP-005). Do not treat maxMintPerDay as a phUSD-issuance cap; it is a per-stable deposit throttle that happens to be denominated in phUSD.'",
+      "evidence": {
+        "poc": {
+          "file": "workspace/antimatter/test/audit/Tier2.t.sol",
+          "tests": [
+            "test_M_dailyCapPermitsDoubleTheConfiguredPhUSD - cap 1000e18, single tx issues 2000e18 phUSD, cap then reported exhausted"
+          ],
+          "status": "passing"
+        },
+        "invariant": {
+          "engines": [
+            "Foundry",
+            "Medusa 1.5.1"
+          ],
+          "failures": [
+            "invariant_09: 'USDC: phUSD issued in 24h exceeded cap: 17473344466000000000000 > 10000000000000000000000'",
+            "invariant_10: 'USDC: minter cap charged for less than the phUSD actually issued: 1000000000000 != 2000000000000'"
+          ],
+          "medusaCounterexample": "single call: peakIssuedInWindow(USDC)=9893392938000000000000 vs peakChargedInWindow(USDC)=4946696469000000000000 - exactly 2.000x",
+          "deterministicReplay": "test_counterexample_dailyCapDoubled (PASSES = reproduces): cap 10,000e18 DOLA, one annihilateFrom of 6,000e18 -> mintedToday 6,000e18 but 12,000e18 phUSD delivered. The cap is exceeded outright in ONE transaction, not merely asymptotically.",
+          "antiVacuity": "the minter's cap is LIVE in the harness (121 swallowed inner reverts dominated by 'Daily mint limit exceeded')"
+        }
+      },
+      "recommendation": "Route the antimatter leg through PhusdStableMinter so one counter sees the whole issuance, or add an equivalent per-period cap on Antimatter's own leg at :236, or (weakest) rename/document maxMintPerDay as a per-stable DEPOSIT throttle so operators size it correctly.",
+      "severityNote": "Honest read carried forward from CODE-003: no direct asset loss and no attacker-specific gain, so a downgrade to Low is defensible. Held at Medium because it is the only issuance rail on a partly uncollateralised token and it is off by 2x in the unsafe direction, silently.",
+      "crossBoundary": true,
+      "relatedNotCollapsed": [
+        "DEDUP-006 (same counter, different root cause: shared-budget crowding/DoS)",
+        "DEDUP-005 (rate changes re-scale what the cap permits)"
+      ]
+    },
+    {
+      "id": "DEDUP-003",
+      "severity": "medium",
+      "confidence": "high",
+      "title": "The pairing ratio is taken on trust from the minter's registered `decimals`; the dangerous direction fails OPEN and is permissionlessly exploitable",
+      "contract": "src/Antimatter.sol",
+      "function": "toStableAmount",
+      "lines": {
+        "trustedRead": 250,
+        "scale": 254,
+        "divide": 255,
+        "range": "246-257"
+      },
+      "sources": [
+        "CODE-002",
+        "SA-010(semantic risk at the same lines)",
+        "faithfulness note 2 (toStableAmount trusts registered decimals)"
+      ],
+      "mergeAction": "Kept as its own entry. EXPLICITLY NOT COLLAPSED with DEDUP-002 despite both being '2x/decimals-adjacent config' issues: different root cause (unvalidated registered decimals vs uncounted second mint leg), different exploit class (permissionless free-mint vs mis-sized operator rail), different mitigation (cross-check IERC20Metadata.decimals() vs cap the AM leg).",
+      "rootCause": "Antimatter computes its entire economic premise from `decimals` read out of PhusdStableMinter.stablecoinConfigs, a value registerStablecoin accepts verbatim and never checks against IERC20Metadata(stablecoin).decimals(). Antimatter performs no independent check although it holds the token address and could do so in one staticcall.",
+      "asymmetry": "decimals OVERSTATED (6-dp registered as 18): scale collapses to 1, pull is 1e12x too large, safeTransferFrom reverts on balance - fails CLOSED, harmless. decimals UNDERSTATED (18-dp registered as 6): scale becomes 1e12, the pull collapses by 1e12x, BOTH contracts make the same error so it cancels inside calculateMintAmount and nothing reverts - fails OPEN, silently, at full phUSD issuance.",
+      "impact": "Any antimatter holder can permissionlessly receive 200 phUSD per 100 AM while surrendering 1e8 raw units (1e-10) of the stablecoin. The stable leg of phUSD - the leg that is supposed to be fully collateralised - becomes backed by dust, for as long as the misconfiguration stands and for as much antimatter as exists. No revert, no event anomaly, no on-chain signal; the :230 residue check and :233 non-zero receipt both pass.",
+      "footgunTest": "Law 3 - an owner mis-typing one decimals argument would expect a revert or a proportionally wrong ratio, NOT a silent unbounded permissionless free-mint. Surprise => footgun => in scope.",
+      "evidence": {
+        "poc": {
+          "file": "workspace/antimatter/test/audit/Tier2.t.sol",
+          "tests": [
+            "test_M_decimalsUnderstatedIsSilentlyExploitable - 18-dp DOLA registered as 6-dp: 100 AM + 1e8 raw DOLA -> 200e18 phUSD, no revert",
+            "test_M_decimalsOverstatedFailsClosed - control proving the asymmetry"
+          ],
+          "status": "passing"
+        },
+        "symbolicContext": "halmos PROVED toStableAmount's exactness guard is sound for d=6 and for symbolic d<=18 (tier3/halmos-p1-d6.txt, halmos-p1-symbolicd.txt) - i.e. the arithmetic is correct GIVEN a correct `decimals`. The proof is exactly why the registered value is the whole risk."
+      },
+      "recommendation": "In toStableAmount cross-check the registered value: `if (decimals != IERC20Metadata(stable).decimals()) revert DecimalsMismatch(...)` (try/catch, revert if the token has no decimals()). This makes the dangerous direction fail closed like the safe one already does.",
+      "crossBoundary": true,
+      "rootCauseLocation": "Registration-time validation gap is PhusdStableMinter.registerStablecoin (nested submodule, excluded at the findings layer). Filed against Antimatter because it reads and acts on the value, doubles the blast radius by minting a second uncollateralised leg on top, and can defend itself in one line. Flag for the minter's own audit.",
+      "faithfulnessNoteReconciliation": "faithfulness-findings.json note 2 Law-3-suppressed this as 'the minter owner's obvious single-step act'. NOT accepted: the code scan demonstrated the mistake is silently absorbed rather than obvious, which is the footgun test. Recorded so a later scan does not re-derive the suppression."
+    },
+    {
+      "id": "DEDUP-004",
+      "severity": "medium",
+      "confidence": "high",
+      "title": "Half of every annihilation's phUSD is minted against no incoming value, and the resulting liability is unbounded, unscheduled and unrecorded",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom / mint",
+      "lines": {
+        "amLegMint": 236,
+        "freeMint": 179,
+        "range": "179-239"
+      },
+      "sources": [
+        "ECON-001",
+        "FAITH-002",
+        "MR-04(code-scanner, explicitly deferred to econ)",
+        "invariant_04_unbackedPhusdEqualsAntimatterBurned(PASS - quantification)"
+      ],
+      "mergeAction": "ECON-001 and FAITH-002 COLLAPSED INTO ONE. Justification below.",
+      "econFaithMergeJustification": "FAITH-002 and ECON-001 are the same defect at the same line (:236) with the same root cause (an unbacked mint whose size is unbounded) and the SAME mitigation (bound emission at src/Antimatter.sol:179 / account for the liability). FAITH-002's own text instructs 'Deduplicate against econ-scanner's finding on the same mint at :236 - econ owns the impact sizing'. Its distinct contribution is a QUALIFIER, not a separate remediation: it records that the behaviour is INTENDED, not accidental (Law-1 overriding Law-2 on a faithfully-implemented but unsafe intent). A qualifier with no separate fix does not earn a second submission - it is preserved as `specStatus` inside this entry, and the entry is dual-channelled to spec-conformance so the faithfulness report still carries it. CONTRAST: FAITH-001 is NOT merged here (see DEDUP-015) because 'the written justification is false' has a different root cause (documentation defect), a different remediation (correct the NatSpec), and lands on a different reader (integrators), and because collapsing it would let the doc defect vanish if the econ finding is ever triaged as accepted-by-design.",
+      "specStatus": "FAITHFUL-BUT-UNSAFE. Law-1 override on Law-2: the declared intent ('this contract mints the phUSD for the antimatter half', :188-189; CLAUDE.md 'antimatter's entire value to a holder is that it annihilates into phUSD worth twice its quantity') is implemented exactly. The intent itself is the hazard. Filed as a spec-level rather than implementation-level security finding.",
+      "rootCause": "Antimatter.mint (:179) has no cap, schedule, or tie to yield or collateral; :236 mints exactly `amount` phUSD against nothing but the burn of a token that was itself minted for free. No contract anywhere tracks the resulting unbacked supply.",
+      "economicImpact": "Each outstanding antimatter token is a permanent, exercisable, $1-denominated call on the phUSD collateral pool. Fair value max(0, 2p-1); at p=$1 emitting N antimatter is economically identical to writing an $N cheque against phUSD's backing. phUSD has no redemption path, so this never becomes on-chain insolvency - it becomes peg pressure, and the cash loss lands on whatever protocol-owned liquidity absorbs the annihilator's sell.",
+      "profitableLoop": {
+        "steps": [
+          "Receive N antimatter free as a staking reward (:180)",
+          "Acquire N (rescaled) stablecoin at ~$1 - real capital",
+          "annihilateFrom(stable,self,self,N): burn N AM, surrender $N stable, receive ~2N phUSD (:236-237)",
+          "Sell 2N phUSD into protocol-owned liquidity at price p",
+          "Net = 2Np - N; profitable for all p > 0.5"
+        ],
+        "profitability": "100% return per cycle at p=$1.00, capital-recycling, permissionless, no flash loan. Keeps paying arbitrageurs until phUSD reaches half peg.",
+        "notAnAtomicAttack": "annihilation is one-way; the attacker must actually hold antimatter and actually part with stablecoin. This is why it is Medium, not High."
+      },
+      "evidence": {
+        "invariantQuantification": "invariant_04 PASSES as an EXACT equality over 76,800 calls in both decimal regimes: phUSD.totalSupply() minus stablecoin in custody (18dp-normalised) == cumulative antimatter burned. The pass is not an all-clear - it is the measurement that the uncollateralised leg is exactly 1:1 with antimatter burned, no rounding drift. invariant_05 separately confirms every stablecoin unit pulled reached strategy custody.",
+        "scopeLimit": "invariants 04/05 pin exchangeRate at 1e18; rate divergence is DEDUP-005's territory."
+      },
+      "severityRationale": "C4 Medium ('value leak with stated assumptions and external requirements'). NOT High: no assets stolen from a specific victim by a specific attack path, no redemption to fail, nothing bricks, and the multiplier itself is documented intent. NOT Low: the liability is real, permanent, unbounded, lands on parties who never consented, and no on-chain control or even observation of it exists.",
+      "escalationTrigger": "If antimatter emission is ever wired to a permissionless or high-volume minter via setApprovedMinter (:151), re-weigh as High. See parked PARK-003 - antimatter is not yet wired into phoenix-phase-2-staging, so emission policy is entirely undecided on-chain.",
+      "recommendation": [
+        "Treat Antimatter.totalSupply() as the protocol's unbacked-phUSD liability and expose it as such - at minimum a view reporting it next to phUSD.totalSupply().",
+        "Bound emission at the source: a supply cap or per-period mint budget on :179, so the liability cannot be enlarged by a single call from any approved minter.",
+        "If the intended policy is that emission is budgeted against realised protocol yield, enforce it on-chain - the code has no representation of that policy at all.",
+        "Correct the NatSpec at :18 (tracked separately as DEDUP-015)."
+      ],
+      "channels": [
+        "primary",
+        "spec-conformance"
+      ],
+      "law2Caveat": "Intent is UNGRADED, not passed: no storyDir, no [story-NNN] tag on any of the 6 commits (PARK-002). The only intent artefact is in-source NatSpec, which carries no suppression authority and is itself economically inaccurate.",
+      "notFiledCheck": "The standing Phoenix rule 'externally-derived yield over-payment is opportunity cost, not loss' was CHECKED and found NOT to apply: the finding is dilution of the phUSD collateral base, not over-payment of a reward budget. No 'the pot pays too much' finding is filed."
+    },
+    {
+      "id": "DEDUP-005",
+      "severity": "medium",
+      "confidence": "high",
+      "title": "exchangeRate re-prices only the stable leg: a hard 1x issuance floor no setting can go below, an unbounded ceiling, and a silent re-scaling of what maxMintPerDay permits",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom / toStableAmount",
+      "lines": {
+        "rateIndependentPull": "254-256",
+        "rateIndependentAmLeg": 236,
+        "configRead": 250,
+        "range": "236-256"
+      },
+      "sources": [
+        "ECON-003",
+        "AM-LOCAL-005",
+        "MR-05(code-scanner, explicitly deferred to econ)"
+      ],
+      "mergeAction": "3-way consolidation. AM-LOCAL-005 is the profiler's local half ('unbounded owner parameter'), MR-05 is the code-scanner's parked deferral of the same lever, ECON-003 supplies the operator-lever model. All three cite the rate-independence of :254-256 and :236. ECON-003 itself states 'that entry records the local half; this one adds the operator-lever model'.",
+      "strongestFraming": "ECON-003",
+      "rootCause": "The stablecoin PULLED is rate-independent (decimals only) and the antimatter leg is always exactly `amount`; only the stable leg's phUSD is rate-scaled. Total issuance per unit of stablecoin received is (1 + exchangeRate/1e18). Antimatter applies no sanity bound of its own even though it already reads the config struct at :250.",
+      "impact": "(a) THROTTLE FLOOR: the natural response to over-issuance is to lower the rate, but at rate=0.10e18 the protocol still emits 1.10 phUSD per $1 taken in, and the unbacked component is completely unaffected. There is no rate that makes annihilation backing-neutral; the only lever that stops dilution is setStablecoinEnabled(false) - a full stop with no intermediate setting. (b) AMPLIFIER: at rate=1.5e18 the pair emits 2.5 phUSD per $1, from a single unbounded, un-timelocked owner call.",
+      "interactionWithDedup002": "Changing the rate silently re-scales the effective daily cap: at rate 0.5e18 the effective maxMintPerDay multiplier moves from 2x to 3x the entered number. Two knobs interacting in a direction neither is documented to move.",
+      "footgunTest": "Law 3 - surprise on both counts: that lowering the rate cannot bring issuance to parity, and that changing the rate silently re-scales what maxMintPerDay permits. Neither is documented on either side. In scope.",
+      "safeConfigGuidance": "Treat exchangeRate as an amplitude control on the BACKED leg only, never as an issuance throttle. Keep it at or below 1e18 on every annihilatable stablecoin. Recompute maxMintPerDay as intendedIssuance / (1 + exchangeRate/1e18) on every rate change. To actually stop dilution use setStablecoinEnabled(false).",
+      "evidence": {
+        "symbolic": "halmos PROVED (tier3/halmos-p2-noresidue-unbounded.txt) the no-residue property holds for EVERY uint256 exchangeRate - i.e. an arbitrary rate does not strand assets. The hazard is economic, not a settlement defect, which this proof isolates.",
+        "profitabilityBoundary": "the annihilator's loop (DEDUP-004) stays profitable whenever p > 1/(1 + rate/1e18): p > $1.00 at rate 0, p > $0.50 at rate 1e18."
+      },
+      "recommendation": [
+        "Add a sanity bound in Antimatter itself - it already reads exchangeRate's sibling fields at :250 and can assert mintedForStable is within tolerance of `amount`, so a fat-fingered or oversized rate fails closed.",
+        "Alternatively scale the antimatter leg by the same rate at :236 so the single knob governs the whole output."
+      ],
+      "crossBoundary": true
+    },
+    {
+      "id": "DEDUP-006",
+      "severity": "medium",
+      "confidence": "medium",
+      "title": "Annihilation and ordinary phUSD minting share one daily budget, and the annihilation path extracts 2x per unit of budget - griefing the on-ramp is the most profitable use of it",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "sharedBudgetCharge": 227,
+        "range": "210-233"
+      },
+      "sources": [
+        "ECON-005"
+      ],
+      "mergeAction": "KEPT SEPARATE from DEDUP-002. Verified before deciding: both concern PhusdStableMinter's maxMintPerDay counter, but the root causes differ - DEDUP-002 is 'the counter under-counts issuance by 2x', DEDUP-006 is 'the counter is a shared budget an annihilator can profitably exhaust'. Different impact class (availability/DoS vs mis-sized rail), different mitigation (separate budget per path + fixed epoch boundary vs charging the AM leg). Collapsing them would bury the DoS.",
+      "rootCause": "PhusdStableMinter.mint is the protocol's general permissionless phUSD on-ramp; Antimatter routes through the identical function and charges the same config.mintedToday. An ordinary minter gets 1 phUSD per unit of budget; an annihilator gets 2.",
+      "impact": "Denial of the protocol's ordinary stablecoin->phUSD on-ramp for a given stablecoin for the remainder of a 24h window, achieved by a party who is PAID ~$1 per unit for doing it. Cost of the DoS is zero - it is a side effect of a profitable trade. The window-reset semantics (restart on the first mint after expiry, not on a fixed schedule) additionally let the annihilator control when each window opens.",
+      "affectedParties": [
+        "ordinary phUSD minters",
+        "any downstream protocol path that mints phUSD through PhusdStableMinter"
+      ],
+      "assumptionGap": "Bites only when maxMintPerDay is non-zero; registerStablecoin defaults it to 0 = unlimited. If the operator never sets a cap, DEDUP-006 is inert and DEDUP-002 is moot - but then there is no issuance rate limit at all, which is DEDUP-004.",
+      "recommendation": [
+        "Give the annihilation path its own budget, or charge the antimatter leg too (which also fixes DEDUP-002) so the two paths consume budget proportionally to what they issue.",
+        "Use a fixed epoch boundary to remove the first-minter timing control."
+      ],
+      "severityRationale": "C4 Medium: protocol function/availability impacted. Not High: no theft, self-resolving each window, and only bites when maxMintPerDay is set non-zero.",
+      "crossBoundary": true
+    },
+    {
+      "id": "DEDUP-007",
+      "severity": "medium",
+      "confidence": "medium",
+      "status": "PARKED-MANUAL-REVIEW",
+      "parked": true,
+      "title": "Post-conditions confirm the stablecoin LEFT, never that the yield strategy CREDITED it; on a current-master strategy the stable leg is minted against principal that was not fully credited",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "minterMint": 227,
+        "residueCheck": 230,
+        "deltaMeasure": 232,
+        "unboundedGuard": 233,
+        "range": "219-233"
+      },
+      "sources": [
+        "ECON-004",
+        "CODE-006",
+        "SA-004(static seed - strict `mintedForStable == 0` equality)",
+        "PARK-001"
+      ],
+      "mergeAction": "ECON-004 and CODE-006 CONSOLIDATED (identical claim, identical evidence chain, identical diff-only limitation (the deployed strategy/vault version is unknown; see parkRationaleCorrection), identical recommendation). PARK-001 is econ's parking record for the same item and is folded in. SA-004 is retained as the static seed - it flagged the strict `== 0` comparison; this entry is the substantive residual it points at.",
+      "parkedReason": "PARKED VISIBLY, NOT DROPPED (Law 1: recall beats tidiness). DIFF-ONLY: cannot be adjudicated from the trees available in this audit repo. PARK RATIONALE CORRECTED 2026-08-18 (review pass): the earlier rationale - that the phUSD-stable-minter pin is stale - was FACTUALLY WRONG. antimatter pins lib/phUSD-stable-minter at d6ed1156, which IS that repo's remote master tip, so THE MINTER PIN IS CURRENT. The stale layer is one level deeper: lib/phUSD-stable-minter/lib/vault is pinned at 043ff2c while vault's remote master is 0110ce4 (11 commits ahead, incl. stories 043/044/048/049, which introduced deposit() returning creditedPrincipal). What cannot be adjudicated at this commit is therefore WHICH YIELD-STRATEGY / VAULT VERSION IS ACTUALLY DEPLOYED, because the finding depends on the deployed strategy's deposit() return behaviour, not on the minter's version.",
+      "rootCause": "The stable leg's phUSD is sized from `amount`, never from what the yield strategy actually credited. PhusdStableMinter makes a bare statement call to IYieldStrategy.deposit and discards its return. Antimatter's post-conditions cannot catch a shortfall: :230 asserts only that the stablecoin LEFT Antimatter, :232-233 measures a phUSD delta and requires it merely to be non-zero.",
+      "diffEvidence": {
+        "pinnedTree": "lib/phUSD-stable-minter/lib/vault @ 043ff2c - IYieldStrategy.sol:15 declares deposit(address,uint256,address) with NO return. Against this tree the discard is correct and there is no finding.",
+        "masterTree": "vault master 0110ce4 - IYieldStrategy.sol:24 declares `... returns (uint256 creditedPrincipal)`, introduced by stories 043/044/048/049 precisely because conservative ERC4626 crediting can credit strictly LESS than `amount`.",
+        "abiImpact": "NONE - the selector depends on argument types only and Solidity ignores surplus returndata, so a master-tree strategy does not brick the call; it silently succeeds while the shortfall goes unrecorded. That silence is what makes this worth filing.",
+        "pinProvenance": "antimatter -> lib/phUSD-stable-minter @ d6ed1156 = minter remote master tip (CURRENT). lib/phUSD-stable-minter -> lib/vault @ 043ff2c vs vault remote master 0110ce4 (11 commits behind, STALE). The staleness is in the vault/strategy layer only."
+      },
+      "impactIfItHolds": "The 'backed' leg is itself partially unbacked, compounding with DEDUP-004's structurally unbacked leg. Silent by construction: no event, no revert, no view records the difference between phUSD issued for the stable leg and principal credited for it. Applies to every deposit through the minter, not just annihilations.",
+      "manualReviewAction": "RE-CHECK INSTRUCTION: read the DEPLOYED yield strategy (resolved from chain, for the stablecoins actually registered) and measure creditedPrincipal vs amount there. DO NOT re-check the phUSD-stable-minter pin - it is already current (d6ed1156 == remote master tip) and would wrongly read as the park being resolved. If the deployed strategy shows 043ff2c-era behaviour (no return / full credit), close as not-applicable; if it credits less than the principal transferred, size the stable leg from the returned value and/or assert mintedForStable against minter.calculateMintAmount(stable, stableAmount).",
+      "recommendation": "Independently of the above: replace the unbounded `mintedForStable == 0` check at :233 with a two-sided assertion against minter.calculateMintAmount(stable, stableAmount), so a short or unexpected mint reverts rather than silently shortchanging the annihilator.",
+      "sharedMitigationWith": [
+        "DEDUP-008",
+        "DEDUP-013"
+      ],
+      "sharedMitigationNote": "One edit at :233 (assert against calculateMintAmount) closes all three, but the three are NOT collapsed: they are distinct root causes (upstream under-credit / in-window inbound sweep / no caller-side expectation guard) with distinct preconditions and distinct evidence.",
+      "crossBoundary": true,
+      "severityNote": "Held at Medium and not High because it is a diff-only claim, unverified against any DEPLOYED strategy (the deployed vault/strategy version is unknown: the minter pin is current, the nested vault pin 043ff2c is 11 commits behind vault master 0110ce4), and the shortfall size is unquantified.",
+      "parkRationaleCorrection": "PARK RATIONALE CORRECTED 2026-08-18 (review pass): the earlier rationale - that the phUSD-stable-minter pin is stale - was FACTUALLY WRONG. antimatter pins lib/phUSD-stable-minter at d6ed1156, which IS that repo's remote master tip, so THE MINTER PIN IS CURRENT. The stale layer is one level deeper: lib/phUSD-stable-minter/lib/vault is pinned at 043ff2c while vault's remote master is 0110ce4 (11 commits ahead, incl. stories 043/044/048/049, which introduced deposit() returning creditedPrincipal). What cannot be adjudicated at this commit is therefore WHICH YIELD-STRATEGY / VAULT VERSION IS ACTUALLY DEPLOYED, because the finding depends on the deployed strategy's deposit() return behaviour, not on the minter's version."
+    },
+    {
+      "id": "DEDUP-008",
+      "severity": "low",
+      "confidence": "high",
+      "title": "mintedForStable is a balance delta, not an attribution: any phUSD arriving mid-call is forwarded to the caller-chosen recipient",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "snapshot": 220,
+        "delta": 232,
+        "guard": 233,
+        "payout": 237,
+        "range": "220-237"
+      },
+      "sources": [
+        "CODE-004",
+        "AM-LOCAL-004",
+        "SA-004(shared static seed)"
+      ],
+      "mergeAction": "CODE-004 and AM-LOCAL-004 consolidated (identical defect, identical line :232, identical recommendation; CODE-004 adds the reproducing PoC and the control test). NOT collapsed into DEDUP-007 despite the shared :233/:232 lines and shared mitigation - different root cause (an inbound during the window is swept as free value, vs an upstream under-credit) and a different, independently reachable attack vector.",
+      "rootCause": "mintedForStable is measured as a balance delta over :220-:232 and forwarded wholesale at :237, never compared against what PhusdStableMinter actually minted (obtainable exactly via minter.calculateMintAmount). On the stablecoin side the measured-balance pattern is what makes :230 fail closed; on the phUSD side the same pattern converts an unexpected inbound into free value instead of a revert.",
+      "impact": "A registered `stable` whose transfer hook pushes phUSD to Antimatter causes that phUSD to be swept to the annihilator. PoC: 500 phUSD injected from the token's hook, annihilator walks away with 700e18 instead of 200e18.",
+      "whyLow": "The only non-trusted code executing inside the window is the stablecoin's own transfer path at :222, and `stable` must be owner-registered with the minter. The realistic registered set (USDC, DOLA) has no transfer hooks. The residual concern is a future registration of a hook-bearing or upgradeable stablecoin.",
+      "evidence": {
+        "poc": {
+          "file": "workspace/antimatter/test/audit/Tier2b.t.sol",
+          "tests": [
+            "test_midCallPhUSDInjectionIsForwardedToRecipient - 500e18 injected from the stable's hook; annihilator receives 700e18",
+            "test_preExistingPhUSDDonationIsNotSwept - control: a pre-call 500e18 donation is correctly excluded by the :220 snapshot and remains stuck (rescueERC20-able)"
+          ],
+          "status": "passing"
+        }
+      },
+      "recommendation": "Compute the expected stable leg from minter.calculateMintAmount(stable, stableAmount) and use the balance delta only as an equality assertion, so an unexpected inbound reverts rather than paying out.",
+      "sharedMitigationWith": [
+        "DEDUP-007",
+        "DEDUP-013"
+      ]
+    },
+    {
+      "id": "DEDUP-009",
+      "severity": "low",
+      "confidence": "high",
+      "title": "Once phUSD and the minter are both wired, the phUSD address can never be changed - the two setters mutually lock",
+      "contract": "src/Antimatter.sol",
+      "function": "setPhUSD, setPhUSDMinter",
+      "lines": {
+        "setPhUSDCheck": "127-129",
+        "setMinterCheck": "140-141",
+        "range": "124-145"
+      },
+      "sources": [
+        "CODE-005"
+      ],
+      "mergeAction": "Kept alone. SA-002 flags the same two functions (state-written-after-external-call) but is a DIFFERENT root cause and is dispositioned separately - see filtered/manual-review. Same-function is not same-root-cause.",
+      "rootCause": "setPhUSD refuses any address the configured minter does not mint; setPhUSDMinter refuses any minter that does not mint the configured phUSD; PhusdStableMinter.phUSD is immutable. No ordering of calls reaches a different phUSD, and neither setter accepts address(0) to unwire.",
+      "impact": "A phUSD redeployment forces a full Antimatter redeployment, losing all antimatter balances (non-upgradeable, no migration path). Not stated anywhere and not what a function named `setPhUSD` advertises.",
+      "footgunTest": "Law 3 - an owner reading two independent setters would reasonably believe either can be re-pointed. Discovering the pair is permanently welded only at the moment a phUSD migration is needed is a surprise with an expensive remedy. In scope, at Low because no funds are at risk and phUSD is intended to be permanent.",
+      "evidence": {
+        "poc": {
+          "file": "workspace/antimatter/test/audit/Tier2.t.sol",
+          "tests": [
+            "test_L_phUSDCanNeverBeMigratedOnceMinterWired - both orderings revert"
+          ],
+          "status": "passing"
+        }
+      },
+      "recommendation": "Document the one-way property on setPhUSD, or add an owner-only `rewire(IFlax newPhUSD, PhusdStableMinter newMinter)` that sets both atomically and re-checks consistency - preserving the no-drift invariant without welding the pair."
+    },
+    {
+      "id": "DEDUP-010",
+      "severity": "low",
+      "confidence": "high",
+      "title": "A near-zero exchangeRate turns a soft throttle into a hard brick: the stable leg rounds to zero and PhUSDNotReceived kills the whole annihilation",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "delta": 232,
+        "guard": 233
+      },
+      "sources": [
+        "ECON-006",
+        "symbolic:check_mintedForStable_alwaysNonZero_d6 (REFUTED)"
+      ],
+      "mergeAction": "ECON-006 and the symbolic refutation 4d CONSOLIDATED. Verified identical: Halmos's witness (amount = 524288000000000000 exactly representable at 6dp, exchangeRate = 1 wei => floor(amount*rate/1e18)==0 => mintedForStable==0 => revert PhUSDNotReceived) is a concrete machine-found instance of exactly the boundary ECON-006 derived by hand. The symbolic run is promoted from 'a triage call' to corroborating evidence on a filed finding.",
+      "rootCause": "When floor(amount * rate / 1e18) truncates to zero the stable leg mints nothing, and :233's zero-guard reverts the entire annihilation rather than delivering the still-valid antimatter leg. The guard is the right instinct (it catches a non-delivering minter) - the problem is that it doubles as an undiagnosable configuration error.",
+      "impact": "Liveness only, no value loss. Setting rate = 0 as a soft 'stop paying the stable half' hard-bricks annihilation for that stablecoin. Near-zero rates brick it only for small amounts, producing an amount-dependent revert whose error name (PhUSDNotReceived) points at the minter failing to deliver rather than at a rate setting.",
+      "evidence": {
+        "symbolic": {
+          "artifact": "tier3/halmos-p4-nonzero.txt",
+          "outcome": "REFUTED with concrete witness",
+          "witness": {
+            "amount": "0x746a52880000000 = 524288000000000000",
+            "rate": "0x01 = 1 wei"
+          },
+          "note": "recorded in symbolic-results.md as reachable only symbolically - 'a fuzzer over sensible rates would not reach it'"
+        }
+      },
+      "recommendation": "Either document PhUSDNotReceived as also covering 'exchangeRate rounds this amount's stable leg to zero', or bound the rate away from zero at registration/update time.",
+      "mightBeIntentional": "Plausibly rate=0 as a per-stable kill switch - but setStablecoinEnabled(false) already exists for that and gives a clear error, so the overlap looks accidental."
+    },
+    {
+      "id": "DEDUP-011",
+      "severity": "low",
+      "confidence": "high",
+      "title": "FlaxToken.revokeAllMintPrivileges silently voids every outstanding antimatter claim, and Antimatter exposes no view of its own authorisation status",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "amLegMint": 236
+      },
+      "sources": [
+        "ECON-007"
+      ],
+      "mergeAction": "Kept separate from DEDUP-012 (CODE-009 'no kill switch of its own'). Verified before deciding: both observe that Antimatter's control levers belong to independent principals, but the root causes and mitigations differ - DEDUP-011 is 'a global revoke by a third principal is a silent, unobservable liability repudiation' (fix: expose an authorisation view + two-contract re-auth runbook); DEDUP-012 is 'Antimatter's own owner has no proportionate lever at all' (fix: an annihilationPaused flag). Neither mitigation implies the other.",
+      "rootCause": "Antimatter's entire value depends on a mint authorisation held by a third, independent owner (FlaxToken), revocable wholesale via mintVersion++ with no per-minter event and no view on either contract.",
+      "impact": "Every outstanding antimatter token becomes permanently inert on one call from a principal who is not antimatter's owner and may not be reasoning about antimatter at all. Recovery requires re-setMinter on BOTH contracts; forgetting Antimatter leaves annihilation silently dead while ordinary minting works, and off-chain UIs still see a configured, registered, non-paused system (toStableAmount still returns successfully).",
+      "footgunTest": "Law 3 - a competent, non-malicious phUSD owner using the documented global kill switch would be surprised that it also voids an unrelated token's entire outstanding claim, and that recovery requires re-authorising two contracts. In scope.",
+      "recommendation": [
+        "Expose a view on Antimatter reporting whether it is currently an authorised, current-version phUSD minter, so the condition is observable without simulating an annihilation.",
+        "Document the two-contract re-authorisation requirement in the incident runbook."
+      ],
+      "stalePinCaveat": "lib/flax-token-v2 @ f5300117 is ~9 months old (2025-11-20) and there is no top-level sibling to cross-read. DIFF-ONLY claim about that tree.",
+      "severityRationale": "QA/Low, Law-3 footgun. Not Medium: the action is deliberate and emergency-scoped, and antimatter is a reward token with no purchase price."
+    },
+    {
+      "id": "DEDUP-012",
+      "severity": "qa",
+      "confidence": "high",
+      "title": "Antimatter has no kill switch of its own; every way to halt annihilation belongs to a different principal",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "entry": 201
+      },
+      "sources": [
+        "CODE-009"
+      ],
+      "mergeAction": "Kept separate from DEDUP-011 - see that entry's mergeAction for the verification and rationale.",
+      "rootCause": "Antimatter is not Pausable and exposes no owner lever to stop annihilation. Halting requires PhusdStableMinter's pauser or owner, FlaxToken's owner, or the yield strategy's owner - all principals independent of Antimatter.owner(), with nothing requiring them to be the same party.",
+      "impact": "If a defect is found in Antimatter itself - including DEDUP-001 - its own owner cannot stop it, and the fastest lever (FlaxToken.revokeAllMintPrivileges) is global: it silently de-authorises PhusdStableMinter too.",
+      "law3Note": "This is an operational observation, NOT a 'malicious owner' finding: no owner needs to misbehave for the incident-response path to be missing.",
+      "recommendation": "Either document the incident-response runbook (who to call, in what order) or add an owner-settable `annihilationPaused` flag checked at the top of annihilateFrom, so the contract's own owner holds a proportionate, non-global lever.",
+      "whyQa": "The composition is arguably deliberate (Antimatter keeps no stablecoin list and defers control to the minter), and a rushed pause would itself add attack surface."
+    },
+    {
+      "id": "DEDUP-013",
+      "severity": "low",
+      "confidence": "medium",
+      "channels": [
+        "spec-conformance"
+      ],
+      "title": "The spec's measured-balance discipline is applied in full to the stablecoin leg but only nominally to the phUSD leg: no minimum-output guard on an already-irreversible burn",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "delta": 232,
+        "guard": 233,
+        "range": "230-237"
+      },
+      "sources": [
+        "FAITH-004",
+        "SA-004(shared static seed)"
+      ],
+      "mergeAction": "Kept as its own entry. NOT collapsed into DEDUP-007 or DEDUP-008 despite the shared line :233 and the shared mitigation: different root cause (no caller-side expectation guard against an exchangeRate change between submission and execution), different evidence, and a different report channel (spec-conformance - it is a partial implementation of a written CLAUDE.md discipline, not an interaction defect).",
+      "specText": "'Burn before the external calls, verify by measured balances rather than assumption, and let anything unexpected revert.' (lib/antimatter/CLAUDE.md, 'Annihilation settles whole or not at all')",
+      "deviation": "Measurement is used for residue detection (:219/:230 strict !=) but not for expectation checking, on the one leg where the burn has already become irreversible. :233 rejects only the exact value zero; any non-zero quantity is accepted on trust, including one wildly below what the stable deposit should have produced. 'Anything unexpected' does not revert - only 'nothing at all' does. annihilateFrom exposes no minimum-output/slippage parameter.",
+      "impact": "If exchangeRate is low or is changed between transaction submission and execution, the holder's antimatter is irreversibly burned at full quantity while the stable half returns almost no phUSD, and the transaction succeeds.",
+      "whyLowNotInvariantViolation": "This does not breach the whole-or-nothing invariant as enumerated - no rest state has antimatter burned with stable undeposited, and nothing is stranded. Rate-setting itself is Law-3 owner territory (CLAUDE.md deliberately makes the minter the single source of truth); the gap is the absence of any caller-side guard against it.",
+      "recommendation": "Add a minOut / expected-phUSD parameter, or assert mintedForStable against minter.calculateMintAmount(stable, stableAmount).",
+      "sharedMitigationWith": [
+        "DEDUP-007",
+        "DEDUP-008"
+      ]
+    },
+    {
+      "id": "DEDUP-014",
+      "severity": "low",
+      "confidence": "high",
+      "channels": [
+        "spec-conformance"
+      ],
+      "title": "The invariant trip-wire CLAUDE.md nominates for 'never expose a burn' is a four-name denylist, not an invariant check",
+      "contract": "test/Annihilation.t.sol",
+      "function": "test_noPublicBurnEntryPoints",
+      "lines": {
+        "probeList": "344-345",
+        "range": "341-355"
+      },
+      "sources": [
+        "FAITH-003",
+        "invariant_08_supplyOnlyMovesViaMintAndAnnihilation(PASS - the dynamic complement)"
+      ],
+      "mergeAction": "Kept as its own entry. Related to DEDUP-001 (whose exploit the trip-wire also fails to catch) but a distinct root cause: guard quality, not a live burn exposure. The invariant_08 PASS is folded in as evidence, not as a separate finding.",
+      "specText": "'no new entry point that reaches _burn except annihilateFrom' ... 'test_noPublicBurnEntryPoints in test/Annihilation.t.sol is a trip-wire for this rule.' (lib/antimatter/CLAUDE.md)",
+      "deviation": "The test asserts that four hardcoded selectors revert: burn(uint256), burn(address,uint256), burnFrom(address,uint256), annihilate(address,uint256). It cannot detect what the rule prohibits - ANY new entry point reaching _burn - because a burn path under any other name is simply not in the list and the test passes green. Two further gaps: the rule also names 'no transfer to address(0) path' and 'no owner-callable clawback', and neither is probed at all (transfer-to-zero happens to be closed by OpenZeppelin's _update, i.e. by the base class, not by anything this repo asserts).",
+      "encodingDefect": "All four signatures are encoded with two arguments (abi.encodeWithSignature(signatures[i], user, 1 ether)), so the one-argument burn(uint256) probe passes trailing calldata the decoder ignores - it would decode amount = uint256(uint160(user)) = 2827 wei rather than 1 ether. It would still catch a naive burn(uint256), but only because the address literal happens to be a small non-zero number. The probe is not testing what it reads as testing.",
+      "invariantHoldsAt0bb82d8": "YES. src/Antimatter.sol contains exactly one _burn (:215, inside annihilateFrom) and one _mint (:180, onlyApprovedMinters). No ERC20Burnable inheritance, no burn/burnFrom/clawback, transfer-to-zero blocked by OZ v5.6.1 _update. Tier-3 invariant_08 independently proves it dynamically: an exact equality (totalSupply == sum minted - sum burned-in-completed-annihilation) over 76,800 calls per campaign on both Foundry and Medusa, with ~3,000 annihilations reverting AFTER reaching _burn and not one unaccounted unit.",
+      "recommendation": "Replace the name-denylist with a property assertion (totalSupply is non-decreasing across every non-annihilateFrom external call, exercised by fuzzed calldata) or a source assertion (a single _burn occurrence, inside annihilateFrom). The Tier-3 harness at workspace/antimatter/test/audit/invariant/ is a ready template.",
+      "note": "Guard-quality finding. CLAUDE.md designates this test as the enforcement mechanism for a load-bearing invariant and instructs future authors not to weaken it, so false assurance here is the whole harm."
+    },
+    {
+      "id": "DEDUP-015",
+      "severity": "low",
+      "confidence": "high",
+      "channels": [
+        "spec-conformance"
+      ],
+      "title": "The contract-header NatSpec justifies the unbacked mint with a redemption symmetry that does not exist, and states a 2x output the code does not guarantee",
+      "contract": "src/Antimatter.sol",
+      "function": "contract-header NatSpec",
+      "lines": {
+        "claim": 18,
+        "range": "13-20"
+      },
+      "sources": [
+        "FAITH-001",
+        "ECON-001.documentationVsImplementation(same observation, folded in)"
+      ],
+      "mergeAction": "KEPT SEPARATE from DEDUP-004 - the explicit justification is recorded in DEDUP-004.econFaithMergeJustification. In short: different root cause (a documentation defect), different remediation (correct the NatSpec at :18), different affected reader (integrators), and if DEDUP-004 is ever triaged as accepted-by-design the doc defect must NOT vanish with it. ECON-001's documentationVsImplementation block is the same observation and is merged INTO this entry rather than left duplicated in DEDUP-004.",
+      "specText": "'brought together with an equal quantity of a supported stablecoin it annihilates, and the pair is emitted as phUSD - twice the quantity, since both halves are redeemed.' (src/Antimatter.sol:16-18)",
+      "deviation": "Both clauses are false. (a) 'both halves are redeemed': phUSD has no redemption path anywhere in any repo. The stable leg's phUSD is minted against a real deposit forwarded to a yield strategy; the antimatter leg's phUSD is minted at :236 with no asset entering the protocol - antimatter is itself an unbacked staking reward minted freely at :179. The word 'redeemed' imports a backing that does not exist. (b) 'twice the quantity': the total is amount + mintedForStable, where mintedForStable honours exchangeRate. The repo's own passing test test_annihilateHonoursMinterExchangeRate (test/Annihilation.t.sol:108-117) asserts 195 phUSD for 100 antimatter at a 0.95 rate - the header's headline arithmetic is contradicted by the project's own test.",
+      "whyItRaisesRatherThanLowersSeverity": "Standing rule: in-source NatSpec carries no suppression authority, and a falsely-authoritative doc raises rather than lowers severity. An integrator reading :13-20 would conclude both phUSD legs are asset-backed. It is also the ONLY intent artefact in the repo (no story is resolvable - PARK-002), so a reader calibrating emission policy has nothing else to go on.",
+      "recommendation": "Correct :16-18: only the stablecoin half is a redemption; the antimatter half is an uncollateralised mint. State the exchangeRate dependence of the total rather than a flat 2x.",
+      "doesNotDampen": "The economic impact of the unbacked mint itself is DEDUP-004's to size and is NOT reduced by filing this entry."
+    },
+    {
+      "id": "DEDUP-016",
+      "severity": "qa",
+      "confidence": "high",
+      "title": "toStableAmount is a decimals-only rescale and is not a phUSD preview; the local `decimals` also shadows ERC20.decimals()",
+      "contract": "src/Antimatter.sol",
+      "function": "toStableAmount",
+      "lines": {
+        "configRead": 250,
+        "math": "252-256",
+        "range": "246-257"
+      },
+      "sources": [
+        "CODE-007",
+        "SA-006"
+      ],
+      "mergeAction": "SA-006 (slither shadowing-local, confidence high) consolidated into CODE-007(b) - the same variable at the same line. CODE-007 is the stronger framing because it explains why shadowing matters HERE (inside toStableAmount `decimals` means the STABLECOIN's decimals, on the single most safety-critical line in the contract - see DEDUP-003).",
+      "items": {
+        "(a) missing preview": "toStableAmount is the only public preview on the annihilation path and ignores exchangeRate entirely, while the phUSD actually delivered is amount + floor(amount*exchangeRate/1e18). At any rate != 1e18 an integrator deriving an expected payout from this function is wrong on the stable leg. The asymmetry is by design and internally coherent (stable leg priced at rate, antimatter leg always at 1) - the QA item is the ABSENCE of a matching phUSD-side preview.",
+        "(b) shadowing": "The local `decimals` at :250 shadows the inherited ERC20.decimals()/IERC20Metadata.decimals()."
+      },
+      "recommendation": "(a) Add previewAnnihilate(address stable, uint256 amount) returns (uint256 stableAmount, uint256 phUSDOut) composing minter.calculateMintAmount, and document toStableAmount as the input-side rescale only. (b) Rename the local to `stableDecimals`.",
+      "note": "The economic consequence of an unbounded, un-timelocked exchangeRate is DEDUP-005, deliberately not re-adjudicated here."
+    },
+    {
+      "id": "DEDUP-017",
+      "severity": "qa",
+      "confidence": "high",
+      "title": "recipient is guarded against address(0) but not against address(this): an annihilation can come to rest ON the contract",
+      "contract": "src/Antimatter.sol",
+      "function": "annihilateFrom",
+      "lines": {
+        "guard": 203,
+        "range": "203-237"
+      },
+      "sources": [
+        "CODE-008",
+        "faithfulness-findings.json note 1 (same observation, Law-3/known-invalid suppressed there)"
+      ],
+      "mergeAction": "CODE-008 kept as the framing; the faithfulness note is the same observation reaching a suppress verdict and is merged as a source rather than left as a divergent record. Resolution: filed at QA, not suppressed - it is a one-line guard the contract's own stated design ('nothing should ever accumulate here', :261-262) asks for, even though the C4 'user input mistake' class is why it does not rise above QA.",
+      "rootCause": "Passing address(this) is accepted: :236 mints `amount` phUSD to Antimatter and :237 transfers mintedForStable from Antimatter to itself, so the full ~2x payout comes to rest on the contract with the antimatter already burned.",
+      "mitigatingFacts": "The phUSD is recoverable by the owner via rescueERC20 (:263), and a later annihilation's phUSDBefore snapshot at :220 correctly excludes it so it is not swept to the next annihilator (control-tested). No partial settlement is created.",
+      "evidence": {
+        "poc": {
+          "file": "workspace/antimatter/test/audit/Tier2b.t.sol",
+          "tests": [
+            "test_recipientSelfStrandsPhUSD - 200e18 phUSD settles on the Antimatter contract, antimatter already burned"
+          ],
+          "status": "passing"
+        }
+      },
+      "recommendation": "Add `if (recipient == address(this)) revert ...;` alongside the existing zero check - address(this) is exactly as cheap to reject as address(0)."
+    },
+    {
+      "id": "DEDUP-018",
+      "severity": "qa",
+      "confidence": "high",
+      "title": "approvedMinters() copies the whole EnumerableSet to memory with no bound",
+      "contract": "src/Antimatter.sol",
+      "function": "approvedMinters",
+      "lines": {
+        "view": 174
+      },
+      "sources": [
+        "AM-LOCAL-003"
+      ],
+      "mergeAction": "Profiler-only finding with no Tier-2 or Tier-3 counterpart. Retained rather than dropped (Law 1: a profiler local finding that no later tier picked up is exactly the kind of item that goes missing). Marked low-value.",
+      "rootCause": "EnumerableSet.values() is unbounded. External view only, so no on-chain caller is forced through it, but it will gas-out for an off-chain reader once the set grows large, and any future on-chain consumer inherits an unbounded loop.",
+      "recommendation": "Paginate, or keep approvedMinterAt/approvedMinterCount (:169, :164) as the supported iteration path and document values() as off-chain-only.",
+      "triageNote": "LIKELY TRIAGE-DEATH: the approved-minter set is expected to hold a handful of entries. Kept visible, not deleted."
+    },
+    {
+      "id": "DEDUP-019",
+      "severity": "qa",
+      "confidence": "medium",
+      "title": "Static-analysis findings in audit-harness and mock files (test/**)",
+      "contract": "test/**",
+      "function": "multiple",
+      "sources": [
+        "SA-011",
+        "SA-012",
+        "SA-013"
+      ],
+      "mergeAction": "Three static findings CONSOLIDATED into one entry by shared root cause ('unchecked ERC20 return / missing zero-check in non-production test and mock code'). Instances preserved individually below so no id becomes unfindable.",
+      "instances": [
+        {
+          "id": "SA-011",
+          "contract": "test/Antimatter.t.sol",
+          "function": "test_transfer",
+          "line": 46,
+          "detail": "Return value of antimatter.transfer(stranger, 4e18) ignored. Slither unchecked-transfer + Aderyn unsafe-erc20-operation/unchecked-return at the same line."
+        },
+        {
+          "id": "SA-012",
+          "contract": "test/Annihilation.t.sol",
+          "function": "_fund, test_thirdPartySpendsAntimatterAllowance, test_selfAnnihilationDoesNotSpendAllowance, test_reentrantStableIsBlocked",
+          "line": "62, 133, 155, 285",
+          "detail": "approve()/ERC20 return values ignored. Corroborated by Aderyn at identical lines."
+        },
+        {
+          "id": "SA-013",
+          "contract": "test/mocks/ReentrantStable.sol",
+          "function": "constructor/setter",
+          "line": "16-17",
+          "detail": "Address state variables set without zero-address checks in the attacker-harness mock."
+        }
+      ],
+      "scopeNote": "FORMALLY IN SCOPE - scope is a denylist and test/** is first-party. Retained per instruction. Not deleted.",
+      "triageNote": "LIKELY TRIAGE-DEATH at /ledger. These are tool noise in non-production code: SA-013 in particular is a deliberate test surface (a mock whose whole purpose is to misbehave), and a missing check there is not a defect. No security impact in any deployed code path.",
+      "recommendation": "None required. If desired, use SafeERC20 in test helpers for consistency."
+    }
+  ],
+  "parkedItems": [
+    {
+      "id": "MR-01",
+      "channel": "manual-review",
+      "status": "CARRIED-FORWARD",
+      "source": "code-scan-findings.json manualReviewItems",
+      "title": "phUSD.totalSupply is transiently inconsistent between the two legs of an annihilation",
+      "reason": "Between :227 and :236 phUSD.totalSupply reflects one leg of a two-leg issuance while the antimatter is already burned. An external protocol reading phUSD supply as a collateralisation input in that window sees an UNDER-count. Not filed because (a) the quantity belongs to FlaxToken not Antimatter, (b) the only way to execute inside the window is a registered stablecoin's transfer hook at :222, (c) both legs are increases so no observer sees an over-count.",
+      "reevaluateIf": "a phUSD collateralisation oracle is built, or a hook-bearing stablecoin is registered",
+      "relatedFindings": [
+        "DEDUP-008"
+      ]
+    },
+    {
+      "id": "MR-02",
+      "channel": "manual-review",
+      "status": "CARRIED-FORWARD",
+      "source": "code-scan-findings.json",
+      "title": "Registering phUSD itself as a supported stablecoin",
+      "reason": "Nothing rejects stable == address(phUSD); :219/:220 would snapshot the same balance twice and the :230 residue check and :232 delta would interfere. Not filed: obviously self-defeating configuration (Law 3, obvious misuse => suppress). Recorded so a future reviewer does not re-derive it. A one-line `if (stable == address(_phUSD)) revert` would close it cheaply."
+    },
+    {
+      "id": "MR-03",
+      "channel": "manual-review",
+      "status": "CARRIED-FORWARD",
+      "source": "code-scan-findings.json",
+      "title": "Registered-but-not-approveYS'd stablecoin is a liveness trap Antimatter cannot detect",
+      "reason": "Antimatter's registration test (:251) is yieldStrategy != address(0), which passes as soon as registerStablecoin runs. approveYS is a SEPARATE owner call, and until it is made every annihilation of that stable reverts inside the minter with no signal Antimatter can surface. Liveness only, no value at risk, fix belongs to the minter's registration flow.",
+      "action": "deployment-runbook item: register and approveYS must be treated as one atomic step"
+    },
+    {
+      "id": "MR-04",
+      "channel": "manual-review",
+      "status": "RESOLVED-INTO-FINDING",
+      "resolvedInto": "DEDUP-004",
+      "source": "code-scan-findings.json",
+      "title": "Antimatter supply discipline is entirely off-contract",
+      "reason": "The code-scanner explicitly deferred this to econ-scanner; econ filed it as ECON-001, now DEDUP-004. Kept visible here so the hand-off is auditable and the item is not assumed lost between the two agents.",
+      "residualNote": "'A bug in ANY approved minter contract converts directly into unbacked phUSD' is carried into DEDUP-004's escalationTrigger."
+    },
+    {
+      "id": "MR-05",
+      "channel": "manual-review",
+      "status": "RESOLVED-INTO-FINDING",
+      "resolvedInto": "DEDUP-005",
+      "source": "code-scan-findings.json",
+      "title": "Unbounded, un-timelocked exchangeRate reprices every future annihilation",
+      "reason": "Deferred by the code-scanner to econ-scanner; econ filed ECON-003, now DEDUP-005. The code-level half (the missing tolerance assertion) is carried by DEDUP-007's recommendation."
+    },
+    {
+      "id": "PARK-001",
+      "channel": "manual-review",
+      "status": "RESOLVED-INTO-FINDING",
+      "resolvedInto": "DEDUP-007",
+      "source": "econ-findings.json parkedForVisibleFollowUp",
+      "title": "ECON-004 must be re-verified against the DEPLOYED yield strategy before action",
+      "reason": "Every cross-repo statement in this scan came from antimatter's own nested pins; there is no top-level lib/phUSD-stable-minter or lib/flax-token-v2 sibling in this audit repo to cross-read. PARK RATIONALE CORRECTED 2026-08-18 (review pass): the earlier rationale - that the phUSD-stable-minter pin is stale - was FACTUALLY WRONG. antimatter pins lib/phUSD-stable-minter at d6ed1156, which IS that repo's remote master tip, so THE MINTER PIN IS CURRENT. The stale layer is one level deeper: lib/phUSD-stable-minter/lib/vault is pinned at 043ff2c while vault's remote master is 0110ce4 (11 commits ahead, incl. stories 043/044/048/049, which introduced deposit() returning creditedPrincipal). What cannot be adjudicated at this commit is therefore WHICH YIELD-STRATEGY / VAULT VERSION IS ACTUALLY DEPLOYED, because the finding depends on the deployed strategy's deposit() return behaviour, not on the minter's version. DEDUP-007 is filed as PARKED-MANUAL-REVIEW and carries this caveat in-band.",
+      "recheckInstruction": "RE-CHECK INSTRUCTION: read the DEPLOYED yield strategy (resolved from chain, for the stablecoins actually registered) and measure creditedPrincipal vs amount there. DO NOT re-check the phUSD-stable-minter pin - it is already current (d6ed1156 == remote master tip) and would wrongly read as the park being resolved. If the deployed strategy shows 043ff2c-era behaviour (no return / full credit), close as not-applicable; if it credits less than the principal transferred, size the stable leg from the returned value and/or assert mintedForStable against minter.calculateMintAmount(stable, stableAmount)."
+    },
+    {
+      "id": "PARK-002",
+      "channel": "spec-conformance",
+      "status": "CARRIED-FORWARD",
+      "source": "econ-findings.json + faithfulness-findings.json",
+      "title": "Law-2 story-faithfulness is UNRESOLVABLE for antimatter",
+      "reason": "registered-projects.json carries storyDir=null; no line matching 'antimatter' in ~/code/product-owner/registered-project-list.md (re-checked 2026-08-18); a content grep for 'antimatter|annihilat' across the ENTIRE stories tree returned ZERO files, so no misnamed storyDir can be identified by content either; and none of the 6 commits carries a [story-NNN] tag. This is a REGISTRY GAP, not an inaccessible document. Law-2 conformance is DEFERRED, NOT CLOSED and NOT PASSED.",
+      "consequence": "The 2x design's intent rests entirely on in-source NatSpec (:16-20), which carries no suppression authority and is itself economically inaccurate (DEDUP-015). A human must supply the mapping before DEDUP-004 can be adjudicated as intended-and-accepted rather than unbounded-and-unaccounted.",
+      "action": "Once antimatter gains a line in registered-project-list.md and a storyDir, re-grade the annihilation feature (commits a0eaee1, 0bb82d8), particularly the 'twice the quantity' economics."
+    },
+    {
+      "id": "PARK-003",
+      "channel": "carryover",
+      "status": "CARRIED-FORWARD",
+      "source": "econ-findings.json",
+      "title": "Antimatter is not yet wired into phoenix-phase-2-staging",
+      "reason": "grep for 'antimatter' across that submodule's .sol/.ts/.md/.json returns zero hits at this commit. Emission policy - who is added via setApprovedMinter (:151), at what rate, against what budget - is entirely undecided on-chain.",
+      "action": "Re-weigh DEDUP-004's severity when the wiring lands: a permissionless or automated antimatter minter converts it from a policy risk into an active drain (High)."
+    },
+    {
+      "id": "PARK-004",
+      "channel": "manual-review",
+      "status": "CARRIED-FORWARD",
+      "source": "econ-findings.json",
+      "title": "Systemic, cross-repo, UNVERIFIED: skimmable yield vs unbacked issuance",
+      "reason": "Yield accruing on deposited collateral is skimmable OUT of the strategies (skimSurplus, seen in the vault trees and used by the promotion dispatchers) while unbacked phUSD keeps being issued by every annihilation. If skimmed surplus is spent on promotions rather than retained as backing, the backing ratio falls from both ends simultaneously. Not modelled - it spans repos that are stale pins in this tree.",
+      "action": "Model once the deployed wiring exists. Obvious compounding interaction with DEDUP-004."
+    },
+    {
+      "id": "MR-20",
+      "channel": "manual-review",
+      "status": "NEW-AT-DEDUP",
+      "source": "static-analysis-findings.json SA-002 vs code-scan disposition",
+      "title": "SA-002 reentrancy-state-change in setPhUSD/setPhUSDMinter - Law-3 suppressed by the code-scanner, parked rather than deleted",
+      "reason": "Aderyn ranks this High; the code-scanner did not file it because both setters are onlyOwner and the external callee is the owner-supplied minter/token, so a re-entrant exploit needs a malicious owner or a malicious owner-installed minter (Law 3). The dedup stage does not have independent grounds to overturn that, but Law-3 suppression of a High-ranked tool finding is a judgement, not a duplicate and not tool noise - so it is parked visibly rather than removed. The substantive defect in these two functions (the mutual lock) IS filed, as DEDUP-009.",
+      "reviewQuestion": "Confirm that no path installs a minter/phUSD address the owner did not choose, and that the read-then-assign ordering cannot be reached with a third-party-controlled callee."
+    },
+    {
+      "id": "MR-21",
+      "channel": "manual-review",
+      "status": "NEW-AT-DEDUP",
+      "source": "tier3/symbolic-results.md \u00a7 What was NOT covered",
+      "title": "Three symbolic properties are UNVERIFIED (11 TIMEOUTs) and must not be read as coverage",
+      "reason": "Recorded at dedup because a TIMEOUT is not a proof and downstream reports must not read silence as coverage (standing rule: symbolic TIMEOUT != proof). (1) End-to-end conservation 'phUSD delivered == amount + stableHalf' TIMED OUT in all 8 configurations, two solvers, bounds from 2**96 down to 2**32 - bound-insensitive, so a narrower domain does not buy a proof. (2) toStableAmount reverts-iff-inexact: the forward exactness direction IS proved; the absence of a spurious revert is not. (3) Overflow parity of the minter's evaluation order is unproven (identical by hand, but that is an argument, not a proof).",
+      "additionalScopeLimits": "Every full-flow proof pins d=6 (or 18) and rate=1e18 concretely; symbolic decimals and symbolic rate were carried only through the pure-arithmetic properties. Full-flow proofs are bounded at amount < 2**96. External dependencies are audit-authored minimal mocks (the real PhusdStableMinter IS used unmodified). The minter's 24h cap, pause flag and enabled flag are left at permissive defaults. Reentrancy is not a symbolic target.",
+      "action": "No finding filed - there is nothing to report, only an absence of proof. Parked so no downstream report claims these areas are verified."
+    }
+  ],
+  "removedWithReason": [
+    {
+      "id": "SA-003",
+      "category": "verified-false-positive",
+      "reason": "divide-before-multiply at :255-256 IS the exactness round-trip guard producing AmountNotRepresentable. Removing it would introduce the very bug the detector warns about. Independently confirmed by a Halmos PROOF that the guard is sound (tier3/halmos-p1-d6.txt, halmos-p1-symbolicd.txt: for every uint256 amount, if toStableAmount returns s then s * scale == amount exactly). This is the strongest possible disposition - machine-checked, not asserted."
+    },
+    {
+      "id": "SA-005",
+      "category": "verified-false-positive",
+      "reason": "The 5 discarded tuple fields of minter.stablecoinConfigs are genuinely unused. Retained as an ABI-coupling hazard note (below), not as a finding."
+    },
+    {
+      "id": "SA-007",
+      "category": "verified-inert",
+      "reason": "nonReentrant not first on rescueERC20. Correct in the abstract but inert here: onlyOwner is a pure storage read with no external call, so nothing can re-enter between the two modifiers. Style only."
+    },
+    {
+      "id": "SA-008",
+      "category": "law-3-inventory",
+      "reason": "Generic Ownable-surface enumeration (setPhUSD, setPhUSDMinter, setApprovedMinter, rescueERC20, mint). Law 3: the owner is trusted for knowing actions and malicious-owner vectors are not filed. Retained ONLY as centralization inventory; every non-obvious footgun in the enumerated setters IS filed separately (DEDUP-003, DEDUP-005, DEDUP-009, DEDUP-010, DEDUP-011). Nothing is suppressed that a competent owner would be surprised by."
+    },
+    {
+      "id": "SA-009",
+      "category": "checked-clean",
+      "reason": "modifier-used-only-once on onlyApprovedMinters, reframed by the static tier as a coverage question. Answered: grep of src/Antimatter.sol finds exactly one _mint( (:180) and exactly one _burn( (:215). No unguarded mint entry point exists. Independently corroborated by Tier-3 invariant_08 (PASS, exact equality over 76,800 calls x 512 runs on Foundry AND Medusa)."
+    },
+    {
+      "id": "SA-010",
+      "category": "style",
+      "reason": "Magic literals 18/10 in the decimal rescale. Pure style; the 18-decimal assumption is documented in NatSpec, and the SEMANTIC risk at those exact lines is filed as DEDUP-003."
+    },
+    {
+      "id": "SA-001 (as a standalone entry)",
+      "category": "consolidated-not-deleted",
+      "reason": "Merged into DEDUP-001; id preserved in that entry's `sources`."
+    },
+    {
+      "id": "SA-004 / SA-006 / AM-LOCAL-001..005 / CODE-* / ECON-* / FAITH-* (as standalone entries)",
+      "category": "consolidated-not-deleted",
+      "reason": "Every one is preserved in the `sources` array of exactly one or more consolidated findings. See mergeMap. No finding id is unreachable."
+    }
+  ],
+  "flaggedForReview": [
+    {
+      "item": "DEDUP-002 severity",
+      "question": "CODE-003's own severityNote concedes 'a downgrade to Low is defensible - no direct asset loss and no attacker-specific gain'. Held at Medium here because two independent fuzzing engines break the invariant outright in a single transaction and the rail is the only issuance limit on a partly uncollateralised token. Severity-classifier should adjudicate.",
+      "conflictingSeverities": {
+        "CODE-003": "medium (with Low noted as defensible)",
+        "ECON-002": "medium",
+        "AM-LOCAL-002": "local-medium"
+      },
+      "resolution": "highest preserved (medium), conflict recorded"
+    },
+    {
+      "item": "DEDUP-007 severity and status",
+      "question": "Filed Medium but PARKED: it is diff-only and unverified against any DEPLOYED strategy. The minter pin is CURRENT (d6ed1156 == remote master tip); what is unknown is which yield-strategy/vault version is DEPLOYED, because the nested vault pin 043ff2c is 11 commits behind vault master 0110ce4. If the deployed strategy is the 043ff2c-era build there is NO finding at all; if it is a master-tree build the shortfall is real but unquantified. Do not classify or submit before the manual-review action is completed - and adjudicate it by reading the DEPLOYED strategy, never the minter pin.",
+      "conflictingSeverities": {
+        "ECON-004": "medium",
+        "CODE-006": "low"
+      },
+      "resolution": "highest preserved (medium), per the conflicting-severity rule; the Low framing reflected only the code-scanner's narrower in-contract lens"
+    },
+    {
+      "item": "DEDUP-004 vs DEDUP-015 split",
+      "question": "Two entries from what a reader may perceive as one topic (the unbacked 2x mint and its false NatSpec justification). The split is deliberate and justified in DEDUP-004.econFaithMergeJustification. If the severity-classifier or report-writer prefers a single submission, DEDUP-015 must be folded in as a named sub-section, never dropped."
+    },
+    {
+      "item": "DEDUP-011 vs DEDUP-012",
+      "question": "Adjacent operational findings on the same trust structure with different mitigations. Kept separate; a QA bundler may reasonably present them as one QA item with two recommendations."
+    },
+    {
+      "item": "FAITH-002 securityEscalation flag",
+      "question": "FAITH-002 carried securityEscalation=true and severity=potential-medium; merged into DEDUP-004 (medium). The escalation is preserved as DEDUP-004.specStatus = FAITHFUL-BUT-UNSAFE. No severity was lost in the merge."
+    }
+  ],
+  "mergeMap": {
+    "DEDUP-001": [
+      "SA-001",
+      "AM-LOCAL-001",
+      "CODE-001",
+      "invariant_06",
+      "invariant_07",
+      "symbolic-3b(x2 witnesses)"
+    ],
+    "DEDUP-002": [
+      "AM-LOCAL-002",
+      "CODE-003",
+      "ECON-002",
+      "invariant_09",
+      "invariant_10"
+    ],
+    "DEDUP-003": [
+      "CODE-002",
+      "SA-010(semantic)",
+      "faithfulness note 2"
+    ],
+    "DEDUP-004": [
+      "ECON-001",
+      "FAITH-002",
+      "MR-04",
+      "invariant_04(quantification)"
+    ],
+    "DEDUP-005": [
+      "ECON-003",
+      "AM-LOCAL-005",
+      "MR-05"
+    ],
+    "DEDUP-006": [
+      "ECON-005"
+    ],
+    "DEDUP-007": [
+      "ECON-004",
+      "CODE-006",
+      "SA-004",
+      "PARK-001"
+    ],
+    "DEDUP-008": [
+      "CODE-004",
+      "AM-LOCAL-004",
+      "SA-004"
+    ],
+    "DEDUP-009": [
+      "CODE-005"
+    ],
+    "DEDUP-010": [
+      "ECON-006",
+      "symbolic-4d"
+    ],
+    "DEDUP-011": [
+      "ECON-007"
+    ],
+    "DEDUP-012": [
+      "CODE-009"
+    ],
+    "DEDUP-013": [
+      "FAITH-004",
+      "SA-004"
+    ],
+    "DEDUP-014": [
+      "FAITH-003",
+      "invariant_08(evidence)"
+    ],
+    "DEDUP-015": [
+      "FAITH-001",
+      "ECON-001.documentationVsImplementation"
+    ],
+    "DEDUP-016": [
+      "CODE-007",
+      "SA-006"
+    ],
+    "DEDUP-017": [
+      "CODE-008",
+      "faithfulness note 1"
+    ],
+    "DEDUP-018": [
+      "AM-LOCAL-003"
+    ],
+    "DEDUP-019": [
+      "SA-011",
+      "SA-012",
+      "SA-013"
+    ]
+  },
+  "notCollapsedDeliberately": [
+    {
+      "pair": [
+        "DEDUP-002",
+        "DEDUP-003"
+      ],
+      "reason": "Both are '2x-adjacent' config issues on the same contract but have different root causes: an uncounted second mint leg vs an unvalidated registered `decimals`. DEDUP-003's understated-decimals path is a PERMISSIONLESS FREE MINT that fails OPEN; DEDUP-002 is a mis-sized operator rail. Different exploit class, different mitigation. Explicitly required by the task brief and independently verified."
+    },
+    {
+      "pair": [
+        "DEDUP-002",
+        "DEDUP-006"
+      ],
+      "reason": "Same counter (maxMintPerDay), different root cause: under-counting vs profitable budget exhaustion. Different impact class (mis-sized rail vs availability DoS) and different mitigation."
+    },
+    {
+      "pair": [
+        "DEDUP-007",
+        "DEDUP-008",
+        "DEDUP-013"
+      ],
+      "reason": "All three touch :232/:233 and share ONE mitigation (assert against calculateMintAmount), but have three distinct root causes: upstream strategy under-credit (cross-boundary, diff-only), in-window inbound phUSD swept as free value (PoC'd, hook-dependent), and no caller-side expectation guard against a rate change (spec-conformance). Different preconditions, different evidence, different channels. Shared mitigation is recorded via sharedMitigationWith rather than by collapsing."
+    },
+    {
+      "pair": [
+        "DEDUP-004",
+        "DEDUP-015"
+      ],
+      "reason": "See DEDUP-004.econFaithMergeJustification - the economic finding and the false-documentation finding have different root causes, remediations and readers, and the doc defect must survive an accepted-by-design triage of the econ finding."
+    },
+    {
+      "pair": [
+        "DEDUP-009",
+        "MR-20(SA-002)"
+      ],
+      "reason": "Same two functions (setPhUSD/setPhUSDMinter), different root causes (mutual configuration lock vs state-after-external-call). Same-function is not same-root-cause."
+    },
+    {
+      "pair": [
+        "DEDUP-011",
+        "DEDUP-012"
+      ],
+      "reason": "Both concern control levers held by independent principals, but require separate mitigations (an authorisation view + two-contract runbook vs an own-owner pause flag)."
+    }
+  ],
+  "notesForDownstream": {
+    "pocProvenance": "All PoCs live in workspace/antimatter/test/audit/** and are AUDIT-AUTHORED. They are NOT present in lib/antimatter @ 0bb82d8 and must never be cited as project test coverage, nor filed as project files. 61/61 pass (50 pre-existing + 11 authored).",
+    "tier3Honesty": "Invariant PASSES are absence of counterexamples within the stated run depth, not proofs. Only the 4 failures are proofs. Halmos TIMEOUT/ERROR carry zero safety weight - see parked MR-21.",
+    "abiCouplingHazard": "Antimatter destructures 7 slots of the minter's StablecoinConfig at :250; the pinned minter's struct has exactly 7 fields in matching positions. If the minter ever reorders or inserts a field there is NO compile error on either side. Not a finding at the observed trees; recorded so it is not lost.",
+    "classesCheckedAndCleared": "CEI ordering, USDT-style non-standard ERC20, fee-on-transfer/rebasing (fails closed AND C4 known-invalid), zero-address/zero-amount, rounding/decimals given a correct config, event correctness, ERC20 conformance, upgrade/storage layout (N/A, non-upgradeable), delegatecall/selfdestruct/tx.origin/timestamp (zero hits), rescueERC20 backstop, and all five reentrancy classes (classic, cross-contract, cross-function, read-only, ERC721 hook). Carried forward unmodified from code-scan-findings.json so the negative coverage is not lost.",
+    "staticNoiseFiltered": "297 static results were filtered before this stage (naming conventions 50, unused-state 16, aderyn literal-instead-of-constant in test files 106, aderyn unused-public-function in test files 52, semgrep all-INFO 27, etc.). That filtering is recorded in tier1/static-analysis-findings.json filteredBreakdown and is not re-litigated here."
+  }
+}

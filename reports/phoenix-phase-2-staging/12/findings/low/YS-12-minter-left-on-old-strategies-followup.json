@@ -1,0 +1,58 @@
+{
+  "id": "YS-12",
+  "entryPoint": "migrate:ys-swap-deploy",
+  "rootCauseFamily": "minter-position-out-of-scope-referral",
+  "fingerprint": "633f3485dd37fe956c2474f7cf8ba0a38506e83f9f72b77fb7a8f019068541a5",
+  "title": "phUSD stable-minter left registered on the buggy old strategies after story-060 (~13,817 DOLA + ~11,936 USDC) — migration-completeness follow-up; minter code is NOT affected by the over-credit bug",
+  "severity": "low",
+  "proposedSeverity": "low",
+  "category": "cluster-interaction",
+  "contract": "lib/phUSD-stable-minter (client position on lib/vault ERC4626YieldStrategy pre-fix builds 0x90ce…7F9 / 0x90af…470)",
+  "function": "run",
+  "location": "docs/stable-staker-migrations/yield-strategy-swap-June-12-2026.md 'Scope' section (staker-only); no suite script repoints the minter to the V2 strategies",
+  "faithfulness": false,
+  "footgun": true,
+  "scopedAnalysisOutcome": {
+    "resolved": true,
+    "resolvedAt": "2026-06-12",
+    "verdict": "NO minter-side code fix needed or possible. The over-credit bug cannot harm PhusdStableMinter: (1) mint() issues phUSD = amount * exchangeRate * decimalAdjust (calculateMintAmount, PhusdStableMinter.sol:243-256) and never reads principalOf/totalBalanceOf/_positionValue, so over-credited principal cannot mint unbacked phUSD; (2) there is no redemption path (story-007 removed withdraw; no withdraw/redeem/burn), so 'distorts minter redemptions' is moot; (3) the minter holds no levers over strategy accounting (only deposit()) — position movement is strategy-owner-side (withdrawAsOwner/totalWithdrawal/relinquishPrincipalAsOwner/emergencyWithdraw). Residual effect on the minter is conservative: skimSurplus understates the minter's surplus and under-skims, never over-skims.",
+    "reclassification": "Provisional Medium (minter-side referral) -> Low (migration-completeness follow-up, owned by the strategy/migration side). Not a minter-code vulnerability and not independently exploitable.",
+    "plan": "reports/phoenix-phase-2-staging/12/script-audits/migrate:ys-swap-deploy/YS-12-minter-followup-plan.md"
+  },
+  "description": "The story-060 suite repoints only the StableStaker client to the V2 strategies; nothing re-registers the phUSD minter. On fork the minter holds 13,816.56 DOLA and 11,935.65 USDC of recorded principal on the buggy old strategies (~13x/6x the staker's exposure). The scoped analysis requested by this referral is now complete: the minter is architecturally immune to the over-credit bug (decoupled minting, no redeem path). The remaining issue is operational migration completeness: (a) fresh user mints keep routing into a known-buggy strategy, and (b) once the staker is evacuated first at an over-credited basis from the shared 'underwater' pool, the residual below-par shortfall can be left with the minter. Both are fixed by repointing the minter onto the V2 strategies (and optionally consolidating its position) — strategy/migration-side, no minter code change.",
+  "impact": "Until a follow-up migration runs, the minter keeps depositing new user collateral into a known-buggy strategy and its existing ~13.8k DOLA / ~11.9k USDC position can absorb the shared pool's below-par shortfall. No unbacked phUSD can be minted and no redemption is distorted (the minter has neither read-back nor redeem).",
+  "classification": {
+    "assetImpact": "No direct asset loss attributable to minter code. phUSD issuance is decoupled from strategy principal and there is no redemption path. Backing-health only: existing minter principal remains on a strategy whose accounting overstates it, and new mints keep flowing there until a repoint migration runs.",
+    "attackPath": [
+      "Not an attack path. Operational completeness gap: the migration suite migrated only the staker client, leaving the minter on the old buggy strategies.",
+      "Consequence (a): mint() -> deposit() keeps crediting nominal principal into 0x90ce.../0x90af... (over-credit defect persists for the minter, but phUSD over-mint is impossible since issuance ignores strategy principal).",
+      "Consequence (b): with the staker evacuated first at over-credited principal from the shared underwater pool, the residual shortfall is left with the minter (realized via strategy withdraw mechanics + migration ordering, not minter code)."
+    ],
+    "likelihood": "N/A (operational). Materiality of (b) depends on whether the autopool is genuinely below par; (a) is certain until the repoint runs.",
+    "assumptions": "Owner of old strategies, V2 strategies, and the minter is the deployer multisig/EOA; YS-01 (previewRedeem brick) is fixed before the V2 strategies are usable.",
+    "externalRequirements": "A follow-up migration that repoints the minter to ysDolaV2/ysUsdcV2 (and optionally consolidates its position). See plan."
+  },
+  "evidence": "Source: PhusdStableMinter.sol mint()/calculateMintAmount (L203-256) reads no strategy state; no withdraw/redeem/burn (story-007 'Remove buggy withdraw'). AYieldStrategy principal/withdraw/skim semantics confirm conservative under-skim and owner-only position movement. Fork reads: YS_DOLA_OLD.principalOf(DOLA, minter)==13816564202291221245191; YS_USDC_OLD.principalOf(USDC, minter)==11935645684. side-effects.json clusterChecks[5].",
+  "recommendation": "No change to PhusdStableMinter. Extend the migration (preferred: repoint the EXISTING minter, no new minter needed): for each token, ysTV2.setClient(minter,true); minter.registerStablecoin(T, ysTV2, rate, decimals); minter.approveYS(T, ysTV2); minter.setMaxMintPerDay(T, <live cap>) — re-applying the cap that registerStablecoin silently zeroes. Optionally consolidate the existing position: strategy-owner withdrawAsOwner(minter, operator, principalOf(minter)) then minter.noMintDeposit(ysTV2, T, recovered). Run after Leg 2/Reset, with the minter as sole remaining client. Full sequence, post-conditions, the registerStablecoin cap-reset footgun, and the rejected new-minter alternative are in reports/phoenix-phase-2-staging/12/script-audits/migrate:ys-swap-deploy/YS-12-minter-followup-plan.md.",
+  "dedupNotes": "Sole source: deploy F8 (idx7). Originally KEPT VISIBLE as a REFERRAL per Law 1; the routed scoped analysis of phUSD-stable-minter is now complete (minter immune; see scopedAnalysisOutcome). Same scope-gap family as YS-03 (suite migrated only the staker client).",
+  "sanitizationReason": "Scoped /analyze of phUSD-stable-minter complete (2026-06-12): minter code is unaffected by the over-credit bug (decoupled mint, no redeem path, no levers). Reclassified from provisional Medium referral to Low migration-completeness follow-up owned by the strategy/migration side. Not submitted as a minter-side H/M; tracked as a Low operational footgun.",
+  "severityJustification": "Low: no minter-code vulnerability and not independently exploitable. The exposure is a migration-completeness footgun (minter left on a known-buggy strategy; new mints keep flowing there; residual shared-pool shortfall can land on the minter), remediated operationally by a repoint migration. No unbacked phUSD can be minted and no redemption is distorted.",
+  "crossLinks": [
+    "YS-12 <-> YS-03: same 'suite migrated only the staker client' scope gap (YS-03 leaves the SYA unwired; YS-12 leaves the minter on the old strategies). Fold the minter repoint into the same rewire step.",
+    "YS-12 <-> YS-01: blocked on the previewRedeem brick fix — the V2 strategies are unusable until YS-01 is fixed.",
+    "YS-12 <-> YS-07: shared minter/buffer surface (cross-link only)."
+  ],
+  "status": "open",
+  "provisional": false,
+  "referral": false,
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-12",
+  "metadata": {
+    "createdAt": "2026-06-12T03:14:24Z",
+    "updatedAt": "2026-06-12T00:00:00Z",
+    "scanOrigin": "audit-script:migrate:ys-swap (story-060)",
+    "auditedCommit": "b27c6ac",
+    "scopedAnalysisCompletedAt": "2026-06-12"
+  },
+  "reportPath": "reports/phoenix-phase-2-staging/12/findings/low/YS-12-minter-left-on-old-strategies-followup.json"
+}

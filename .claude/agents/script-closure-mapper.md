@@ -23,7 +23,7 @@ effects and knock-on problems visible.
   "project": "phoenix-phase-2-staging",
   "submodulePath": "lib/phoenix-phase-2-staging",
   "entryPoint": "RestoreMintAtIndex4",
-  "reportDir": "reports/phoenix-phase-2-staging-XX",
+  "reportDir": "reports/phoenix-phase-2-staging/XX",
   "repoUrl": "https://github.com/Behodler/phoenix-phase-2-staging",
   "defaultBranch": "master",
   "forkAvailable": true,

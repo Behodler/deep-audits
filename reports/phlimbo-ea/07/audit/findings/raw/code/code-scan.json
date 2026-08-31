@@ -1,0 +1,160 @@
+{
+  "project": "phlimbo-ea",
+  "reportDir": "reports/phlimbo-ea/07",
+  "commit": "7045a96",
+  "scanTimestamp": "2026-07-14T00:00:00Z",
+  "scanType": "code",
+  "scanner": "code-scanner (Tier-2 interaction-level)",
+  "contractsScanned": 2,
+  "primaryTargets": ["src/PhlimboV3.sol", "src/MigratorV2V3.sol"],
+  "scopeNote": "V1 Phlimbo.sol change is cosmetic-only (forge fmt + comment) — no V1 behavioral bugs re-reported. Analysis worked from profiles + Tier-1 leads, confirming/refuting against source.",
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "unrecoverable-migration-brick-on-reverting-reward-recipient",
+      "severity": "potential-medium",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "migrate",
+      "line": 186,
+      "lineStart": 156,
+      "lineEnd": 206,
+      "confidence": "high",
+      "lead": "MIG-LOCAL-01 / PM-002 / SA-005 — CONFIRMED",
+      "description": "migrate() forwards each user's reward deltas with reverting safeTransfer: phUSD (L187), stable rewardToken (L190), promoToken (L193). The loop is sequential from `migrateIterator` and cannot skip an index. If ANY seeded user at index k cannot receive one of the three tokens (realistically a USDC/USDT compliance-frozen/blocklisted address for the stable rewardToken, or a restricted partner promoToken), that user's safeTransfer reverts, which reverts the ENTIRE migrate() call and every index >= k with it. The cursor never advances past k.",
+      "attackVector": "A single poisoned recipient (e.g. an OFAC-frozen USDC address that was a legitimate V2 staker at seed time) permanently wedges the migration at that cursor index. There is NO in-contract recovery: (1) seedUsers requires `!seeded || migrateIterator == -1` (L114) so a fresh straggler list to exclude the bad address is FORBIDDEN mid-pass because migrateIterator is stuck at k (>=0, != -1); (2) withdrawAll (L216) is a pure balance sweep that deliberately does NOT reset the pass; (3) migrate cannot be advanced. The ONLY recovery is to deploy a brand-new MigratorV2V3 and re-wire it via setMigrator on BOTH PhlimboV2 and PhlimboV3. The inline docstring's stated escape ('exclude such addresses from the seed list', L59-61) is unachievable once a pass is underway — it is a misleading recovery promise.",
+      "impact": "Liveness/availability DoS of the entire remaining V2->V3 migration. No theft, no principal loss (withdrawAll recovers stranded balances; V2/V3 positions remain intact), but the migration cannot complete without a redeploy+rewire operation. Owner-recoverable, so ceiling is Medium.",
+      "asymmetryNote": "V3.batchClaim (L448-470) solved EXACTLY this failure mode with _tryTransfer (non-reverting, L816-820) + unclaimablePromo banking. MigratorV2V3.migrate did NOT adopt the same non-reverting pattern for its three reward forwards — an inconsistency within the same codebase/story.",
+      "codeSnippet": "if (phUSDRewards > 0) { IERC20(address(phUSD)).safeTransfer(user, phUSDRewards); }\nif (stableRewards > 0) { rewardToken.safeTransfer(user, stableRewards); }\nif (promoRewards > 0) { promoToken.safeTransfer(user, promoRewards); }",
+      "recommendation": "Wrap the three reward forwards in a non-reverting try-transfer (reuse the _tryTransfer/unclaimablePromo bank pattern, or leave failed rewards claimable by the user), OR allow migrate to skip a failing index rather than reverting the batch, OR relax the reseed guard to permit an owner mid-pass re-seed that excludes a poisoned address.",
+      "pocSketch": "Seed [A, BLOCKED, C] where BLOCKED is a USDC-blocklisted address holding a V2 stable-reward accrual. Call migrate(3). A migrates; at BLOCKED the rewardToken.safeTransfer reverts -> whole tx reverts. migrateIterator stays 0. seedUsers([A,C]) reverts 'Pass in progress'. migrate(3) reverts again forever. Assert migration cannot reach migrateIterator==-1 without deploying a new migrator.",
+      "knownIssueCrossRef": "Same envelope as ledger V2-M-01 (MigratorV1V2 strict-== brick): availability only, owner recovery via redeploy, no theft. Sanitizer to reconcile by fingerprint."
+    },
+    {
+      "id": "CODE-002",
+      "type": "uncapped-unbacked-phUSD-mint-on-reward-leg",
+      "severity": "potential-high-conditional",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_updatePool / _claimRewards / _updatePhUSDEmissionRate",
+      "line": 745,
+      "lineStart": 744,
+      "lineEnd": 746,
+      "confidence": "medium",
+      "lead": "PM-001 / SA-012-area — CONFIRMED as code fact; intended-emission-by-design; severity conditional on config",
+      "description": "CONFIRMED asymmetry: the phUSD reward leg is minted with NO funded-budget cap, unlike the other two legs. In _updatePool the phUSD accrual is `phUSDReward = timeElapsed * phUSDPerSecond` (L745) accumulated into accPhUSDPerShare with NO cap (contrast the stable leg capped at rewardBalance, L730, and the promo leg capped at promoRewardBalance, L756). At claim time _claimRewards MINTS it unbacked via `phUSD.mint(beneficiary, pendingPhUSDAmount)` (L781-784). phUSD has no funded budget by construction — it is the protocol's own mintable token; V3 must hold the mint role.",
+      "configAnalysis": "The emission rate `phUSDPerSecond = totalStaked * desiredAPYBps / 10000 / SECONDS_PER_YEAR` (L831) is ZERO whenever desiredAPYBps == 0. desiredAPYBps is NOT set in the constructor (defaults 0) and can only be raised via the owner-only two-step setDesiredAPY (L222-240). Therefore in the shipped/zero-APY config NO phUSD is minted (this is the KI-10 immunization). The moment the owner commits any non-zero APY, phUSD is minted on demand, unbacked, with no per-window emission cap. Total emission over a year equals exactly the intended APY (`totalStaked * desiredAPYBps / 10000`), so this is intended inflation-by-emission, NOT a double-mint/over-mint accounting bug (single _updatePool writer, no double-count path found; pendingPhUSD view mirrors).",
+      "impact": "If a non-zero-APY config ships: unbacked phUSD inflation gated only by the owner-set APY magnitude, with no on-chain solvency cap. This is the phUSD-mint-authority solvency concern (ledger V2-M-02 load-bearing / V2-M-03 're-classify HIGH if any non-zero-APY config ships'). A non-obvious footgun for the APY magnitude (desiredAPYBps has no upper bound, so a fat-fingered or aggressive APY silently mints large unbacked phUSD).",
+      "recommendation": "Confirm the deployed config ships desiredAPYBps == 0 (KI-10). If any non-zero APY is intended, gate the phUSD leg against a funded/authorized emission budget or an explicit upper bound on desiredAPYBps, and document the unbacked-mint invariant. Emit at honest severity only if a non-zero-APY config is in scope for this run.",
+      "knownIssueCrossRef": "Reconciles to ledger V2-M-02 / V2-M-03 (memory: phlimbo-ea-audit-notes). Regression check against a known concern — sanitizer to reconcile by fingerprint; do NOT re-file as a fresh High unless a non-zero-APY config is in scope."
+    },
+    {
+      "id": "CODE-003",
+      "type": "malformed-returndata-revert-in-nonreverting-transfer",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_tryTransfer / batchClaim",
+      "line": 819,
+      "lineStart": 816,
+      "lineEnd": 820,
+      "confidence": "high",
+      "lead": "V3-LOCAL-01 — CONFIRMED",
+      "description": "_tryTransfer computes `callSuccess && (returndata.length == 0 || abi.decode(returndata, (bool)))` (L819). If a promoToken's transfer succeeds at the call level but returns NON-empty returndata shorter than 32 bytes (returndata.length in [1,31]), the `returndata.length == 0` short-circuit is false and abi.decode(returndata,(bool)) is evaluated. abi.decode into a bool requires exactly a 32-byte word; on shorter data it REVERTS. That revert propagates out of _tryTransfer (it is NOT wrapped in a try) and reverts the whole batchClaim chunk — defeating the explicit design intent that the flush must never brick.",
+      "attackVector": "A promo token that returns malformed short returndata (non-standard, but promoToken is only semi-trusted/owner-vetted per promotion) makes EVERY batchClaim revert at the first staker with pending > 0. finalizePromotion requires flushCursor == _stakers.length() (L483), which can never be reached; abortFlush returns to Active but re-flushing hits the same wall. The promo slot becomes permanently un-rotatable/un-finalizable.",
+      "impact": "Flush/rotation DoS for a specific class of non-standard promo token, contradicting the non-reverting guarantee. Token-assumption dependent (owner vets the promo token), so Low. No fund loss.",
+      "recommendation": "Length-check returndata (`returndata.length >= 32`) before abi.decode, and treat any non-standard returndata as a failed transfer (bank into unclaimablePromo) rather than letting it revert.",
+      "knownIssueCrossRef": "Already surfaced in profile as V3-LOCAL-01 (local-low)."
+    },
+    {
+      "id": "CODE-004",
+      "type": "permissionless-depletion-window-reset-griefing",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "collectReward",
+      "line": 570,
+      "lineStart": 559,
+      "lineEnd": 573,
+      "confidence": "medium",
+      "lead": "collectReward permissionless rate recompute (suspicious-area) — CONFIRMED mechanism",
+      "description": "collectReward is permissionless (no access control, L559). Every call runs _updatePool() then unconditionally recomputes `rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration` (L570), i.e. it re-stretches the ENTIRE remaining stable-reward balance over a FRESH full depletionDuration starting now. A griefer can call collectReward with a dust `amount` (require amount > 0, so >= 1 wei of rewardToken) repeatedly to perpetually reset the depletion window: at any time t the schedule's finish line becomes t + depletionDuration, so the window never completes and the stable reward stream is stretched indefinitely.",
+      "attackVector": "Attacker calls collectReward(1) each block. Each call accrues the small elapsed portion at the old rate, adds 1 wei, then re-anchors the remaining balance over a full window. Cost is 1 wei rewardToken + gas per call; sustained, it throttles legitimate stakers' stable-reward accrual toward zero rate over time.",
+      "impact": "Griefing/DoS of stable reward emission TIMING. No theft and funds are not lost (they remain in rewardBalance, distributable if griefing stops), but the reward distribution schedule the protocol promises can be indefinitely delayed/diluted by any third party. Degrades protocol function; ongoing attacker cost and no attacker profit keep it Low (could be argued Medium as availability impact).",
+      "recommendation": "Make collectReward permissioned (owner/funder role), or decouple the depletion-rate recompute from every caller (e.g. only extend, never reset, the window; or accumulate deposits without re-anchoring the schedule).",
+      "knownIssueCrossRef": "Profile notes this also applies to V2 (inherited pattern), now present in NEW V3 code. Not owner-malicious (any third party can grief) so in scope; let severity-classifier calibrate Low vs Medium."
+    },
+    {
+      "id": "CODE-005",
+      "type": "stale-promo-accounting-after-emergency-drain-bricks-resumption",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "emergencyTransfer / _claimRewards / pauseWithdraw",
+      "line": 307,
+      "lineStart": 307,
+      "lineEnd": 325,
+      "confidence": "medium",
+      "lead": "Independent (emergencyTransfer stale-promo suspicious-area) — CONFIRMED as non-obvious owner footgun (Law 3)",
+      "description": "emergencyTransfer (L307-325) sweeps all phUSD/reward/promo balances to a recipient and pauses, but does NOT touch promo bookkeeping (promoPhase stays Active, promoRewardBalance stays > 0, promoToken stays set) nor staking accounting. If it is invoked during an ACTIVE promotion, the contract afterward believes it still owes promo it no longer holds. On resumption, _updatePool keeps accruing accPromoPerShare against the non-zero promoRewardBalance (L753-761), so users show positive pendingPromo, and _claimRewards' promo leg does a reverting `promoToken.safeTransfer(beneficiary, pendingPromoAmount)` (L804) against a ZERO on-hand promo balance — reverting the user's stake/withdraw/claim.",
+      "attackVector": "Non-malicious owner uses emergencyTransfer during an active promo to rescue funds, later resolves the incident, refunds the contract (phUSD + stable) and unpauses expecting normal operation. Every user with pending promo now has their stake/withdraw/claim bricked by the reverting promo transfer, because promo accounting was never reconciled to the drained balance. A competent owner would be surprised that the safety button leaves promo-claiming users bricked on resume.",
+      "impact": "Post-emergency DoS of core user functions (stake/withdraw/claim) for any staker with pending promo, until the owner performs a full flush-rotation. Recovery IS available but non-obvious: beginFlush -> drive batchClaim to completion (its _tryTransfer banks the now-unpayable promo into unclaimablePromo) -> finalizePromotion (clears promoToken/promoRewardBalance to None and leaves all promoDebts aligned so pending==0), THEN unpause. Owner-recoverable, no fund loss beyond the intended emergency drain, hence Low.",
+      "recommendation": "In emergencyTransfer, when a promo slot is set, also reset promo accounting to a consistent state (e.g. zero promoRewardBalance/promoRewardPerSecond, or force the phase into a drain-safe state), or document the mandatory post-emergency flush-rotation sequence before any unpause.",
+      "knownIssueCrossRef": "Related to but distinct from PM-005 / ledger F-01 / V2-F-01 (emergencyTransfer drains phUSD so pauseWithdraw reverts — spec-conformance, carried forward). This finding is the NEW V3 promo-specific incremental footgun."
+    },
+    {
+      "id": "CODE-006",
+      "type": "escape-hatch-incomplete-token-coverage",
+      "severity": "potential-low",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "withdrawAll",
+      "line": 216,
+      "lineStart": 216,
+      "lineEnd": 229,
+      "confidence": "high",
+      "lead": "MIG-LOCAL-02 / PM-007 — CONFIRMED (QA)",
+      "description": "withdrawAll sweeps only phUSD and rewardToken to the owner (L218-226); it does NOT sweep promoToken. Under normal flow promo is forwarded per-user in the same atomic iteration, but any promo stranded by rounding/donation, or promo left in the contract if a promo forward class ever changes, is unrecoverable via this escape hatch (would need a fresh migrator deploy).",
+      "impact": "QA-level completeness gap. No user-fund risk in normal flow (promo forwards are atomic with revert-on-failure, so no partial stranding).",
+      "recommendation": "Add a promoToken sweep to withdrawAll, reading phlimboV3.promoToken() at call time (guard address(0))."
+    },
+    {
+      "id": "CODE-007",
+      "type": "invariant-drift-zombie-staker-set-entry",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "pauseWithdraw",
+      "line": 537,
+      "lineStart": 537,
+      "lineEnd": 552,
+      "confidence": "high",
+      "lead": "PM-004 — CONFIRMED harmless-but-noted (QA/Low)",
+      "description": "A user who fully exits via pauseWithdraw (amount -> 0) is NOT removed from _stakers (by design, L533-535, to keep the set frozen during a flush), breaking the stated invariant 'membership <=> userInfo.amount > 0'. These zombie entries are correctness-harmless (batchClaim visits them with pending == 0 and aligns promoDebt to 0) but accumulate across pause cycles, monotonically inflating the flush iteration count / gas the owner pays to reach flushCursor == _stakers.length().",
+      "impact": "No fund risk; flush is chunked so no hard brick. Zombies can only form during an owner/pauser-initiated pause window (a user must have staked >= MINIMUM_STAKE first), so not cheaply spammable by a third party without a pause window. Low/QA operational footgun.",
+      "recommendation": "Document that stakerCount can exceed active stakers; optionally allow a permissionless compaction pass that removes zero-amount members outside a flush."
+    }
+  ],
+  "refutedLeads": [
+    {
+      "lead": "Lead 4 — Reward-delta netting across straggler second pass",
+      "verdict": "REFUTED (no bug — netting is correct)",
+      "reasoning": "The phUSD bracket (phUSDBefore L163, delta L180) spans BOTH phlimboV2.withdraw (delivers full principal `amount` + minted phUSD reward + auto-claimed stable to the migrator) AND phlimboV3.stake (pulls exactly `amount` principal via safeTransferFrom, and on a 2nd pass auto-claims the user's V3 phUSD/stable/promo to the migrator). Because `amount` == the full live V2 position (userInfo read L160, withdrawn in full L170) and V3.stake pulls exactly `amount`, principal nets to zero in the phUSD delta; the remainder is exactly the phUSD reward (V2 + any V3 2nd-pass auto-claim). stable and promo deltas are pure rewards. Each iteration captures promoBefore/stableBefore FRESH (L164-166) and forwards all deltas to the user before the next iteration, so nothing is double-forwarded or stranded across iterations. promoToken is read once per migrate() call (L149); a rotation cannot occur within a single successful call (rotation requires pause via beginFlush, but V3.stake is whenNotPaused and would revert), and across calls each call brackets the then-current promo, while any pre-rotation promo owed to an already-in-V3 user was paid directly during that rotation's batchClaim. No mis-forwarding of a retired promo balance."
+    },
+    {
+      "lead": "Lead 5 — nonReentrant not first modifier (SA-020)",
+      "verdict": "REFUTED (not exploitable)",
+      "reasoning": "On stake/withdraw/claim the only modifier preceding nonReentrant is whenNotPaused, whose check (Pausable._requireNotPaused) is a pure storage read with NO external call and no reentrancy-sensitive state mutation. The msg.sender==user||migrator authorization is an inline body require, not a preceding modifier. Therefore the reentrancy lock is fully engaged before any external call in the function body; the guard is NOT bypassable. Aderyn's ordering flag is a false positive here."
+    },
+    {
+      "lead": "SA-001/002/003 — state-after-external-call reentrancy in stake/withdraw/claim",
+      "verdict": "REFUTED (guard holds; counterparties trusted)",
+      "reasoning": "All value-handling entrypoints are nonReentrant with the guard actually engaged (see Lead 5). The pre-state external call is phUSD.mint (trusted protocol token, IFlax, no re-entrant callback) and rewardToken transfers (plain ERC20, no callback; ERC777 explicitly ruled out). The hook is invoked AFTER state finalization. No cross-function/cross-contract reentry path corrupts staker accounting."
+    },
+    {
+      "lead": "Secondary migrate brick — V2 position below V3 MINIMUM_STAKE",
+      "verdict": "REFUTED (assumption verified)",
+      "reasoning": "V2 and V3 both define MINIMUM_STAKE = 1e15 with identical dust-forced-full-exit rules (V2 src L100/L379, V3 L149/L645). Any nonzero V2 position is therefore >= 1e15 == V3's MINIMUM_STAKE, so phlimboV3.stake(amount,user) cannot revert on the minimum-stake check. No additional brick trigger here beyond CODE-001."
+    },
+    {
+      "lead": "PM-005 — emergencyTransfer then pauseWithdraw reverts (empty balance)",
+      "verdict": "CARRIED-FORWARD SPEC-CONFORMANCE (not re-filed as H/M)",
+      "reasoning": "emergencyTransfer drains phUSD, so the paused-emergency exit pauseWithdraw (L549 safeTransfer against zero balance) reverts. This is the F-01 / V2-F-01 spec-conformance item carried verbatim into V3; owner draining in a true emergency is a KNOWING action (funds are already gone). Route to spec-conformance channel and reconcile with ledger F-01 rather than a fresh H/M. The NEW incremental V3 issue (promo-specific stale accounting on resume) is captured as CODE-005."
+    }
+  ]
+}
+</content>
+</invoke>

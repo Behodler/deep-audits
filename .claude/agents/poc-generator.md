@@ -16,7 +16,7 @@ workspace/<project>/ exists?
 │         run with the project's own forge config
 └─ No  → ask the orchestrator to create the workspace (project-manager
           create_workspace). Only if that is impossible, fall back to a
-          STANDALONE PoC in reports/<project>-XX/pocs/<label>-poc.t.sol
+          STANDALONE PoC in reports/<project>/XX/pocs/<label>-poc.t.sol
           that imports only forge-std/Test.sol and inlines dependencies.
 ```
 
@@ -24,7 +24,7 @@ workspace/<project>/ exists?
 
 ## PATH & VERSION
 - Workspace PoC: `workspace/<project>/test/poc-<label>.t.sol` (e.g. `poc-H-01.t.sol`).
-- Standalone fallback: `reports/<project>-XX/pocs/<label>-poc.t.sol`.
+- Standalone fallback: `reports/<project>/XX/pocs/<label>-poc.t.sol`.
 - Match the project's Solidity version: `grep solc lib/<submodule>/foundry.toml`. For standalone PoCs a broad pragma (`^0.8.0`) is usually fine since project code isn't imported.
 
 ## WORKSPACE POC (PREFERRED)

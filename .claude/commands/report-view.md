@@ -35,7 +35,7 @@ Or simple array:
 ## 2. Resolve Project
 Invoke **project-manager**: "Resolve friendly name and get the latest versioned report dir"
 - Look up in registered-projects.json; if not found, list registered projects.
-- Get `<report-dir>` (latest `reports/<project>-XX/`) for locating submission files.
+- Get `<report-dir>` (latest `reports/<project>/XX/`) for locating submission files.
 
 ## 3. Load Selected Findings
 Invoke **finding-manager**: "Get findings by labels"

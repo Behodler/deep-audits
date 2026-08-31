@@ -1,0 +1,240 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-07-14T00:00:00Z",
+    "project": "phlimbo-ea",
+    "reportDir": "reports/phlimbo-ea/07",
+    "commit": "7045a96",
+    "agent": "severity-classifier",
+    "stage": "classified",
+    "inputStage": "sanitized (6 NEW pass-through + DEDUP-09 flagged)",
+    "criteria": "C4 (CLAUDE.md): High = assets stolen/lost/compromised directly or via valid attack path w/o hypotheticals; Medium = no direct asset risk but protocol function/availability impacted, or value leak with stated assumptions + external requirements; QA/Low = state-handling, spec deviations, centralization.",
+    "note": "Classifies ONLY the NEW findings that passed sanitization. Carried/suppressed/spec-conformance items (DEDUP-03b, DEDUP-04, DEDUP-10) keep their sanitizer disposition and are NOT re-classified here."
+  },
+
+  "classifiedFindings": [
+    {
+      "id": "CLASS-001",
+      "label": "H-01",
+      "originalId": "DEDUP-01",
+      "contract": "src/PhlimboV3.sol",
+      "function": "collectReward / _updatePool(promo) / batchClaim / finalizePromotion",
+      "severity": "high",
+      "plausibility": "plausible",
+      "faithfulness": false,
+      "footgun": false,
+      "regression": false,
+      "classification": {
+        "assetImpact": "Honest co-stakers' share of the partner promo-token pool is stolen: after batchClaim aligns per-staker promo debts during Flushing, a permissionless collectReward call re-advances accPromoPerShare, so a claimant with ~zero effective stake time collects promo tokens that economically belong to other stakers. Loss is bounded by the active promo pool size, not full TVL.",
+        "attackPath": [
+          "1. Owner opens a promo and later begins Flushing (a normal, recurring step of the promo lifecycle).",
+          "2. batchClaim aligns/settles per-staker accPromoPerShare debts for the flush.",
+          "3. Any address permissionlessly calls collectReward, which advances accPromoPerShare again past the aligned debts during the Flushing window.",
+          "4. The attacker (or an opportunistic staker) claims promo tokens in the next accrual with effectively zero stake time, capturing value that should accrue to honest co-stakers.",
+          "5. Alternate branch: the double-advance overshoots available balance, so honest claims revert with ERC20InsufficientBalance (claim DoS)."
+        ],
+        "likelihood": "medium-to-high - no privilege, no collusion, no economic black swan; requires only that the exploit occur inside a Flushing window during an active promo. That window is not attacker-triggered (owner runs beginFlush) but recurs every promo finalization as normal operation, so the opportunity is routinely available.",
+        "assumptions": "An active promo exists with a non-trivial promo pool and >1 staker; the theft magnitude scales with the promo pool and the honest stakers' aligned share.",
+        "externalRequirements": "A Flushing window during an active promo (routine operational state). Attacker does not need to control its timing, only to act within it."
+      },
+      "poc": "passing (theft + DoS branches; invariant INV-PROMO-01 broke 14 runs/840 calls and 30 runs/1800 calls)",
+      "justification": "Direct theft of other stakers' promo tokens via a permissionless entrypoint with no hypotheticals and a concrete, PoC-backed attack path -> C4 High. Plausible-High: the enabling state (flush during active promo) is normal recurring operation, not an extraordinary circumstance. Magnitude is bounded by promo pool size but bounding does not downgrade genuine theft; the finding is at direct asset risk, disqualifying it from Medium.",
+      "severityRationale": "Considered Medium (bounded loss, owner-run flush precondition) but rejected: Medium is for 'assets NOT at direct risk'. Here co-stakers' assets ARE directly taken via a permissionless path with a passing PoC, and the precondition is normal protocol state rather than a hand-wavy external assumption. CRITICAL: must not be suppressed under the Linear-Depletion (ledger M-04) acknowledgement - this is a distinct accumulator-advance-during-flush defect the rate-recompute mitigation does not cover.",
+      "flaggedForHumanReview": false
+    },
+    {
+      "id": "CLASS-002",
+      "label": "M-01",
+      "originalId": "DEDUP-02",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "migrate / seedUsers / withdrawAll",
+      "severity": "medium",
+      "plausibility": null,
+      "faithfulness": false,
+      "footgun": false,
+      "regression": false,
+      "priorArt": "ledger V2-M-01 (same availability-DoS class on MigratorV1V2; open)",
+      "classification": {
+        "assetImpact": "No theft. Availability/liveness: a single reverting/blocklisted reward recipient inside an unskippable forwarding loop bricks the entire migration chunk, and the reseed guard (L114) makes the documented straggler-exclusion escape unreachable, so the one-time V2->V3 migration cannot complete without redeploy+rewire.",
+        "attackPath": [
+          "1. Migration list includes a reward recipient that reverts on receipt (e.g. a USDC-blocklisted address, or a contract with a reverting fallback).",
+          "2. migrate iterates recipients and calls safeTransfer of the reward inside a loop with no per-recipient skip.",
+          "3. The reverting recipient reverts the whole chunk transaction.",
+          "4. No in-contract recovery exists (reseed guard blocks re-entry to exclude the straggler); the migration is stuck until the owner redeploys and rewires."
+        ],
+        "likelihood": "medium - requires one migrated reward recipient to be a reverting/blocklisted address; realistic with real-world token blocklists (frozen USDC), but a specific external condition.",
+        "assumptions": "At least one reward recipient in the migration set reverts on receipt.",
+        "externalRequirements": "A reverting/blocklisted recipient (external token behaviour). Owner-recoverable via redeploy+rewire; no funds lost, only liveness."
+      },
+      "poc": "not required at Medium beyond demonstrated revert path; behaviour mirrors ledger V2-M-01 class",
+      "justification": "Protocol function/availability impacted (migration bricks) with a documented external requirement (reverting recipient) and no direct asset risk -> textbook C4 Medium. Not Low: this is a full liveness DoS of a core migration flow with no in-contract recovery, above a state/completeness nit. Not High: no theft or fund loss, owner-recoverable by redeploy.",
+      "flaggedForHumanReview": false
+    },
+    {
+      "id": "CLASS-003",
+      "label": "M-02",
+      "originalId": "DEDUP-03a",
+      "contract": "src/PhlimboV3.sol",
+      "function": "emergencyTransfer / _updatePool(promo) / _claimRewards(promo)",
+      "severity": "medium",
+      "plausibility": null,
+      "faithfulness": false,
+      "footgun": true,
+      "footgunClass": "operational-hazard (Law 3 non-obvious owner footgun)",
+      "regression": false,
+      "classification": {
+        "assetImpact": "No theft. Availability: emergencyTransfer sweeps promo balances but does NOT reset the V3-only promo bookkeeping (promoToken / promoRewardBalance / promoPhase), so after unpause, stake / withdraw / claim revert for every staker holding a pending promo position - core functions bricked for the affected cohort.",
+        "attackPath": [
+          "1. During an active promo, the (non-malicious) owner invokes emergencyTransfer to drain balances - a plausible incident response.",
+          "2. Promo bookkeeping (promoToken/promoRewardBalance/promoPhase) is left set with no backing balance.",
+          "3. On unpause, _updatePool/_claimRewards promo math references the now-inconsistent state.",
+          "4. stake/withdraw/claim revert for all stakers with pending promo until the owner performs a non-obvious beginFlush -> batchClaim -> finalizePromotion recovery dance."
+        ],
+        "likelihood": "low-to-medium - requires the owner to use emergencyTransfer specifically while a promo is active; the surprising bricking consequence is exactly the non-obvious part that makes it a reportable footgun rather than an obvious misuse.",
+        "assumptions": "An active promo with stakers holding pending promo positions at the time emergencyTransfer is called.",
+        "externalRequirements": "Owner uses emergencyTransfer during an active promo (non-obvious footgun, in scope per Law 3)."
+      },
+      "justification": "Availability of core protocol functions (stake/withdraw/claim) impacted for all affected stakers -> C4 Medium. Classified by the impact it unlocks per Law 3: a competent non-malicious owner would be surprised that an emergency drain bricks core functions, so it is an operational hazard, not a malicious-admin vector. Recoverable via a non-obvious flush sequence caps it at Medium (not High: no fund loss); above Low because core function availability is broadly disrupted. Safe-config guidance: finalize/flush the promo before invoking emergencyTransfer, or add promo-state reset to emergencyTransfer.",
+      "flaggedForHumanReview": false
+    },
+    {
+      "id": "CLASS-004",
+      "label": "L-01",
+      "originalId": "DEDUP-05",
+      "contract": "src/PhlimboV3.sol",
+      "function": "collectReward",
+      "severity": "low",
+      "faithfulness": false,
+      "footgun": false,
+      "regression": false,
+      "priorArt": "ledger V1-M-02 (permissionless collectReward stable re-anchor grief, acknowledged, downgraded to Low)",
+      "classification": {
+        "assetImpact": "No theft. Griefing/state: permissionless collectReward re-anchors the stable rewardPerSecond over a FRESH full depletionDuration (L570), letting a third party repeatedly reset the stable-reward decay schedule.",
+        "attackPath": [
+          "1. Attacker calls collectReward (must satisfy amount>0 gate, unlike V1's free poke).",
+          "2. rewardPerSecond is recomputed over a fresh depletionDuration, stretching the stable-reward payout curve.",
+          "3. Repeated calls grief the reward schedule but are self-limiting (each requires a real amount>0)."
+        ],
+        "likelihood": "low - the amount>0 gate makes it costly/self-limiting; no fund theft, only schedule perturbation.",
+        "assumptions": "Attacker willing to satisfy the amount>0 precondition repeatedly.",
+        "externalRequirements": "None beyond the amount>0 gate."
+      },
+      "justification": "State-handling/griefing with no direct asset risk and a self-limiting gate -> C4 Low, consistent with the V1-M-02 prior-art downgrade. Not suppressed: genuine recurrence on new V3 code (Law 1 keep). Not Medium: the amount>0 gate neutralises the free-poke availability angle that would push it up.",
+      "flaggedForHumanReview": false
+    },
+    {
+      "id": "CLASS-005",
+      "label": "L-02",
+      "originalId": "DEDUP-06",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_tryTransfer / batchClaim",
+      "severity": "low",
+      "faithfulness": false,
+      "footgun": false,
+      "regression": false,
+      "classification": {
+        "assetImpact": "No theft. Availability (token-gated): _tryTransfer does abi.decode on transfer return data; a non-standard promo token returning short return-data reverts the batchClaim chunk and makes finalizePromotion unreachable.",
+        "attackPath": [
+          "1. Owner configures a promo with a non-standard token whose transfer returns fewer than 32 bytes.",
+          "2. _tryTransfer's abi.decode reverts on the short return-data.",
+          "3. The batchClaim chunk reverts; finalizePromotion cannot be reached for that token class."
+        ],
+        "likelihood": "low - requires the owner to select a non-standard promo token; promo tokens are owner-vetted per promotion.",
+        "assumptions": "Owner-vetted promo token behaves like a standard ERC20 (the safe path); the bug only triggers on a non-standard token.",
+        "externalRequirements": "A non-standard promo token (token-assumption gated)."
+      },
+      "justification": "Token-assumption-gated availability edge with no fund loss on a V3-only construct -> C4 Low. Owner vets the promo token, so the trigger is narrow; kept (Law 1) rather than dismissed because the guarantee 'flush must never brick' is a stated V3 property.",
+      "flaggedForHumanReview": false
+    },
+    {
+      "id": "CLASS-006",
+      "label": "L-03",
+      "originalId": "DEDUP-08",
+      "contract": "src/PhlimboV3.sol",
+      "function": "pauseWithdraw (zombie _stakers entries)",
+      "severity": "low",
+      "faithfulness": false,
+      "footgun": true,
+      "footgunClass": "operational-hazard (gas inflation, owner-borne)",
+      "regression": false,
+      "classification": {
+        "assetImpact": "No theft, correctness-harmless (zombies visited with pending==0). Operational: pauseWithdraw-to-zero leaves zombie entries in the _stakers EnumerableSet, monotonically inflating the owner's chunked-flush (batchClaim to flushCursor==_stakers.length()) gas cost.",
+        "attackPath": [
+          "1. A staker (>=MINIMUM_STAKE) is reduced to zero via pauseWithdraw during a pause window, leaving a residual _stakers entry.",
+          "2. Over many such events the set grows with zero-value zombies.",
+          "3. batchClaim must still iterate them, inflating owner flush gas; in the tail this could approach block-gas limits (availability), but not cheaply third-party-spammable (needs pause window + prior >=MINIMUM_STAKE stake)."
+        ],
+        "likelihood": "low - accumulation is slow and not cheaply attacker-driven; impact is owner-borne gas.",
+        "assumptions": "Repeated pause-window zero-outs accumulate faster than any cleanup.",
+        "externalRequirements": "Pause windows plus prior qualifying stakes."
+      },
+      "justification": "Correctness-harmless operational gas footgun with only owner-borne cost and no direct asset/availability risk in normal operation -> C4 Low (borderline QA). Not Medium: no user-facing function impact and not cheaply weaponisable; the availability tail is remote.",
+      "flaggedForHumanReview": false
+    },
+    {
+      "id": "CLASS-007",
+      "label": "Q-01",
+      "originalId": "DEDUP-07",
+      "contract": "src/MigratorV2V3.sol",
+      "function": "withdrawAll",
+      "severity": "qa",
+      "faithfulness": false,
+      "footgun": false,
+      "regression": false,
+      "classification": {
+        "assetImpact": "None in normal flow. Completeness gap: the withdrawAll escape hatch sweeps phUSD + rewardToken but omits promoToken, so promo tokens sitting in the migrator are not covered by the escape hatch.",
+        "attackPath": [
+          "1. Escape-hatch scenario leaves promoToken balance in the migrator.",
+          "2. withdrawAll recovers phUSD + rewardToken but not promoToken.",
+          "3. Promo tokens require a separate recovery path."
+        ],
+        "likelihood": "n/a - no user-fund risk in the normal migration flow.",
+        "assumptions": "PromoToken balance present in the migrator at escape time.",
+        "externalRequirements": "None."
+      },
+      "justification": "Completeness/state-handling gap with no user-fund risk -> C4 QA. Route to QA bundle.",
+      "flaggedForHumanReview": false
+    },
+    {
+      "id": "CLASS-008",
+      "label": "L-04",
+      "originalId": "DEDUP-09",
+      "contract": "src/PhlimboV3.sol",
+      "function": "startPromotion / topUpPromotion",
+      "severity": "low",
+      "faithfulness": false,
+      "footgun": false,
+      "regression": false,
+      "classification": {
+        "assetImpact": "No theft. Retryable revert: strict balanceOf-delta == amount assertion on the owner-invoked promo funding paths reverts on a fee-on-transfer / rebasing / externally-donated promo token.",
+        "attackPath": [
+          "1. Owner funds a promo with startPromotion/topUpPromotion using a fee-on-transfer or otherwise non-standard token.",
+          "2. The received balance delta != amount, so the strict-equality assertion reverts.",
+          "3. Funding is rejected (retryable); no funds lost."
+        ],
+        "likelihood": "low - owner-invoked, owner-vetted token, retryable.",
+        "assumptions": "Owner selects a fee-on-transfer/non-standard/rebasing promo token.",
+        "externalRequirements": "Non-standard promo token behaviour."
+      },
+      "justification": "Owner-invoked, retryable funding revert on a non-standard token with no theft -> C4 Low at most, and it sits near the C4 known-invalid fee-on-transfer / non-standard-ERC20 bucket. Kept VISIBLE (Law 1) but flagged: if the strict-equality is purely an intentional fee-on-transfer rejection, the validity-checker should suppress it as known-invalid; otherwise it stands as Low. SA-027 state-after-transferFrom here is an owner KNOWING action (Law 3), a note only, not a reentrancy finding.",
+      "flaggedForHumanReview": true,
+      "flagReason": "borderline C4 known-invalid (fee-on-transfer / non-standard ERC20); pending validity-checker final suppress/keep decision."
+    }
+  ],
+
+  "notReclassifiedHere": {
+    "DEDUP-03b": "spec-conformance carryover (F-01 / V2-F-01 class on V3); owner KNOWING drain, route to spec-conformance report, not a fresh H/M.",
+    "DEDUP-04": "config-conditional known issue (KI-10 zero-APY immunization + SolvencyDetermination.md documented mint-based solvency); held at Medium, RE-CLASSIFY HIGH only if a non-zero-APY config is confirmed planned/deployed.",
+    "DEDUP-10": "ledger carryover [V2-M-01] still-open strict fingerprint match on unchanged retired MigratorV1V2; carryover stub only, no new report."
+  },
+
+  "finalSeverityTable": [
+    {"label": "H-01", "originalId": "DEDUP-01", "severity": "High", "plausibility": "Plausible-High", "contract": "PhlimboV3", "title": "Promo Flushing-window accPromoPerShare over-credit steals co-stakers' promo tokens (or DoS)"},
+    {"label": "M-01", "originalId": "DEDUP-02", "severity": "Medium", "plausibility": null, "contract": "MigratorV2V3", "title": "Reverting/blocklisted reward recipient bricks the V2->V3 migration chunk (no in-contract recovery)"},
+    {"label": "M-02", "originalId": "DEDUP-03a", "severity": "Medium", "plausibility": null, "contract": "PhlimboV3", "title": "emergencyTransfer leaves promo bookkeeping stale -> resume bricks stake/withdraw/claim (owner footgun)"},
+    {"label": "L-01", "originalId": "DEDUP-05", "severity": "Low", "plausibility": null, "contract": "PhlimboV3", "title": "Permissionless collectReward re-anchors stable rewardPerSecond over a fresh depletionDuration (grief)"},
+    {"label": "L-02", "originalId": "DEDUP-06", "severity": "Low", "plausibility": null, "contract": "PhlimboV3", "title": "_tryTransfer abi.decode reverts on short return-data, bricks batchClaim chunk (token-gated)"},
+    {"label": "L-03", "originalId": "DEDUP-08", "severity": "Low", "plausibility": null, "contract": "PhlimboV3", "title": "Zombie _stakers entries monotonically inflate owner flush gas cost"},
+    {"label": "Q-01", "originalId": "DEDUP-07", "severity": "QA", "plausibility": null, "contract": "MigratorV2V3", "title": "withdrawAll escape hatch omits promoToken sweep (completeness gap)"},
+    {"label": "L-04", "originalId": "DEDUP-09", "severity": "Low", "plausibility": null, "contract": "PhlimboV3", "title": "Strict balance-delta equality reverts on fee-on-transfer/rebasing promo token (flagged: near known-invalid)"}
+  ]
+}

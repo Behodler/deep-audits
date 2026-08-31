@@ -1,0 +1,111 @@
+{
+  "project": "phlimbo-ea",
+  "reportDir": "reports/phlimbo-ea/07",
+  "commit": "7045a96",
+  "scanTimestamp": "2026-07-14T00:00:00Z",
+  "scanType": "economic",
+  "tier": "Tier-2 (protocol-wide economic / interaction analysis over Tier-1 profiles)",
+  "contractsScanned": 2,
+  "scopeFocus": ["src/PhlimboV3.sol (NEW promo subsystem + rotation state machine)", "src/MigratorV2V3.sol (NEW live-read chunked migration)"],
+  "linearDepletionVerdict": {
+    "class": "Linear-Depletion / rate-drift emission bug (family-recurring, DO NOT auto-suppress)",
+    "verdict_promo_stream": "MITIGATED / not-reborn",
+    "verdict_stable_stream": "LATENT griefing survives (permissionless collectReward re-anchor) — inherited from V2, see ECON-003",
+    "evidence": [
+      "The classic V1 bug was recompute of rewardPerSecond inside _updatePool (fires on EVERY user interaction), re-anchoring the depletion window each touch. V2 fixed it by moving the recompute out of _updatePool. V3 preserves that discipline for BOTH streams: _updatePool (L715-765) accrues but NEVER recomputes rewardPerSecond or promoRewardPerSecond.",
+      "PROMO recompute sites are ONLY topUpPromotion (L385) and setPromoDepletionDuration (L403), BOTH onlyOwner. There is NO permissionless promo-rate recompute, so a griefer cannot dilute/reset the promo rate mid-window. The permissionless promo entrypoint batchClaim (L438) only aligns promoDebt to a FROZEN accPromoPerShare (contract is paused during Flushing) and pays out — it does not accrue or re-rate. => promo Linear-Depletion is genuinely mitigated.",
+      "accPromoPerShare is never reset across rotations (L456/L477-479); the flush aligns every promoDebt to it, so `amount*acc - debt` starts the next promo at exactly 0. No cross-window over-accrual path found.",
+      "Contrast: the STABLE rewardPerSecond IS recomputed at a PERMISSIONLESS site — collectReward (L570) — so the re-anchor griefing survives for the stable leg only (ECON-003). It is a slow-down/delay grief, not the V1 unbounded-stretch-on-every-interaction bug, and carries no theft."
+    ]
+  },
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "stale-promo-accounting-bricks-core-staking-on-resume",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "function": "emergencyTransfer / _updatePool(promo) / _claimRewards(promo)",
+      "line": 307,
+      "lineStart": 307,
+      "lineEnd": 325,
+      "description": "emergencyTransfer() sweeps the on-hand promo balance to `recipient` and pauses, but does NOT touch the promo bookkeeping: promoToken stays set, promoRewardBalance stays > 0, promoPhase stays Active (L307-325 only move tokens + _pause; no promo-state reset). After the sweep the accounting is stale: promoRewardBalance > 0 while the actual promo balance held by the contract is 0. When the owner later unpause()s to resume normal operation (unpause is permitted because promoPhase==Active != Flushing), the FIRST user interaction runs _updatePool(), whose promo block (L753-762) still sees promoToken!=0 and promoRewardBalance>0, so it credits accPromoPerShare against the phantom balance. _claimRewards() (L800-807) then computes a positive pendingPromo and calls promoToken.safeTransfer(beneficiary, pendingPromo) against a zero balance, which REVERTS. Because _claimRewards runs inside stake/withdraw/claim, every existing staker with any pending promo is bricked out of ALL three core functions, and pauseWithdraw is unavailable (contract is unpaused, and it would itself revert on the swept phUSD balance — the separate PM-005/F-01 issue).",
+      "codeSnippet": "// emergencyTransfer: sweeps promo, does NOT clear promoToken/promoRewardBalance/promoPhase\nif (address(promoToken) != address(0)) { ... promoToken.safeTransfer(recipient, promoBalance); }\n_pause();\n// later, on resume: _claimRewards promo leg reverts on zero balance\nif (address(promoToken) != address(0)) {\n  uint256 pendingPromoAmount = (amount*accPromoPerShare)/PRECISION - promoDebt;\n  if (pendingPromoAmount > 0) { promoToken.safeTransfer(beneficiary, pendingPromoAmount); } // REVERTS: balance==0\n}",
+      "economicImpact": "Availability loss: after an emergency drain during an ACTIVE (or Flushing) promotion, resuming the contract bricks stake/withdraw/claim for every existing staker — principal (phUSD) is unwithdrawable through the normal path until recovery. No direct theft. Stakers also permanently lose the promo they had already accrued (those tokens left via emergencyTransfer to `recipient`). Recovery is NON-obvious: owner must unpause -> beginFlush (re-pauses) -> drive batchClaim to completion (each pending promo transfer fails and is banked into unclaimablePromo via the non-reverting _tryTransfer, so the flush itself does NOT brick) -> finalizePromotion (clears promoToken/promoRewardBalance) -> unpause. Only after the promo slot is cleared do core functions work again.",
+      "attackScenario": "1. Owner has an Active promotion (promoToken set, promoRewardBalance>0).\n2. An incident prompts owner to call emergencyTransfer(treasury) — the documented break-glass. All balances (incl. promo) leave; contract pauses. Promo bookkeeping is untouched.\n3. Incident resolved; owner calls unpause() expecting normal operation to resume (legitimate: the contract supports pause/unpause, there is no selfdestruct/finality).\n4. Any staker's next stake/withdraw/claim reverts inside _claimRewards' promo transfer (zero balance) — staking is wedged for the whole user base until the owner discovers and runs the full flush-dance to clear the promo slot.",
+      "profitability": "Not attacker-profitable (no theft); this is an owner FOOTGUN, in scope under Law 3 as a non-obvious consequence of a legitimate owner action. A competent, non-malicious owner would be surprised that emergencyTransfer + unpause bricks staking.",
+      "affectedParties": ["all existing stakers (bricked core functions + forfeited accrued promo)", "protocol (availability/reputation)"],
+      "recommendation": "In emergencyTransfer, when a promo slot is set, also reset the promo bookkeeping (promoToken=0, promoRewardBalance=0, promoPhase=None, promoRewardPerSecond=0) — or gate _updatePool/_claimRewards promo accrual on actual on-hand balance — so a drained promo cannot brick the resume path. At minimum, document that emergencyTransfer during a promotion requires a full finalize-flush before unpausing.",
+      "confidence": "medium",
+      "crossRef": "Confirms profile suspiciousArea (PhlimboV3.profile #96) — stale promo accounting after emergencyTransfer. Distinct root cause from PM-005/F-01 (pauseWithdraw-on-zero-phUSD); the two compound."
+    },
+    {
+      "id": "ECON-002",
+      "type": "uncapped-unbacked-phusd-mint-on-reward-leg",
+      "severity": "potential-medium",
+      "contract": "src/PhlimboV3.sol",
+      "function": "_updatePool / _claimRewards / _updatePhUSDEmissionRate",
+      "line": 744,
+      "lineStart": 744,
+      "lineEnd": 746,
+      "description": "The phUSD reward leg is minted on demand with NO funded-budget cap, unlike the stable and promo legs. _updatePool accrues phUSDReward = timeElapsed * phUSDPerSecond with no cap against any balance (L744-746), and _claimRewards mints it via phUSD.mint(beneficiary, pendingPhUSDAmount) (L781-784). Contrast the stable leg, capped at rewardBalance (L730), and the promo leg, capped at promoRewardBalance (L756). phUSDPerSecond = totalStaked * desiredAPYBps / 10000 / SECONDS_PER_YEAR (L831), i.e. a fresh, uncollateralized emission of the protocol's own stable token at the owner-set APY on staked principal.",
+      "codeSnippet": "if (phUSDPerSecond > 0) {\n  uint256 phUSDReward = timeElapsed * phUSDPerSecond;   // NO cap\n  accPhUSDPerShare += (phUSDReward * PRECISION) / totalStaked;\n}\n// ...\nphUSD.mint(beneficiary, pendingPhUSDAmount);            // unbacked mint",
+      "economicImpact": "Config-conditional dilution of ALL phUSD holders. If a non-zero desiredAPYBps is ever configured, the protocol mints phUSD unbacked at that APY: annual unbacked issuance = totalStaked * desiredAPYBps / 10000. Worked example: totalStaked = 10,000,000 phUSD, desiredAPYBps = 500 (5%) => 500,000 phUSD/yr minted with zero collateral behind it, degrading the backing ratio / peg of a token that is supposed to be a stablecoin. The mint is unbounded in aggregate (grows with time and with totalStaked); there is no funded reserve or per-window ceiling to stop emission if the backing source lags.",
+      "attackScenario": "Not an attack — an owner-config footgun / known structural concern. desiredAPYBps has no upper bound and the phUSD leg has no reserve, so any non-zero APY silently inflates unbacked phUSD. Currently immunized ONLY by the zero-APY default (phUSDPerSecond==0 => the L744 branch is skipped).",
+      "profitability": "n/a (dilution, not extraction). Stakers gain freshly-minted phUSD; every phUSD holder is diluted pro-rata.",
+      "affectedParties": ["all phUSD holders (dilution / backing erosion)", "protocol peg"],
+      "recommendation": "Back the phUSD reward leg with the same funded-cap discipline as the stable/promo legs (deplete a funded balance), or bound desiredAPYBps and document the intended backing source. Emit at honest severity only if a non-zero-APY config is in scope for this run.",
+      "confidence": "medium",
+      "crossRef": "Reconciles to pattern-matcher PM-001 and ledger V2-M-02 (phUSD mint authority) / V2-M-03 (memory: re-classify HIGH if a non-zero-APY config ships; zero-APY / KI-10 currently immunizes). Sanitizer to reconcile by fingerprint — this is a known-concern regression carried verbatim into V3, not a fresh discovery."
+    },
+    {
+      "id": "ECON-003",
+      "type": "permissionless-rate-reanchor-griefing-stable-leg",
+      "severity": "potential-low",
+      "contract": "src/PhlimboV3.sol",
+      "function": "collectReward",
+      "line": 559,
+      "lineStart": 559,
+      "lineEnd": 573,
+      "description": "collectReward is permissionless (no access control) and is the canonical recompute site for the stable stream: it runs _updatePool() at the old rate, pulls `amount` rewardToken from the caller, then sets rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration (L570), re-anchoring the depletion window over the FULL depletionDuration from `now`. Because the recompute resets the remaining runway (rewardBalance/rewardPerSecond) back to a fresh depletionDuration, anyone can call collectReward with a dust `amount` (require is only amount>0; 1 wei of the stablecoin) to repeatedly stretch the stable emission window, slowing distribution to stakers.",
+      "codeSnippet": "function collectReward(uint256 amount) external nonReentrant { // permissionless\n  require(amount > 0, ...);\n  _updatePool();\n  rewardToken.safeTransferFrom(msg.sender, address(this), amount);\n  rewardBalance += amount;\n  rewardPerSecond = (rewardBalance * PRECISION) / depletionDuration; // re-anchors runway to full duration\n}",
+      "economicImpact": "Griefing of reward TIMELINESS (not principal, not amount): each re-anchor can only slow emission (runway resets to <= depletionDuration; it never accelerates), so a griefer calling collectReward each block turns linear depletion into exponential decay — ~63% distributed by the end of the nominal window instead of 100%, deferring roughly the remaining ~37% beyond schedule. No tokens are lost (they stay in rewardBalance and eventually distribute) and no redistribution between stakers occurs (uniform slow-down). Cost to griefer: gas every block + 1 wei stablecoin per call, continuously — economically marginal, self-limiting.",
+      "attackScenario": "1. Stable rewards accruing with some runway < depletionDuration.\n2. Griefer calls collectReward(1) each block -> rewardPerSecond keeps resetting to rewardBalance/depletionDuration -> emission asymptotically slows -> stakers' stable rewards are delayed.",
+      "profitability": "Unprofitable for the griefer (pure grief; must pay gas indefinitely). Included for completeness of the Linear-Depletion family sweep.",
+      "affectedParties": ["stakers (delayed stable rewards, time-value only)"],
+      "recommendation": "Restrict collectReward to the funder role (yield-accumulator), or make the recompute anchor to the REMAINING window rather than a fresh full depletionDuration, so a third party cannot re-anchor. Note this is INHERITED from V2 (also present there); the promo leg is immune because its recompute sites are onlyOwner.",
+      "confidence": "medium",
+      "crossRef": "Confirms profile suspiciousArea (PhlimboV3.profile #93). Inherited-from-V2; low severity (grief/time-value, no theft). Reinforces the Linear-Depletion verdict: promo=mitigated, stable=residual-permissionless-grief."
+    }
+  ],
+  "verifiedNoFinding": [
+    {
+      "id": "ECON-N1",
+      "topic": "Migration economic correctness (MigratorV2V3.migrate)",
+      "contract": "src/MigratorV2V3.sol",
+      "line": 163,
+      "conclusion": "CORRECT — forwards exactly the pending rewards each user was owed, no haircut / over-forward / stranding.",
+      "reasoning": "The phUSD balance bracket (phUSDBefore @L163, delta @L180) spans BOTH the V2 withdraw (delivers principal `amount` + minted phUSD reward + auto-claimed stable to the migrator) AND the V3 stake (pulls exactly `amount` phUSD via the max forceApprove @L144). Principal received == principal restaked, so it nets exactly out of the phUSD delta; the remainder is precisely the phUSD reward. stable delta (L181) and promo delta (L183) are pure rewards. `amount` is read LIVE from V2 (L160) immediately before withdraw, so a user staking/withdrawing in V2 mid-migration is handled robustly (withdraw(liveAmount) then stake(liveAmount) still nets; amount==0 is skipped). On a straggler SECOND pass the same bracket also captures V3 auto-claimed phUSD/stable/promo (user already in V3) and forwards them — the user correctly receives BOTH their V2 straggler rewards and their V3-accrued rewards, with no double-count (principal still nets: V3.stake pulls exactly the re-staked `amount`). V2's dust rule guarantees any nonzero position >= MINIMUM_STAKE, so V3.stake never reverts on the minimum. Per-iteration bracketing isolates each user (prior-iteration residual sits in the `before` baseline and is not mis-forwarded). No mint role on the migrator; V2 mints during its own withdraw.",
+      "residualNote": "The only migrate() concern is availability, not value: a single reward recipient that cannot receive a token (blocklisted USDC / reverting fallback) reverts the whole chunk (safeTransfer, not the non-reverting _tryTransfer that V3.batchClaim uses), and reseed is forbidden mid-pass -> the migration can wedge. That is captured as MIG-LOCAL-01 / PM-002 (availability DoS, owner-recoverable via fresh migrator; no theft) — a liveness issue, not an economic-loss finding, so not re-filed here."
+    },
+    {
+      "id": "ECON-N2",
+      "topic": "Promo accrual rounding / divide-before-multiply (SA-014)",
+      "contract": "src/PhlimboV3.sol",
+      "line": 754,
+      "conclusion": "No economic finding — rounding favors the protocol; dust is bounded and swept, not leaked to users.",
+      "reasoning": "promoRewardPerSecond = amount*PRECISION/duration retains the fractional rate (scaled by 1e18), so potentialPromo = (promoRewardPerSecond*timeElapsed)/PRECISION (L754) truncates < 1 wei of promo per accrual. accPromoPerShare += (promoToDistribute*PRECISION)/totalStaked (L759) is standard MasterChef floor division: it rounds DOWN on accrual (the protocol-favoring direction per the rounding checklist), stranding at most sub-wei-per-share of promo in promoRewardBalance. This dust, the undistributed remainder, and unclaimablePromo are all swept to the owner-chosen leftoverRecipient at finalizePromotion (L487-490). No user-favoring round-trip exists (rewards are pull-accrual, not deposit/redeem), and accPromoPerShare never resets so nothing strands or double-credits between windows. Value flows to leftoverRecipient, never lost to the protocol and never over-paid to a user. (This is V3-LOCAL-03, informational.)"
+    },
+    {
+      "id": "ECON-N3",
+      "topic": "phUSD emission rate recompute on stake/withdraw (rate-drift check)",
+      "contract": "src/PhlimboV3.sol",
+      "line": 825,
+      "conclusion": "No drift bug — the phUSD leg is APY-pegged, not depletion-anchored.",
+      "reasoning": "_updatePhUSDEmissionRate (L825-832) sets phUSDPerSecond = totalStaked*desiredAPYBps/10000/SECONDS_PER_YEAR — a stateless function of current totalStaked, correctly recomputed when principal changes. This is NOT the V1 'distribute-remaining-balance-over-full-window' re-anchor, so recomputing it on every stake/withdraw introduces no window drift. The only phUSD concern is the uncapped/unbacked mint (ECON-002)."
+    }
+  ],
+  "notes": [
+    "Trusted verified properties from profiles (checkedArithmetic, flushCompleteness, accPromoPerShareNeverReset, minStakeInvariant) were treated as axioms. accPromoPerShareNeverReset and the flush completeness were spot-verified against source (L456/L477-499) because ECON-001 depends on them and they were tagged 'verified-by-construction'.",
+    "No oracle / AMM / flash-loan surface exists (time-linear accrual only) — oracle & price-manipulation categories are N/A (confirmed by pattern-matcher checkedNoMatch)."
+  ]
+}

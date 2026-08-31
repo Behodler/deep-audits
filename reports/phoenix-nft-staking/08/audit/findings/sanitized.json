@@ -1,0 +1,202 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanRun": "phoenix-nft-staking-08",
+  "sanitizationTimestamp": "2026-04-27T00:00:00Z",
+  "agent": "sanitizer",
+  "input": {
+    "source": "reports/phoenix-nft-staking/08/audit/findings/deduplicated.json",
+    "findingCount": 8,
+    "severityDistribution": {"high": 1, "medium": 3, "low": 4}
+  },
+  "output": {
+    "findingCount": 7,
+    "severityDistribution": {"high": 1, "medium": 3, "low": 3},
+    "removedCount": 1,
+    "flaggedCount": 1
+  },
+  "knownIssueSources": [
+    "registered-projects.json projects['phoenix-nft-staking'].knownIssues (14 entries)",
+    "registered-projects.json projects['phoenix-nft-staking'].designDecisions (12 entries)",
+    "lib/phoenix-nft-staking/CLAUDE.md (Feature Specification + Critical Invariants)",
+    "lib/phoenix-nft-staking/src/INFTSupply.sol (NatSpec re production wiring)",
+    "lib/phoenix-nft-staking/src/BatchNFTMinter.sol (NatSpec re donation behavior, no-reentrancy claim, atomic-rollback claim)",
+    "C4 known-invalid finding categories (FOT, user-input mistakes)"
+  ],
+  "priorAuditSubmissionsConsulted": [
+    "reports/phoenix-nft-staking/07/audit/submissions/M-01-submission.md (emergencyWithdraw _updatePool ordering)",
+    "reports/phoenix-nft-staking/07/audit/submissions/qa-report.md (L-01..L-13, C-01..C-03)",
+    "reports/phoenix-nft-staking/05/audit/submissions/M-03-submission.md (R sized against staked subset; geometric APY floor framing)",
+    "reports/phoenix-nft-staking/05/audit/submissions/qa-report.md (L-01 donation grief on NFTStaker)",
+    "reports/phoenix-nft-staking/04/audit/submissions/M-01-submission.md, M-02-submission.md, qa-report.md",
+    "reports/phoenix-nft-staking/03/audit/submissions/M-01-submission.md, qa-report.md",
+    "reports/phoenix-nft-staking/02/audit/submissions/M-01-submission.md, qa-report.md",
+    "reports/phoenix-nft-staking/01/audit/submissions/M-01-submission.md, M-03-submission.md, qa-report.md",
+    "reports/phoenix-nft-staking/06 (rejected only) / reports/phoenix-nft-staking (rejected only)"
+  ],
+  "scopeAssumptions": {
+    "paymentToken": "Standard ERC20 (per project: 'Underlying tokens are standard ERC20 without transfer hooks or fee-on-transfer'). FOT/rebasing tokens are C4-known-invalid unless explicitly listed in scope; no such listing exists for phoenix-nft-staking.",
+    "productionMinter": "NFTMinterV2 (confirmed via INFTSupply.sol NatSpec L15-L18: 'NFTMinterV2 is the concrete implementation; production wiring of INFTSupply is a direct cast of the deployed NFTMinterV2 address'). NFTStaker is wired against NFTMinterV2 via INFTSupply. BatchNFTMinter, however, is wired against the V1 ITokenMinter — this is the DEDUP-001 defect, not an audit assumption error.",
+    "newCodePath": "BatchNFTMinter.sol added in story-009 (per scope update note). Confirmed no prior audit submission references BatchNFTMinter or batchMint."
+  },
+  "findings": [
+    {
+      "id": "DEDUP-001",
+      "originalIds": ["ECON-001"],
+      "scanners": ["econ-scanner"],
+      "title": "BatchNFTMinter wired to V1 ITokenMinter interface; non-functional against production NFTMinterV2",
+      "severitySuggestion": "high",
+      "type": "interface-incompatibility / functional-defect",
+      "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 73,
+      "rootCause": "BatchNFTMinter imports legacy V1 ITokenMinter and calls 3-arg mint(address,uint256,address). Production NFTMinterV2 only exposes mint(uint256,address) and mint(uint256,address,bytes). Selectors differ; every batchMint reverts on selector miss against the V2 minter. MockITokenMinter mirrors V1 so the test suite does not catch the regression.",
+      "impact": "Functional DoS of the entire helper against the spec-bound production minter. Users lose gas; the documented UX optimisation is undelivered.",
+      "recommendation": "Re-target BatchNFTMinter at ITokenMinterV2 (`yield-claim-nft/V2/interfaces/ITokenMinterV2.sol`) and call `mint(dispatcherIndex, recipient)`. Add an integration test against the deployed NFTMinterV2 ABI rather than the V1 mock.",
+      "confidence": "high",
+      "sanitizationNotes": "VERIFIED. INFTSupply.sol NatSpec (L15-L18) explicitly states the production wiring is NFTMinterV2. NFTStaker depends on INFTSupply (which exposes only configs+totalSupply, both of which V2 implements). The V1 ITokenMinter at lib/.../yield-claim-nft/src/interfaces/ITokenMinter.sol declares mint(address,uint256,address); the V2 ITokenMinterV2 at lib/.../yield-claim-nft/src/V2/interfaces/ITokenMinterV2.sol declares mint(uint256,address). Selectors differ (computed from canonical signatures). The audit assumption that production is V2 is correct per the project's own documentation. Not in any known-issues list. No prior audit submission addresses BatchNFTMinter (introduced in story-009). KEEP at high."
+    },
+    {
+      "id": "DEDUP-002",
+      "originalIds": ["ECON-002"],
+      "scanners": ["econ-scanner"],
+      "title": "batchMint has no per-mint or cumulative price ceiling; front-runner can bump price between submission and inclusion, gas-griefing the entire batch",
+      "severitySuggestion": "medium",
+      "type": "MEV / front-run griefing",
+      "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 65,
+      "rootCause": "No `maxStartingPrice` / `maxCumulativePrice` parameter. Dispatcher's `price` grows by `growthBasisPoints` per mint; any concurrent mint between user submission and inclusion makes the cumulative cost exceed the prepaid `paymentAmount`, reverting the entire batch atomically.",
+      "impact": "Honest batch minters lose gas on reverted batches. Front-runner secures the cheapest slots and the early-minter geometric APY premium (compounds with DEDUP-006). Atomic rollback prevents overpayment but does not prevent denial.",
+      "recommendation": "Add a `maxCumulativePrice` (or `maxPerMintPrice`) parameter and revert if `nftMinter.configs(dispatcherIndex).price > maxStartingPrice` at the start of the call. A coarse `maxPaymentPerMint` would also bound user downside.",
+      "confidence": "high",
+      "sanitizationNotes": "Not a known issue. Not addressed by any prior submission. The known-issue 'Price growth via basis points may compound to very large values over many mints (documented design)' is from yield-claim-nft, not phoenix-nft-staking, and addresses long-term price compounding — not the inability of batchMint callers to set a slippage ceiling. Distinct issue. KEEP."
+    },
+    {
+      "id": "DEDUP-003",
+      "originalIds": ["CODE-BNM-001"],
+      "scanners": ["code-scanner"],
+      "title": "batchMint forfeits dispatcher-side slippage protection by passing empty extraData on every iteration",
+      "severitySuggestion": "medium",
+      "type": "missing-slippage-protection",
+      "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 73,
+      "rootCause": "BatchNFTMinter calls the no-extraData overload of `ITokenMinter.mint`. The interface natspec documents `extraData` as dispatcher-specific slippage parameters. The BalancerPooler dispatcher routes payment through a Balancer pool swap; without slippage params the swap accepts whatever the pool quotes at execution time. Single-mint callers can pick the extraData overload; batch callers cannot.",
+      "impact": "MEV searchers can sandwich every batch mint on the Balancer leg. The aggregate `paymentAmount` upfront pull bounds caller loss only by the dispatcher's revert-on-insufficient-balance; for batches large enough to move the pool the loss can dwarf per-iteration price growth.",
+      "recommendation": "Add an `extraData` (single shared) or `bytes[] calldata extraDatas` (per-iteration) parameter to `batchMint` and forward to the slippage-aware mint overload.",
+      "confidence": "medium",
+      "sanitizationNotes": "Not a known issue. Not in prior submissions. NOTE: this finding is conditioned on BatchNFTMinter being re-targeted at V2 (DEDUP-001 fix); if DEDUP-001 is fixed by switching to V2, the V2 mint(uint256,address) overload also lacks extraData and the same critique applies — recommend the V2-extraData overload mint(uint256,address,bytes). The mitigation framing transfers cleanly. KEEP."
+    },
+    {
+      "id": "DEDUP-004",
+      "originalIds": ["CODE-BNM-002", "ECON-003"],
+      "scanners": ["code-scanner", "econ-scanner"],
+      "title": "batchMint pre-approves nftMinter for type(uint256).max for the entire loop, exposing the full paymentAmount to the configured dispatcher",
+      "severitySuggestion": "low",
+      "type": "excess-approval / approval-window-too-wide",
+      "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 70,
+      "rootCause": "Allowance is set to `type(uint256).max` before the loop and revoked only after it ends. For the loop's duration the dispatcher (or any callback path it triggers) has authority to pull the contract's full balance rather than the metered per-mint `price`. The contract also explicitly omits ReentrancyGuard.",
+      "impact": "Caller's full `paymentAmount` is at risk if a registered dispatcher turns hostile, has a callback bug, or invokes a token hook that re-enters. Today's BalancerPoolerV2 dispatcher does not callback to msg.sender, so the surface is latent — but the trust amplification vs. an N-call single-mint sequence is structural.",
+      "recommendation": "Replace the max approval with `paymentToken.forceApprove(address(nftMinter), paymentAmount)` (single-line change — bounds dispatcher authority by what the user already authorised). Optionally approve per-iteration with `nftMinter.getPrice(dispatcherIndex)` for an even tighter window. Update the L29 docstring claim about omitted reentrancy guards if approach changes.",
+      "confidence": "medium",
+      "sanitizationNotes": "Not a known issue. Not in prior submissions. The yield-claim-NFT known-issue 'Owner trust assumptions for registering dispatchers' covers the dispatcher-trust angle in the yield-claim-NFT scope; in BatchNFTMinter the trust-amplification is a NEW surface (caller's full upfront balance vs. per-mint metered amount). Distinct from the parent owner-trust framing. KEEP."
+    },
+    {
+      "id": "DEDUP-005",
+      "originalIds": ["CODE-BNM-006", "ECON-005", "ECON-006"],
+      "scanners": ["code-scanner", "econ-scanner"],
+      "title": "BatchNFTMinter collapses multi-tx mint cadence into a single transaction, simultaneously amplifying L-04 runway depletion and concentrating the early-minter geometric APY premium",
+      "severitySuggestion": "medium",
+      "type": "mechanism-design / cross-contract-amplification",
+      "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 72,
+      "rootCause": "A single `batchMint(count=N)` produces `latestPrice * (1 + g)^N` and accumulates `mintDebt` for N mints atomically. This (a) accelerates NFTStaker runway depletion via the next `_recomputeSchedule` (prior-audit L-04 amplification — the multi-tx cadence assumption that operators may have implicitly relied on collapses to a single tx), and (b) lets a single first-batch attacker capture the entire geometric APY premium pool (`r^N + r^(N-1) + ... + r^1`) before any organic minters can compete for the early slots. Without batching, each mint is a separate mempool event and competing minters can front-run each other for early slots.",
+      "impact": "Two-axis impact:\n  - Runway: operators counting on inter-mint reaction windows lose them; a single tx can collapse `windowEnd` measurably.\n  - Distribution: first batch minter earns several multiples of `targetAPY` (per ECON-005's worked example: `targetAPY * r^N` ≈ 3.4x targetAPY for N=100, r=1.025) for the lifetime of their stake, paid for by later organic stakers' mintDebt. Reward budget drains faster than baseline organic-distribution scenarios assume.",
+      "recommendation": "Cap `count` per `batchMint` invocation (e.g. MAX_BATCH = 10 or 32) so that wholesale early-minter capture requires multiple separate transactions, restoring some of the front-running competition the original design assumed. Stronger fix: per-block / per-tx mint-rate limit at the NFTMinterV2 dispatcher layer that batched calls cannot bypass. Document the runway-stability implication in BatchNFTMinter natspec so operators size buffers accordingly.",
+      "confidence": "medium",
+      "sanitizationNotes": "PARTIAL OVERLAP with documented intentional behavior — flagged for human review but kept per 'when in doubt keep' policy.\n\n  - The geometric APY premium per se ('earlier minters earn targetAPY * r^k') IS a documented intentional design decision (registered-projects.json line 514 'APY-as-floor semantics... earlier minters... earn targetAPY * r^k > targetAPY'; see also phoenix-nft-staking-05 M-03-submission.md L130 'Earlier minters paid currentMintPrice / (1+g)^k for some k > 0 and earn targetAPY * (1+g)^k > targetAPY. Advertise targetAPY as the minimum').\n  - The L-04 angle (latestPrice growth accelerating runway depletion) IS the documented prior-audit L-04 (phoenix-nft-staking-07 qa-report.md L66-72) but is being AMPLIFIED here by a NEW code path (BatchNFTMinter.batchMint). Re-flagging an amplification of a prior Low via a newly-introduced contract is legitimate.\n  - The NOVEL claim — that batching collapses arrival-order competition and lets a single actor capture the entire premium pool atomically — is NOT documented anywhere I could find. The CLAUDE.md spec assumes 'each mint is a separate mempool event', and the worked example in ECON-005 (3.4x targetAPY for N=100) is not anticipated in any known-issue. Whether the spec ANTICIPATED single-actor full-pool capture is unclear — the audit acceptance test is undecided. Per user instruction 'If unclear, keep the finding'. KEPT, but caller should be aware part of the framing restates known intentional behavior."
+    },
+    {
+      "id": "DEDUP-006",
+      "originalIds": ["CODE-NFS-001"],
+      "scanners": ["code-scanner"],
+      "title": "M-03 staked-subset notional `S = totalStaked * latestPrice` uses bare multiplication; safe for documented param envelope but unprotected against future high-supply / high-price configs",
+      "severitySuggestion": "low",
+      "type": "potential-overflow / future-config-fragility",
+      "contract": "lib/phoenix-nft-staking/src/NFTStaker.sol",
+      "function": "_recomputeSchedule",
+      "line": 401,
+      "rootCause": "Bare `totalStaked * latestPrice` with no overflow guard. Natspec bounds the product at ~1e27 under current params, but `totalStaked` is not enforced on-chain and a future stakedId rotation to a higher-supply token combined with sustained `growthBasisPoints` mints can push past 2^256.",
+      "impact": "Currently no exploitable path. If parameters drift outside the documented envelope, Solidity 0.8 checked arithmetic catches the overflow as a revert in `_recomputeSchedule`, DoS-ing every interaction (stake / unstake / claim / topUp / setTargetAPY / setDispatcherIndex / setNFTMinter / pullAndRefresh) until `emergencyWithdraw` reduces totalStaked. Solvency invariant is preserved (principal recoverable via emergencyWithdraw).",
+      "recommendation": "Cheapest defensive hardening: `require(latestPrice == 0 || totalStaked <= type(uint256).max / latestPrice, NFTStaker__SOverflow())` before the bare mul, with a typed error so monitoring can react before total interaction DoS sets in.",
+      "confidence": "medium",
+      "sanitizationNotes": "Not in any prior submission (M-03 in phoenix-nft-staking-05 dealt with the rate-sizing basis change, not the multiplicative overflow envelope). Not in known issues. The known-issue 'M-03 staked-subset sizing' is the FIX whose internals this finding examines for overflow safety; flagging an arithmetic-envelope hardening on the resulting expression is orthogonal and legitimate. KEEP."
+    },
+    {
+      "id": "DEDUP-007",
+      "originalIds": ["CODE-BNM-003"],
+      "scanners": ["code-scanner"],
+      "title": "totalPaid return value reports 0 when caller actually spent paymentAmount and received an unrelated donation refund as a windfall",
+      "severitySuggestion": "low",
+      "type": "incorrect-return-value / accounting-drift",
+      "contract": "lib/phoenix-nft-staking/src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 81,
+      "rootCause": "When a third-party donation pre-loads the contract balance, `remaining > paymentAmount` after the loop. The clamp `paymentAmount > remaining ? paymentAmount - remaining : 0` returns `totalPaid = 0` even though the dispatcher pulled real cost. Off-chain accounting treats a paid mint as free.",
+      "impact": "Off-chain integrator accounting bug. No on-chain asset loss — caller's wallet flow is internally consistent (paid dispatcher, received donation as refund, net wallet correct). Only the helper's `totalPaid` return value is wrong.",
+      "recommendation": "Either snapshot pre-call balance and compute `totalPaid = paymentAmount + preBal > remaining ? paymentAmount + preBal - remaining : 0`, OR document in natspec that `totalPaid == 0` does not imply zero-cost mint when donations are present.",
+      "confidence": "high",
+      "sanitizationNotes": "Not a known issue (BatchNFTMinter natspec acknowledges donation flow-forward but does not address the totalPaid-return-value asymmetry). Not in prior submissions. Distinct from prior-audit phoenix-nft-staking-07 L-01 (NFTStaker donation grief on _recomputeSchedule) — different contract, different mechanism (return value vs schedule perturbation). KEEP."
+    }
+  ],
+  "removed": [
+    {
+      "findingId": "DEDUP-008",
+      "originalIds": ["ECON-008"],
+      "title": "Pre-deposited payment-token donations to BatchNFTMinter accrue to the next caller; an MEV bot can sweep donor windfalls",
+      "removalReason": "documented_intentional_design_plus_user_input_mistake",
+      "matchedTo": "BatchNFTMinter.sol L18-L24 NatSpec: 'A griefer who pre-deposits payment-token to this contract simply donates to the next caller; the contract's balance always flows forward to whoever invokes batchMint next.' Combined with C4 known-invalid 'User input mistakes / phishing' (the loss path requires a confused user transferring tokens directly to the helper instead of using the approve+call entrypoint).",
+      "confidence": "high",
+      "rationale": "Two independent grounds for removal: (1) The next-caller-wins behavior is explicitly documented in the contract NatSpec as intentional. (2) The user-loss path requires a confused user fat-fingering a direct transfer — exactly the C4-known-invalid 'user input mistakes / phishing' bucket per registered-projects.json scope rules and the parent CLAUDE.md 'Known Invalid Findings' list. The deduplicator itself flagged this finding as 'borderline' and noted it could be classed as documented intentional design; a strict reading drops it. The MEV-bot-sweep observation describes the documented behavior operating as designed (whoever calls next gets the residue), not a vulnerability."
+    }
+  ],
+  "flaggedForReview": [
+    {
+      "findingId": "DEDUP-005",
+      "reason": "partial_overlap_with_documented_intentional_behavior",
+      "possibleMatches": [
+        "registered-projects.json projects['phoenix-nft-staking'].knownIssues line 514: 'APY-as-floor semantics... earlier minters who paid latestPrice / r^k earn targetAPY * r^k > targetAPY (geometric-growth multiple)'",
+        "reports/phoenix-nft-staking/05/audit/submissions/M-03-submission.md L130: 'Earlier minters paid currentMintPrice / (1+g)^k... earn targetAPY * (1+g)^k > targetAPY. Advertise targetAPY as the minimum'",
+        "reports/phoenix-nft-staking/07/audit/submissions/qa-report.md L66-72 (L-04): 'External NFT mints accelerate runway depletion via latestPrice growth' — DEDUP-005 amplifies this prior Low via the new BatchNFTMinter code path"
+      ],
+      "novelClaim": "The geometric APY premium per se is documented as intentional. The L-04 runway depletion is documented as a prior Low. The NOVEL claim is that BatchNFTMinter collapses arrival-order competition into a single transaction, allowing a single actor to capture the ENTIRE premium pool (r^N + r^(N-1) + ... + r^1) atomically before any other minter can compete. Whether the spec anticipated single-actor full-pool capture is not addressed in any known-issue or prior submission — the spec implicitly assumes natural arrival distribution across separate mempool events.",
+      "decision": "KEPT per 'when in doubt, keep the finding' rule. Severity classifier should weigh whether the novel single-tx-capture angle is sufficient to justify a Medium, or whether the bulk of the framing restates documented intentional behavior and should be downgraded to Low or merged into the prior-audit L-04. The L-04 amplification angle is the strongest standalone hook because it materially changes the operator-side runway-management story for a previously-acknowledged Low."
+    }
+  ],
+  "summary": {
+    "before": 8,
+    "after": 7,
+    "removed": 1,
+    "flagged": 1,
+    "severityDistributionAfter": {
+      "high": 1,
+      "medium": 3,
+      "low": 3
+    },
+    "removalReasonCounts": {
+      "documented_intentional_design": 1,
+      "out_of_scope": 0,
+      "duplicate_of_prior_submission": 0,
+      "C4_known_invalid_user_input_mistakes": 1
+    }
+  },
+  "verificationNotes": {
+    "DEDUP-001_v1_v2_assumption_check": "VERIFIED — production target is NFTMinterV2 per INFTSupply.sol NatSpec (L15-L18: 'NFTMinterV2 — the concrete implementation — inherits OpenZeppelin ERC1155Supply and implements configs, so the production wiring of INFTSupply is a direct cast of the deployed NFTMinterV2 address'). NFTStaker is wired against INFTSupply which is concretely cast to NFTMinterV2. The V1/V2 selector mismatch in BatchNFTMinter is a real defect, NOT an audit assumption error. The V1 ITokenMinter at the imported path declares mint(address,uint256,address); V2 declares mint(uint256,address). Distinct selectors. The MockITokenMinter in test/mocks/ is a V1 mock, which is why the test suite passes despite the production-incompatibility.",
+    "FOT_token_assumption_check": "Standard ERC20 assumed. FOT/rebasing tokens are C4-known-invalid per parent CLAUDE.md 'Known Invalid Findings' unless explicitly in scope. CODE-BNM-007 (FOT incompatibility) was already dropped at the dedup layer. No further action needed at the sanitization layer.",
+    "BatchNFTMinter_prior_audit_check": "BatchNFTMinter is new in story-009 (per scope update note 2026-04-27). Confirmed no prior phoenix-nft-staking-0[1-7] / phoenix-nft-staking submission references BatchNFTMinter or batchMint. All BatchNFTMinter findings are first-time submissions.",
+    "L-04_amplification_check": "Prior phoenix-nft-staking-07 L-04 ('External NFT mints accelerate runway depletion via latestPrice growth') was framed as operator-runway-only and submitted as Low. DEDUP-005 amplifies it via a new code path. Not a duplicate submission — the BatchNFTMinter enabler is novel, but the underlying mechanism (runway depletion via latestPrice growth) is the same. Severity classifier should consider whether the BatchNFTMinter-driven amplification reaches Medium impact or remains Low."
+  }
+}

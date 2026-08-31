@@ -1,0 +1,52 @@
+{
+  "id": "YS-10",
+  "entryPoint": "migrate:ys-swap-cleanup",
+  "rootCauseFamily": "cleanup-buffer-band-wrong-postcondition",
+  "fingerprint": "e34ac20ed90f0fcd0b4d00efbbb3686a675a40e1c14f2f0266574cdb622e1a05",
+  "title": "PostMigrationCleanup verify-5b USDC skim band reverts on the very state the migration produces, bricking the finalizer (temp minter never revoked)",
+  "severity": "medium",
+  "proposedSeverity": "medium",
+  "category": "intent-mismatch",
+  "contract": "lib/phoenix-phase-2-staging/script/PostMigrationCleanup.s.sol",
+  "function": "run",
+  "location": "PostMigrationCleanup.s.sol:197-202",
+  "faithfulness": false,
+  "footgun": false,
+  "description": "The cleanup gate's per-token 'buffer sanity band' requires buffer = principalOf(token,original) - poolInfo(token).totalStaked to lie in [<token>Skimmed/2, <token>Skimmed*2], on the premise (comment L169-180) that buffer ≈ <token>Skimmed. That premise is false. The buffer is dominated NOT by the leg-1 skim but by the leg-1 initiateMigration realize-over-credit surplus: initiateMigration realizes the whole old-strategy position R into idle balance, exceeding credited P by accrued yield; ResetAndRewire's setYieldStrategy idle-sweep folds that whole excess into V2 principal. On the real post-migration fork state the USDC buffer is 27,229,913 (~27.2 USDC) while recorded usdcSkimmed is only 532,748 (~0.53 USDC) — 51.1x over the band's upper bound. The UNMODIFIED script REVERTS at 'Verify 5b FAILED: USDC buffer not within sanity band of usdcSkimmed' BEFORE the sole mutation, so phUSD.setMinter(tempStaker,false) never runs and the migration can never be declared COMPLETE. The DOLA pool has the same shape (~26.78 DOLA buffer) and escapes only because dolaSkimmed==0 disables its band branch — confirming the band, not the state, is wrong.",
+  "impact": "The story-060 final step is non-functional against its own correctly-migrated mainnet state. Operators hit an unexplained revert at the finalizer; the temp staker retains live phUSD minter authorization indefinitely (a standing mint-capable surface the cleanup exists to remove); 'migration COMPLETE' is never signalled. Funds are not at risk and underlying state is solvent (principalOf > totalStaked on both pools), so this is availability/operational-integrity of the finalizer, not loss — Medium.",
+  "classification": {
+    "assetImpact": "No fund loss — underlying state is solvent (principalOf > totalStaked on both pools) and user funds are already restored by leg2. But the finalizer reverts on its own correctly-migrated state, so phUSD.setMinter(tempStaker,false) never runs and the temp staker keeps a live phUSD minter authorization indefinitely (a standing mint-capable surface).",
+    "attackPath": [
+      "1. Cleanup verify-5b requires buffer in [usdcSkimmed/2, usdcSkimmed*2], premised on buffer~=skim.",
+      "2. Real buffer is dominated by the leg1 realize-over-credit surplus, not the skim: ~27.2 USDC actual vs 0.53 skimmed, 51.1x over the band.",
+      "3. Unmodified script reverts 'Verify 5b FAILED' before its sole mutation; minter revocation never executes; 'migration COMPLETE' never signalled."
+    ],
+    "likelihood": "Deterministic on the correct post-migration state; the band, not the state, is wrong (FX4 variant with band removed passes all 12 checks).",
+    "assumptions": "Funds safe and solvent; fix is to drop the band and keep the hard solvency invariant.",
+    "externalRequirements": "None for the revert; the dangling minter is a standing privilege until manually revoked."
+  },
+  "evidence": "side-effects.json unmodifiedPreview: reverted=true, revertReason 'Verify 5b FAILED…', revertedBeforeMutation=true. bandMath: usdcBufferActual 27229913 vs band [266374,1065496], ratio 51.1x. FX4 variant (band removed, hard solvency kept) passes all 12 and revokes the minter — proving the band is the sole blocker. DOLA band SKIPPED only because dolaSkimmed==0.",
+  "recommendation": "Drop the [skim/2, skim*2] band entirely and keep only the hard solvency invariant (principalOf >= totalStaked, already asserted at 4b/5b) — the real safety property; the script's own comment admits the band is 'diagnostic-only … inexact'. If a surplus sanity bound is desired, base it on the realize-over-credit accounting (leg-1 realized R minus credited P), not the skim alone, and log the ≈skim comparison rather than asserting it.",
+  "dedupNotes": "Sole source: cleanup idx0. Distinct root cause (WrongPostConditionInvariant). Standalone Medium — a second independent suite-blocker (the finalizer reverts even after YS-01 etc. are fixed, on correct state). Not a duplicate of YS-01/YS-09.",
+  "sanitizationReason": "New entry point migrate:ys-swap-cleanup. Wrong post-condition band bricks the finalizer on correctly-migrated state. Independent suite-blocker, not a duplicate of YS-01/YS-09. Not any KI. NEW.",
+  "severityJustification": "An independent second suite-blocker: the finalizer deterministically reverts on its own correctly-migrated mainnet state (wrong post-condition band), so the migration can never be declared complete and — more importantly — the temp staker's phUSD minter authorization is never revoked, leaving a standing mint-capable surface the cleanup exists to remove. Funds are solvent and not at risk, so this is availability/operational-integrity of the finalizer plus a dangling privilege: Medium, not High.",
+  "crossLinks": [
+    "YS-10 <-> YS-03 <-> YS-08: cleanup verify-5b buffer band relates to the same V2 buffer surface as YS-03 (unwired SYA) and YS-08 (25->10 downgrade). Distinct root causes, cross-link only."
+  ],
+  "status": "NEW",
+  "provisional": false,
+  "referral": false,
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-12",
+  "metadata": {
+    "createdAt": "2026-06-12T03:14:24Z",
+    "updatedAt": "2026-06-12T03:26:47Z",
+    "scanOrigin": "audit-script:migrate:ys-swap (story-060)",
+    "auditedCommit": "b27c6ac"
+  },
+  "reportPath": "reports/phoenix-phase-2-staging/12/findings/medium/YS-10-cleanup-buffer-band-wrong-postcondition.json",
+  "pocPath": "workspace/phoenix-phase-2-staging/test/PoC_YS10_CleanupBandRevert.t.sol",
+  "pocStatus": "VALIDATED (3/3 passing)",
+  "pocCommand": "forge test --match-path test/PoC_YS10_CleanupBandRevert.t.sol -vv",
+  "pocNote": "PoC proves the verify-5b band require (PostMigrationCleanup.s.sol#L197-202) rejects the correct post-migration buffer 27,229,913 vs band [266,374..1,065,496] with the exact revert reason."
+}

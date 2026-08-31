@@ -36,7 +36,7 @@ Invoke **project-manager**: "Resolve friendly name to submodule path; get curren
 - Get `lib/<submodule>`, the current submodule HEAD (the "latest code"), and the target commit (`--commit` if given, else HEAD).
 
 Invoke **finding-manager**: "Load the ledger entry for this selector"
-- Read `reports/ledgers/<project>.json`; resolve the selector to exactly one entry via FINDING SELECTOR RESOLUTION (issue ID → fingerprint prefix → run label → description). Announce any non-exact resolution on one line before proceeding.
+- Read `reports/<project>/ledger.json`; resolve the selector to exactly one entry via FINDING SELECTOR RESOLUTION (issue ID → fingerprint prefix → run label → description). Announce any non-exact resolution on one line before proceeding.
 - Load its `issueId`, `fingerprint`, `status`, `severity`, `title`, `contract`, `function`, `lineStart/lineEnd`, `reportPath`, `firstSeenRun`, `fixedAtCommit`.
 - If the selector matches a `merged` entry (e.g. M-03 → M-02), report the merge and recheck the surviving entry instead.
 
@@ -95,7 +95,7 @@ Write a focused addendum to the run that **owns** the finding (derived from `rep
 - Path: `reports/<owner-run>/reverify/<label>-<short-target-commit>.md`
 - Contents: target commit, changed-file scope, mechanism used (PoC-replay vs scanner), the forge output / assertion result, the outcome (STILL-LIVE / LIKELY-FIXED / INCONCLUSIVE), and the proposed ledger action.
 
-This is explicitly an **addendum**, not an audit run — it must not create `reports/<project>-NN/` or move the ledger's `lastRun`.
+This is explicitly an **addendum**, not an audit run — it must not create `reports/<project>/NN/` or move the ledger's `lastRun`.
 
 ## 6. Propose Ledger Update (single entry, recheck-only fields)
 Invoke **finding-manager**: "Record recheck result on the target entry only — recheck-touch operation"
@@ -124,7 +124,7 @@ Scope:          NARROW (1 file, within finding's contract)
 Mechanism:      PoC-replay — workspace/reflax-yield-vault/test/poc-M01-overskim.t.sol
 Result:         STILL-LIVE  ✓ exploit assertion still passes
 
-Record:  reports/reflax-yield-vault-05/reverify/M-01-a1b2c3d.md
+Record:  reports/reflax-yield-vault/05/reverify/M-01-a1b2c3d.md
 Ledger:  M-01 recheck fields updated (lastSeenRun / lastAuditedCommit NOT touched)
 
 Proposed action: none — finding confirmed still open.

@@ -1,0 +1,300 @@
+{
+  "project": "yield-claim-nft",
+  "reportDir": "reports/yield-claim-nft/10",
+  "scanTimestamp": "2026-06-07T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scanMode": "cold",
+  "auditedCommit": "cf75ec9520fd16b19e20c4b77ada2be28d7d4382",
+  "patternDb": "patterns/vulnerability-patterns.json",
+  "scope": [
+    "src/V2/NFTMinterV2.sol",
+    "src/V2/NFTMigrator.sol",
+    "src/V2/dispatchers/ATokenDispatcherV2.sol",
+    "src/V2/dispatchers/BalancerPoolerV2.sol",
+    "src/V2/dispatchers/BurnerV2.sol",
+    "src/V2/dispatchers/GatherV2.sol",
+    "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+    "src/V2/hooks/DefaultDispatchHook.sol",
+    "src/NFTMinter.sol",
+    "src/dispatchers/ATokenDispatcher.sol",
+    "src/dispatchers/BalancerPooler.sol",
+    "src/dispatchers/Burner.sol",
+    "src/dispatchers/Gather.sol",
+    "src/BurnRecorder.sol"
+  ],
+  "patternsChecked": 29,
+  "findingsCount": 5,
+  "manualReviewCount": 5,
+  "notes": [
+    "Architecture is a mint->dispatch system, NOT a MasterChef farm and NOT an ERC4626 vault issuer: the staking-yield accumulator patterns (REWARD-ACCRUAL-ORDER, REWARD-RUNWAY-DEPLETION, EMISSION-WINDOW-BOUNDARY, YIELD-PRINCIPAL-ACCOUNTING-SKEW, TWO-STEP-COMMIT-WINDOW) have no accPerShare/rewardDebt accounting surface here and did not match.",
+    "'ATokenDispatcher' is an *Abstract* token dispatcher base class, NOT an Aave aToken integration. No Aave/aToken code exists in scope despite the brief mentioning aTokens.",
+    "No oracle (latestRoundData/AggregatorV3), no ecrecover/ECDSA/permit, no proxy/initialize/delegatecall, no unsafe downcast, no raw ETH/selfdestruct handling, no cross-chain/lzReceive surface. Those patterns are structurally absent (true negatives), not merely unmatched.",
+    "The Sky PSM donation route (story-034) deliberately replaced an AMM swap with a fixed-rate buyGem (no price curve / slippage / imbalance ceiling, capped by maxTout), and allowances are reset to 0 after use — this neutralises the sandwich/slippage and stale-approval vectors on the donation leg specifically.",
+    "Cross-referenced against ledger reports/yield-claim-nft/ledger.json (lastRun yield-claim-nft-09, same commit). Several matches correspond to already-tracked ledger entries and are annotated with ledgerStatus; they are reported (not dropped) for the interaction scanners' situational awareness."
+  ],
+  "findings": [
+    {
+      "id": "PM-01",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC777",
+      "type": "cross-function-reentrancy",
+      "severity": "potential-low",
+      "contract": "src/V2/NFTMinterV2.sol",
+      "function": "_executeMint",
+      "line": 170,
+      "lineEnd": 201,
+      "description": "NFTMinterV2._executeMint has NO ReentrancyGuard. It makes an external call into an arbitrary registered dispatcher (`dispatch`, line 191) and then performs an ERC1155 `_mint` to `recipient` (line 196), which fires the `onERC1155Received` acceptance hook to an attacker-controlled recipient. The per-dispatcher `dispatch` carries `nonReentrant`, so SAME-dispatcher re-entry is blocked, but the minter itself is unguarded: a dispatcher callback or the ERC1155 receiver can re-enter `mint()` for a DIFFERENT index (cross-index re-entry). Price growth is applied before dispatch (CEI is followed), so impact is bounded, but the unguarded external-call-then-mint structure is exactly the pattern and warrants an interaction-scanner pass to confirm no cross-index invariant can be broken (e.g. via a malicious hook set by the owner, or a dispatcher that calls a non-standard token).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "ATokenDispatcherV2(config.dispatcher).dispatch(address(this), actualReceived, extraData)  // external call, no minter-side guard",
+        "_mint(recipient, resolvedTokenId, 1, \"\")  // ERC1155 receiver hook after external interaction",
+        "contract NFTMinterV2 ... // no ReentrancyGuard inherited; only the dispatcher's dispatch() is nonReentrant"
+      ],
+      "missingMitigations": [
+        "No ReentrancyGuard / nonReentrant on the minter's mint/_executeMint path (cross-index re-entry not blocked)"
+      ],
+      "presentMitigations": [
+        "Checks-Effects-Interactions: config.price grown BEFORE dispatch (line 188)",
+        "Each dispatcher's dispatch() is nonReentrant + onlyMinter + whenNotPaused"
+      ],
+      "historicalAnalog": "ERC1155/ERC777 onReceived cross-function reentrancy (numerous C4); same shape as the project's own ledger L-01.",
+      "ledgerStatus": "tracked as L-01 (qa-bundled, low) — reports/yield-claim-nft/08/submissions/qa-report.md",
+      "routeTo": "code-scanner"
+    },
+    {
+      "id": "PM-02",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "lp-add-sandwich",
+      "severity": "potential-medium",
+      "contract": "src/V2/dispatchers/BalancerPoolerV2.sol",
+      "function": "pool / unlockCallback",
+      "line": 269,
+      "lineEnd": 311,
+      "description": "pool(uint256 minBPT) performs a single-sided UNBALANCED addLiquidity into a Balancer V3 sUSDS/phUSD pool (unlockCallback line 307). Slippage protection IS present (minBptAmountOut = minBPT, line 302), but the floor is supplied entirely by the off-chain authorized pooler with no on-chain oracle/TWAP reference; a pooler that passes a loose or zero minBPT exposes the accumulated sUSDS to a classic add-liquidity sandwich (front-run imbalances the pool, LP add mints fewer BPT, back-run extracts). The single-sided join into a 2-token pool is the most sandwich-prone LP shape. Confirm the pooler is an automated keeper that computes minBPT from getIdealBPT() (line 318) at submission time, and that the gap between query and execution is acceptably bounded. NOTE: the *donation* leg is NOT affected — it now routes through the fixed-rate Sky PSM (no curve), per story-034.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "AddLiquidityKind.UNBALANCED single-sided join (maxAmountsIn[ ] one side zero)",
+        "minBptAmountOut: minBPT  // caller(pooler)-supplied, no on-chain reference"
+      ],
+      "missingMitigations": [
+        "No on-chain oracle/TWAP lower bound on minBPT; floor trust delegated to off-chain pooler"
+      ],
+      "presentMitigations": [
+        "minBPT slippage floor parameter exists and is enforced by the vault",
+        "pool() is onlyAuthorizedPooler + whenNotPaused + nonReentrant",
+        "getIdealBPT() router-query helper available for keepers to size minBPT"
+      ],
+      "historicalAnalog": "Balancer/Curve single-sided add-liquidity MEV sandwich (e.g. C4 add-liquidity slippage findings).",
+      "ledgerStatus": "related to L-03 (fixed) which concerned the *donation* swap; the pool() LP-add slippage-source is a distinct, still-open surface",
+      "routeTo": "econ-scanner"
+    },
+    {
+      "id": "PM-03",
+      "source": "pattern-db",
+      "patternId": "RETURN-VALUE-IGNORE",
+      "type": "unchecked-external-return",
+      "severity": "potential-low",
+      "contract": "src/V2/dispatchers/BalancerPoolerV2.sol",
+      "function": "_dispatch",
+      "line": 218,
+      "lineEnd": 218,
+      "description": "IERC4626(_sUSDS).deposit(poolingUSDS, address(this)) discards the returned share amount. Impact is limited because sUSDS is a mature, well-behaved Sky ERC4626 and pool() later re-reads the actual sUSDS balance via balanceOf(), so a silent short-mint would surface as fewer pooled tokens rather than a phantom credit. Clean signature match; realistically QA. Also observed (informational): ISkyPSM.buyGem() return (usdsInWad) is discarded but the spend is pre-computed and bounded by forceApprove(usdsSpent), so it is safe.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "IERC4626(_sUSDS).deposit(poolingUSDS, address(this))  // returned shares not captured/checked"
+      ],
+      "missingMitigations": [
+        "No check that deposit() minted the expected shares"
+      ],
+      "presentMitigations": [
+        "Actual sUSDS balance re-read via balanceOf() in pool() before LP add (self-correcting)",
+        "sUSDS is a trusted external 4626"
+      ],
+      "historicalAnalog": "Unchecked ERC4626 deposit/redeem return (generic SWC-104 / C4 code-quality).",
+      "ledgerStatus": "tracked as Q-02 (qa-bundled)",
+      "routeTo": "code-scanner"
+    },
+    {
+      "id": "PM-04",
+      "source": "pattern-db",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "type": "gas-dos",
+      "severity": "potential-medium",
+      "contract": "src/V2/NFTMigrator.sol",
+      "function": "migrate / setInitialized",
+      "line": 62,
+      "lineEnd": 76,
+      "description": "migrate() iterates i = 1..v1.nextIndex() and, for each held V1 index, runs a NESTED per-unit loop calling v2.mintFor() once per NFT unit (lines 70-72). setInitialized() (lines 53-57) loops the same outer range. The outer bound is the V1 dispatcher count (owner-bounded, small), but the inner bound is the holder's per-index ERC1155 balance, which is unbounded — a large V1 holder can exceed the block gas limit and be permanently unable to migrate. Also the related index-0 brick (a V1 dispatcher registered after setInitialized has indexMapping==0, making mintFor revert 'index not registered').",
+      "confidence": "high",
+      "matchedSignatures": [
+        "for (uint256 i = 1; i < upperBound; i++)  // upperBound = v1.nextIndex()",
+        "for (uint256 j = 0; j < balance; j++) { v2.mintFor(v2Index, msg.sender); }  // per-unit nested mint"
+      ],
+      "missingMitigations": [
+        "No pagination / per-call cap; per-unit mint loop instead of a single batch mint of `balance`"
+      ],
+      "presentMitigations": [
+        "Outer range bounded by owner-controlled dispatcher count"
+      ],
+      "historicalAnalog": "Unbounded migration/airdrop loop gas-DoS (generic C4 DoS).",
+      "ledgerStatus": "tracked as M-01 + M-02 (both wont-fix: V1->V2 migration already executed, migrate() no longer exercised). Reported for completeness; do NOT re-escalate without evidence migrate() is live again.",
+      "routeTo": "code-scanner"
+    },
+    {
+      "id": "PM-05",
+      "source": "pattern-db",
+      "patternId": "INCORRECT-OPERATOR",
+      "type": "off-by-one-boundary",
+      "severity": "potential-low",
+      "contract": "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+      "function": "setRatio",
+      "line": 78,
+      "lineEnd": 78,
+      "description": "setRatio uses `if (newRatio > MAX_RATIO) revert RatioTooHigh()` (MAX_RATIO = 50), which ACCEPTS newRatio == 50, directly contradicting the documented invariant 'ratio is strictly `< MAX_RATIO` (50)' (NatSpec at lines 23, 42, 76). The correct guard is `>=`. Impact is a single-unit boundary slip on the mint-debt ratio (50% accrual vs the intended <50%); low severity but a clean operator-mismatch and a spec deviation.",
+      "confidence": "high",
+      "matchedSignatures": [
+        "if (newRatio > MAX_RATIO) revert RatioTooHigh();  // doc says strictly < MAX_RATIO; should be >="
+      ],
+      "missingMitigations": [
+        "Guard does not enforce the documented strict-less-than bound"
+      ],
+      "presentMitigations": [],
+      "historicalAnalog": "< vs <= / > vs >= threshold off-by-one (generic).",
+      "ledgerStatus": "tracked as L-02 (qa-bundled)",
+      "routeTo": "code-scanner"
+    }
+  ],
+  "manualReview": [
+    {
+      "id": "MR-01",
+      "source": "pattern-db",
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "type": "uncapped-mint-on-demand",
+      "severity": "potential-medium",
+      "contract": "src/V2/hooks/BalancerPoolerMintDebtHook.sol",
+      "function": "onDispatch / pull",
+      "line": 109,
+      "lineEnd": 127,
+      "description": "onDispatch accrues mintDebt += amount*ratio/100 on every dispatch (gross USDS, ratio <= 50%), and pull() mints exactly mintDebt phUSD to `recipient` and zeroes the ledger. There is NO per-time emission cap — the only bound is real mint volume routed through the pooler. This is the mint-on-demand shape, but several mitigations make it low-confidence as an exploit: (1) onDispatch is gated `OnlyDispatcher` so arbitrary callers cannot inflate debt; (2) `recipient` is owner-pinned, NOT caller-chosen (distinguishes it from the BATCH-PAYOUT-FIXED-POT front-run vector); (3) pull() zeroes before mint + nonReentrant, so no double-mint; (4) each debt unit corresponds to genuine USDS paid at mint. The residual concern is unbacked-phUSD economics, which the prior run already adjudicated and HARD-SUPPRESSED as DEDUP-001 (owner-trust + out-of-scope external phUSD backing model). Recorded here so the suppression remains visible per Law 1; do NOT re-escalate absent a NEW permissionless extraction path.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "uint256 added = (amount * ratio) / 100; mintDebt += added;",
+        "phUSD.mint(recipient, debt);  // IMintable, authorized minter, no emission cap"
+      ],
+      "presentMitigations": [
+        "onDispatch gated to `dispatcher` (OnlyDispatcher)",
+        "recipient owner-pinned (not caller-chosen)",
+        "pull() zeroes mintDebt before mint, nonReentrant",
+        "debt backed by real per-mint USDS inflow"
+      ],
+      "historicalAnalog": "Mint-on-claim over-mint family (phoenix-nft-staking / stable-staker), and the project's own suppressed DEDUP-001 unbacked-phUSD note.",
+      "ledgerStatus": "overlaps DEDUP-001 (suppressed: owner-trust + out-of-scope backing model)",
+      "routeTo": "econ-scanner"
+    },
+    {
+      "id": "MR-02",
+      "source": "pattern-db",
+      "patternId": "ERC4626-INFLATION",
+      "type": "share-inflation",
+      "severity": "potential-low",
+      "contract": "src/V2/dispatchers/BalancerPoolerV2.sol",
+      "function": "_dispatch",
+      "line": 218,
+      "lineEnd": 218,
+      "description": "Signature `IERC4626(...).deposit(assets, receiver)` matches, but the protocol is a DEPOSITOR INTO an external, mature, well-seeded Sky 4626 (sUSDS), not a vault ISSUER. First-depositor/donation inflation attacks target the vault that issues shares; here that vault is out-of-scope sUSDS, which has long since passed its first-deposit window. No protocol-issued share math exists in scope. Almost certainly N/A; recorded so the negative is auditable.",
+      "confidence": "low",
+      "presentMitigations": [
+        "Protocol consumes, does not issue, ERC4626 shares",
+        "sUSDS is an established external vault (no first-deposit window)"
+      ],
+      "historicalAnalog": "ERC4626 first-depositor inflation (OZ writeup) — does not apply to a depositor-only integration.",
+      "routeTo": "econ-scanner"
+    },
+    {
+      "id": "MR-03",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "lp-add-sandwich-v1",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/BalancerPooler.sol",
+      "function": "dispatch / unlockCallback",
+      "line": 50,
+      "lineEnd": 91,
+      "description": "V1 (context) BalancerPooler.dispatch defaults minBptAmountOut to 0 when extraData is empty (line 51), so a mint that does not pass extraData performs an UNBALANCED single-sided LP add with ZERO slippage protection — fully sandwichable. This is the V1 antecedent that V2 partially hardened (V2 moves slippage to the pooler-supplied minBPT in a separate owner-triggered pool()). Flagged low because V1 is out-of-focus context and may be a fixed-root-cause / OOS lineage; included so the interaction scanners can confirm V1 is deprecated/unused on-chain.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "uint256 minBptAmountOut = extraData.length > 0 ? abi.decode(extraData, (uint256)) : 0;"
+      ],
+      "missingMitigations": [
+        "minBptAmountOut defaults to 0 on the dispatch path (no slippage floor)"
+      ],
+      "historicalAnalog": "Zero-minOut LP add sandwich.",
+      "ledgerStatus": "V1 legacy/context; verify deprecation before reporting",
+      "routeTo": "econ-scanner"
+    },
+    {
+      "id": "MR-04",
+      "source": "pattern-db",
+      "patternId": "DIVISION-PRECISION",
+      "type": "rounding",
+      "severity": "potential-low",
+      "contract": "src/V2/dispatchers/BalancerPoolerV2.sol",
+      "function": "_dispatch / _psmDonate",
+      "line": 212,
+      "lineEnd": 257,
+      "description": "Donation sizing uses integer-percent and floor math: donationUSDS = amount*batchDonationSize/100 (coarse 1% granularity), and gemAmt = floor(usdsAmount*WAD/(conv*(WAD+tout))). All multiplications precede divisions (no division-before-multiplication precision loss), and every rounding is FLOOR in the protocol's favour (dust accrues to the contract, never over-credits batchMinter). hook accrual `added = amount*ratio/100` likewise rounds down (silently no-ops sub-100 dust). No exploitable skew; recorded as a benign rounding note for completeness.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "gemAmt = (usdsAmount * WAD) / (conv * (WAD + tout))",
+        "donationUSDS = (amount * batchDonationSize) / 100"
+      ],
+      "presentMitigations": [
+        "Multiply-before-divide throughout; floor rounds toward protocol",
+        "gemAmt > 0 require guards against rounding-to-zero donation"
+      ],
+      "historicalAnalog": "Precision-loss / dust rounding (generic, here benign).",
+      "routeTo": "econ-scanner"
+    },
+    {
+      "id": "MR-05",
+      "source": "pattern-db",
+      "patternId": "CENTRALIZATION-ADMIN",
+      "type": "owner-footgun",
+      "severity": "potential-low",
+      "contract": "src/V2/NFTMinterV2.sol",
+      "function": "replaceDispatcher / setHook / setPSM / setBatchMinter",
+      "line": 227,
+      "lineEnd": 247,
+      "description": "Owner controls dispatcher registration/replacement, hook swap, PSM/batchMinter/ratio config. Under the three-law model the owner is trusted for KNOWING actions, so 'malicious owner' vectors are out of scope. The reportable residue is the NON-OBVIOUS footgun surface: replaceDispatcher re-points the token/metadata under EXISTING NFT holders at an index (already tracked C-01); setHook to a reverting hook bricks dispatch until swapped (documented); setBatchMinter/setPSM mis-set silently park or mis-route donation USDS. All are documented or already-tracked; included so interaction scanners weigh them as operational hazards, not as standalone H/M.",
+      "confidence": "low",
+      "presentMitigations": [
+        "All gated onlyOwner; hook null-object guaranteed non-zero; donation try/catch parks on failure"
+      ],
+      "historicalAnalog": "Single-admin config-change hazards (C4 Low/QA).",
+      "ledgerStatus": "tracked as C-01 (qa-bundled, centralization)",
+      "routeTo": "code-scanner"
+    }
+  ],
+  "patternsCheckedDetail": {
+    "matchedOrFlagged": [
+      "REENTRANCY-ERC777", "MISSING-SLIPPAGE", "RETURN-VALUE-IGNORE", "DOS-UNBOUNDED-LOOP",
+      "INCORRECT-OPERATOR", "MINT-ON-DEMAND-OVERMINT", "ERC4626-INFLATION",
+      "DIVISION-PRECISION", "CENTRALIZATION-ADMIN"
+    ],
+    "checkedNotMatched": [
+      "ORACLE-STALE (no oracle)", "ORACLE-ROUNDID (no oracle)", "SIGNATURE-REPLAY (no ecrecover/ECDSA)",
+      "FRONTRUN-APPROVE (forceApprove only, reset to 0; QA-class anyway)",
+      "FLASH-LOAN-PRICE (getIdealBPT is a view-only keeper helper, not used for on-chain critical decisions; no spot-price-as-truth)",
+      "UNSAFE-DOWNCAST (no narrowing casts)", "UNPROTECTED-INIT (no initializer/proxy)",
+      "STORAGE-COLLISION (no delegatecall/proxy)", "SELFDESTRUCT-FORCE-ETH (no ETH/balance logic)",
+      "DOUBLE-VOTING (no governance)", "PERMIT-FRONTRUN (no permit)",
+      "FIRST-DEPOSITOR-ATTACK (no totalSupply==0 special-case in protocol)",
+      "CROSS-CHAIN-REPLAY (single-chain, no bridge)", "TIMELOCK-BYPASS (no timelock)",
+      "REWARD-ACCRUAL-ORDER (no accPerShare/rewardDebt)", "REWARD-RUNWAY-DEPLETION (no rewardBudget/window)",
+      "EMISSION-WINDOW-BOUNDARY (no emission window)", "BATCH-PAYOUT-FIXED-POT (pot recipient owner-pinned, value-backed; not count-gated/caller-chosen)",
+      "YIELD-PRINCIPAL-ACCOUNTING-SKEW (no principal/yield-strategy accounting in scope)",
+      "TWO-STEP-COMMIT-WINDOW (authVersion mass-revoke, not a snapshot-commit window)"
+    ]
+  }
+}

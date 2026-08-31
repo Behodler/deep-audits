@@ -1,0 +1,252 @@
+{
+  "project": "reflax-yield-vault",
+  "run": "reflax-yield-vault-15",
+  "submoduleHead": "ad12cb1",
+  "scanMode": "regression",
+  "stories": ["story-047", "story-048"],
+  "baselineLedger": "reports/reflax-yield-vault/ledger.json",
+  "lastAuditedCommit": "2f6774dcf4275f73c46d510cd1db40f1743eb87d",
+  "timestamp": "2026-06-11T00:00:00Z",
+  "agent": "deduplicator",
+  "summary": {
+    "rawInputs": {
+      "staticAnalysis": 21,
+      "patternFindings": 2,
+      "patternManualReview": 4,
+      "codeFindings": 1,
+      "econFindings": 5,
+      "faithfulnessFindings": 7,
+      "invariantFailures": 1,
+      "totalRawSignals": 41
+    },
+    "canonicalFindings": 11,
+    "faithfulnessChannelEntries": 7,
+    "dispositionCounts": {
+      "NEW": 2,
+      "COLLAPSES-INTO-LEDGER": 5,
+      "QA-CLUSTER-COLLAPSE": 1,
+      "MANUAL-REVIEW": 2,
+      "DROP-FP": 1
+    },
+    "newHighMedium": 0,
+    "conclusion": "34 scanner/Tier-3 signals collapse to 11 canonical entries; the 7 faithfulness findings are preserved as their own channel with cross-references (not collapsed). Exactly TWO genuinely new scanner findings, both Low: (1) DEDUP-15-001 — the totalWithdrawal announced-vs-executed live-balance drift, materially widened by story-048's 6h/72h retiming (merges CODE-001 + PATTERN-001 + ECON-003 + the retiming facets of PATTERN-002/SLITHER-014, Tier-3-reproduced); (2) DEDUP-15-002 — the story-047 global-buffer-redirect cross-client subsidy footgun (merges ECON-002 + PATTERN-MR-003, corroborated by FAITH-15-006). Everything else collapses into existing ledger entries (L-01, M-02 cluster, L-13, L-01-run11, L-02, plus the QA/style cluster), is parked for manual review (2 items, Law-1 visible channel), or is dropped as a Tier-3-refuted / structural false positive. No regression: no previously-fixed finding reappeared."
+  },
+  "findings": [
+    {
+      "canonicalId": "DEDUP-15-001",
+      "title": "totalWithdrawal Phase-2 executes the LIVE client balance, not the Phase-1 announced snapshot; story-048 retiming (WAITING_PERIOD 24h->6h, EXECUTION_WINDOW 48h->72h, total 78h) shrinks the community reaction window 4x and widens the announced-vs-executed drift horizon, while three documentation sources still claim 24h/48h",
+      "severityEstimate": "low (operational hazard / anti-rug-commitment transparency weakening; owner-only executor, Law-3 discount applied — NOT a fresh High/Medium)",
+      "disposition": "NEW",
+      "contract": "src/AYieldStrategy.sol + src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_initiateWithdrawal / _executeWithdrawal -> _totalWithdraw",
+      "fileLine": "src/AYieldStrategy.sol:822-837 (Phase-1 snapshot announced in WithdrawalInitiated), :846-860 (Phase-2 forwards cached amount), :84-86 (story-048 retimed constants), :414 (stale 24h/48h docstring); src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:209-240 (_totalWithdraw uses cached amount only for require(>0) at L211, sells shares proportional to LIVE clientBalances at L219-220, zeroes live balance at L234-235)",
+      "rootCause": "The two-phase anti-rug machine snapshots and publicly announces the client balance in Phase 1, but Phase 2 sizes the actual sweep from the LIVE clientBalances/totalDeposited at execution time — the snapshot is advisory only. Deposits landing between phases are swept with NO fresh waiting period and never appear in the announced figure. Pre-existing mechanism, but story-048 (ad12cb1) made the divergence materially more reachable: reaction window before execution shrank 24h->6h while the window in which live state can drift grew to a 78h total horizon. The docstring (AYieldStrategy.sol:414), IYieldStrategy.sol:101, and registry designDecision #5 all still document 24h/48h.",
+      "impact": "The advertised 'announced amount, after a wait' rugpull-protection commitment does not bind the executed amount, and the silent 4x window reduction means monitoring/alerting sized to the documented 24h cadence reacts too slowly. Harm dimension: end-users of an authorized client contract (e.g. stable-staker/SYA) whose mid-window deposits are migrated to owner() without the protective wait. Accounting stays internally correct (live balance zeroed, totalDeposited decremented consistently) — this is a transparency/commitment weakening plus a non-obvious owner footgun, not an over-withdraw or theft path.",
+      "sources": [
+        "CODE-001 (code-scanner: source-confirmed line refs + cross-contract harm dimension — most complete attack-path narrative, preserved)",
+        "PATTERN-001 (TWO-STEP-COMMIT-WINDOW: vulnerableWhen signature hit + missing min(cached,live) mitigation framing)",
+        "ECON-003 (econ-scanner: economic mechanism + who-loses framing; confirms accounting conservation, narrows to transparency weakening)",
+        "PATTERN-002 (TIMELOCK-BYPASS: only its diff-new WAITING_PERIOD 24h->6h facet folds here; the emergencyWithdraw zero-delay bypass facet is existing C-01)",
+        "SLITHER-014 (timestamp: retiming-substance facet only; the generic timestamp-detector facet stays on QA-02)",
+        "invariant-results failure invariant_P3_PATTERN001_announcedAmountFaithful (forge + medusa, expected-detector: executed 1209632.69e18 > announced 278585.41e18 after a mid-window deposit at 6h boundary — Tier-3 reproduction evidence)"
+      ],
+      "tier3Evidence": "Detector invariant fails by design under forge (shrunk to 5 calls) and Medusa (deposit -> initiate -> deposit -> warp 6h -> execute), proving executed amount strictly exceeds the Phase-1 announced amount. Window-boundary tests confirm the new 6h/72h/78h constants and >=/<= inclusivity are implemented correctly.",
+      "ledgerCollision": "DISTINCT-BUT-ADJACENT to H-02 (7b19ceec, status false-positive in ledger — note: invariant-results.json calls it 'downgraded-to-centralization'; the ledger is authoritative, discrepancy flagged for finding-manager). H-02's rejected claim was the High theft/underflow-brick framing; this entry's root-cause class is commitment-transparency-weakening + story-048 retiming, which is diff-new and was never adjudicated. Also adjacent: L-13 (1456259d, covers only the benign live-balance-SHRANK/zero direction), L-06-run11 (f9194462, WithdrawalExecuted emits the cached not actual amount — compounds this finding; bump lastSeenRun), QA-02 (70162a2a, generic timestamp detector — its title text still says 24h/48h and needs the 6h/72h refresh), C-01 (679c917d, centralization bundle — report text citing a 24h reaction window must be updated to 6h).",
+      "crossReferenceFaithfulness": "FAITH-15-004 (QA doc deviation: the stale 24h/48h NatSpec x2 + registry designDecision — the documentation leg of this finding lives there); FAITH-15-005 (Law-1 assessment: the 6h retiming itself is story-blessed and NOT an unsafe story, because zero-delay emergencyWithdraw already dominates — which is why this entry caps at Low rather than re-escalating).",
+      "newFingerprintBasis": "sha256(src/AYieldStrategy.sol:_executeWithdrawal:announced-vs-executed-live-drift-story048-retiming) — to be assigned by finding-manager; deliberately distinct from H-02's fingerprint",
+      "humanReviewFlag": false,
+      "recommendation": "Pin Phase-2 execution to min(announced snapshot, live balance) or require re-initiation when the live balance exceeds the announced figure; update the 24h/48h documentation in AYieldStrategy.sol:414, IYieldStrategy.sol:101, and registry designDecision #5 to 6h/72h; refresh C-01 report text and any off-chain monitoring SLAs to the 6h reaction window."
+    },
+    {
+      "canonicalId": "DEDUP-15-002",
+      "title": "story-047 pools ALL clients' set-aside buffers into one global setAsideBufferRecipient: in a multi-client deployment every non-recipient client's dip-absorption reserve is silently routed to the single recipient, while stale story-042 NatSpec still promises a per-client reserve",
+      "severityEstimate": "low (Law-3 non-obvious owner footgun + spec drift; QA doc fix at minimum; implementation is FAITHFUL to story-047)",
+      "disposition": "NEW",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol + src/concreteYieldStrategies/ERC4626YieldStrategy.sol + src/AYieldStrategy.sol",
+      "function": "_distributeBuffer / setSetAsideBufferRecipient / setAsideBufferSize (NatSpec)",
+      "fileLine": "ERC4626MarketYieldStrategy.sol:353-372 and ERC4626YieldStrategy.sol:308-326 (single aggregate transfer to setAsideBufferRecipient); AYieldStrategy.sol:51-53 (STALE NatSpec: buffer 'returned to the client... reserve to absorb below-par dips'), :318-341 (stale AUDITOR NOTE), :352-357 (setter); IYieldStrategy.sol:130-132 (stale per-client-reserve NatSpec)",
+      "rootCause": "Post-047 the per-client set-aside return was replaced by ONE aggregate transfer of all clients' set-asides to a single global recipient. With nonzero setAsideBufferSize configured on more than one client, non-recipient clients' reserves cross-subsidize the recipient's beneficiary; a non-recipient client protocol whose underwater-exit machinery expects its own buffer back (the still-documented story-042 semantics) finds its underwater withdrawals reverting for lack of buffer. The per-client setSetAsideBuffer setter still reads as a per-client reserve, making the consequence non-obvious.",
+      "impact": "Distributional only — conservation verified (Tier-3 bufferConservation PASS: totalSetAside <= underlyingReceived, dust to skim recipient); no value leaves the protocol and story-047 actually REMOVES the old front-run-the-skim self-benefit incentive. The reportable residue is (a) the multi-client-config footgun and (b) the in-file spec contradiction (stale setAsideBufferSize NatSpec vs correct setAsideBufferRecipient NatSpec three lines below).",
+      "sources": [
+        "ECON-002 (econ-scanner: cross-client value-transfer mechanism, who-loses/who-gains — most complete analysis, preserved)",
+        "PATTERN-MR-003 (BATCH-PAYOUT-FIXED-POT manual-review: recipient-pinning spec-drift angle, promoted out of manual-review by econ corroboration)"
+      ],
+      "crossReferenceFaithfulness": "FAITH-15-003 (the stale-NatSpec deviation is formally recorded there at QA, faithfulness channel — qa-bundler should emit ONE doc-fix item, not two); FAITH-15-006 (independent Law-3 footgun retention at Low, including the cross-protocol note that StableStaker's owner rescue treats the arriving idle buffer as fully rescuable — carries to the next stable-staker run). This canonical entry is the scanner-channel finding; the faithfulness entries corroborate and are NOT collapsed away.",
+      "ledgerCollision": "none — no existing fingerprint covers the global-redirect cross-client subsidy mechanism (story-047 is new at ad12cb1). Adjacent: L-03 (aggregate buffer-percentage cap, different root cause), L-04 (buffer persists across deauthorization), QA-08 (skim-de-buffering footgun, different root cause).",
+      "newFingerprintBasis": "sha256(src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:_distributeBuffer:global-recipient-cross-client-buffer-subsidy-footgun) — to be assigned by finding-manager",
+      "humanReviewFlag": false,
+      "recommendation": "Safe config: set nonzero setAsideBufferSize only for the client that is (or funnels to) the setAsideBufferRecipient. Fix the stale NatSpec at AYieldStrategy.sol:51-53 and IYieldStrategy.sol:130-132 to state buffers are protocol-level yield routing to setAsideBufferRecipient, not client reserves (single doc-fix item shared with FAITH-15-003)."
+    },
+    {
+      "canonicalId": "DEDUP-15-003",
+      "title": "Global slippageToleranceBps couples withdrawal/skim slippage floors to deposit principal-credit: raising tolerance to clear a stuck withdrawal silently haircuts concurrent depositors' creditedPrincipal (at MAX_BPS: zero credit + zero minOut)",
+      "severityEstimate": "low (owner footgun / safe-config guidance)",
+      "disposition": "COLLAPSES-INTO-L-01",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "setSlippageTolerance / _creditedPrincipal",
+      "fileLine": "ERC4626MarketYieldStrategy.sol:88-93 (setter bounded only by MAX_BPS), 106-108 (creditedPrincipal = amount*(MAX_BPS-bps)/MAX_BPS), 139/168/225/276 (minOut sites)",
+      "rootCause": "A single slippageToleranceBps governs both the deposit credit haircut and every swap minOut floor; the two legs cannot be decoupled. An owner raising tolerance for an operational withdrawal would plausibly be surprised that concurrent deposits book haircut principal (shortfall reclassified as skimmable surplus) — surprise => Law-3 in-scope footgun. Value stays inside the protocol; not diff-new (predates story-047/048).",
+      "ledgerTarget": "L-01 (open Low, fingerprint 6460e35331dff5c220d596a134d4f71e1ce0c53b6bfd3b0b5f48edf97307b286 — 'setter missing sane cap'). Same setter, same missing-cap root cause; this run ENRICHES L-01 with the deposit-credit coupling blast radius and safe-config guidance. Bump lastSeenRun and append annotation; do not open a new entry.",
+      "sources": [
+        "ECON-001 (econ-scanner: full coupling mechanism + who-loses analysis — preserved as the L-01 annotation text)",
+        "PATTERN-MR-004 (MISSING-SLIPPAGE manual-review: requested exactly this economic blast-radius check; resolved here)"
+      ],
+      "crossReference": "Adjacent to acknowledged M-02 NAV cluster and C-01; downstream stable-staker story-011 zero-credit guard mitigates the zero-credit extreme for depositFor users.",
+      "humanReviewFlag": false,
+      "recommendation": "Annotate L-01: cap setSlippageTolerance well below MAX_BPS (e.g. <= 1000) and pause deposits before temporarily raising tolerance for an operational withdrawal."
+    },
+    {
+      "canonicalId": "DEDUP-15-004",
+      "title": "Vault-rate vs AMM-realizable-rate divergence on minOut / surplus ceiling / totalBalanceOf (standing M-02 NAV cluster) — story-047/048 did not change the surface",
+      "severityEstimate": "no-new-finding (adjudicated cluster; lastSeenRun bump only)",
+      "disposition": "COLLAPSES-INTO-M-02",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "deposit / withdraw / _totalWithdraw / _skimSurplus minOut + surplus-ceiling sites",
+      "fileLine": "ERC4626MarketYieldStrategy.sol:139, 167-168, 224-225, 262, 268-276",
+      "rootCause": "All minOut floors and the aggregate-surplus ceiling are denominated at vault convertTo* spot NAV while execution is at the AMM rate — the known M-02 surface. story-047 changed only proceed DISTRIBUTION and story-048 only timing constants and the out-of-scope direct-strategy creditedPrincipal; neither touches swap sizing or minOut.",
+      "ledgerTarget": "M-02 (fingerprint d7f6c2dfd580776dd3193942b89806b893ac95ff56a752a5e5bd7c501cb41416; cluster incl. L-09, L-11). HARD-SUPPRESSED from re-escalation per MEMORY reflax-yield-vault-realizable-solvency-collapse (run-12 PoC: concentrated-liquidity pool + small slippage = no valid sandwich path). Parked here for Law-1 visibility only.",
+      "sources": [
+        "ECON-004 (econ-scanner, self-adjudicated as fold-into-M-02)",
+        "PATTERN-MR-001 (FLASH-LOAN-PRICE manual-review, self-adjudicated as fold-into-M-02)"
+      ],
+      "humanReviewFlag": false,
+      "recommendation": "finding-manager: bump M-02 cluster lastSeenRun to run-15. No report owed."
+    },
+    {
+      "canonicalId": "DEDUP-15-005",
+      "title": "Consumer-side attribution of bare aggregated buffer inflows: does the global setAsideBufferRecipient (intended: stable-staker) correctly absorb unsolicited, batched ERC20 transfers pooling MULTIPLE clients' set-asides? (cross-repo; ties to stable-staker M-05 / reflax F-03)",
+      "severityEstimate": "manual-review (cross-repo interaction question, no in-scope finding raised)",
+      "disposition": "MANUAL-REVIEW",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_distributeBuffer (trust boundary at the single safeTransfer)",
+      "fileLine": "ERC4626MarketYieldStrategy.sol:368 (safeTransfer(setAsideBufferRecipient, totalSetAside) — no callback, no strategy-level event)",
+      "rootCause": "story-047 sends the aggregate set-aside as a plain transfer; the strategy emits only per-client SNAPSHOT SurplusSkimmed in vault-asset terms, which never equals the realized split, so the recipient-vs-buffer split is not reconstructable on-chain. Whether stable-staker attributes these bare inflows correctly is a property of the consumer contract in a different repo, outside run-15 scope.",
+      "sources": ["ECON-005 (econ-scanner, self-routed to interaction/faithfulness channel)"],
+      "crossReference": "Ledger F-03 (52f9b84a, open faithfulness) — FAITH-15-007 proposes annotating F-03 with the now-live StableStaker.sol:786 relinquishPrincipal callsite and a cross-project re-check trigger; this buffer-inflow question should ride the same next-stable-staker-run trigger. Also FAITH-15-006's rescue-footgun note (StableStaker owner rescue treats idle buffer as rescuable).",
+      "humanReviewFlag": true,
+      "recommendation": "Queue for the next stable-staker regression run: verify buffer-inflow attribution and the pay-out-then-relinquish invariant together. QA sub-item for this repo (qa-bundler): emit a BufferSetAside(token, totalSetAside, recipient) event so the split is reconstructable off-chain (LOCAL-MKT-047-002)."
+    },
+    {
+      "canonicalId": "DEDUP-15-006",
+      "title": "creditedPrincipal = vault.previewRedeem(sharesReceived) booking (story-048, ERC4626YieldStrategy) is protocol-favoring only if the target vault honors previewRedeem(previewDeposit(x)) <= x — vault-dependent bound unproven for concrete targets; file is outside registered run-15 scope but inside the story-048 diff",
+      "severityEstimate": "manual-review (low confidence; scope decision + vault-property proof needed)",
+      "disposition": "MANUAL-REVIEW",
+      "contract": "src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "function": "_acquireShares / previewDeposit / previewRedeem",
+      "fileLine": "ERC4626YieldStrategy.sol:110-113 (creditedPrincipal booking), 65-84 (new preview pass-throughs); AYieldStrategy.sol:696-716 (_depositInternal books whatever the hook reports)",
+      "rootCause": "A vault with asymmetric preview rounding or fee logic could make previewRedeem(sharesReceived) exceed the nominal deposit (over-credit), or a manipulated/transient NAV at deposit time could skew the booked figure. FAITH-15-002 verified the change is FAITHFUL to story-048 (and that ERC4626MarketYieldStrategy deliberately needs no equivalent fix), but conformance does not answer the vault-dependence question.",
+      "sources": ["PATTERN-MR-002 (YIELD-PRINCIPAL-ACCOUNTING-SKEW manual-review, preserved per Law 1 — not dropped despite the scope boundary)"],
+      "crossReferenceFaithfulness": "FAITH-15-002 (conformance verified; the residual here is the unproven round-trip bound, not faithfulness).",
+      "humanReviewFlag": true,
+      "recommendation": "Confirm the scope decision on ERC4626YieldStrategy.sol with project-manager; prove previewRedeem(previewDeposit(x)) <= x and previewRedeem monotonicity for the concrete target vaults (autoDOLA etc.) — a one-off fork test in workspace/ suffices. If a target vault violates the bound, re-open as a real finding."
+    },
+    {
+      "canonicalId": "DEDUP-15-007",
+      "title": "Uninitialized local accumulator `totalSetAside` in the story-047-rewritten _distributeBuffer (both concrete strategies) — defaults to 0, exact conservation proven by Tier-3",
+      "severityEstimate": "false-positive",
+      "disposition": "DROP-FP",
+      "contract": "src/concreteYieldStrategies/ERC4626YieldStrategy.sol + src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_distributeBuffer",
+      "fileLine": "ERC4626YieldStrategy.sol:315, ERC4626MarketYieldStrategy.sol:360",
+      "rootCause": "Slither uninitialized-local on a declared-without-initializer accumulator. Solidity zero-initializes locals; the accumulator semantics are exactly intended. Flagged only because the function body was rewritten in this diff — the one reason it warranted Tier-3 attention rather than reflex-dropping.",
+      "tier3Evidence": "P1 bufferConservation invariant PASS under forge (256x250) and Medusa (200k tests): exact two-transfer split, return value correct, dust to recipient. P1 clients-untouched-by-skim PASS. The rewritten function is conservation-exact.",
+      "sources": ["SLITHER-006", "SLITHER-007"],
+      "reason": "Structural FP on changed code, affirmatively discharged by passing invariants rather than assumed benign. Dropped.",
+      "humanReviewFlag": false
+    },
+    {
+      "canonicalId": "DEDUP-15-008",
+      "title": "Strict-equality zero-guards gating _totalWithdraw (totalShares == 0 || totalDeposited == 0) in both concrete strategies",
+      "severityEstimate": "low (existing)",
+      "disposition": "COLLAPSES-INTO-L-13",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol + src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "function": "_totalWithdraw",
+      "fileLine": "ERC4626MarketYieldStrategy.sol:209, ERC4626YieldStrategy.sol:177",
+      "rootCause": "Same zero-boundary early-return facet already tracked by L-13 (migration recorded as executed when sharesToSell floors to 0); benign exact-zero guard, not attacker-griefable. Identical to run-14's DEDUP-COL-002 adjudication; no diff lines touch these guards.",
+      "ledgerTarget": "L-13 (open Low, fingerprint 1456259d8ac60c118795b770323769ed2bf565c67dee884a6d814daded7bbc4e) — bump lastSeenRun.",
+      "sources": ["SLITHER-001", "SLITHER-002"],
+      "humanReviewFlag": false
+    },
+    {
+      "canonicalId": "DEDUP-15-009",
+      "title": "CEI / reentrancy-no-eth in _totalWithdraw: state written after vault.redeem / ammAdapter.swap (both concrete strategies)",
+      "severityEstimate": "low (existing)",
+      "disposition": "COLLAPSES-INTO-L-01-run11",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol + src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "function": "_totalWithdraw",
+      "fileLine": "ERC4626MarketYieldStrategy.sol:209, ERC4626YieldStrategy.sol:177",
+      "rootCause": "Same CEI-violation class as open L-01-run11 (state mutated after external calls, guarded by nonReentrant + onlyOwner + whenNotPaused; vault/adapter owner-configured, no attacker callback under the non-hooked-ERC20 trust model). Owner-gated twin of the run-14 DEDUP-COL-001 adjudication; no diff lines touch this path.",
+      "ledgerTarget": "L-01-run11 (open Low, fingerprint 3ab43381ffaf861f4cd5b1f25e1a8d4b9e709b1c9e53b2dfddda42c62fdf2a5d) — bump lastSeenRun; nonReentrant-ordering facet remains on L-04-run11.",
+      "sources": ["SLITHER-003", "SLITHER-004"],
+      "humanReviewFlag": false
+    },
+    {
+      "canonicalId": "DEDUP-15-010",
+      "title": "External calls + require inside the per-client loop of _accrueSurplusShares — one bad client entry can DoS the whole skim (both concrete strategies)",
+      "severityEstimate": "low/qa (wont-fix, existing)",
+      "disposition": "COLLAPSES-INTO-L-02",
+      "contract": "src/concreteYieldStrategies/ERC4626YieldStrategy.sol + src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_accrueSurplusShares",
+      "fileLine": "ERC4626YieldStrategy.sol:268/276, ERC4626MarketYieldStrategy.sol:313/321",
+      "rootCause": "Per-client loop over the owner-grown authorized-client set with external convertToShares calls and an in-loop require — the unbounded/fragile-loop facet of the existing wont-fix L-02 (author: 'unlikely to exceed 3 clients'). No diff lines touch the loop; story-047 actually IMPROVED the adjacent surface by replacing the per-client transfer loop with one aggregate transfer.",
+      "ledgerTarget": "L-02 (wont-fix Low, fingerprint 81ee07506e4262414d80d9f97beca56f411b34c009622d6e726bee77acc186cf) — bump lastSeenRun.",
+      "sources": ["SLITHER-011", "SLITHER-012"],
+      "humanReviewFlag": false
+    },
+    {
+      "canonicalId": "DEDUP-15-011",
+      "title": "QA/style SAST cluster: setRoute lastToken FP, setClient EnumerableSet returns, swap event-ordering, timestamp detector, constructor shadowing x3, nonReentrant-not-first x8, single-step Ownable x2, encodePacked revert-string FP, plus two QA-at-best signals in the out-of-registered-scope ERC4626YieldStrategy",
+      "severityEstimate": "qa",
+      "disposition": "QA-CLUSTER-COLLAPSE",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol, src/AYieldStrategy.sol, src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "function": "setRoute / setClient / swap / _updateWithdrawalStatus / constructors / modifier ordering / Ownable / revert-string / _disposeShares / constructor approve",
+      "fileLine": "see per-source mapping",
+      "ledgerTargets": {
+        "SLITHER-005 (uninitialized lastToken in setRoute)": "L-10 (false-positive, 90f3fa16 — loop always assigns before require); real distinct setRoute validation gap stays L-07 (open, b28e77da). Bump lastSeenRun on both.",
+        "SLITHER-010 (setClient EnumerableSet add/remove returns ignored)": "QA-06 (open, 8019f1c9) exact match — bump lastSeenRun.",
+        "SLITHER-013 (Swapped event after router.exchange)": "event-ordering only, no state-after-call; folds into general QA, no entry owed (same as run-14 adjudication).",
+        "SLITHER-014 (timestamp detector facet)": "QA-02 (open, 70162a2a) — bump lastSeenRun AND update its title/text from 24h/48h to 6h/72h (constants changed at ad12cb1); the retiming SUBSTANCE is carried by DEDUP-15-001, not here.",
+        "ADERYN-002/003/004 (constructor parameter shadowing x3)": "L-05-run11 (open, adc461fa) exact match — bump lastSeenRun.",
+        "ADERYN-005 (nonReentrant not first modifier, 8 entry points)": "L-04-run11 (open, 46ab675c) exact match — bump lastSeenRun.",
+        "SEMGREP-001/002 (single-step Ownable, AYieldStrategy + CurveAMMAdapter)": "L-08 (open, 207c3752) exact match — bump lastSeenRun.",
+        "ADERYN-001 (abi.encodePacked hash-collision on revert-string concatenation)": "DROP-FP — no hashing/decoding, collision premise inapplicable; same harmless construct class as existing QA-01 (4e98bf16). Identical to run-14 DEDUP-DROP-001.",
+        "SLITHER-008 (vault.redeem return unchecked in _disposeShares, ERC4626YieldStrategy:133)": "NO existing ledger entry. File is outside registered run-15 scope and the line is UNCHANGED in 2f6774d..ad12cb1. QA-at-best (received-vs-expected unchecked); parked visibly here per Law 1 — qa-bundler discretion to include if the ERC4626YieldStrategy scope decision (DEDUP-15-006) lands in-scope.",
+        "SLITHER-009 (raw approve(max) in ERC4626YieldStrategy constructor:50)": "NO existing ledger entry. Unchanged code, out-of-registered-scope file; one-time constructor approve to the owner-chosen vault; non-bool-returning-token concern is QA (forceApprove recommended). Parked visibly, same scope-decision gate as SLITHER-008."
+      },
+      "sources": ["SLITHER-005", "SLITHER-008", "SLITHER-009", "SLITHER-010", "SLITHER-013", "SLITHER-014", "ADERYN-001", "ADERYN-002", "ADERYN-003", "ADERYN-004", "ADERYN-005", "SEMGREP-001", "SEMGREP-002"],
+      "reason": "All map to existing open/adjudicated QA/Low ledger entries or are structural FPs, except the two SLITHER-008/009 signals in the out-of-registered-scope unchanged file, which are parked visibly rather than dropped (Law 1). None is a new H/M; none touches the story-047/048 diff except the SLITHER-014 facet routed to DEDUP-15-001.",
+      "humanReviewFlag": false
+    }
+  ],
+  "faithfulnessChannel": {
+    "note": "Faithfulness findings are preserved as their own channel per pipeline policy — deduplicated only against each other (no intra-channel duplicates found; FAITH-15-003 vs -006 and FAITH-15-004 vs -005 share subjects but assess distinct criteria: doc-conformance vs footgun, doc-conformance vs Law-1 safety). Overlaps with scanner findings are cross-referenced, not collapsed.",
+    "entries": [
+      { "id": "FAITH-15-001", "verdict": "CONFORMS", "severity": "none", "disposition": "no-finding (story-047 full conformance; also RESOLVES the static-analyzer VISIBLE-CHANNEL note on skim loud-guard ordering — guard is story-blessed, zero-buffer back-compat verified, Tier-3 P2 invariants PASS)" },
+      { "id": "FAITH-15-002", "verdict": "CONFORMS", "severity": "none", "disposition": "no-finding (story-048 full conformance); residual vault-dependence question routed to DEDUP-15-006" },
+      { "id": "FAITH-15-003", "verdict": "DEVIATES", "severity": "qa", "disposition": "QA doc fix (stale story-042 per-client-reserve NatSpec at AYieldStrategy.sol:51-53 + IYieldStrategy.sol:130-132) — cross-ref DEDUP-15-002; qa-bundler should emit ONE combined doc-fix item" },
+      { "id": "FAITH-15-004", "verdict": "DEVIATES", "severity": "qa", "disposition": "QA doc fix (stale 24h/48h at AYieldStrategy.sol:414, IYieldStrategy.sol:101, registry designDecision #5) — cross-ref DEDUP-15-001; project-manager to update the registry entry" },
+      { "id": "FAITH-15-005", "verdict": "CONFORMS", "severity": "none", "disposition": "no-finding (Law-1 assessment: 6h retiming blessed-by-story, not unsafe — kept visible as the reason DEDUP-15-001 caps at Low)" },
+      { "id": "FAITH-15-006", "verdict": "CONFORMS (footgun retained)", "severity": "low", "disposition": "Law-3 footgun corroborating DEDUP-15-002 (canonical scanner finding); its cross-protocol StableStaker-rescue note rides the DEDUP-15-005 next-stable-staker-run trigger" },
+      { "id": "FAITH-15-007", "verdict": "CONFORMS (disposition proposal)", "severity": "faithfulness", "disposition": "ledger action: KEEP F-03 (52f9b84a) OPEN, annotate with the now-live StableStaker.sol:786 relinquishPrincipal callsite + cross-project re-check trigger — finding-manager to apply via /ledger" }
+    ]
+  },
+  "regressionCheck": {
+    "fixedFindingsReappeared": false,
+    "note": "No finding previously marked 'fixed' (M-01 skim-overskim, fixed at 043ff2cb) reappeared; no REGRESSION flag raised. The Tier-3 detector failure reproduces the already-adjudicated H-02 mechanism (ledger status false-positive for its High framing — NOT a regression; the diff-new retiming residue is DEDUP-15-001). Tier-3 P4 principal-ledger-conservation (story-045/046 hoist regression guard) PASSED."
+  },
+  "humanReviewQueue": [
+    "DEDUP-15-005 — cross-repo buffer-inflow attribution on stable-staker (queue for next stable-staker regression run, alongside the F-03 callsite re-check)",
+    "DEDUP-15-006 — ERC4626YieldStrategy scope decision + previewRedeem(previewDeposit(x)) <= x round-trip-bound proof for concrete target vaults"
+  ],
+  "downstreamRouting": {
+    "DEDUP-15-001": "severity-classifier (expect Low; if it discounts further, fold as annotations onto H-02 + C-01 + QA-02 instead of a new entry — do not silently drop) -> finding-manager (new ledger entry, footgun:true, distinct fingerprint from H-02; flag the H-02 status-string discrepancy between ledger 'false-positive' and invariant-results 'downgraded-to-centralization') -> qa-bundler",
+    "DEDUP-15-002": "severity-classifier (confirm Low, footgun:true) -> finding-manager (new ledger entry) -> qa-bundler (merge doc-fix leg with FAITH-15-003)",
+    "DEDUP-15-003": "finding-manager: annotate + bump L-01 (no new entry)",
+    "DEDUP-15-004": "finding-manager: bump M-02 cluster lastSeenRun only (hard-suppressed from re-escalation per MEMORY)",
+    "DEDUP-15-005 / DEDUP-15-006": "manual-review channel; DEDUP-15-005's BufferSetAside-event sub-item to qa-bundler",
+    "DEDUP-15-007": "dropped (Tier-3-discharged FP); no downstream action",
+    "DEDUP-15-008/009/010": "finding-manager: bump lastSeenRun on L-13, L-01-run11, L-02",
+    "DEDUP-15-011": "finding-manager: bump lastSeenRun on L-10/L-07/QA-06/QA-02/L-05-run11/L-04-run11/L-08; refresh QA-02 text to 6h/72h; SLITHER-008/009 held pending the DEDUP-15-006 scope decision",
+    "faithfulnessChannel": "FAITH-15-003/004 to qa-bundler as doc-fix items; FAITH-15-007 F-03 annotation to finding-manager; registry designDecision #5 update to project-manager"
+  }
+}

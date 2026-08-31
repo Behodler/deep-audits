@@ -23,8 +23,7 @@ Invoke **project-manager**: "Resolve friendly name to get project details"
 ## 3. Confirm Removal
 Present to user what will be removed (resolve the actual paths first):
 - Submodule path: `lib/<submodule-name>`
-- All versioned report dirs: `reports/<friendly-name>/` and `reports/<friendly-name>-NN/`
-- Persistent ledger: `reports/ledgers/<friendly-name>.json`
+- The project's report directory: `reports/<friendly-name>/` — every numbered run dir and the ledger it contains
 - Workspace clone: `workspace/<friendly-name>/`
 - Registration entry in registered-projects.json
 - Ask for confirmation before proceeding (this is destructive)
@@ -39,8 +38,7 @@ Steps to execute:
 
 ## 5. Remove Reports, Ledger, and Workspace
 Invoke **project-manager**: "Remove all run artifacts for project"
-- Delete every versioned report dir: `reports/<friendly-name>/` and `reports/<friendly-name>-NN/` (findings/, submissions/, pocs/, *.json).
-- Delete the persistent ledger: `reports/ledgers/<friendly-name>.json`.
+- Delete the project's report directory: `rm -rf reports/<friendly-name>/`. It holds every run dir (findings/, submissions/, pocs/, *.json) and `ledger.json`. Name the directory exactly — never a `reports/<friendly-name>*` prefix glob, which would also match a project whose name extends this one.
 - Delete the workspace clone: `workspace/<friendly-name>/`.
 
 ## 6. Unregister Project
@@ -52,7 +50,7 @@ Invoke **project-manager**: "Remove project from registered-projects.json"
 ## 7. Verify Clean State
 Invoke **project-manager**: "Verify project has been completely removed"
 - Confirm `lib/<submodule-name>` no longer exists
-- Confirm no `reports/<friendly-name>*` dirs, no `reports/ledgers/<friendly-name>.json`, no `workspace/<friendly-name>/`
+- Confirm `reports/<friendly-name>/` is gone, and no `workspace/<friendly-name>/`
 - Confirm project not in registered-projects.json
 - Check .gitmodules no longer references the submodule
 
@@ -81,7 +79,7 @@ All file operations, git operations, and directory deletion MUST be performed by
 |------|-------|----------------|
 | Resolve project | project-manager | "Resolve friendly name '{name}' to get submodule path and project details" |
 | Remove submodule | project-manager | "Remove git submodule at lib/{submodule} completely (deinit, rm, clean modules)" |
-| Remove artifacts | project-manager | "Remove reports/{name}*, reports/ledgers/{name}.json, and workspace/{name}/" |
+| Remove artifacts | project-manager | "Remove reports/{name}/ and workspace/{name}/" |
 | Unregister | project-manager | "Remove project '{name}' from registered-projects.json" |
 | Verify removal | project-manager | "Verify project '{name}' has been completely expunged" |
 
@@ -94,8 +92,8 @@ All file operations, git operations, and directory deletion MUST be performed by
 # Examples
 ```
 /expunge phoenix-nft-staking
-# Removes lib/phoenix-nft-staking, all reports/phoenix-nft-staking* dirs,
-# reports/ledgers/phoenix-nft-staking.json, workspace/phoenix-nft-staking/, and registration
+# Removes lib/phoenix-nft-staking, reports/phoenix-nft-staking/ (runs + ledger),
+# workspace/phoenix-nft-staking/, and registration
 ```
 
 # Critical Rules

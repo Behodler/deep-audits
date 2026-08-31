@@ -1,0 +1,742 @@
+{
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-21",
+  "entryPoint": "dev",
+  "producedBy": "sanitizer",
+  "producedAt": "2026-07-29",
+  "regressionBaseline": {
+    "entryPoint": "dev",
+    "lastAuditedCommit": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+    "lastAuditedRun": "phoenix-phase-2-staging-06"
+  },
+  "fingerprintFormula": "sha256(contract:function:rootCauseClass:entryPoint) \u2014 verified byte-exact against ledger entries c294d93f77 and 0b497be32114",
+  "counts": {
+    "input": 11,
+    "suppressed": 0,
+    "passed": 11,
+    "new": 11,
+    "stillOpen": 0,
+    "regression": 0,
+    "flaggedForReview": 0
+  },
+  "knownIssuesStatus": {
+    "suppressionEnabled": false,
+    "reason": "BLOCKED. registered-projects.json declares knownIssuesFile 'lib/phoenix-phase-2-staging/known-issues.md' with knownIssuesCount 11, but that file DOES NOT EXIST on disk (verified this run). The 11 cached entries are a non-re-derivable snapshot dated 2026-01-09T15:30:00Z \u2014 the same unfalsifiable-known-issues failure mode previously recorded for phlimbo-ea. Under Law 1, no finding may be suppressed on that basis.",
+    "wouldHaveBeenConsidered": {
+      "DEV-10": "Cached KI #2 \"Mock contracts with unlimited minting (testing infrastructure only)\" would plausibly have covered a dead pre-funded mock deployment. NOT SUPPRESSED: the known-issues file lib/phoenix-phase-2-staging/known-issues.md does not exist, so the 11 cached entries (snapshot 2026-01-09) are non-re-derivable and carry no suppression authority this run. Recommend human triage decide.",
+      "DEV-01": "Cached KI #2 (mock contracts / testing infrastructure) could have been mis-stretched over DEV-01 because its vacuity evidence involves MockKendu/MockPhUSD. NOT SUPPRESSED, and would be wrong even if the KI list were live: the defect is in the FIRST-PARTY contract NudgeStreamer.sol, not in a mock; the mocks only explain why the local probe cannot detect it.",
+      "DEV-03": "Cached KI #10 \"Admin trust assumptions ... (operational risk)\" could have been stretched over a missing owner-setter guard. NOT SUPPRESSED: blocked-KI rule, and independently Law 3 keeps non-obvious owner footguns in scope.",
+      "DEV-09": "Cached KI #7 \"Circular reference between Phlimbo and StableYieldAccumulator (documented deployment order)\" sits on adjacent wiring-order subject matter. NOT SUPPRESSED: blocked-KI rule; and DEV-09 is about missing post-step assertions on setNudgeStreamer, not about deployment ordering."
+    },
+    "remediation": "Re-extract known issues from the submodule at HEAD (project-manager) before any future run is permitted to suppress on this list, or clear knownIssuesFile/knownIssues from the registry."
+  },
+  "suppressions": [],
+  "flaggedForReview": [],
+  "findings": [
+    {
+      "id": "DEV-01",
+      "title": "NudgeStreamer.collectNudge credits the buffer with the amount SENT, not received, against a POOLED per-token balance \u2014 one taxed token drains sibling streams and bricks batchMint for every reward token",
+      "severity": "medium",
+      "propagation": "PROPAGATES-TO-MAINNET",
+      "contract": "lib/nft-staking/src/NudgeStreamer.sol",
+      "function": "collectNudge / _settle / _accrued",
+      "lineStart": 149,
+      "lineEnd": 150,
+      "entryPoint": "dev",
+      "rootCauseClass": "UnmeasuredTokenReceipt",
+      "category": "unintended-side-effect",
+      "description": "`collectNudge` performs `IERC20(token).safeTransferFrom(msg.sender, address(this), amount); s.buffer += amount;` (:149-150) with no balance-delta measurement. The streamer holds a SINGLE POOLED balance per token across every `(batchMinter, token)` pair, while `_settle` caps payouts against the per-stream accounting buffer (`_accrued`, :193-200), not against real custody. The contract NatSpec at :194-196 asserts 'The buffer cap guarantees the streamer can never transfer more than it holds, even if elapsed is large' \u2014 that guarantee is PER-STREAM whereas custody is POOLED PER-TOKEN, so it does not hold across pairs. The deploy-script probe at DeployMocks.s.sol:1661 is the only defence anywhere and it is VACUOUS: it runs solely against MockKendu and MockPhUSD, both defined with no transfer fee, so it cannot fail locally. There is no on-chain guard.",
+      "impact": "For any reward token that is fee-on-transfer, taxed, or reflection-based: (1) the credited buffer immediately exceeds custody; (2) whichever `(batchMinter, token)` pair settles first is paid its full over-stated buffer out of the shared balance, consuming the backing of the other pairs; (3) the later pair's `pullPendingStream` REVERTS on insufficient balance; and (4) because `BatchNFTMinterMultiToken.batchMint` loops `pullPendingStream` over `getNudgeTokens()` inside one transaction (:539), a single tainted token bricks batchMint for ALL reward tokens \u2014 the entire mint path, not just the tainted reward. Kendu Inu is a memecoin whose real transfer semantics are unverified, and MockKendu's own NatSpec states the mock is deliberately fee-free because the streamer assumes exact delivery.",
+      "evidence": "PoC workspace/phoenix-phase-2-staging/test/AuditDevNudgeStreamerFoT.t.sol \u2014 4/4 PASS against the REAL NudgeStreamer with a 5% fee-on-transfer ERC20. (A) buffer 100,000e18 vs custody 95,000e18. (B) two pairs of the same token: buffers 200,000e18 vs pooled custody 190,000e18; pair A settles and the streamer pays out its full 100,000, leaving 90,000 against pair B's 100,000 claim; B's pullPendingStream reverts. (C) a clean token settles fine in isolation while the tainted token reverts \u2014 and batchMint shares one transaction. (D) at feeBps==0 the divergence vanishes entirely, confirming the DeployMocks probe passes vacuously by construction. Also confirmed on the live local chain: streamer balance EXACTLY equals the credited buffer for all three tokens, i.e. the condition under which this finding is invisible.",
+      "recommendation": "Measure the receipt in `collectNudge`: `uint256 before = IERC20(token).balanceOf(address(this)); safeTransferFrom(...); uint256 received = IERC20(token).balanceOf(address(this)) - before; s.buffer += received;` and recompute the rate from `received`. If fee-on-transfer tokens are intended to be permanently out of scope, add an on-chain probe in `registerStream` (which is already owner-gated and is the natural admission point) rather than relying on a deploy-script assert against a mock that cannot fail. Independently, verify the real Kendu token's transfer semantics on-chain BEFORE `setNudgeTokenWhitelist` on mainnet.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-001",
+        "dedupDisposition": "KEPT \u2014 genuinely new, cross-run verified",
+        "originalIds": [
+          "DEV-01"
+        ],
+        "dedupRationale": "Verified against all prior NudgeStreamer/collectNudge prior art in the family ledgers. NOT a duplicate of any of them: this is a custody-accounting defect (credited-vs-received amount against a POOLED per-token balance shared across (batchMinter,token) pairs), not a timing, wiring or re-key issue. Medium + PROPAGATES-TO-MAINNET: protected from collapse under Law 1.",
+        "crossRunLinks": [
+          {
+            "ledger": "phoenix-nft-staking",
+            "entry": "6f46ec80f1 (L-03)",
+            "status": "open",
+            "relation": "ADJACENT-NOT-DUPLICATE",
+            "note": "L-03 attacks the SAME NatSpec block (streamer 'cap' claims) but on the TIMING axis: 'time-throttle not value-cap'. DEV-01 attacks the CUSTODY axis: the per-stream buffer cap is not backed by per-stream custody. Different root cause, different fix (measure receipt / admission probe vs. NatSpec reword). Keep separate."
+          },
+          {
+            "ledger": "phoenix-nft-staking",
+            "entry": "4a1d8edc92 (L-01)",
+            "status": "open",
+            "relation": "SAME-CONTRACT-DIFFERENT-DEFECT",
+            "note": "L-01 = no rescue, buffers strand on decommission. DEV-01 = buffer over-credited relative to custody. Disjoint."
+          },
+          {
+            "ledger": "phoenix-nft-staking",
+            "entry": "aaebb4b9b0 (L-02)",
+            "status": "open",
+            "relation": "SAME-FUNCTION-DIFFERENT-DEFECT",
+            "note": "L-02 = collectNudge dust window-reset griefing (rate re-amortisation). DEV-01 = collectNudge unmeasured receipt. Same function, disjoint root causes."
+          },
+          {
+            "ledger": "phoenix-nft-staking",
+            "entry": "bfdb50105e (Q-03)",
+            "status": "wont-fix (qa)",
+            "relation": "SAME-CLASS-DIFFERENT-CONTRACT \u2014 RE-FILE, DISCLOSED",
+            "note": "Q-03 is the fee-on-transfer class on BatchNFTMinterMultiToken._payRewards, owner WONT-FIX. Its triage reason states verbatim: 'The caller chooses BOTH the token AND the recipient, the fee accrues to the token's own sink (no extraction by anyone), and there is NO path where A's token choice costs an unrelated B.' RE-FILE BASIS: DEV-01 supplies exactly the path Q-03's acceptance says does not exist \u2014 NudgeStreamer custody is POOLED PER TOKEN across (batchMinter,token) pairs, so pair A's settlement consumes pair B's backing and B's pullPendingStream reverts (PoC case B). Additional delta: BatchNFTMinterMultiToken.batchMint loops pullPendingStream over the whole whitelist in one tx, so one tainted token bricks the mint path for ALL reward tokens. The Q-03 wont-fix is NOT overridden and is NOT cited as suppression."
+          },
+          {
+            "ledger": "phoenix-nft-staking",
+            "entry": "bfdb50105e (Q-03) triage note",
+            "status": "wont-fix",
+            "relation": "KNOWN-INVALID-PREDICATE-DOES-NOT-FIRE",
+            "note": "Pre-empting a C4 'fee-on-transfer tokens are known-invalid' objection: the same triage note records that 'story-022 \u00a74.4 documents FoT explicitly, so the C4 known-invalid predicate does not fire'. FoT is in scope for this family. (Recorded for the sanitizer/validity-checker; no suppression applied here \u2014 sanitizer is BLOCKED this run.)"
+          },
+          {
+            "ledger": "stable-yield-accumulator",
+            "entry": "5292756503 (M-02, error 0xd62cbfe8)",
+            "status": "fixed (with knowingly-accepted residual)",
+            "relation": "NOT-A-DUPLICATE",
+            "note": "0xd62cbfe8 is NudgeStreamer__NotRegistered \u2014 a stream-KEYING/wiring brick from setRewardToken re-keying an armed rail. DEV-01 involves no re-keying: the stream stays registered and correctly keyed, and fails on token custody. Disjoint. NOTE the M-02 closure text is nonetheless directly relevant to this run: it defers its three residual paths 'to a forthcoming dedicated deploy script, to be reviewed here under /audit-script' \u2014 i.e. to an audit of this shape. See the DEV-09 link."
+          }
+        ]
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. C4 known-invalid 'fee-on-transfer / weird ERC-20' predicate does NOT fire: DEV-01 is a first-party accounting defect in NudgeStreamer.sol (buffer += amount without receipt measurement, against POOLED per-token custody with a per-stream cap), not a request for weird-token support; and phoenix-nft-staking story-022 \u00a74.4 documents FoT explicitly, so the token class is in-scope by the project's own spec. Reproduced by a 4/4-passing PoC (cross-pair drain + batchMint brick). In scope: lib/nft-staking is a FIRST-PARTY Behodler-org submodule, not a third-party dependency.",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires",
+        "blockedKnownIssueNote": "Cached KI #2 (mock contracts / testing infrastructure) could have been mis-stretched over DEV-01 because its vacuity evidence involves MockKendu/MockPhUSD. NOT SUPPRESSED, and would be wrong even if the KI list were live: the defect is in the FIRST-PARTY contract NudgeStreamer.sol, not in a mock; the mocks only explain why the local probe cannot detect it."
+      },
+      "reconciliation": {
+        "fingerprint": "a753907e2a4c6261389ea642ede743e198b50741d4bcb43fa8bad900729174d1",
+        "fingerprintInput": "lib/nft-staking/src/NudgeStreamer.sol:collectNudge / _settle / _accrued:UnmeasuredTokenReceipt:dev",
+        "legacyPathVariantChecked": null,
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null,
+        "disclosedRefile": {
+          "priorEntry": "phoenix-nft-staking :: bfdb50105e (Q-03, qa, wont-fix)",
+          "relation": "SAME-CLASS-DIFFERENT-CONTRACT \u2014 DISCLOSED RE-FILE, NOT AN OVERRIDE",
+          "basis": "Different project ledger, different contract (NudgeStreamer.sol vs BatchNFTMinterMultiToken.sol) and different function => different fingerprint. Q-03's wont-fix reason states verbatim there is 'NO path where A's token choice costs an unrelated B'; DEV-01 supplies exactly that path via POOLED per-token custody across (batchMinter,token) pairs. The prior human triage is preserved and untouched; this is a new instance whose facts contradict the prior acceptance's stated premise. Recommend the human re-weigh bfdb50105e in light of DEV-01."
+        }
+      }
+    },
+    {
+      "id": "DEV-02",
+      "title": "Migration rehearsal sizes the budget transfer as a fraction of a hard-coded CONSTANT rather than of the actual balance \u2014 moves 88.67%, not the documented 90%, and strands 345 phUSD in three untracked contracts",
+      "severity": "low",
+      "propagation": "LOCAL-ONLY (but the formula must never be ported \u2014 see differential-gap.md \u00a73.1)",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "_runStakerMigration",
+      "lineStart": 1831,
+      "lineEnd": 1832,
+      "entryPoint": "dev",
+      "rootCauseClass": "ConstantDerivedSizing",
+      "category": "intent-mismatch",
+      "description": "`uint256 movable = (REHEARSAL_STAKER_BUDGET * 90) / 100;` computes 90% of a hard-coded seed constant, not 90% of the staker's actual phUSD balance. Between the `topUp(REHEARSAL_STAKER_BUDGET)` at :1734 and the migration, the three seed NFT mints route through the Uniboost donation branch and the UniboostMintDebtHook mints additional phUSD INTO the V1 staker. That contribution is excluded from the transfer entirely. The in-source comment at :1822-1830 describes the result as 'a flat 90%' and ':1788' says it 'leaves an arbitrary 10% stranded' \u2014 both understate the divergence.",
+      "impact": "Measured on the live chain: V1 actual balance 1015.014 phUSD, moved 900, so the actual fraction moved is 88.67% and the stranded residual is 115.014 phUSD (11.33%) per staker \u2014 345.042 phUSD across the three. The post-condition at :1712 (`phUSD.balanceOf(v2) > 0`) cannot detect this: it proves non-zero, not correctly-sized. On mainnet, where the mint-debt hook has been minting into the live stakers for months, the seed constant would be an arbitrary and possibly small fraction of the real balance, so 'flat 90%' could move almost any proportion. The author explicitly disclaims the number (:1783-1789: 'Do not read this 90% as a validated answer; the rehearsal proves nothing about sizing') and hands sizing to story 072 as OPEN.",
+      "evidence": "cast against the deployed chain: three V1 stakers at 0x976fcd02\u2026, 0x413b1afc\u2026, 0x359570b3\u2026 hold 115.014007236759570733 / 115.014007236826930907 / 115.014039422670157249 phUSD after migration; the three V2 stakers each hold exactly 900e18 with totalStaked == 3. Staker #3 additionally ended with committedDebt == 1 wei (the others 0), directly confirming the accrual-during-broadcast effect the constant works around is real. None of the six rehearsal artifacts is tracked, so the stranded value is invisible to progress.31337.json, local.json, addresses.ts and the :3001 API.",
+      "recommendation": "For the mainnet port: compute `balance - committedDebt` at execution time, or move the budget in a separate transaction after `initiateMigration` has frozen `committedDebt`. The forge simulate-then-replay defect that forced the constant does not apply on mainnet, where every `*:broadcast` npm entry uses `--skip-simulation`. Port the ORDERING finding the rehearsal exists to produce (settle+freeze before moving the budget, :1778-1781); do not port the number. Locally, either track the rehearsal artifacts or assert the residual explicitly.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-002",
+        "dedupDisposition": "KEPT \u2014 unique",
+        "originalIds": [
+          "DEV-02"
+        ],
+        "dedupRationale": "No duplicate in-run and no prior ledger entry on rehearsal budget sizing. Note the propagation flag is LOCAL-ONLY-with-port-warning; it must not be merged with any PROPAGATES finding.",
+        "crossRunLinks": [
+          {
+            "ledger": "phoenix-phase-2-staging",
+            "entry": "aad986850d",
+            "status": "open",
+            "relation": "WEAK-THEME-ONLY",
+            "note": "Both are 'a script pins a hard-coded proportion instead of reading live state' (25%->10% buffer literal). Different contract, function, entry point and value. NOT consolidated \u2014 a themed merge here would hide two independent literals the mainnet port must each be re-derived from."
+          }
+        ]
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. Not a known-invalid category. LOCAL-ONLY rehearsal-sizing defect; the finding's own value is the do-not-port warning.",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires"
+      },
+      "reconciliation": {
+        "fingerprint": "6537da6fb7481a4c0cb2bb28d85793107a6d52bd65ee6c683d5e5db4d40004da",
+        "fingerprintInput": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol:_runStakerMigration:ConstantDerivedSizing:dev",
+        "legacyPathVariantChecked": "8ccfed2bdd96d8167b35168a0d5e80c03010ddfe88468350eedc1033935cb929",
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null
+      }
+    },
+    {
+      "id": "DEV-03",
+      "title": "BatchNFTMinterMultiToken.setNudgeStreamer is the only one of six streamer setters with no zero-address guard \u2014 zeroing it silently strands every accrued stream while batchMint keeps succeeding",
+      "severity": "low",
+      "propagation": "PROPAGATES-TO-MAINNET",
+      "contract": "lib/nft-staking/src/BatchNFTMinterMultiToken.sol",
+      "function": "setNudgeStreamer",
+      "lineStart": 299,
+      "lineEnd": 302,
+      "entryPoint": "dev",
+      "rootCauseClass": "InconsistentZeroAddressGuard",
+      "category": "access-control",
+      "description": "All six donor contracts reject `setNudgeStreamer(address(0))` with an explicit guard \u2014 BalancerPoolerV2.sol:247, Uniboost.sol:191, NudgeRatchet.sol:106, PromotionUniV2_Eth.sol:349, StableYieldAccumulator.sol:514. `BatchNFTMinterMultiToken.setNudgeStreamer` (:299-302) has none, because address(0) is its deliberate 'streaming disabled' sentinel: `batchMint` gates the whole `pullPendingStream` loop on `if (_nudgeStreamer != address(0))` (:538). The sentinel design is defensible in isolation; the hazard is that it is the ONE setter in a family of six that accepts the value every sibling rejects, and its failure mode is silent while every sibling's is a loud revert.",
+      "impact": "An operator wiring the sink from a wrong or placeholder address (see DEV-06) gets no error and no event distinguishable from a normal reconfiguration. batchMint continues to succeed. Every accrued stream stays stranded in the streamer and the batcher is paid only whatever was already sitting in the sink. Because `pullPendingStream` is the ONLY path by which streamed funds reach the batch minter, and donors keep pushing INTO the streamer, the divergence grows without bound and is visible only by comparing streamer buffers against sink balances. This inverts the intuition an operator would form from the five guarded siblings.",
+      "evidence": "PoC workspace/phoenix-phase-2-staging/test/AuditDevStreamerWiring.t.sol, run with --fork-url against the live local chain \u2014 2/2 PASS. test_zeroAddressGuardAsymmetry: all six donors return ok==false for setNudgeStreamer(address(0)); BatchNFTMinterMultiToken returns ok==true and nudgeStreamer() reads address(0). test_zeroedSinkStrandsAccruedStreams: with the streamer wired, a qualifying batchMint(26) pays the batcher 45,045,015 USDC + 5,000e18 phUSD + 50,000e18 Kendu; with the streamer zeroed the SAME batchMint SUCCEEDS with no revert and no event and pays 189,464 USDC + 0 phUSD + 0 Kendu, leaving the full matured pot stranded in the streamer.",
+      "recommendation": "Either (a) emit a distinct, unambiguous event when the streamer is set to zero (e.g. `NudgeStreamingDisabled`) so the disable is loud in logs, or (b) add an explicit `setNudgeStreamingEnabled(bool)` and require a non-zero address in `setNudgeStreamer`, separating 'disable' from 'misconfigure'. At minimum, the mainnet script must post-assert `batchMinter.nudgeStreamer() == <expected>` after the call \u2014 DeployMocks post-asserts only the SYA leg (:1129) of seven such calls.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-003",
+        "dedupDisposition": "KEPT \u2014 RE-FILE OF A KNOWN CLASS, DISCLOSED",
+        "originalIds": [
+          "DEV-03"
+        ],
+        "dedupRationale": "Same fail-open/unwired-sink CLASS as prior art below, but a DISTINCT contract+function+entryPoint => distinct fingerprint that automatic dedup cannot flag. Disclosed rather than collapsed, per the standing re-file rule. No prior wont-fix/acknowledged status is overridden.",
+        "crossRunLinks": [
+          {
+            "ledger": "yield-claim-nft",
+            "entry": "c91bef813d (M-04)",
+            "status": "fixed (story-037 hookTypeId marker guard)",
+            "relation": "SAME-CLASS-DIFFERENT-CONTRACT \u2014 RE-FILE, DISCLOSED",
+            "note": "M-04 = 'Unwired-dispatch zero-debt value leak: default empty hook accrues no phUSD debt if owner forgets setHook (Law-3 footgun)'; owner triage reason: 'Owner ack \u2014 WILL FIX (guard against the default-sentinel hook: revert on unwired dispatch in _dispatch...)'. RE-FILE BASIS: identical shape (a sentinel/zero collaborator makes the value leg a silent no-op while the main call keeps succeeding) on a DIFFERENT contract (BatchNFTMinterMultiToken.setNudgeStreamer, nft-staking) that never received the M-04 fail-closed treatment. The M-04 remedy \u2014 fail closed on the default/unwired collaborator \u2014 is precisely what DEV-03 asks for here."
+          },
+          {
+            "ledger": "yield-claim-nft",
+            "entry": "563df2e64a (L-09)",
+            "status": "open",
+            "relation": "PRECEDENT-FOR-HANDLING",
+            "note": "L-09 is the same class reborn on a third dispatcher (Uniboost) and was explicitly recorded OPEN rather than auto-folded under the sibling wont-fix Q-08, with the reasoning 'The Q-08 wont-fix accepted the exposure on the LIVE BalancerPoolerV2, not on this newly-in-scope Uniboost.' DEV-03 is handled the same way."
+          },
+          {
+            "ledger": "phoenix-nft-staking",
+            "entry": "858e9e807a (H-01)",
+            "status": "wont-fix",
+            "relation": "NOT-RELATED-ON-ROOT-CAUSE",
+            "note": "Checked because it shares the contract (BatchNFTMinterMultiToken.batchMint) and was named in the dedup brief. 858e9e80 is the value-blind nudge GATE (count-only qualification paying the full pot). DEV-03 is a SETTER guard asymmetry that strands the pot instead of over-paying it \u2014 economically the opposite direction. NOT a duplicate and the 858e9e80 wont-fix is NOT cited against it."
+          }
+        ]
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. Law 3 footgun: a missing zero-address guard that is present on the five sibling setters is a NON-OBVIOUS consequence \u2014 a competent non-malicious owner would be surprised that zeroing the streamer strands accrued value while batchMint keeps succeeding (fail-open, silent). Not a 'malicious owner' framing; not 'reckless admin'. In scope.",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires",
+        "blockedKnownIssueNote": "Cached KI #10 \"Admin trust assumptions ... (operational risk)\" could have been stretched over a missing owner-setter guard. NOT SUPPRESSED: blocked-KI rule, and independently Law 3 keeps non-obvious owner footguns in scope."
+      },
+      "reconciliation": {
+        "fingerprint": "f7de907d798140658d9cd3c030a23d051c96a06e1abc6ab9f2ccf91d9ee78f20",
+        "fingerprintInput": "lib/nft-staking/src/BatchNFTMinterMultiToken.sol:setNudgeStreamer:InconsistentZeroAddressGuard:dev",
+        "legacyPathVariantChecked": null,
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null,
+        "disclosedRefile": {
+          "priorEntry": "yield-claim-nft :: c91bef813d (M-04, medium, fixed \u2014 \"Owner ack \u2014 WILL FIX: revert on unwired dispatch\")",
+          "relation": "SAME-CLASS-DIFFERENT-CONTRACT \u2014 DISCLOSED RE-FILE",
+          "basis": "Fail-open-on-unwired-pointer class. c91bef813d was fixed on ATokenDispatcherV2; BatchNFTMinterMultiToken.setNudgeStreamer never received the fail-closed treatment. Precedent for keeping this open rather than folding it under a fixed sibling: yield-claim-nft 563df2e64a (L-09, open) \u2014 the same class reborn on a third dispatcher was kept as its own OPEN entry. Not suppressed."
+        }
+      }
+    },
+    {
+      "id": "DEV-04",
+      "title": "progress.31337.json is written with a hard-coded deploymentStatus \"completed\" during forge's local-execution phase, before any transaction is broadcast",
+      "severity": "low",
+      "propagation": "PROPAGATES-TO-MAINNET (as a pattern \u2014 this shape has already poisoned three committed mainnet progress files)",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "_writeProgressFile",
+      "lineStart": 1918,
+      "lineEnd": 1945,
+      "entryPoint": "dev",
+      "rootCauseClass": "WriteBeforeBroadcast",
+      "category": "unintended-side-effect",
+      "description": "`_writeProgressFile()` emits `\"deploymentStatus\": \"completed\"` as a string LITERAL (:1922), derived from nothing, and is called after `vm.stopBroadcast()` \u2014 i.e. during forge's local execution pass, before the broadcast begins. The file also hard-codes `\"chainId\": 31337` (:1919) rather than reading `block.chainid`, and hard-codes its own output path (:1943). It contains no timestamp and no deployer field, so a stale file is byte-indistinguishable from a fresh one.",
+      "impact": "Benign in isolation on anvil \u2014 DeployMocks never reads a progress file (no vm.readFile/parseJson anywhere) and clean:local deletes it first, so there is no resume consumer to mislead. It is NOT benign as a pattern: package.json's `//uniboost-cutover:resume` doc comment records this exact shape already producing three committed `progress.uniboost-cutover.1.POISONED*.bak` files on mainnet, where a crashed broadcast left a file positively asserting completion. Combined with the total absence of a chain-id guard (DEV-05), a mis-pointed RPC would produce a progress file that positively asserts it is anvil output.",
+      "evidence": "Empirically confirmed during this audit: progress.31337.json mtime 2026-07-29 12:14:24 while the broadcast was still in flight at 12:17:45 (deployer nonce 160 of 352). The file claimed 'completed' for a further ~15 minutes of unconfirmed broadcasting. Separately, a cold redeploy reproduced the committed file BYTE-IDENTICALLY (md5 f4bb1d9f42d24416dd8a4622ab6b21c7), which is a positive determinism result but also means no field distinguishes a fresh file from a stale one.",
+      "recommendation": "For the mainnet port, do not inherit this. Use `DeployMainnetUniboostBatchMinters.s.sol:214`'s `_isDeployed` (which additionally requires `a.code.length > 0`) as the source of truth for resume, and treat the progress file as advisory. Locally, at minimum read `block.chainid` rather than hard-coding 31337, and add a timestamp so staleness is detectable.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-004",
+        "dedupDisposition": "KEPT \u2014 unique; NOT merged with DEV-05",
+        "originalIds": [
+          "DEV-04"
+        ],
+        "dedupRationale": "DEV-04 and DEV-05 both touch chain identity (DEV-04 hard-codes chainId 31337 in the progress file; DEV-05 is the missing require). Deliberately NOT consolidated: different root causes (WriteBeforeBroadcast vs MissingChainGuard), different fixes, and \u2014 decisive under constraint 2 \u2014 different propagation flags (PROPAGATES-as-pattern vs LOCAL-ONLY).",
+        "crossRunLinks": [
+          {
+            "ledger": "phoenix-phase-2-staging",
+            "entry": "86a0f4fd99 / 2f8e1ff5e1",
+            "status": "fixed / open",
+            "relation": "ADJACENT-THEME",
+            "note": "Prior resume/idempotency findings on other entry points concern ABSENT resume state; DEV-04 concerns resume state that is present and positively WRONG. Not consolidated."
+          }
+        ]
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. Not a known-invalid category; concrete evidence cited (three committed mainnet progress files already poisoned by this shape).",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires"
+      },
+      "reconciliation": {
+        "fingerprint": "1e8cc0dc58ba0ecbe43faf12ea343e3d6eb784c36d3ad2b0141668e33777871e",
+        "fingerprintInput": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol:_writeProgressFile:WriteBeforeBroadcast:dev",
+        "legacyPathVariantChecked": "a76333aae892b7ed5c17aef123a6734e5d5d64f65f9da7bdaf8df2d45e67bcc1",
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null
+      }
+    },
+    {
+      "id": "DEV-05",
+      "title": "DeployMocks has no block.chainid guard at all, in direct contravention of the project's own CLAUDE.md, while every DeployMainnet* script carries one twice",
+      "severity": "low",
+      "propagation": "LOCAL-ONLY (the guard's absence is the finding; the port must add one)",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "run",
+      "lineStart": 290,
+      "lineEnd": 290,
+      "entryPoint": "dev",
+      "rootCauseClass": "MissingChainGuard",
+      "category": "access-control",
+      "description": "Line :290 merely LOGS the chain id. There is no `require(block.chainid == 31337)` anywhere in the 1946-line file. All seven DeployMainnet* scripts carry `require(block.chainid == 1)`, most of them twice (setUp + run). The project's own CLAUDE.md is explicit: 'Anvil may relax these checks for local iteration, but the relaxation must be gated behind an explicit `block.chainid == 31337` branch and clearly commented \u2014 never share an unsafe default code path between local and real networks.' The same file also lists 'Mock contracts with unlimited minting / Default Anvil private keys / Unrestricted permissions / Simplified initialization' under 'Local Development Only \u2014 NEVER deploy these configurations to Sepolia or Mainnet.'",
+      "impact": "Story 073 enlarges the ungated surface: unrestricted `MockKendu.mint`, `phUSD.setMinter(deployer, true)` granted at :1648 and :1731 and never revoked (verified live: `authorizedMinters(deployer) == (true, 1)` after the run), the 300-ETH `WETH9.deposit` at :1460, real `PhusdStableMinter.mint` calls in Phases 9/9.5/9.55/9.6, and the entire destructive V1-staker teardown (pause + pauser repoint to an EOA + unregister from the global Pauser). The only thing preventing this script from running against a non-anvil RPC is the operator typing the right --rpc-url. This is a footgun in the Law-3 sense: a competent non-malicious operator would be surprised that the one script in the repo containing every unsafe local relaxation is also the only one with no chain gate.",
+      "evidence": "grep for `block.chainid` in script/DeployMocks.s.sol returns a single hit at :290, inside a console.log. grep for `setMinter(.*false)` returns nothing. Live post-run: `cast call MockPhUSD 'authorizedMinters(address)' 0xf39Fd6e5\u2026 -> (true, 1)`, `mintVersion() -> 1`.",
+      "recommendation": "Add `require(block.chainid == 31337, \"DeployMocks: anvil only\")` in `run()` before `vm.startBroadcast`. Independently, revoke the two `phUSD.setMinter(deployer, true)` grants at the end of the run and post-assert `authorizedMinters(deployer).canMint == false`, so the port inherits a revoke-and-assert habit rather than a standing grant.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-005",
+        "dedupDisposition": "KEPT \u2014 RE-FILE OF A KNOWN CLASS, DISCLOSED",
+        "originalIds": [
+          "DEV-05"
+        ],
+        "dedupRationale": "A prior chain-guard entry exists in THIS project's ledger under a different entry point. Same rootCauseClass, different script and different entryPoint => distinct fingerprint. Disclosed, not collapsed; the prior entry is OPEN, so no triage decision is overridden.",
+        "crossRunLinks": [
+          {
+            "ledger": "phoenix-phase-2-staging",
+            "entry": "8468af472d",
+            "status": "open",
+            "relation": "SAME-CLASS-DIFFERENT-SCRIPT \u2014 RE-FILE, DISCLOSED",
+            "note": "'MigrateBatchNFTMinter lacks a chainid guard, unlike its sibling funder' (low, open, entryPoint batch-minter-migrate). Identical class and identical intra-repo-asymmetry argument. RE-FILE BASIS: (a) different script and entry point; (b) DeployMocks is a materially worse instance \u2014 it is the one script carrying every documented unsafe local relaxation (unlimited mock minting, an unrevoked phUSD setMinter grant, the destructive V1-staker teardown) and it contradicts the project's own CLAUDE.md rule requiring the anvil relaxation to be gated behind an explicit block.chainid == 31337 branch. Two open instances of one class in one project is itself the signal; keep both so a systemic fix is visible."
+          }
+        ]
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. Law 3 footgun aimed at an operator hand-porting to mainnet, and it contradicts the project's own CLAUDE.md rule. Not 'reckless admin mistake' \u2014 the absence of the guard is the defect, not the operator's use of it.",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires"
+      },
+      "reconciliation": {
+        "fingerprint": "ce524709d965de786fc2b6f6a1e5d2e2139406346b8fd5f930fdabac679b36e0",
+        "fingerprintInput": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol:run:MissingChainGuard:dev",
+        "legacyPathVariantChecked": "c725664a66d8b6e004e96fc73c0d48d63552653cd5b2243e6a29ce2901cd9a1a",
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null,
+        "disclosedRefile": {
+          "priorEntry": "phoenix-phase-2-staging :: 8468af472d (low, open, entryPoint batch-minter-migrate)",
+          "relation": "SAME-CLASS-DIFFERENT-ENTRY-POINT \u2014 DISCLOSED RE-FILE, BOTH KEPT",
+          "basis": "Identical rootCauseClass (MissingChainGuard) on a different script under a different entryPoint => different fingerprint BY DESIGN (entryPoint is folded into the hash). The prior entry is `open`, so no human triage is overridden. SYSTEMIC SIGNAL: two independently-filed open instances of MissingChainGuard in one project indicates a repo-wide gap, not two script-local slips; recommend a systemic fix (shared chain-guard modifier) rather than two point fixes."
+        }
+      }
+    },
+    {
+      "id": "DEV-06",
+      "title": "mainnet-addresses.ts carries 0x0 placeholders for Kendu and NudgeStreamer that are type-indistinguishable from real addresses, because the ContractAddresses interface is regenerated from ANVIL data with every field a required plain string",
+      "severity": "low",
+      "propagation": "PROPAGATES-TO-MAINNET",
+      "contract": "lib/phoenix-phase-2-staging/server/deployments/mainnet-addresses.ts",
+      "function": "n/a (data file) + server/generate-ts-addresses.js:generateInterfaceFile",
+      "lineStart": 64,
+      "lineEnd": 131,
+      "entryPoint": "dev",
+      "rootCauseClass": "AnvilDerivedTypeGatesMainnet",
+      "category": "cluster-interaction",
+      "description": "`generate-ts-addresses.js` regenerates `addresses.ts`'s `ContractAddresses` interface from local.json \u2014 i.e. from ANVIL data \u2014 emitting `${name}: string;` for every one of the 57 keys, all required, all plain `string`. The hand-maintained `mainnet-addresses.ts` is annotated `: ContractAddresses`, so a purely local mock addition forces a placeholder into the mainnet address book. Story-073 commit d241e61 did exactly that for `Kendu` (:64) and `NudgeStreamer` (:131), both `0x0000\u20260000`. Nothing in the type system, the file, or the :3001 API distinguishes a placeholder from a real address.",
+      "impact": "A mainnet script sourcing `NudgeStreamer` or `Kendu` from this file gets address(0). IMPORTANT CORRECTION to the prior framing: this does NOT produce a silent mis-wire on the donor path \u2014 all six donors reject `setNudgeStreamer(address(0))` explicitly, and `setNudgeTokenWhitelist(address(0), true)` reverts `BatchMint__ZeroNudgeToken`, so those legs fail LOUDLY at deploy time. The one silent consumer is `BatchNFTMinterMultiToken.setNudgeStreamer`, which has no guard (see DEV-03). The residual risk is therefore (a) that one silent leg and (b) a general operator-trust problem: the file's zero addresses read as data, not as 'not yet deployed'.",
+      "evidence": "server/deployments/mainnet-addresses.ts:64 `Kendu: \"0x0000000000000000000000000000000000000000\"`, :131 `NudgeStreamer: \"0x00\u202600\"`. server/generate-ts-addresses.js:57 `lines.push(\\`  ${name}: string;\\`)`. Live run: addresses.ts regenerated with 57 required string fields; the :3001 API serves both `Kendu` and `NudgeStreamer` with no mock/placeholder marker and zero `Mock`-prefixed keys.",
+      "recommendation": "Introduce a branded or optional type for not-yet-deployed entries (e.g. `NudgeStreamer?: string` or a `type NotDeployed = \"0x0\"` union) so the compiler distinguishes them, or split the interface into a mainnet-required core and an anvil-only extension so local mock additions stop type-gating the mainnet address book. At minimum, add a runtime guard in any mainnet script: `require(addr != address(0), \"<name> not deployed\")` at the point of read.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-006",
+        "dedupDisposition": "KEPT \u2014 NOT merged with DEV-07",
+        "originalIds": [
+          "DEV-06"
+        ],
+        "dedupRationale": "Same FILE as DEV-07 (mainnet-addresses.ts) but the inverse error and a different root cause: DEV-06 = an anvil-derived generated TYPE forces zero placeholders into the mainnet book (AnvilDerivedTypeGatesMainnet); DEV-07 = prose claims real deployed addresses are placeholders (StaleMisleadingComment). Collapsing them would destroy exactly the deployed/not-deployed distinction the hand-written mainnet script depends on. Both PROPAGATES-TO-MAINNET.",
+        "crossRunLinks": [
+          {
+            "ledger": "phoenix-phase-2-staging",
+            "entry": "3ff5624889 / 691e85a600",
+            "status": "open",
+            "relation": "SIBLING-PATTERN",
+            "note": "Prior off-chain address-book defects (positional CREATE-index mapping; PREVIEW_MODE leakage still patching mainnet-addresses). Same artifact family, different mechanisms. Not consolidated."
+          }
+        ],
+        "intraRunLinks": [
+          "DEV-03 is the single silent consumer of a 0x0 sourced from this file; DEV-06's own text already carries the correction that the other legs fail loudly."
+        ]
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. Law 3 footgun: 0x0 placeholders type-indistinguishable from real addresses because the interface is regenerated from ANVIL data. A competent operator would be surprised. Not a user-input-mistake exclusion \u2014 the type system actively hides the distinction.",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires"
+      },
+      "reconciliation": {
+        "fingerprint": "3177eed94ecb62181138179a2d2c1e1c9be6830b111ba69f2f0a1bd483b93237",
+        "fingerprintInput": "lib/phoenix-phase-2-staging/server/deployments/mainnet-addresses.ts:n/a (data file) + server/generate-ts-addresses.js:generateInterfaceFile:AnvilDerivedTypeGatesMainnet:dev",
+        "legacyPathVariantChecked": "42a5dc9ea413c8027495e503ab7d1e4cbe7d1ac449d3f4b5e7cfe627c6cd4c97",
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null
+      }
+    },
+    {
+      "id": "DEV-07",
+      "title": "mainnet-addresses.ts comments describe three REAL non-zero mainnet addresses as \"not yet deployed / zero placeholders\", inverting exactly the distinction the mainnet port depends on",
+      "severity": "low",
+      "propagation": "PROPAGATES-TO-MAINNET",
+      "contract": "lib/phoenix-phase-2-staging/server/deployments/mainnet-addresses.ts",
+      "function": "n/a (data file)",
+      "lineStart": 136,
+      "lineEnd": 145,
+      "entryPoint": "dev",
+      "rootCauseClass": "StaleMisleadingComment",
+      "category": "drift",
+      "description": "The comments at :136 and :142 read 'NudgeRatchet dispatcher + its mint-debt hook \u2014 not yet deployed on mainnet (story 068). Zero placeholders so this file still satisfies the ContractAddresses interface' and 'Dedicated NFTStaker \u2026 not yet deployed on mainnet (story 068)'. The values beneath them are real, non-zero, deployed mainnet addresses: NudgeRatchet 0xd4ea91f6096A75a1c34A3c25D7725dE1f5c49f68, NudgeRatchetMintDebtHook 0x09AceB96337df1316e0D2d7EEEa44d754D1f8d05, RatchetNFTStaker 0x299b0071def42d35eaf5ea24cc0a71cf10655a64, RatchetBatchNFTMinter 0x81896f48a95abea255cd38a3010e985b6051a1c7.",
+      "impact": "Seventy lines above, two entries in the SAME file genuinely are zero placeholders (DEV-06). An operator reading this file to decide what still needs deploying gets the answer exactly backwards for four entries. Given the stated next step is a hand-written differential mainnet script that must source live addresses from this file and distinguish deployed from not-deployed, this is the single most decision-relevant piece of misinformation in the address book. It is also a Law-3 footgun: the comment is the artifact a competent operator would trust.",
+      "evidence": "Direct read of server/deployments/mainnet-addresses.ts:136-145. Corroborated by package.json's `//fix-ratchet-sink` doc comment, which describes live owner-only operations against the NudgeRatchet and RatchetBatchNFTMinter \u2014 i.e. contracts that are demonstrably deployed and in production use.",
+      "recommendation": "Correct the four comments to record the actual deployment dates and the story that shipped them. Adopt a single, machine-checkable convention for 'not yet deployed' (see DEV-06) so a comment can never contradict a value. Consider a lint/CI check asserting that any entry commented 'not yet deployed' holds address(0) and vice versa.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-007",
+        "dedupDisposition": "KEPT \u2014 NOT merged with DEV-06",
+        "originalIds": [
+          "DEV-07"
+        ],
+        "dedupRationale": "See DEDUP-DEV-006. Highest decision-relevance for the stated next step (hand-written differential mainnet script), which reads this exact file to decide what still needs deploying.",
+        "crossRunLinks": []
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. Law 3 footgun: prose inverts exactly the real/placeholder distinction the mainnet port depends on. Note repo memory 'in-source NatSpec carries no suppression authority' \u2014 misleading documentation raises, not lowers, the weight here.",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires"
+      },
+      "reconciliation": {
+        "fingerprint": "dcce8f512418ce0b422b63f812f5a3b4a1d0a02dfa56f8694188bf229f536b75",
+        "fingerprintInput": "lib/phoenix-phase-2-staging/server/deployments/mainnet-addresses.ts:n/a (data file):StaleMisleadingComment:dev",
+        "legacyPathVariantChecked": "a1fa11b396169ea0d49603dd4d52b0de64a85daff2308d6f8575c47d732e79c1",
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null
+      }
+    },
+    {
+      "id": "DEV-08",
+      "title": "extract-addresses.js strips a leading \"Mock\" before every drop-list and rename, and writes the result with no collision guard",
+      "severity": "low",
+      "propagation": "PROPAGATES-TO-MAINNET (the interface it generates gates the mainnet address book)",
+      "contract": "lib/phoenix-phase-2-staging/server/extract-addresses.js",
+      "function": "extractAddresses",
+      "lineStart": 107,
+      "lineEnd": 144,
+      "entryPoint": "dev",
+      "rootCauseClass": "UnguardedNameRewrite",
+      "category": "unintended-side-effect",
+      "description": "`const displayName = name.startsWith('Mock') ? name.slice(4) : name;` (:107) is a blind 4-character slice applied BEFORE the DROPPED_CONTRACT_NAMES check (:110), the UniV2-backing drop (:116), the V1-NFT drop (:122) and the V2->base rename (:137-141). The final write at :144 is an unguarded assignment with no duplicate detection. Separately, three mocks bypass the strip entirely because they are tracked under an already-stripped key (MockUSDe as 'USDe' :327, MockSUSDe as 'SUSDe' :333, MockMarketAMMAdapter as 'USDeAMMAdapter' :446), so the file carries two conventions for the same job.",
+      "impact": "Two effects. (1) Nothing downstream marks a mock as a mock \u2014 verified on the live run: local.json, addresses.ts, local-addresses.ts and the :3001 API contain ZERO keys beginning with 'Mock'; MockPhUSD is served as 'PhUSD', MockKendu as 'Kendu', MockAutoDOLA as 'AutoDOLA'. A UI or operator reading the address book cannot tell a 22-line stub from the real Balancer router. (2) The missing collision guard is a latent silent-clobber: a future contract tracked as 'MockNFTMinterV2' would strip to NFTMinterV2, hit the V2 rename, and overwrite the REAL 'NFTMinter' key with no error; one tracked as 'MockNFTMigrator' would be silently dropped. No collision exists today (verified across all 99 track keys), but the mainnet key set is hand-maintained and must mirror this generated interface exactly, so a silent overwrite points the UI at the wrong contract.",
+      "evidence": "server/extract-addresses.js:107, :144. Live run: 71 progress entries -> 57 local.json entries; `curl localhost:3001/contracts` returns 57 keys, 0 of which start with 'Mock', including 'Kendu' and 'NudgeStreamer'.",
+      "recommendation": "Add a duplicate-key assertion before the write at :144 (`if (extracted.contracts[displayName]) throw new Error(...)`). Move the Mock strip AFTER the drop-lists and rename so it cannot interact with them. Consider emitting an `isMock: true` flag on stripped entries so the UI and the :3001 API can surface the distinction rather than erasing it.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-008",
+        "dedupDisposition": "KEPT \u2014 unique",
+        "originalIds": [
+          "DEV-08"
+        ],
+        "dedupRationale": "Shares the address-book generation pipeline with DEV-06 but a different file (extract-addresses.js vs generate-ts-addresses.js) and a different defect (unguarded name rewrite + missing collision guard vs required-string typing). Two independent fixes; not consolidated.",
+        "crossRunLinks": []
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. Not a known-invalid category. Unguarded name rewrite feeding the generated interface that gates the mainnet address book.",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires"
+      },
+      "reconciliation": {
+        "fingerprint": "4c3e1fb7f2d351b073354ce4f7df8b8ac3bbb9313e8d3d6f1a30e8eee2f3f5ca",
+        "fingerprintInput": "lib/phoenix-phase-2-staging/server/extract-addresses.js:extractAddresses:UnguardedNameRewrite:dev",
+        "legacyPathVariantChecked": "515aa2aa80c9afb3c307544dad4ec2e9a38a860c876dd1c9c2e29b3b5d5b83a1",
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null
+      }
+    },
+    {
+      "id": "DEV-09",
+      "title": "DeployMocks asserts none of story 073's headline stream state, and the one probe that covers it is vacuous by construction",
+      "severity": "low",
+      "propagation": "LOCAL-ONLY",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "_deployStreamerAndBatchMinter / _seedNudgeStream",
+      "lineStart": 1617,
+      "lineEnd": 1664,
+      "entryPoint": "dev",
+      "rootCauseClass": "MissingPostStepAssertion",
+      "category": "intent-mismatch",
+      "description": "The script's 17 requires include no post-condition on `streams(batchMinter, token).duration == LOCAL_STREAM_DURATION`, on any buffer being non-zero, or on `pendingStream` accruing \u2014 the three facts story 073 exists to establish. Of the seven `setNudgeStreamer` calls only the SYA leg is post-asserted (:1129). The one probe touching stream state (:1661/:1664) runs solely against MockKendu and MockPhUSD, both fee-free by construction, so it cannot fail (see DEV-01).",
+      "impact": "The story's reported outcome rests on console.log output rather than on-chain assertions, so a regression in the wiring would produce a green run. NOTE IN MITIGATION: the author's technical reason for not asserting accrual in-script is sound and documented at script/interactions/TestNudgePayout.s.sol:157-168 \u2014 a forge script's requires all execute in the simulation pass where every statement shares one block timestamp, so `pendingStream` reads 0 there regardless of the live chain. This is a genuine tooling constraint, not negligence. The gap is therefore in the RUNBOOK, not the script: nothing in the `dev` chain performs the out-of-band verification the author says is required.",
+      "evidence": "This audit performed the missing verification with cast and confirmed all three self-reported numbers: duration == 21600 on all three tokens; buffers USDC 44855551 (44.855551, matching the reported '44.86'), phUSD 5000e18, Kendu 50000e18; pendingStream non-zero on all three; streamer ERC20 balance exactly equal to each credited buffer.",
+      "recommendation": "Add the out-of-band verification to the `dev` chain as a scripted step (a `verify:streams` npm entry doing the cast reads and failing non-zero), so the property is enforced rather than documented. Post-assert all seven `setNudgeStreamer` calls, not just SYA. The same verification step is required in the mainnet runbook \u2014 see differential-gap.md \u00a74.5.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-009",
+        "dedupDisposition": "KEPT \u2014 NOT merged with DEV-01",
+        "originalIds": [
+          "DEV-09"
+        ],
+        "dedupRationale": "Overlaps DEV-01 on one shared FACT (the DeployMocks :1661 probe is vacuous because both probe tokens are fee-free by construction) but not on root cause: DEV-01 is a contract defect that PROPAGATES-TO-MAINNET; DEV-09 is a LOCAL-ONLY assertion/runbook gap. Constraint 2 forbids collapsing across that boundary, and collapsing would let a mainnet-propagating Medium be filed under a local-rig QA-shaped heading. Shared sub-claim: 'only 1 of 7 setNudgeStreamer calls is post-asserted (:1129)' appears in both DEV-03 (as a recommendation) and DEV-09 (as the finding). CANONICAL HOME = DEV-09; DEV-03 retains it as a cross-reference only. No content removed.",
+        "crossRunLinks": [
+          {
+            "ledger": "stable-yield-accumulator",
+            "entry": "5292756503 (M-02)",
+            "status": "fixed with knowingly-accepted residual",
+            "relation": "LOAD-BEARING \u2014 THIS RUN IS THE DEFERRAL VENUE",
+            "note": "The M-02 closure accepted three residual re-key/repoint paths (setNudgeAddress :485 unguarded, setNudgeStreamer :513 zero-check only, and the setNudgeSplit(0) walk-around) on the express basis that they are 'deferred to a forthcoming dedicated deploy script, to be reviewed here under /audit-script, where the remaining footguns are expected to be caught.' DEV-09 records that the deploy script post-asserts the SYA leg ONLY \u2014 1 of 7 setNudgeStreamer calls \u2014 i.e. the mitigation the M-02 closure was deferred to is thin. Flagged for the orchestrator: this raises DEV-09's weight above a routine missing-assertion note. It does NOT reopen M-02 (that is a human /ledger decision) and no status is changed here."
+          }
+        ]
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. Not a known-invalid category. Missing-post-step-assertion class; this project's ledger already holds ~10 open instances of that class across other entry points, which supports it as a systemic runbook gap rather than a nit. Additionally load-bearing as the deferral venue for stable-yield-accumulator M-02.",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires",
+        "blockedKnownIssueNote": "Cached KI #7 \"Circular reference between Phlimbo and StableYieldAccumulator (documented deployment order)\" sits on adjacent wiring-order subject matter. NOT SUPPRESSED: blocked-KI rule; and DEV-09 is about missing post-step assertions on setNudgeStreamer, not about deployment ordering."
+      },
+      "reconciliation": {
+        "fingerprint": "c76a8f9f94795987c0d2aa5626c69a8afc430b24423cf3c853b9199022e4e9d1",
+        "fingerprintInput": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol:_deployStreamerAndBatchMinter / _seedNudgeStream:MissingPostStepAssertion:dev",
+        "legacyPathVariantChecked": "b14b4afb4cfccfc0d9cd139bae3e98f61385e0fe7800a3bdcd3e9418fd49c7c7",
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null,
+        "disclosedRefile": {
+          "priorEntry": "stable-yield-accumulator :: 5292756503 (M-02, medium, fixed-with-knowingly-accepted-residual)",
+          "relation": "DEFERRAL-VENUE REPORT \u2014 NO STATUS CHANGE",
+          "basis": "M-02's closure note expressly deferred three residual setNudgeStreamer/setNudgeAddress/setNudgeSplit walk-around paths 'to a forthcoming dedicated deploy script, to be reviewed here under /audit-script'. This run IS that venue. DEV-09 finds the deploy script post-asserts 1 of 7 setNudgeStreamer calls, so the mitigation the closure was deferred to is demonstrably thin. M-02's status is NOT modified here (human /ledger decision). RECOMMEND: human re-weigh whether M-02's `fixed` closure basis still holds. The same note also states the closure 'must not be cited to suppress a residual-path finding filed under a different fingerprint' \u2014 honoured."
+        }
+      }
+    },
+    {
+      "id": "DEV-10",
+      "title": "MockERC4626Wrapper is deployed, pre-funded with 1,000,000 mock USDC and exported to the UI as WaUSDC, but serves a route removed in story-034 and has zero first-party consumers",
+      "severity": "qa",
+      "propagation": "LOCAL-ONLY",
+      "contract": "lib/phoenix-phase-2-staging/src/mocks/MockERC4626Wrapper.sol",
+      "function": "n/a (dead deployment)",
+      "lineStart": 1,
+      "lineEnd": 69,
+      "entryPoint": "dev",
+      "rootCauseClass": "DeadScaffolding",
+      "category": "unintended-side-effect",
+      "description": "The sUSDS->waUSDC donation route this mock serves was replaced by the Sky PSM in story-034 and is described in-source as 'structurally dead' (BalancerPoolerV2.sol:23-29). Its only caller is MockBalancerVault.swap (:165), which is itself never invoked by first-party code (zero `swap(` hits in BalancerPoolerV2.sol). The mock is nevertheless deployed at DeployMocks.s.sol:677, funded with 1,000,000 mock USDC at :686, and exported to the address book and the :3001 API as `WaUSDC`.",
+      "impact": "Noise in the address book that the UI and any operator reading it must ignore. The mock's `mintShares` is unauthenticated and its `redeem` enforces no allowance (:54-56, :64-68), so the 1M is freely drainable by anyone on the local chain \u2014 harmless on anvil, but it means a contract with no purpose holds the largest single mock balance in the deployment. MockBalancerVault.swap/setSwapRate are dead for the same reason.",
+      "evidence": "grep for `swap(` in lib/yield-claim-nft/src/dispatchers/BalancerPoolerV2.sol returns zero hits. MockERC4626Wrapper appears in local.json and in `curl localhost:3001/contracts` as `WaUSDC`.",
+      "recommendation": "Delete MockERC4626Wrapper, its deployment and funding steps, and MockBalancerVault.swap/setSwapRate. Do not carry any of it into the mainnet port.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-010",
+        "dedupDisposition": "KEPT \u2014 QA, NOT merged with DEV-11",
+        "originalIds": [
+          "DEV-10"
+        ],
+        "dedupRationale": "Weakest two findings of the set are DEV-10 and DEV-11 and both are LOCAL-ONLY qa. Considered for consolidation as 'dead/stale local scaffolding' and REJECTED: different artifacts (a deployed+funded mock contract vs an HTTP server doc blob), different root causes (DeadScaffolding vs StaleDocumentation), different owners, different fixes. Neither is tool-noise in the filterable sense (neither is a missing event, a floating pragma, a NatSpec gap or a style issue), so neither meets the outright-removal bar. Both retained at qa for the QA bundle.",
+        "crossRunLinks": []
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT \u2014 WOULD-HAVE-BEEN-SUPPRESSED UNDER THE (BLOCKED) CACHED KI LIST. See knownIssuesStatus.wouldHaveBeenConsidered. Left live per the blocked-KI rule; recommended for explicit human triage.",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires",
+        "blockedKnownIssueNote": "Cached KI #2 \"Mock contracts with unlimited minting (testing infrastructure only)\" would plausibly have covered a dead pre-funded mock deployment. NOT SUPPRESSED: the known-issues file lib/phoenix-phase-2-staging/known-issues.md does not exist, so the 11 cached entries (snapshot 2026-01-09) are non-re-derivable and carry no suppression authority this run. Recommend human triage decide."
+      },
+      "reconciliation": {
+        "fingerprint": "f5bb2b654c9a23452e48fd642a8baf0244918aaa1dc570bb98e7406ca0c09bf0",
+        "fingerprintInput": "lib/phoenix-phase-2-staging/src/mocks/MockERC4626Wrapper.sol:n/a (dead deployment):DeadScaffolding:dev",
+        "legacyPathVariantChecked": "090b53f02eb657101a3a3644065cece512a584e0d01c213f4a5897c8ed673308",
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null
+      }
+    },
+    {
+      "id": "DEV-11",
+      "title": "The :3001 API's root doc blob advertises 18 available contracts while the endpoint serves 57, and CORS is open to every origin",
+      "severity": "qa",
+      "propagation": "LOCAL-ONLY",
+      "contract": "lib/phoenix-phase-2-staging/server/index.js",
+      "function": "GET / , app.use(cors())",
+      "lineStart": 1,
+      "lineEnd": 200,
+      "entryPoint": "dev",
+      "rootCauseClass": "StaleDocumentation",
+      "category": "drift",
+      "description": "`GET /` returns a static documentation blob listing a hand-written `availableContracts` array of 18 names; `GET /contracts` actually serves 57. Both loaders are hard-wired to chainId 31337 and the response shape does not match the `{networks:{...}, activeNetwork, availableNetworks}` contract documented in the project CLAUDE.md. `cors()` is applied with no origin allowlist.",
+      "impact": "A UI developer integrating against the documented surface sees a third of what exists. Local-only and low consequence \u2014 anvil binds loopback here, though `npm run start:anvil` uses `--host 0.0.0.0`, which binds every interface.",
+      "evidence": "Live run: `curl localhost:3001/` -> availableContracts length 18; `curl localhost:3001/contracts` -> 57 keys. Health endpoint confirms deploymentsLoaded/extractedAddressesLoaded true, chainId 31337.",
+      "recommendation": "Derive the root blob's contract list from local.json rather than hand-maintaining it, or drop the list and point at /contracts. Reconcile the response shape with CLAUDE.md, or update CLAUDE.md to describe what is actually served.",
+      "dedup": {
+        "dedupId": "DEDUP-DEV-011",
+        "dedupDisposition": "KEPT \u2014 QA, with a split-value note",
+        "originalIds": [
+          "DEV-11"
+        ],
+        "dedupRationale": "See DEDUP-DEV-010. Split-value note for the classifier: the stale 18-vs-57 doc blob half IS low-value drift; the load-bearing half is `cors()` with no allowlist combined with `npm run start:anvil --host 0.0.0.0`, on a chain that (per DEV-05) has unlimited mock minting and an unrevoked phUSD minter grant to the deployer. Retained whole so that half is not lost; no severity re-rating applied (classifier's job).",
+        "crossRunLinks": []
+      },
+      "sanitization": {
+        "disposition": "PASSED",
+        "suppressed": false,
+        "note": "KEPT. Local dev API server, first-party file in the submodule; scope is default-in-scope denylist and only the project's own nested lib/** is excluded, so server/index.js is in scope. Held at QA (LOCAL-ONLY, no mainnet propagation).",
+        "knownIssueSuppressionApplied": false,
+        "c4KnownInvalidApplied": true,
+        "c4KnownInvalidResult": "no category fires"
+      },
+      "reconciliation": {
+        "fingerprint": "a37137b3e3695945979739c6f8094f869f7a45a4d4323e98b370f6f2ab161a2a",
+        "fingerprintInput": "lib/phoenix-phase-2-staging/server/index.js:GET / , app.use(cors()):StaleDocumentation:dev",
+        "legacyPathVariantChecked": "b893a33e9d3bee25fa3df81a518c01dbb8c1c7cb990fb9234371e6ab9207e460",
+        "origin": "new",
+        "ledgerMatch": null,
+        "matchedAgainst": "phoenix-phase-2-staging ledger, all 78 entries, by exact fingerprint AND by legacy stripped-path fingerprint variant AND by semantic title/contract/root-cause sweep",
+        "firstSeenRun": "phoenix-phase-2-staging-21",
+        "firstSeenCommitBaseline": "bd2290c071cf36ba213b010a06ce2e1724afe011",
+        "regressionOf": null,
+        "priorStatus": null
+      }
+    }
+  ],
+  "ledgerNotesForFindingManager": [
+    {
+      "kind": "DO-NOT-MODIFY",
+      "entries": [
+        "phoenix-nft-staking :: bfdb50105e",
+        "yield-claim-nft :: c91bef813d",
+        "yield-claim-nft :: 563df2e64a",
+        "stable-yield-accumulator :: 5292756503",
+        "phoenix-phase-2-staging :: 8468af472d",
+        "phoenix-phase-2-staging :: 28d5044e4e"
+      ],
+      "note": "Referenced for disclosure only. Sanitizer wrote nothing to any ledger. None of these statuses may be auto-changed by this run."
+    },
+    {
+      "kind": "UNRE-OBSERVED-OPEN-DEV-ENTRY",
+      "entry": "0b497be32114147aa44ea7328329eaab2f024fd22b3208804fe604b84cca86b3",
+      "status": "open",
+      "severity": "qa",
+      "entryPoint": "dev",
+      "title": "StableStaker deployed with migrator == address(0): terminal-migration path is permanently unreachable",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "run (Phase 3.7)",
+      "firstSeenRun": "phoenix-phase-2-staging-05",
+      "reportPath": "reports/phoenix-phase-2-staging/05/findings/qa/Q-01-stablestaker-migrator-zero.json",
+      "note": "The only OPEN dev-entryPoint ledger entry. It was NOT re-flagged by this run, but this run was story-073-scoped, so absence is not evidence of a fix. Do NOT auto-flip to fixed. Treat as still-open and CARRY FORWARD in full (submissions/carryover/), per the carryover rule. It was already carried in run-06 as reports/phoenix-phase-2-staging/06/findings/qa/Q-01-CARRYOVER.md."
+    },
+    {
+      "kind": "FIXED-STAYS-FIXED",
+      "entry": "c294d93f772bf5cb1aec185ff89fb8e1908bb114702bcf884561e778147c29d3",
+      "note": "Only other dev-entryPoint entry (low, fixed, StableStaker pauser == address(0)). Not re-flagged this run \u2014 no regression."
+    }
+  ],
+  "parkedItemsCarriedForward": [
+    {
+      "id": "MR-DEV-001",
+      "kind": "OMITTED-CANDIDATE \u2014 RECOMMEND FILING AS A CONTRACT FINDING",
+      "confidence": "high (source-verified this run)",
+      "reason": "Constraint-4 check. mock-fidelity.md \u00a72 documents a MOCK gap, but embedded in it is a first-party CONTRACT defect that appears nowhere in candidate-findings.json and would otherwise leave this run invisibly. The deduplicator does not mint findings; parked here so it is not lost.",
+      "title": "ERC4626YieldStrategy.previewRedeem / previewDeposit view passthroughs still STATICCALL the underlying vault \u2014 the story-060 / YS-01 Tokemak fix is one-directional",
+      "propagation": "PROPAGATES-TO-MAINNET",
+      "contract": "lib/reflax-yield-vault/src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "function": "previewRedeem / previewDeposit",
+      "lineStart": 73,
+      "lineEnd": 85,
+      "rootCauseClassProposed": "StaticcallOnStateMutatingPreview",
+      "entryPoint": "dev",
+      "sourceVerification": "Read against the TOP-LEVEL submodule HEAD lib/reflax-yield-vault (not a nested stale pin). :73-75 `return vault.previewDeposit(assets);` and :83-85 `return vault.previewRedeem(shares);`, both declared `external view` => Solidity emits STATICCALL. Twenty lines below, :110-115 credits principal via `vault.convertToAssets(sharesReceived)` with an in-source comment naming the exact hazard: 'Use convertToAssets (NOT previewRedeem): convertToAssets is ERC4626-mandated STATICCALL-safe, whereas some real vaults (e.g. Tokemak Autopools) mutate state inside previewRedeem and revert with StateChangeDuringStaticCall when called as an external view.' The authors therefore knew the hazard and hardened ONE call site.",
+      "whyItMatters": "Against a real Tokemak Autopool these two views revert for every caller, always; against MockAutoDOLA (plain un-overridden OZ ERC4626) they return a clean number, always. The local rig therefore reports green on the exact behaviour that already bricked this project's YS-swap suite. Blast radius today is UI/keeper reads (no first-party on-chain caller found), which is why this is parked for triage rather than asserted as a Medium.",
+      "crossRunPriorArt": {
+        "ledger": "phoenix-phase-2-staging",
+        "entry": "28d5044e4e",
+        "label": "YS-01 lineage",
+        "severity": "medium",
+        "status": "acknowledged",
+        "entryPoint": "migrate:ys-swap-deploy",
+        "contractOfPrior": "ERC4626YieldStrategy._acquireShares",
+        "relation": "SAME-ROOT-CAUSE-DIFFERENT-FUNCTION => DIFFERENT FINGERPRINT",
+        "disclosure": "The prior entry is 'Story-060 fix line (vault.previewRedeem) reverts against the real Tokemak Autopool vaults', acknowledged on the _acquireShares deposit path \u2014 the path that was subsequently fixed by the convertToAssets swap. That acknowledgement does NOT cover previewRedeem/previewDeposit at :73-85, which are a different function and were never touched. This must not be auto-suppressed under 28d5044e4e."
+      },
+      "corroboratingMemory": "stable-yield-accumulator run-14 note: 'the guard is ONE-DIRECTIONAL, residual paths reproduce'. Same shape, independently observed here.",
+      "secondaryGapsInTheSameMockSection": [
+        "No maxRedeem/maxWithdraw check before `vault.redeem` in _disposeShares (:128-135): against a real Autopool with a liquid reserve below the request, user withdrawals brick. Locally impossible to reproduce.",
+        "MockAutoDOLA._updateYield() mints assets into the vault BEFORE super._deposit mints shares, so convertToAssets(sharesReceived) > amount and creditedPrincipal at :115 can EXCEED the deposited amount \u2014 the precise opposite of that line's stated intent. Any local invariant asserting 'principal is never over-credited' passes VACUOUSLY. Flagged because a vacuous-harness result is a known repeat failure mode in this repo."
+      ],
+      "recommendedAction": "Route to the script-auditor / code-scanner for a proper finding record with a fingerprint of its own (contract:function:StaticcallOnStateMutatingPreview:dev), or to /ledger for an explicit human decision. Do NOT fold into 28d5044e4e."
+    }
+  ]
+}

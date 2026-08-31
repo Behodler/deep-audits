@@ -63,15 +63,16 @@ See `registered-projects.json` → `scopePolicy`. The in-scope set is **computed
 - **branch_is_gone(name, branch)** — after `git fetch --prune origin`, `origin/<branch>` no longer resolves. This makes a branch an *abandonment candidate*; it never abandons anything on its own.
 
 ### Versioned report directories
-- **create_versioned_report_dir(name)** — scan `reports/` for `<project>` and `<project>-NN`; unversioned legacy dir counts as index 0; create `reports/<project>-{max+1:02d}/`; return `{ path, version, isFirst }`.
-- **get_latest_report_dir(name)** — most recent versioned dir, or null.
+- **create_versioned_report_dir(name)** — every project owns one directory, `reports/<project>/`, holding its numbered run dirs and its ledger. Scan `reports/<project>/` for children whose name matches `^[0-9]{2}$`; create `reports/<project>/{max+1:02d}/`, creating `reports/<project>/` first if it does not exist; return `{ path, version, isFirst }`. A `-legacy`-suffixed dir (e.g. `00-legacy`) is history parked outside the sequence and is never counted. Run `00` is the pre-versioning seed run that four projects have; a project without one simply starts at `01`.
+- **get_latest_report_dir(name)** — the `^[0-9]{2}$` child of `reports/<project>/` with the largest value under a **numeric** sort, or null. Sort numerically, not lexically: lexical ordering only happens to work while every run number is two digits.
+- **Run label vs. path.** A run's label stays `<project>-NN` (`phoenix-nft-staking-22`). That is the identity string carried by `firstSeenRun`, `lastSeenRun`, `lastRun` and the mint-once issue IDs, and it never changes. Its directory is `reports/<project>/NN/`. Translate between the two mechanically; never rewrite a stored label to match a path.
 
 ### Workspace (writable PoC/test copy)
 - **create_workspace(name)** — read submodule URL from `.gitmodules`; if `workspace/<project>/` exists return it; else `git clone --depth 1 <url> workspace/<project>` then `git -C workspace/<project> remote remove origin`. Source repos in `lib/` stay read-only; PoCs and Tier-3 tests go in `workspace/<project>/test/`.
 - **workspace_exists(name)** — boolean.
 
 ### Ledger & regression
-The ledger is `reports/ledgers/<project>.json` (persistent, outside versioned run dirs). It is the source of truth for which findings are open/fixed/triaged across runs.
+The ledger is `reports/<project>/ledger.json` (persistent, outside versioned run dirs). It is the source of truth for which findings are open/fixed/triaged across runs.
 - **get_ledger(name)** — parse the ledger, or return an empty `{ project, branch: <currentBranch>, lastAuditedCommit: null, branchBaselines: {}, findings: [] }` if absent.
 - **current_commit(name)** — `git -C lib/<submodule> rev-parse HEAD`.
 - **audit_baseline(name)** — **the branch-aware replacement for "read `lastAuditedCommit`"**. Resolve `b = current_branch(name)`, then:

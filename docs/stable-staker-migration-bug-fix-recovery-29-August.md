@@ -4,8 +4,8 @@
 **Live staker:** `0xbce8ABC09BaEDCabE93419bF875f6186e182079A` · **Owner (staker + all three strategies):** `0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6`
 
 This document is the fix plan, not the finding. The evidence sits in
-`reports/stable-staker-14/submissions/M-01.md` (`ss14m1`, fingerprint `d1aa4060…`) and
-`reports/stable-staker-14/submissions/L-08-set-aside-buffer-not-swept.md` (`ss14l8`, fingerprint `f7991b64…`).
+`reports/stable-staker/14/submissions/M-01.md` (`ss14m1`, fingerprint `d1aa4060…`) and
+`reports/stable-staker/14/submissions/L-08-set-aside-buffer-not-swept.md` (`ss14l8`, fingerprint `f7991b64…`).
 
 ---
 
@@ -271,7 +271,7 @@ STAKER=0xbce8ABC09BaEDCabE93419bF875f6186e182079A
 TOKEN=<DOLA or USDC address>
 
 # 1. resolve the wired strategy for this token (do not assume it from a deploy record —
-#    reports/ledgers and mainnet-addresses files have been stale before)
+#    ledgers and mainnet-addresses files have been stale before)
 STRAT=$(cast call $STAKER "yieldStrategy(address)(address)" $TOKEN --rpc-url $RPC_MAINNET)
 
 # 2. what the strategy books for the staker

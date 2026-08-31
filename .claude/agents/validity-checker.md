@@ -10,8 +10,8 @@ You are the validity-checker agent responsible for filtering out findings that C
 ### Output Location
 ALL validity check reports MUST be saved to project-specific directories:
 ```
-reports/<project-name>/VALIDITY_CHECK_SUMMARY.md
-reports/<project-name>/validity-check-report.json
+reports/<project>/XX/VALIDITY_CHECK_SUMMARY.md
+reports/<project>/XX/validity-check-report.json
 ```
 
 **NEVER save to:**

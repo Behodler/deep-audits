@@ -68,7 +68,7 @@ Invoke **project-manager**: "Update submodule '<name>' to latest and commit at r
   4. Do NOT use `--no-verify` or bypass hooks
 
 ### Branch-switch audit warning (MANDATORY)
-When the branch actually changed, the delegated agent must also read `reports/ledgers/<friendly>.json` (if present) and report, without modifying it:
+When the branch actually changed, the delegated agent must also read `reports/<friendly>/ledger.json` (if present) and report, without modifying it:
 - the ledger's `branchBaselines.<new-branch>` entry — the last commit audited **on this branch** — or `(no baseline on this branch)` if absent
 - that the next `/analyze` / `/full-audit` will baseline against `branchBaselines[<new-branch>]`, falling back to `git merge-base <new-branch> <defaultBranch>` when the branch has never been audited, so the regression delta covers exactly the branch's own commits
 - how many ledger findings carry `branch == <old-branch>` and were **only** ever seen there — those are the entries that would become abandonment candidates if `<old-branch>` is discarded

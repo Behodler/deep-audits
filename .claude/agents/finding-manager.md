@@ -47,7 +47,7 @@ with no lookup table, whereas nothing re-derives "this is `sya12m1`" from a cont
 ## STORAGE STRUCTURE
 Each run uses a versioned directory provided by the orchestrator. Single audit path (no mode subdirectory):
 ```
-reports/<project>-XX/
+reports/<project>/XX/
 ├── findings/
 │   ├── high/         H-01-*.json
 │   ├── medium/       M-01-*.json
@@ -63,7 +63,7 @@ reports/<project>-XX/
 │   └── rejected/
 └── analysis-<timestamp>.json
 ```
-PoCs/tests live in `workspace/<project>/test/` (preferred) or `reports/<project>-XX/pocs/` (standalone fallback). **Never** write to `lib/<project>/` — submodules are read-only.
+PoCs/tests live in `workspace/<project>/test/` (preferred) or `reports/<project>/XX/pocs/` (standalone fallback). **Never** write to `lib/<project>/` — submodules are read-only.
 
 ## FINDING RECORD FORMAT
 ```json
@@ -115,7 +115,7 @@ All finding operations take the versioned `reportDir`. Core operations:
 - **export** — emit a finding in submission format.
 
 ## LEDGER UPSERT
-The persistent ledger lives at `reports/ledgers/<project>.json` (outside versioned run dirs). At the end of a run, upsert it:
+The persistent ledger lives at `reports/<project>/ledger.json` (outside versioned run dirs). At the end of a run, upsert it:
 - **New finding** → append entry with `issueId` (minted now, from this run's number + the finding's label), `fingerprint`, `status: "open"`, `firstSeenRun` = current run, `lastSeenRun` = current run, and `reportPath`.
 - **Still-open** (matched an existing `open` entry) → bump `lastSeenRun`; do not regenerate a report. **Carry `issueId` through untouched** — do not re-mint it to this run's number, and do not mint one if the entry never had one.
 - **Regression** (matched a `fixed` entry that reappeared) → set `status: "open"`, record `regressionOf` = prior run, flag in the run output.
@@ -133,7 +133,7 @@ Ledger entry shape:
   "abandonedBranch": null, "abandonedAt": null,
   "contract": "src/RewardVault.sol", "function": "withdrawRewardToken",
   "lineStart": 240, "lineEnd": 252, "entryPoint": null,
-  "reportPath": "reports/phoenix-nft-staking-12/submissions/H-01-submission.md"
+  "reportPath": "reports/phoenix-nft-staking/12/submissions/H-01-submission.md"
 }
 ```
 Never silently overwrite a human-set status (`fix-pending`/`acknowledged`/`wont-fix`/`false-positive`/`abandoned`) — those are triage decisions set via `/ledger`.
@@ -193,7 +193,9 @@ Header prepended to the copy (then `---`, then the untouched original body):
 - **Original fingerprint:** `9addc259…`  ·  **This-run fingerprint:** `4f1ab0c2…`
 - **First seen:** reflax-yield-vault-05  ·  **Still present as of:** reflax-yield-vault-08
 - **Location:** `src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L413-L441` (`_skimSurplus`)
-- **Original report:** [reports/reflax-yield-vault-05/submissions/M-01-skim-overskim.md](../../reflax-yield-vault-05/submissions/M-01-skim-overskim.md)
+- **Original report:** [reports/reflax-yield-vault/05/submissions/M-01-skim-overskim.md](../../05/submissions/M-01-skim-overskim.md)
+
+(Link depth: a run's sibling runs are two levels up from `submissions/` — `../../<NN>/…` — and **three** levels up from `submissions/carryover/`. A path to the repo root, such as `lib/<project>/src/X.sol`, is three levels up from `submissions/` and four from `submissions/carryover/`.)
 
 *The text below is a verbatim copy of the original report. Line numbers and links were accurate at the originating commit; re-verify against current HEAD before acting.*
 
@@ -221,7 +223,7 @@ QA-severity carryover stays in **`submissions/carryover/`** and is **never** wri
 - If **every** entry in an originating audit's QA report has been disposed of, write **no** file for that audit.
 
 ```markdown
-> **Carryover QA report — audit 09** (cut down from `reports/<project>-09/submissions/qa-report.md`).
+> **Carryover QA report — audit 09** (cut down from `reports/<project>/09/submissions/qa-report.md`).
 > Retained below (still open / untriaged as of audit 20): **L-02, L-04, C-01**.
 > Removed as no longer live: L-01 (fixed, run 14), L-03 (acknowledged), L-05 (wont-fix).
 > Labels are the originals — gaps in the sequence are the removals above, not omissions.

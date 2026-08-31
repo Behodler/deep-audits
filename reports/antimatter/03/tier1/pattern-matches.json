@@ -1,0 +1,330 @@
+{
+  "project": "antimatter",
+  "reportDir": "reports/antimatter/03",
+  "scanTimestamp": "2026-08-21T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scanMode": "regression",
+  "submodule": "lib/antimatter",
+  "commit": "3a96fb7",
+  "baseline": "c91bc1a",
+  "branch": "master",
+  "patternDb": { "path": "patterns/vulnerability-patterns.json", "version": "1.1" },
+  "patternsChecked": 35,
+  "scope": [
+    "src/Antimatter.sol",
+    "test/Annihilation.t.sol",
+    "test/Antimatter.t.sol",
+    "test/mocks/ReentrantStable.sol"
+  ],
+  "deltaWindow": {
+    "story": "story-003",
+    "description": "annihilate gains a trailing uint256 minPhUSDOut (selector change); the calculateMintAmount quote, the expectedForStable==0 guard and the two-sided mintedForStable != expectedForStable exactness check are all DELETED; replaced by the one-sided floor totalPhUSD = amount + mintedForStable; if (totalPhUSD < minPhUSDOut) revert.",
+    "deletedGuards": [
+      { "guard": "uint256 expectedForStable = minter.calculateMintAmount(stable, stableAmount); if (expectedForStable == 0) revert PhUSDNotReceived();", "usedToBlock": "settlement at a zero (or round-to-zero) exchange rate, where the stable half is taken and mints nothing" },
+      { "guard": "if (mintedForStable != expectedForStable) revert PhUSDAmountMismatch(expectedForStable, mintedForStable);", "usedToBlock": "BOTH directions: (a) a phUSD balance increase during [:244,:256] that did not come from the minter's mint for this deposit (mid-call donation / injection sweep), and (b) the minter delivering MORE than its own quote (unbounded over-forward)" }
+    ],
+    "guardDeletionNote": "Both deletions are invisible to signature-style grep: the newly-reachable conditions live on lines that did not change (:256, :263, :264). Every match below marked newlyReachable:true is reachable only because of a deletion, not because of an added line."
+  },
+  "structuralInputs": [
+    "InsufficientPhUSDOut (:260) is the ONLY value check left on the stablecoin half. The surviving checks at :254 (stable balance unchanged) and :256 (phUSD balance delta) are conservation checks over Antimatter's own balances, not value checks.",
+    "totalPhUSD = amount + mintedForStable and mintedForStable >= 0, so ANY minPhUSDOut <= amount is a guard that can never fire. The inert range is the whole interval [0, amount], not just {0}."
+  ],
+  "findingsCount": 5,
+  "manualReviewCount": 6,
+  "refutationsCount": 22,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "patternName": "Count-Gated / Winner-Take-All Pot Decoupled From Value Paid",
+      "type": "balance-delta-mistaken-for-attribution",
+      "severity": "potential-medium",
+      "confidence": "high",
+      "contract": "src/Antimatter.sol",
+      "line": 256,
+      "lines": { "snapshot": 244, "delta": 256, "floor": 260, "payout": 264, "range": "244-264" },
+      "title": "The deleted two-sided exactness check was the sole thing converting a mid-call phUSD injection from a silent sweep into a revert; its removal re-arms the donation-attribution sweep to a caller-chosen recipient",
+      "description": "mintedForStable at :256 is Antimatter's own phUSD balance delta over the window [:244, :256], not an attribution of who minted it. Every wei of phUSD that lands on Antimatter inside that window - from the stablecoin's own transfer hook, from any third party, from any other protocol path - is added to mintedForStable and then transferred at :264 to `recipient`, an address the CALLER chooses and which need not be the caller. At baseline c91bc1a this was neutralised: `mintedForStable != expectedForStable` reverted the whole annihilation on any delta that did not equal the minter's own quote. story-003 deletes that check. Nothing replaces it on the upper side.",
+      "whyItMatchesHere": "This is not the generic 'balanceOf(address(this)) is manipulable' template. Three pattern preconditions are concretely satisfied at these lines: (1) the pot is read as a contract-balance delta AFTER an external mint/transfer chain (:246 safeTransferFrom into a caller-registered token, :251 minter.mint) - the pattern's explicit 'pot read/snapshotted AFTER an external loop (donation self-refund)' condition; (2) the payout recipient is caller-chosen (:226 `address recipient`, unconstrained beyond != address(0)); (3) the payout is NOT compared to the value the caller contributed - the caller contributed exactly `stableAmount` of stable, and the check at :254 only confirms that stable LEFT, never how much phUSD it should have fetched. The new floor at :260 does not restore the bound because it is ONE-SIDED: a larger mintedForStable only makes the floor easier to clear, so an injection sweep can never trip it.",
+      "matchedSignatures": [
+        "balanceOf(address(this))  -- src/Antimatter.sol:244, :256",
+        "IERC20(address(_phUSD)).safeTransfer(recipient, mintedForStable)  -- src/Antimatter.sol:264"
+      ],
+      "missingMitigations": [
+        "No comparison of mintedForStable against the minter's quote for this deposit (calculateMintAmount call DELETED by story-003)",
+        "No upper bound of any kind on mintedForStable",
+        "recipient is not pinned to msg.sender"
+      ],
+      "preconditions": [
+        "phUSD arrives at address(Antimatter) between the :244 snapshot and the :256 read - reachable via a registered stablecoin's transfer hook at :246, or by any third party transferring phUSD in the same block ordering ahead of the read",
+        "The annihilation otherwise settles (floor cleared, which an injection only helps)"
+      ],
+      "deltaEffect": "newly-reachable",
+      "deltaEffectDetail": "The defect itself has been present since run-01 and its lines are byte-identical. What changed is that its ONLY mitigation was deleted. This is a re-arming, not a new bug.",
+      "ledgerCorrespondence": {
+        "fingerprint": "ad4b779566291190",
+        "label": "L-01",
+        "issueId": "am1l1",
+        "status": "open",
+        "currentSeverity": "qa",
+        "relationship": "ECHO-WITH-IMPACT-RE-INVERSION - not a new finding",
+        "note": "L-01 was re-worded (NOT closed) at antimatter-02 precisely because the exact-equality check inverted its impact from value-leak to revert-DoS, and it was held at QA on that basis. That basis is now deleted. The run-02 impactInversion_antimatter_02 block explicitly recorded that the root cause survives byte-for-byte; it now re-acquires its run-01 impact. Tier 2 should re-weigh L-01 back toward its run-01 Low/value-leak framing rather than filing a new entry.",
+        "existingProof": "workspace/antimatter/test/audit/Tier2b.t.sol::test_midCallPhUSDInjectionIsForwardedToRecipient (audit-authored, passing at run-01: 500e18 injected from the stable's hook, annihilator receives 700e18). AUDIT-AUTHORED - never cite as project coverage.",
+        "counterEvidenceNowMoot": "antimatter-02 Q-05 (1b960956475d434a) claimCorrection cited Tier2Delta.t.sol::test_midCallPhUSDInjectionNowReverts as proof the equality check narrowed L-01. That test targets deleted code and is now bit-rot."
+      },
+      "references": ["patterns/vulnerability-patterns.json#BATCH-PAYOUT-FIXED-POT"]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "patternName": "Missing Slippage Protection",
+      "type": "structurally-inert-minimum-output-guard",
+      "severity": "potential-medium",
+      "confidence": "high",
+      "contract": "src/Antimatter.sol",
+      "line": 260,
+      "lines": { "param": 226, "natspec": "222-225", "floor": "259-260", "range": "222-260" },
+      "title": "The new minPhUSDOut floor is denominated over a total whose larger half is unconditionally delivered, so the entire range [0, amount] is a guard that cannot fire - and the floor is opt-out by default in both the NatSpec and the project's own test suite",
+      "description": "The floor is checked as `amount + mintedForStable < minPhUSDOut`. `amount` is the antimatter half, minted at :263 at a hard 1:1 with no dependence on the exchange rate, on the minter, or on anything the caller cannot already compute. It is therefore delivered unconditionally in every path that reaches :260. The only quantity actually at risk is mintedForStable, and the floor binds on it only to the extent that minPhUSDOut EXCEEDS amount. A caller who states any floor in [0, amount] - including the intuitive `minPhUSDOut = amount` ('I want at least my antimatter back') and the semi-intuitive `minPhUSDOut = amount` scaled 1:1 against a depegged stable - receives exactly zero protection while believing themselves protected.",
+      "whyItMatchesHere": "The pattern's vulnerableWhen list is satisfied literally: 'amountOutMin = 0' (permitted, and blessed at :224-225 as 'Passing zero waives the protection entirely and is permitted'), 'No deadline parameter' (there is none - and unlike an AMM, the rate mover here is a privileged setter, so a deadline is the natural second half of the protection), and 'User cannot specify minimum' is satisfied in the weaker but sharper form: the user CAN specify a minimum, but a whole contiguous interval of the values they would naturally pick is silently inert. The inertness is a property of the DENOMINATION choice (total-of-both-halves) that the delta introduced, not a generic complaint.",
+      "matchedSignatures": [
+        "uint256 minPhUSDOut  -- src/Antimatter.sol:226",
+        "if (totalPhUSD < minPhUSDOut) revert InsufficientPhUSDOut(minPhUSDOut, totalPhUSD)  -- src/Antimatter.sol:260"
+      ],
+      "missingMitigations": [
+        "No floor on the stable half alone (e.g. `mintedForStable < minStableLegOut`), which would have no inert range",
+        "No non-zero requirement and no deadline/expiry parameter",
+        "No revert or warning on a floor <= amount, which is provably unsatisfiable-to-violate",
+        "The project's own harness never exercises a non-zero-but-inert floor - see testHarnessEvidence"
+      ],
+      "testHarnessEvidence": {
+        "file": "test/Annihilation.t.sol",
+        "conventionComment": ":65-67 - 'every test that is not about the slippage floor passes minPhUSDOut == 0, so the floor is inert and the test observes only the behaviour it is actually about'",
+        "coverageGap": "The dedicated slippage tests (:302, :319, :335, :348, :359, :374) use only minPhUSDOut in {0, 150e18, 200e18} against amount = 100e18. Every non-zero value tested is strictly greater than amount. No test constructs a floor in the inert open range (0, amount], so the harness cannot observe the inert-range property at all. This is a test-adequacy gap that makes the defect invisible to the suite, not merely an untested branch."
+      },
+      "preconditions": [
+        "A caller supplies minPhUSDOut <= amount, believing it protects the settlement",
+        "The stable leg then mints less than expected (rate moved down, rate set to zero, or round-to-zero at a small amount) - the floor does not fire and the shortfall settles"
+      ],
+      "deltaEffect": "newly-reachable",
+      "deltaEffectDetail": "The parameter and the check are both new in story-003.",
+      "ledgerCorrespondence": {
+        "fingerprint": "3aac91383dcb6060",
+        "label": "F-01",
+        "issueId": "am1f1",
+        "status": "fix-pending",
+        "relationship": "THIS DELTA IS F-01'S AGREED FIX - and the residual is a candidate INCOMPLETE FIX, not a new finding",
+        "watchItem": "WATCH-02-02",
+        "closureAttestation": "WATCH-02-02 / Q-05.falseClosureBlock require, for closure of 3aac91383dcb6060, 'evidence of a CALLER-SUPPLIED minimum-output parameter (e.g. uint256 minPhUSDOut checked as amount + mintedForStable >= minPhUSDOut before :260)'. story-003 implements that formulation LITERALLY, including the exact total-of-both-halves denomination the attestation names. On its face the attestation is satisfied.",
+        "tier2Question": "The attestation text is met; the question this run newly raises is whether the attested FORMULATION was itself right. The inert range [0, amount] is a direct consequence of the total-of-both-halves denomination that both the ledger's agreed-fix text and the implementation share. Tier 2 must decide between (a) F-01 fixed + a new, distinct finding for the inert range, or (b) F-01 INCOMPLETE FIX. Per CLAUDE.md an incomplete fix is ranked second only to a regression because it reads as done, and the human-set fix-pending status must not be auto-flipped by this pipeline either way.",
+        "relatedNowMoot": "Q-05 (1b960956475d434a) describes the deleted exact-equality check's misleading framing; its subject code no longer exists. Q-05's own reweighCondition ('IF F-01 is ever CLOSED... Q-05 MUST BE RE-WEIGHED TO LOW') is now live."
+      },
+      "references": ["patterns/vulnerability-patterns.json#MISSING-SLIPPAGE"]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "patternName": "Missing Slippage Protection",
+      "type": "deleted-zero-output-guard",
+      "severity": "potential-medium",
+      "confidence": "high",
+      "contract": "src/Antimatter.sol",
+      "line": 260,
+      "lines": { "deletedGuardWas": "between 235 and 239 at baseline", "surviving": 260, "payout": 264 },
+      "title": "Deleting `if (expectedForStable == 0) revert PhUSDNotReceived()` converts a zero exchange rate from a hard revert into a silent surrender of the stablecoin half, for the whole inert floor range",
+      "description": "At baseline, a zero (or round-to-zero) exchange rate reverted PhUSDNotReceived and the caller kept their stable. At 3a96fb7 the same configuration proceeds: :246 pulls stableAmount from the caller, :251 deposits it through the minter, mintedForStable is 0, totalPhUSD == amount, and the floor at :260 fires only if minPhUSDOut > amount. For every minPhUSDOut in the inert range [0, amount] the call SUCCEEDS and the caller has handed over the stable half for nothing. The project asserts this as intended behaviour in test_zeroMinPhUSDOutDisablesFloor (test/Annihilation.t.sol:374: 'only the antimatter half' / 'the stable half was still taken').",
+      "whyItMatchesHere": "The floor is the sole surviving value check on the stable half (structural input 1), and this is the exact configuration in which the floor's inert range (structural input 2) has its maximum consequence - the caller loses 100% of the value of the stable leg rather than a slippage increment. It compounds PATTERN-002: the inert range is not a theoretical edge, it is precisely the range the project's own documentation (:224-225) and test convention (:65-67) steer callers into.",
+      "matchedSignatures": ["DELETED: if (expectedForStable == 0) revert PhUSDNotReceived();"],
+      "missingMitigations": [
+        "No `mintedForStable > 0` sanity check retained anywhere on the path",
+        "No require that minPhUSDOut > amount when the caller wants any stable-leg protection"
+      ],
+      "preconditions": [
+        "exchangeRate for `stable` is 0, or rounds mintedForStable to 0 for the given stableAmount (PhusdStableMinter.calculateMintAmount:255 floor-divides by 1e18)",
+        "Caller passes minPhUSDOut <= amount - which the NatSpec explicitly permits and the harness convention normalises"
+      ],
+      "deltaEffect": "newly-reachable",
+      "ledgerCorrespondence": {
+        "fingerprint": "0ed1c6e3270816c5",
+        "label": "L-03",
+        "issueId": "am1l3",
+        "status": "open",
+        "currentSeverity": "low",
+        "relationship": "IMPACT INVERSION - the stated impact is now UNREACHABLE and has been replaced by its opposite",
+        "note": "L-03's title and impact are 'a hard brick: PhUSDNotReceived kills the whole annihilation' - an AVAILABILITY finding. PhUSDNotReceived no longer exists, so that impact is genuinely gone. It has been replaced by a VALUE impact on the same root cause (round-to-zero stable leg). Do NOT let this reconcile as 'L-03 fixed' - the availability leg closing and a value leg opening on the same lines is the same shape as L-01's inversion at run-02 and must be recorded, not netted to zero. Per the memory note on expired-closure vs regression, this is its own bucket."
+      },
+      "references": ["patterns/vulnerability-patterns.json#MISSING-SLIPPAGE"]
+    },
+    {
+      "id": "PATTERN-004",
+      "source": "pattern-db",
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "patternName": "Mint-on-Claim Over-Mint",
+      "type": "unbounded-upper-side-after-two-sided-check-removal",
+      "severity": "potential-medium",
+      "confidence": "medium",
+      "contract": "src/Antimatter.sol",
+      "line": 264,
+      "lines": { "delta": 256, "floor": "259-260", "amMint": 263, "stableForward": 264 },
+      "title": "The one-sided floor bounds only the shortfall; the surplus side the deleted equality check used to bound is now unbounded, and the whole surplus is forwarded to a caller-chosen recipient",
+      "description": "Trading a two-sided exactness check for a one-sided floor removes the upper bound entirely. Whatever phUSD the minter delivers - at any rate, from any cause - is forwarded in full at :264. The project asserts this as intended in test_overPhUSDMintNowSucceeds (test/Annihilation.t.sol:335: rate raised to 15e17, recipient receives 250 ether, comment 'the whole surplus is forwarded').",
+      "whyItMatchesHere": "The pattern's vulnerableWhen 'per-call mint amount derived from user-influenceable accounting with no emission cap' now holds on the stable leg specifically. Antimatter previously imposed its own cap (the minter's quote for this deposit); it now imposes none, and delegates entirely to PhusdStableMinter's maxMintPerDay - which ledger M-03/M-05 already establish governs only half the phUSD an annihilation issues. The surplus is unbacked phUSD in the same sense as the antimatter half (ledger M-02): it is issued against stable already accounted for at the quoted rate.",
+      "matchedSignatures": [
+        "_phUSD.mint(recipient, amount)  -- src/Antimatter.sol:263",
+        "IERC20(address(_phUSD)).safeTransfer(recipient, mintedForStable)  -- src/Antimatter.sol:264"
+      ],
+      "missingMitigations": ["No upper bound on mintedForStable", "No cap relating mintedForStable to stableAmount"],
+      "preconditions": ["Exchange rate above the caller's assumption at execution time, or any other cause of an over-quote mint"],
+      "deltaEffect": "newly-reachable",
+      "ledgerCorrespondence": {
+        "relatedFingerprints": [
+          { "fingerprint": "abe4305ac8f0c44f", "label": "M-04", "status": "wont-fix", "note": "M-04 already covers 'an unbounded ceiling' on exchangeRate. The owner's triageReason accepts the stable leg as PhusdStableMinter's responsibility. This match may fold into M-04 rather than stand alone - Tier 2 to adjudicate." },
+          { "fingerprint": "64807f2b1456d622", "label": "M-02", "status": "wont-fix", "note": "unbacked issuance framing" },
+          { "fingerprint": "df5c16e2238a3c1c", "label": "M-03", "status": "wont-fix", "note": "daily cap governs only half" }
+        ],
+        "relationship": "PROBABLE ECHO of M-04's unbounded-ceiling leg, but the SOURCE of the unboundedness changed: at baseline Antimatter bounded it locally regardless of M-04; now it does not. Flag rather than suppress."
+      },
+      "references": ["patterns/vulnerability-patterns.json#MINT-ON-DEMAND-OVERMINT"]
+    },
+    {
+      "id": "PATTERN-005",
+      "source": "pattern-db",
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "patternName": "Two-Step Setter Window Race (applied: quote-to-execution rate race)",
+      "type": "rate-change-between-quote-and-execution",
+      "severity": "potential-low",
+      "confidence": "medium",
+      "contract": "src/Antimatter.sol",
+      "line": 251,
+      "lines": { "execution": 251, "floor": 260 },
+      "externalContract": "lib/phUSD-stable-minter/src/PhusdStableMinter.sol:138 updateExchangeRate (onlyOwner, unbounded, no timelock)",
+      "title": "The quote step is off-chain and the execution step re-reads a live, owner-mutable, untimelocked rate; the floor is the only binder, and it is inert over [0, amount]",
+      "description": "step 1 (the caller's off-chain quote via calculateMintAmount) and step 2 (:251 minter.mint) are separated by an arbitrary interval during which PhusdStableMinter.updateExchangeRate - onlyOwner, unbounded, with no timelock and no bounds check beyond registration - can move the rate. The NatSpec at :215-218 acknowledges this explicitly and designates minPhUSDOut as the sole enforcement.",
+      "whyItMatchesHere": "The pattern's vulnerableWhen 'step 2 re-reads a live value instead of the value snapshotted at step 1' holds exactly. It is filed at potential-low rather than higher for two reasons under Law 3: the rate setter is the trusted owner, and a deliberate mid-flight repricing is a malicious-owner vector that is explicitly out of scope. What remains IN scope is the footgun form: a non-malicious owner performing a routine depeg repricing has no way to see in-flight annihilations, and callers steered to minPhUSDOut <= amount by :224-225 have no protection. That is a non-obvious consequence of an ordinary owner action, which CLAUDE.md Law 3 puts in scope as an operational hazard.",
+      "matchedSignatures": ["minter.mint(stable, stableAmount)  -- src/Antimatter.sol:251", "function updateExchangeRate(address stablecoin, uint256 newRate) external onlyOwner  -- PhusdStableMinter.sol:138"],
+      "missingMitigations": ["No deadline parameter on annihilate", "No timelock or bound on updateExchangeRate", "No on-chain quote snapshot"],
+      "preconditions": ["An owner rate change lands between a caller's quote and their transaction", "Caller's floor is in the inert range, or absent"],
+      "deltaEffect": "unchanged-in-substance",
+      "deltaEffectDetail": "IMPORTANT REFUTATION OF A TEMPTING READING: deleting the calculateMintAmount quote did NOT remove protection against this race. As antimatter-02 established (Q-05.claimCorrection), the deleted check re-quoted at the EXECUTION-time rate on BOTH sides, so it never bound anything the caller saw at signing time. The delta neither worsens nor improves the quote-to-execution race on the upper bound; minPhUSDOut is a genuine net improvement here, limited only by its inert range.",
+      "ledgerCorrespondence": {
+        "fingerprint": "abe4305ac8f0c44f",
+        "label": "M-04",
+        "status": "wont-fix",
+        "relationship": "ECHO. Owner triageReason accepted the stable leg as the minter's concern. Recorded for completeness; likely suppressed downstream."
+      },
+      "references": ["patterns/vulnerability-patterns.json#TWO-STEP-COMMIT-WINDOW"]
+    }
+  ],
+  "manualReview": [
+    {
+      "id": "MR-PATTERN-001",
+      "patternId": "FEE-ON-TRANSFER-ACCOUNTING",
+      "confidence": "low",
+      "severity": "potential-low",
+      "likelyInvalid": true,
+      "likelyInvalidReason": "C4 known-invalid: fee-on-transfer and non-standard/weird ERC20 tokens are out of scope unless explicitly in scope. FLAGGED NOT DROPPED per the run instruction so triage can dispose of it explicitly.",
+      "contract": "src/Antimatter.sol",
+      "lines": { "pull": 246, "approve": 247, "deposit": 251, "conservation": 254 },
+      "assessment": "PARTIAL MATCH THAT MOSTLY FAILS CLOSED. :246 pulls stableAmount but :251 passes the REQUESTED stableAmount to the minter, not a measured delta - the pattern's core signature. However the conservation check at :254 (balanceOf(this) must equal stableBefore) means a fee-skimming token leaves a residue and reverts StableNotDeposited, so the skew does not silently settle. Two residual angles worth a human look: (a) a rebasing-DOWN token could make :251's pull fail rather than mis-credit, a DoS not a leak; (b) a token whose fee is charged to the RECIPIENT of the minter's onward deposit skews the yield strategy's principal, which is ledger M-06 territory (ac6de2faade9adcd, wont-fix/parked) rather than this pattern's.",
+      "deltaEffect": "unchanged",
+      "ledgerCorrespondence": { "fingerprint": "ac6de2faade9adcd", "label": "M-06", "status": "wont-fix", "relationship": "adjacent, not identical" }
+    },
+    {
+      "id": "MR-PATTERN-002",
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "confidence": "low",
+      "severity": "potential-medium",
+      "contract": "src/Antimatter.sol",
+      "lines": { "deposit": 251, "conservation": 254 },
+      "assessment": "Signature match on the requested-vs-received shape: :254 confirms the stable LEFT Antimatter, never that the yield strategy CREDITED it. This is verbatim ledger M-06. Unchanged by the delta. Recorded so the WATCH-02-01 constraint is carried forward.",
+      "deltaEffect": "unchanged",
+      "ledgerCorrespondence": { "fingerprint": "ac6de2faade9adcd", "label": "M-06", "status": "wont-fix", "parked": true, "watchItem": "WATCH-02-01", "note": "WATCH-02-01 forbids citing the old PhUSDAmountMismatch check as evidence M-06 is fixed. That check is now DELETED, so the watch is moot in the direction it feared - but M-06's own status is unchanged and it remains parked/unverified pending knowledge of the DEPLOYED yield-strategy version." }
+    },
+    {
+      "id": "MR-PATTERN-003",
+      "patternId": "CENTRALIZATION-ADMIN",
+      "confidence": "low",
+      "severity": "potential-low",
+      "contract": "src/Antimatter.sol",
+      "lines": { "onlyOwner": "137, 149, 164, 309" },
+      "assessment": "onlyOwner on setPhUSD, setPhUSDMinter, setApprovedMinter, rescueERC20, plus the external onlyOwner updateExchangeRate. Wholly covered by existing ledger entries C-01/C-02/C-03. No new surface in this delta. Recorded as checked, not re-filed.",
+      "deltaEffect": "unchanged",
+      "ledgerCorrespondence": { "labels": ["C-01", "C-02", "C-03"], "fingerprints": ["2a844d32db2eb0f9", "3a90280bed325637", "2e9152785e3dc975"], "relationship": "echo" }
+    },
+    {
+      "id": "MR-PATTERN-004",
+      "patternId": "TIMELOCK-BYPASS",
+      "confidence": "low",
+      "severity": "potential-low",
+      "contract": "lib/phUSD-stable-minter/src/PhusdStableMinter.sol",
+      "line": 138,
+      "assessment": "updateExchangeRate has no delay of any kind and no bound on newRate (0 and 2^256-1 both accepted). Under Law 3 the malicious-owner reading is out of scope; the footgun reading is PATTERN-005. Also note the ROOT CAUSE IS IN A NESTED DEPENDENCY, not first-party antimatter source - C4 puts issues whose root cause is out of scope out of scope. Recorded for the interaction it enables in Antimatter, not as a minter finding.",
+      "deltaEffect": "unchanged",
+      "ledgerCorrespondence": { "fingerprint": "abe4305ac8f0c44f", "label": "M-04", "status": "wont-fix" }
+    },
+    {
+      "id": "MR-PATTERN-005",
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "confidence": "low",
+      "severity": "potential-low",
+      "contract": "src/Antimatter.sol",
+      "line": 187,
+      "assessment": "approvedMinters() returns the full EnumerableSet with no bound. Exactly ledger Q-04-adjacent Q-03. View-only, owner-populated. Unchanged by the delta.",
+      "deltaEffect": "unchanged",
+      "ledgerCorrespondence": { "fingerprint": "0174ea0bd59a9b12", "label": "Q-03", "status": "open", "relationship": "echo" }
+    },
+    {
+      "id": "MR-PATTERN-006",
+      "patternId": "FRONTRUN-APPROVE",
+      "confidence": "low",
+      "severity": "potential-low",
+      "likelyInvalid": true,
+      "likelyInvalidReason": "Pattern note: C4 typically treats this as QA/known issue, and CLAUDE.md lists 'Approve race condition / safeApprove front-running' under Known Invalid Findings. Routed here rather than to findings per the SKIP RULE, which requires a skip be auditable and permits a manualReview route when a plausible twist exists.",
+      "contract": "src/Antimatter.sol",
+      "lines": { "grant": 247, "revoke": 253 },
+      "assessment": "TWIST CONSIDERED AND FOUND ABSENT. forceApprove(minter, stableAmount) at :247 is granted and reset to 0 at :253 inside the same nonReentrant call, so no residual allowance persists between transactions and there is no window another transaction can interleave into. The only re-entry vector is the stablecoin's own transfer hook, which the ReentrancyGuard blocks (test/Annihilation.t.sol:386). No HM twist identified - dispose as QA.",
+      "deltaEffect": "unchanged"
+    }
+  ],
+  "refutations": [
+    { "patternId": "ERC4626-INFLATION", "result": "no-match", "reason": "Antimatter is a plain ERC20 with no share accounting, no deposit(assets,receiver), no totalAssets(). The 1:1 antimatter->phUSD leg at :263 is a fixed rate, not a share price." },
+    { "patternId": "FIRST-DEPOSITOR-ATTACK", "result": "no-match", "reason": "No totalSupply()==0 special case anywhere; no exchange rate derived from totalSupply." },
+    { "patternId": "ORACLE-STALE", "result": "no-match", "reason": "No Chainlink. Signatures latestRoundData()/AggregatorV3Interface absent from src and from PhusdStableMinter. The rate is a stored owner-set uint256, so staleness is not the right frame - the quote-to-execution race is, and is filed as PATTERN-005. Explicitly refuted so a reader does not expect an oracle finding from the run instruction's 'oracle/rate-change' phrasing." },
+    { "patternId": "ORACLE-ROUNDID", "result": "no-match", "reason": "Same as ORACLE-STALE - no Chainlink round data on any path." },
+    { "patternId": "REENTRANCY-ERC777", "result": "refuted", "reason": "annihilate is nonReentrant (:226) and follows CEI: the _burn at :239 precedes every external call, and the only state written after an external call is local. The hostile-hook case is covered by the project's own test/mocks/ReentrantStable.sol + test_reentrantStableIsBlocked (:386), which the delta kept passing (updated to the 4-arg selector)." },
+    { "patternId": "REENTRANCY-CROSS-FUNCTION", "result": "refuted", "reason": "OpenZeppelin ReentrancyGuard is a single contract-wide lock, and both state-touching externals (annihilate :226, rescueERC20 :309) carry it. mint (:192) is onlyApprovedMinters and touches no shared annihilation state. No unguarded sibling shares the balance window." },
+    { "patternId": "REENTRANCY-READONLY", "result": "refuted", "reason": "The only public view of consequence is toStableAmount (:283), a pure decimals rescale that reads only the minter's registered config - it reports no price, share price, or NAV, and its value is invariant across the annihilate window. Nothing an integrator could price against becomes transiently inconsistent. Note this is a genuine refutation, not an omission: the pattern instructs flagging even when this contract is itself safe, and the condition for that (a value-reporting view) is absent." },
+    { "patternId": "REENTRANCY-ERC721-RECEIVE", "result": "not-applicable", "reason": "No ERC721/1155 anywhere in scope; no _safeMint/onERC721Received." },
+    { "patternId": "SIGNATURE-REPLAY", "result": "no-match", "reason": "No ecrecover, ECDSA.recover, or SignatureChecker in scope." },
+    { "patternId": "PERMIT-FRONTRUN", "result": "no-match", "reason": "No permit path; the stable is pulled via a pre-existing allowance at :246." },
+    { "patternId": "CROSS-CHAIN-REPLAY", "result": "no-match", "reason": "No block.chainid, no bridge receiver." },
+    { "patternId": "UNPROTECTED-INIT", "result": "no-match", "reason": "Constructor-initialised (:132), not Initializable; no initialize()." },
+    { "patternId": "STORAGE-COLLISION", "result": "no-match", "reason": "No delegatecall, no proxy. Only staticcall, at :295." },
+    { "patternId": "FLASH-LOAN-PRICE", "result": "refuted", "reason": "The codeSignature balanceOf(address(this)) DOES hit at :243/:244/:254/:256, but none of those reads is a price or a reserve - they are conservation snapshots. No getReserves()/slot0(). The manipulable-balance concern that IS real here is attribution, not pricing, and is filed as PATTERN-001. Recorded so the signature hit is not silently dropped." },
+    { "patternId": "UNSAFE-DOWNCAST", "result": "refuted", "reason": "The only narrowing is at :297-298, where a uint256 decoded from the staticcall is compared to uint8 decimals by WIDENING to uint256 - the deliberately safe direction, and tested (test_toStableAmountRevertsOnDecimalsAboveUint8Range, :538). No uint128/96/64 casts." },
+    { "patternId": "DIVISION-PRECISION", "result": "refuted", "reason": "toStableAmount divides at :301 then multiplies at :302, but only to VERIFY exactness (stableAmount * scale != amount reverts AmountNotRepresentable). Precision loss is made impossible rather than tolerated. This is the mitigation shape, not the bug shape." },
+    { "patternId": "ROUNDING-DIRECTION", "result": "refuted-in-scope", "reason": "The antimatter half is 1:1 with no conversion. The stable half's rounding happens inside PhusdStableMinter.calculateMintAmount (:255, floor division by 1e18), which rounds DOWN against the caller and in the protocol's favour - the pattern's notVulnerableWhen direction. The round-to-ZERO endpoint of that same floor division is not a rounding-direction leak but a total loss of the leg, and is filed separately as PATTERN-003." },
+    { "patternId": "INCORRECT-OPERATOR", "result": "refuted", "reason": "The new boundary at :260 uses `<`, making the floor INCLUSIVE (totalPhUSD == minPhUSDOut settles). This is documented at :222 ('The least phUSD the caller will accept') and directly tested by test_floorMetExactlySucceeds (test/Annihilation.t.sol:348, 'the boundary is inclusive'). Semantics and operator agree; the one-unit difference is the intended direction. The pattern's own note warns against flagging every comparison - the boundary here was checked and is correct. `decimals > 18` at :289 is likewise correct (18 is supported)." },
+    { "patternId": "RETURN-VALUE-IGNORE", "result": "refuted", "reason": "SafeERC20 is used for every token movement (:246, :264, :311) and forceApprove for approvals (:247, :253). The one low-level call (:295 staticcall) checks both `ok` and `data.length == 32` before decoding - stricter than the pattern requires, and deliberately chosen over try/catch per the comment at :292-294." },
+    { "patternId": "SELFDESTRUCT-FORCE-ETH", "result": "no-match", "reason": "No address(this).balance, no payable function, no receive/fallback. The contract cannot hold ETH." },
+    { "patternId": "DOUBLE-VOTING", "result": "no-match", "reason": "No governance, no vote/castVote, no snapshot semantics." },
+    { "patternId": "WEAK-PRNG", "result": "no-match", "reason": "No randomness of any kind; no value-bearing random outcome. block.timestamp is not read in src/Antimatter.sol at all." }
+  ],
+  "patternsSkipped": [
+    { "patternId": "FRONTRUN-APPROVE", "reason": "SKIP RULE: pattern note declares C4 treats this as QA/known-issue, and CLAUDE.md lists it under Known Invalid Findings. Not emitted as a primary finding. NOT DROPPED - the signature match at :247/:253 was examined for an HM twist, none was found, and the assessment is recorded as MR-PATTERN-006." },
+    { "patternId": "REWARD-ACCRUAL-ORDER", "reason": "NOT-APPLICABLE, not a policy skip. No accumulator anywhere in scope: no accRewardPerShare/accPhusdPerShare, no rewardDebt, no _updatePool. Antimatter has no staking or reward accrual - it is a burn-and-mint settlement contract." },
+    { "patternId": "REWARD-RUNWAY-DEPLETION", "reason": "NOT-APPLICABLE. No rewardRate/rewardBudget/windowEnd/phusdPerSecond; no emission schedule. The only issuance cap on any path is PhusdStableMinter's maxMintPerDay, which is covered by ledger M-03/M-05 rather than by this pattern." },
+    { "patternId": "EMISSION-WINDOW-BOUNDARY", "reason": "NOT-APPLICABLE. No lastRewardTime/windowEnd/depletionDuration; src/Antimatter.sol never reads block.timestamp. The nearest time-window construct is PhusdStableMinter's rolling 24h cap (:218-226), which is nested-dependency code and already covered by ledger M-03/M-05." },
+    { "patternId": "BATCH-PAYOUT-FIXED-POT", "reason": "NOT SKIPPED - the Phoenix-specific hooks (nudge/nudgeSize/batchMint) are absent, but the GENERAL signatures (balanceOf(address(this)) pot read after an external loop, caller-chosen recipient, payout not bounded by contributed value) all match. Emitted as PATTERN-001. Recorded here only to document that the general/regression distinction was applied deliberately." }
+  ],
+  "coverageNotes": [
+    "TEST-ADEQUACY: the pattern DB contains NO pattern about test or harness adequacy, so the in-scope test files could not be matched against one. The test evidence gathered is therefore attached to PATTERN-002.testHarnessEvidence rather than filed as its own pattern match. Two harness observations that Tier 2 should carry: (a) no test exercises a floor in the inert range (0, amount]; (b) the burn-denylist test at test/Annihilation.t.sol:451-458 still lists the string 'annihilate(address,uint256)', and now hard-codes reasoning about the 4-arg selector at :454-456 - the selector change means the OLD 3-arg annihilate(address,address,uint256) is not in the denylist, so the denylist's brittleness (ledger F-02, 78612be9264d2b49, open) is confirmed rather than addressed by this delta.",
+    "GUARD-DELETION REASONING was the primary method for PATTERN-001, PATTERN-003 and PATTERN-004. None of these would surface from signature matching on the changed lines: their code is unchanged and their preconditions became satisfiable only because a guard elsewhere was removed.",
+    "The two most consequential outputs of this run are re-arming/inversion events on EXISTING ledger entries (L-01 ad4b779566291190, L-03 0ed1c6e3270816c5), not new fingerprints. Tier 2 must not let either reconcile as 'fixed' on the strength of the deleted error selectors disappearing.",
+    "PhusdStableMinter is a nested dependency (lib/phUSD-stable-minter). It is referenced as an interaction partner only; no finding is filed against it."
+  ],
+  "errors": []
+}

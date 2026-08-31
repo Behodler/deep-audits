@@ -1,6 +1,6 @@
 View and triage the persistent findings ledger for a project
 # Purpose
-Inspect and update `reports/ledgers/<project>.json` — the persistent record of which findings are open, fixed, or triaged across audit runs. Triage decisions recorded here are respected by future `/analyze` and `/full-audit` runs (acknowledged/wont-fix/false-positive findings are suppressed; `fix-pending` findings keep being rescanned; reappearing fixed findings are flagged as regressions).
+Inspect and update `reports/<project>/ledger.json` — the persistent record of which findings are open, fixed, or triaged across audit runs. Triage decisions recorded here are respected by future `/analyze` and `/full-audit` runs (acknowledged/wont-fix/false-positive findings are suppressed; `fix-pending` findings keep being rescanned; reappearing fixed findings are flagged as regressions).
 
 # Arguments
 - `$ARGUMENTS` format: `<project-name> [action] [selector] [note]`
@@ -78,7 +78,7 @@ These two look similar in a triage conversation ("yes, that's real") but have **
 # Orchestration Flow
 
 ## 1. Resolve Project
-Invoke **project-manager**: "Resolve friendly name (lowercase-kebab)" and locate `reports/ledgers/<project>.json`. If absent, report that no ledger exists yet (run `/analyze` first).
+Invoke **project-manager**: "Resolve friendly name (lowercase-kebab)" and locate `reports/<project>/ledger.json`. If absent, report that no ledger exists yet (run `/analyze` first).
 
 ## 2a. List (no action)
 Invoke **finding-manager**: "Load and summarize the ledger"

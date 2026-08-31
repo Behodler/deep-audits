@@ -69,7 +69,7 @@ For each match, create a finding:
 ```json
 {
   "project": "phoenix-nft-staking",
-  "reportDir": "reports/phoenix-nft-staking-12",
+  "reportDir": "reports/phoenix-nft-staking/12",
   "scope": ["src/Staking.sol", "src/RewardVault.sol", ...]
 }
 ```

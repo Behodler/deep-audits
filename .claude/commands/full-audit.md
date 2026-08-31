@@ -15,7 +15,7 @@ Invoke **project-manager**: "Resolve and validate project"
 
 ## 1.2. Create Versioned Report Directory
 Invoke **project-manager**: "Create versioned report directory for this audit run"
-- Creates `reports/<project>-XX/` (next sequential version). Store the path for all steps.
+- Creates `reports/<project>/XX/` (next sequential version). Store the path for all steps.
 
 ## 1.3. Setup Workspace (If Not Exists)
 Invoke **project-manager**: "Check if workspace exists, create if needed"
@@ -27,7 +27,7 @@ Present a summary and proceed immediately — do NOT pause for user confirmation
 Full Audit: phoenix-nft-staking
 ━━━━━━━━━━━━━━━━━━━━━━━
 Submodule:   lib/phoenix-nft-staking
-Report dir:  reports/phoenix-nft-staking-12/
+Report dir:  reports/phoenix-nft-staking/12/
 Workspace:   workspace/phoenix-nft-staking/
 Scope:       6 contracts (default-in-scope)   Known issues: 5
 New in scope: 1 — src/InPlaceMigrator.sol (auto-included this run)
@@ -103,7 +103,7 @@ M-02 ⚠ severity questioned (might be Low)
 ```
 Full Audit Complete: phoenix-nft-staking
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Run: reports/phoenix-nft-staking-12/   Mode: REGRESSION
+Run: reports/phoenix-nft-staking/12/   Mode: REGRESSION
 
 Submissions ready:
   High:   1 report (1 regression)
@@ -114,9 +114,9 @@ Submissions ready:
              M-01 (audit 09) → submissions/M-01-C1.md
              L-02, L-04 (audit 09) → submissions/carryover/qa-report-09.md
 
-Reports:  reports/phoenix-nft-staking-12/submissions/*.md
+Reports:  reports/phoenix-nft-staking/12/submissions/*.md
 PoCs:     workspace/phoenix-nft-staking/test/poc-*.t.sol
-Ledger:   reports/ledgers/phoenix-nft-staking.json (updated)
+Ledger:   reports/phoenix-nft-staking/ledger.json (updated)
 
 Action items:
   ⚠ M-02: review severity classification

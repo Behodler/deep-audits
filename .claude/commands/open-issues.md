@@ -6,7 +6,7 @@ List a project's undealt-with findings, filtered by a severity floor (default Me
 # Purpose
 Answer one question fast: **which findings in this project still need someone to act on them?**
 
-Reads the persistent ledger `reports/ledgers/<project>.json` and shows only the findings that have **not** been resolved or triaged to a terminal decision — the *undealt-with* backlog — filtered to a severity floor that defaults to **Medium and above** (where the value leaks live; this suite is mostly DeFi).
+Reads the persistent ledger `reports/<project>/ledger.json` and shows only the findings that have **not** been resolved or triaged to a terminal decision — the *undealt-with* backlog — filtered to a severity floor that defaults to **Medium and above** (where the value leaks live; this suite is mostly DeFi).
 
 This command is **read-only**. It never writes to ledgers, submodules, findings, or the registry. To change a finding's disposition use `/ledger <project> <action> <selector>`, passing the issue ID shown in the first column (`pns12h3`).
 
@@ -42,13 +42,13 @@ Severity ordering for the floor is `high > medium > low` (Centralization `C-XX` 
 Extract the project name (required, first token), the optional severity floor, and the optional flags. Default floor = `medium`. Reject an unknown floor token by listing the valid ones.
 
 ## 2. Resolve Project
-Invoke **project-manager**: "Resolve friendly name (lowercase-kebab) and locate `reports/ledgers/<project>.json`."
+Invoke **project-manager**: "Resolve friendly name (lowercase-kebab) and locate `reports/<project>/ledger.json`."
 - If the project is unknown: list registered projects and stop.
 - If no ledger exists yet: report that there is nothing to triage and suggest `/analyze <project>` (or `/full-audit <project>`), then stop.
 
 ## 3. Load & Filter
 Invoke **finding-manager**: "Load the ledger, select undealt-with findings at or above the severity floor."
-- Load every entry from `reports/ledgers/<project>.json`.
+- Load every entry from `reports/<project>/ledger.json`.
 - **Status filter:** keep entries whose `status` is **not** in the dealt-with set (`fixed`, `acknowledged`, `wont-fix`, `false-positive`, `abandoned`, `submitted`, `qa-bundled`, `merged`, `suppressed`). Unrecognized statuses are kept (fail-open). **`fix-pending` is deliberately NOT in the dealt-with set** — a fix is owed, so it is undealt-with by definition and must always be shown.
 - **Severity filter:** keep entries whose `severity` is at or above the floor.
 - Sort by severity (High → Medium → Low), then by label.

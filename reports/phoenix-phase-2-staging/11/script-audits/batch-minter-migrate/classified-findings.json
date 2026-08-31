@@ -1,0 +1,118 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-06-05T00:00:00Z",
+    "project": "phoenix-phase-2-staging",
+    "entryPoint": "batch-minter-migrate",
+    "run": "phoenix-phase-2-staging-11",
+    "stage": "severity-classifier",
+    "agent": "severity-classifier",
+    "input": "reports/phoenix-phase-2-staging/11/script-audits/batch-minter-migrate/sanitized-findings.json",
+    "inputFindings": 2,
+    "classifiedFindings": 2,
+    "severityChanges": [
+      {
+        "label": "BMM-M-01",
+        "proposedSeverity": "medium",
+        "finalSeverity": "low",
+        "direction": "downgrade",
+        "summary": "Downgraded Medium -> Low/QA. Fail-safe deployment-script defect, no assets at risk, harm gated entirely behind two privileged operator actions, trivially operator-fixable with a loud self-documenting revert. Does not clear the C4 Medium 'protocol function/availability impacted' bar when the only impact is that an internal ops top-up script is out of sync and reverts safely."
+      }
+    ],
+    "factVerification": {
+      "verifiedAgainstSource": true,
+      "checks": [
+        "MintSellAndDonateToBatchMinter.s.sol:279 BATCH_MINTER is `address constant = 0x6e9886...5071` (OLD minter), no env override — CONFIRMED.",
+        "MintSellAndDonateToBatchMinter.s.sol:308 `require(IPoolerCfg(LIVE_POOLER).batchMinter() == BATCH_MINTER, \"batchMinter != live pooler\")` — CONFIRMED.",
+        "MigrateBatchNFTMinter.s.sol:197 `IBalancerPoolerV2Min(POOLER).setBatchMinter(newMinter)` + :199 post-assert pooler.batchMinter == newMinter — CONFIRMED (repoint occurs and is asserted).",
+        "MigrateBatchNFTMinter.s.sol:run has NO `require(block.chainid == 1)` guard — CONFIRMED absent.",
+        "MintSellAndDonateToBatchMinter.s.sol:289 `require(block.chainid == 1, ...)` present in sibling — CONFIRMED (cluster inconsistency is real)."
+      ]
+    }
+  },
+  "classifiedFindings": [
+    {
+      "id": "CLASS-BMM-001",
+      "originalId": "BMM-M-01",
+      "label": "BMM-L-01-final",
+      "fingerprint": "41d64bdad3023517102641ddf91e020a3a0a2cab57f7cbf5dd14e630d538ee21",
+      "title": "Migration silently bricks the mint-sell-donate funder: its hardcoded BATCH_MINTER constant still points at the retired old minter",
+      "contract": "lib/phoenix-phase-2-staging/script/MintSellAndDonateToBatchMinter.s.sol",
+      "function": "run",
+      "lineStart": 279,
+      "lineEnd": 308,
+      "entryPoint": "batch-minter-migrate",
+      "rootCauseClass": "StaleHardcodedSiblingConstant",
+      "severity": "low",
+      "proposedSeverity": "medium",
+      "plausibility": "plausible",
+      "regression": false,
+      "carryAsQa": true,
+      "classification": {
+        "assetImpact": "NONE. The defect is fail-safe: the line-308 equality require reverts the funder run BEFORE any phUSD is minted or any USDC is moved. No funds are stranded, stolen, leaked, or sent to the dead contract. The deployed protocol (new BatchNFTMinter, pooler, dispatcher) continues to function; the new minter still receives the one-time 128.57 USDC seed and per-mint donate-forward.",
+        "attackPath": [
+          "There is no external-attacker path. The condition is reached only via privileged operator actions:",
+          "1. Privileged operator (Ledger signer) runs the batch-minter-migrate script, which repoints POOLER.setBatchMinter(newMinter).",
+          "2. The same operator later runs the mint-sell-donate funder to top up the nudge pot.",
+          "3. The funder reverts at line 308 (`batchMinter != live pooler`) because its compile-time BATCH_MINTER constant still equals the OLD minter.",
+          "4. No funds move; the operator must edit the constant, recompile, and rerun to refill the pot."
+        ],
+        "likelihood": "Conditional on two admin operations in sequence; not externally triggerable. The revert is loud and self-documenting, so an operator is told exactly what is wrong on first attempt.",
+        "assumptions": "Operator runs the migration, then later runs the funder without first updating the funder's hardcoded constant. Both are privileged, Ledger-gated operations.",
+        "externalRequirements": "None beyond the privileged operator executing both scripts. No third-party / market / attacker dependency."
+      },
+      "justification": "Downgraded from the proposed Medium to Low/QA. Rationale, weighed against the C4 Medium 'protocol function/availability impacted' limb and CLAUDE.md's conservatism mandate: (1) ZERO ASSETS AT RISK — the report itself states it is fail-safe; the require aborts before any value moves, so there is no theft, no leak, and no stranded funds. (2) GATED BEHIND TWO PRIVILEGED ADMIN ACTIONS — the harm cannot occur without the operator running the migration and then running the funder; C4 treats operator-coordination / reckless-admin / 'two admin scripts out of sync' issues as QA, not Medium. There is no external-attacker path. (3) IT IS A DEPLOYMENT-SCRIPT DEFECT, NOT AN ON-CHAIN CONTRACT VULNERABILITY — the deployed protocol keeps working correctly (per-mint donate-forward and the one-time seed are unaffected); only an internal ops top-up script is stale. CLAUDE.md classes 'function incorrect as to spec / state handling' as QA/Low. (4) TRIVIALLY OPERATOR-FIXABLE WITH A LOUD SELF-DOCUMENTING REVERT — fixing it is a one-constant edit + recompile + rerun, and the revert string names the exact mismatch, so this is recoverable operational drift, not a protocol outage. (5) THE 'AVAILABILITY' HARM IS GRADUAL AND INTERNAL — no end-user is denied a protocol function; the nudge pot merely stops being bulk-refilled until the ops script is bumped, with the per-mint donate-forward still flowing. Per CLAUDE.md ('never overstate severity', 'be conservative', downgrade-from-Medium for issues requiring an admin mistake / operator error), this does not clear the Medium bar. It remains a high-value QA / Configuration-Safety / cluster-consistency item and should be surfaced prominently in the QA bundle with the deduplicator/sanitizer recommendation: make the funder's BATCH_MINTER env/config-driven (read from live pooler.batchMinter() and assert code) OR add a mandatory post-migration source-bump checklist step in the Story 057 plan.",
+        "borderlineFlag": "BORDERLINE -> flagged for human review. A judge who reads the Medium 'availability' limb expansively could argue the only documented bulk pot-refill path being inoperable is an availability impact. The classification lands on Low because (a) no value is at risk, (b) it is purely operator/script self-inflicted and Ledger-gated, and (c) it is recoverable by a one-line edit with a self-explaining revert — the impact does not justify a Medium label without overstatement. If the operator/judge deems the bulk-refill path protocol-critical and not merely an internal ops convenience, this is the one finding that could be argued up to Medium."
+    },
+    {
+      "id": "CLASS-BMM-002",
+      "originalId": "BMM-L-01",
+      "label": "BMM-L-02-final",
+      "fingerprint": "8468af472d8e6df61eecdb2e3b5df446bc84e59cc33813f3bd61e7119a2caef8",
+      "title": "MigrateBatchNFTMinter lacks a chainid guard, unlike its sibling funder",
+      "contract": "lib/phoenix-phase-2-staging/script/MigrateBatchNFTMinter.s.sol",
+      "function": "run",
+      "lineStart": 114,
+      "lineEnd": 140,
+      "entryPoint": "batch-minter-migrate",
+      "rootCauseClass": "MissingNetworkGuard",
+      "severity": "low",
+      "proposedSeverity": "low",
+      "plausibility": "plausible",
+      "regression": false,
+      "carryAsQa": true,
+      "classification": {
+        "assetImpact": "NONE in practice. A broadcast against the wrong chain would almost certainly revert on the first external call to a non-existent contract (hardcoded mainnet addresses), and the broadcast itself requires a Ledger signature.",
+        "attackPath": [
+          "No attacker path. Self-inflicted operator misconfiguration only:",
+          "1. Operator points --rpc-url / --fork-url at a non-mainnet chain (fat-finger or stale env).",
+          "2. run() executes without a chainid fail-fast guard.",
+          "3. Execution almost always reverts on the first call to an address with no code on the wrong chain; nothing material happens."
+        ],
+        "likelihood": "Low. Requires operator RPC misconfiguration; mitigated by --rpc-url $RPC_MAINNET, the Ledger signature, hardcoded mainnet constants, and reverts-on-wrong-chain.",
+        "assumptions": "Operator misconfigures the target RPC/fork URL.",
+        "externalRequirements": "None beyond operator misconfiguration."
+      },
+      "justification": "Confirmed Low/QA. This is a Configuration-Safety / cluster-consistency nit: a cheap, standard fail-fast guard the rest of the cluster relies on (sibling MintSellAndDonateToBatchMinter.s.sol:289 pins block.chainid==1) and the repo's own Configuration-Safety section mandates, but its absence here has self-defeating mitigations (RPC pin + Ledger sig + hardcoded mainnet addresses + reverts-on-wrong-chain) and no demonstrated exploit path or asset impact. Per CLAUDE.md, missing standard guards with no HM exploit path are QA/Low at best (and the deduplicator already removed it from the HM set as common-tool-noise). Surface in the QA bundle as a Configuration-Safety nit: add `require(block.chainid == 1, \"expected mainnet (1)\")` at the top of run() (or gate behind PREVIEW for local), matching the sibling."
+    }
+  ],
+  "qaBundle": [
+    {
+      "label": "BMM-L-01-final",
+      "from": "BMM-M-01 (downgraded Medium -> Low)",
+      "class": "Configuration-Safety / cluster-consistency / operational-drift",
+      "note": "Make the funder's BATCH_MINTER env/config-driven (read live pooler.batchMinter() + assert code) or add a mandatory post-migration source-bump checklist step. Borderline: could be argued to Medium if the bulk pot-refill path is deemed protocol-critical."
+    },
+    {
+      "label": "BMM-L-02-final",
+      "from": "BMM-L-01 (confirmed Low)",
+      "class": "Configuration-Safety / cluster-consistency",
+      "note": "Add a `require(block.chainid == 1)` network guard to match the sibling and the repo Configuration-Safety gate."
+    }
+  ],
+  "humanReviewFlags": [
+    {
+      "label": "BMM-L-01-final (was BMM-M-01)",
+      "reason": "Borderline Low/Medium. Lands on Low (no value at risk, gated behind two privileged Ledger-signed admin actions, recoverable by a one-line edit with a self-documenting revert). Could be argued up to Medium only if a judge treats the bulk pot-refill funder as a protocol-critical availability path rather than an internal ops convenience."
+    }
+  ]
+}

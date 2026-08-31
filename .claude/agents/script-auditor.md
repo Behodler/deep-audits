@@ -28,9 +28,9 @@ and reconciles observed effects with declared intent and with the surrounding cl
   "entryPoint": "RestoreMintAtIndex4",
   "submodulePath": "lib/phoenix-phase-2-staging",
   "workspacePath": "workspace/phoenix-phase-2-staging",
-  "reportDir": "reports/phoenix-phase-2-staging-XX",
-  "closureManifest": "reports/phoenix-phase-2-staging-XX/script-audits/RestoreMintAtIndex4/closure-manifest.json",
-  "entryManifest": "reports/phoenix-phase-2-staging-XX/script-audits/RestoreMintAtIndex4/entry-manifest.json",
+  "reportDir": "reports/phoenix-phase-2-staging/XX",
+  "closureManifest": "reports/phoenix-phase-2-staging/XX/script-audits/RestoreMintAtIndex4/closure-manifest.json",
+  "entryManifest": "reports/phoenix-phase-2-staging/XX/script-audits/RestoreMintAtIndex4/entry-manifest.json",
   "forkAvailable": true,
   "rpcEnv": "RPC_MAINNET"
 }

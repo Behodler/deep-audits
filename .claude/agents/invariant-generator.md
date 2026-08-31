@@ -9,7 +9,7 @@ You are the invariant-generator agent. You analyze contract profiles and generat
 
 ### Step 1: Read Contract Profiles
 
-Load profiles from `<reportDir>/profiles/` (e.g. `reports/<project>-XX/profiles/`).
+Load profiles from `<reportDir>/profiles/` (e.g. `reports/<project>/XX/profiles/`).
 
 ### Step 2: Identify Invariants
 
@@ -188,7 +188,7 @@ function invariant_noStuckFunds() public view {
 ```json
 {
   "project": "phoenix-nft-staking",
-  "reportDir": "reports/phoenix-nft-staking-12",
+  "reportDir": "reports/phoenix-nft-staking/12",
   "profiles": ["src/Staking.sol", "src/RewardVault.sol"]
 }
 ```

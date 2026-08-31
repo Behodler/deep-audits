@@ -33,7 +33,7 @@ than no PoC.
 **Which mode am I validating?** Look at where the PoC lives / what it imports:
 - `workspace/<project>/test/*.t.sol` importing `../src/...` → **mode 1**, validate against
   real source (imports of project contracts are REQUIRED here, not a failure).
-- `reports/<project>-XX/pocs/*.t.sol` importing only forge-std → **mode 2**, validate
+- `reports/<project>/XX/pocs/*.t.sol` importing only forge-std → **mode 2**, validate
   standalone-ness **and** faithfulness to the cited original.
 
 Do not fail a mode-1 workspace PoC for importing project contracts. That check applies to
@@ -43,10 +43,10 @@ mode 2 only.
 
 **The `lib/` directory contains git submodules that are STRICTLY READ-ONLY.**
 - Workspace PoCs live in `workspace/<project>/test/`; standalone export PoCs in
-  `reports/<project>-XX/pocs/`. **NEVER** write or copy files to `lib/<project>/`.
+  `reports/<project>/XX/pocs/`. **NEVER** write or copy files to `lib/<project>/`.
 - When validating a workspace PoC, run forge from `workspace/<project>` against real source.
-- (Legacy note: older docs referenced `reports/<project>/pocs/` unversioned — the current
-  path is the versioned `reports/<project>-XX/pocs/`.)
+- (Layout note: a PoC path always names a run — `reports/<project>/XX/pocs/`. Never write to
+  `reports/<project>/` itself: that directory holds the run dirs and `ledger.json`, nothing else.)
 
 ## PRIMARY RESPONSIBILITIES
 
@@ -89,13 +89,13 @@ grep "^import" <poc-path>
 - Path under `workspace/<project>/test/` importing `../src/...` → **MODE 1 (workspace)**.
   Project imports are REQUIRED. Skip the standalone check; go to Step 2 (compile + run
   against real source) and Step 4 (demonstrates the claim). This is the authoritative proof.
-- Path under `reports/<project>-XX/pocs/` importing only forge-std → **MODE 2 (standalone
+- Path under `reports/<project>/XX/pocs/` importing only forge-std → **MODE 2 (standalone
   export)**. Run Step 1 (standalone check) AND verify faithfulness to the cited original.
 
 #### Step 1: Check Standalone Requirements — MODE 2 ONLY
 ```bash
 # Check imports - for a standalone EXPORT PoC, should ONLY see forge-std
-grep "^import" reports/<project>-XX/pocs/<label>-poc.t.sol
+grep "^import" reports/<project>/XX/pocs/<label>-poc.t.sol
 
 # Valid output for a standalone export (ONLY these patterns allowed):
 # import "forge-std/Test.sol";
@@ -134,7 +134,7 @@ This is the gold standard - if it works in a fresh forge project, it's truly sta
 #### Step 3: Alternative - Test from Project Directory
 ```bash
 cd lib/<project>
-forge test --match-path ../../reports/<project-name>/pocs/<label>-poc.t.sol -vvvv
+forge test --match-path ../../reports/<project>/XX/pocs/<label>-poc.t.sol -vvvv
 ```
 
 Note: This may pass even with project imports due to remappings. Use isolation test (Step 2) for definitive standalone validation.

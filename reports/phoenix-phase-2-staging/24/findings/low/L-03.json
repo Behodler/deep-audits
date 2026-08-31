@@ -1,0 +1,95 @@
+{
+  "id": "L-03",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-24",
+  "commit": "b9391b199ef38d7bf5066b6cd81d21b283a3a4e1",
+  "status": "open",
+  "severity": "low",
+  "title": "Phase 0 never establishes that PhlimboV2 can mint phUSD during the migration, yet every migrated position with pending phUSD routes through V2's bare, reverting `phUSD.mint`",
+  "fingerprint": "ea56e89aba49e10ad21f266530c5229849aca73526bdcf089c1c2d398ca7aa73",
+  "fingerprintInput": "lib/phoenix-phase-2-staging/script/DeployMainnetPromotionReady.s.sol:_phase0_phlimboV3Preconditions:UncheckedPreconditionOnMigrationPayoutPath:promotion-ready:dry",
+  "entryPoint": "promotion-ready:dry",
+  "contract": "lib/phoenix-phase-2-staging/script/DeployMainnetPromotionReady.s.sol",
+  "function": "_phase0_phlimboV3Preconditions",
+  "rootCauseClass": "UncheckedPreconditionOnMigrationPayoutPath",
+  "lineStart": 784,
+  "lineEnd": 787,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "origin": "new",
+  "originBasis": "Exact fingerprint ea56e89a… absent. Nearest ledger neighbour b28492ce97 is also a missing Phase 0 probe but on the OFF-CHAIN snapshot file with an unrelated failure mode; PR24-05's function _phase0_phlimboV3Preconditions is distinct from b28492ce97's _phase0_preconditions / _loadSnapshotUsers. entryPoint promotion-ready:dry is COLD. NEW.",
+  "faithfulness": false,
+  "description": "`MigratorV2V3.migrateOne` migrates a user by calling `phlimboV2.withdraw(amount, user)`, which runs `PhlimboV2._claimRewards` (:486) and pays the phUSD leg with a BARE, reverting `phUSD.mint(beneficiary, pendingPhUSDAmount)` (:495) whenever `pendingPhUSDAmount > 0`. V3's non-reverting `try`/bank was added by phlimbo story 029 to V3 ONLY. So the migration's per-user body silently depends on PhlimboV2 holding an active phUSD mint grant for any position carrying pending phUSD. Phase 0 reads that grant and LOGS it (:784-787, `console.log(\"  V2 holds phUSD mint:  \", ...)`) but never requires it, and Phase 4e's step 14 only ever revokes it. Because `migrateOne` runs inside `migrate`'s try/catch, a revert here is absorbed into `UserMigrationSkipped` and the cursor advances — so the failure is a silent skip, not an error, and the hard `require(v2.totalStaked() == 0)` gate at :1779 then aborts the ENTIRE promotion-ready cutover on behalf of a defect three contracts away.",
+  "impact": "Latent, not live, and I verified that on chain rather than assuming it: `phUSD.authorizedMinters(PhlimboV2)` reads `(false, 0)` and `PhlimboV2.accPhUSDPerShare()` reads 0 at block 25678182, so no live position carries pending phUSD and the dependency is currently dormant — consistent with the dry run migrating all 16 users with zero skips. Were V2's APY ever armed between now and the Ledger session (which also re-arms accrual on existing positions), every position with pending phUSD would be skipped, the gate would abort the whole cutover, and the operator's only diagnostic would be raw revert bytes in `UserMigrationSkipped`. Because the abort happens in the local pass this is a liveness/operational footgun, not asset risk — nothing broadcasts.",
+  "evidence": "side-effects.json.liveChainReads (authorizedMinters(PhlimboV2) = false/0; accPhUSDPerShare = 0; phUSDPerSecond = 0; desiredAPYBps = 0, all at block 25678182); lib/phlimbo-ea/src/PhlimboV2.sol:486-495 (bare mint) vs lib/phlimbo-ea/src/MigratorV2V3.sol:172-211 (try/catch absorbs it, cursor advances).",
+  "recommendation": "Add a Phase 0 precondition that makes the dependency explicit and self-diagnosing rather than leaving it to a log line: `require(IPhlimboV2Like(PHLIMBO_V2).accPhUSDPerShare() == 0 || _v2HoldsPhusdMint(), \"PhlimboV2 has advanced accPhUSDPerShare but holds no phUSD mint authority - every position carrying pending phUSD will be SILENTLY SKIPPED by migrateOne and the totalStaked()==0 gate will abort the cutover. Grant it before Phase 4e and let step 14 revoke it afterwards\")`. This costs nothing today (both sides read 0) and turns an unexplained whole-cutover abort into a one-line diagnosis.",
+  "relatedFindings": [
+    {
+      "fingerprint": "b28492ce97",
+      "label": "L-07",
+      "relationship": "same shape (missing Phase 0 precondition probe), different prerequisite — off-chain snapshot file vs on-chain mint grant"
+    },
+    {
+      "id": "PR24-04",
+      "relationship": "both touch PhlimboV2 s phUSD mint authority from opposite ends (grant unasserted during payout vs revoke ordering)"
+    },
+    {
+      "fingerprint": "95552867719d92a56b055c2e4a2654433a1f620b119e8b897d93b5047a530097",
+      "project": "phlimbo-ea",
+      "label": "V3-M-04",
+      "relationship": "skip-accumulation path that ends at the same :1779 gate abort; see manual-review MR-24-01 for the refutation of the cursor-pin reading"
+    }
+  ],
+  "classification": {
+    "assetImpact": "None. Liveness/operational only - the failure aborts the cutover during the local pass, so nothing broadcasts and no state is mutated.",
+    "attackPath": [
+      "No attacker. Latent precondition gap with a silent-failure diagnosis.",
+      "1. Phase 0 (_phase0_phlimboV3Preconditions, :784-787) READS whether PhlimboV2 holds phUSD mint authority and only console.logs it - it never requires it. Phase 4e step 14 only ever revokes it.",
+      "2. MigratorV2V3.migrateOne migrates by calling phlimboV2.withdraw(amount, user), which runs PhlimboV2._claimRewards (:486) and pays the phUSD leg with a BARE, reverting phUSD.mint (PhlimboV2.sol:495) whenever pendingPhUSDAmount > 0. V3's non-reverting try/bank was added to V3 only (phlimbo story 029).",
+      "3. If V2's APY is armed between now and the Ledger session - which also re-arms accrual on existing positions - every position carrying pending phUSD reverts inside migrateOne.",
+      "4. migrate's try/catch absorbs the revert into UserMigrationSkipped and ADVANCES the cursor: a silent skip, not an error.",
+      "5. The hard require(v2.totalStaked() == 0) at :1779 then aborts the ENTIRE promotion-ready cutover on behalf of a defect three contracts away, with raw revert bytes in UserMigrationSkipped as the operator's only diagnostic."
+    ],
+    "likelihood": "Dormant today, verified on chain: phUSD.authorizedMinters(PhlimboV2) == (false, 0) and PhlimboV2.accPhUSDPerShare == 0 at block 25678182 - no live position carries pending phUSD, consistent with the dry run migrating all 16 users with zero skips.",
+    "assumptions": "Assumes V2's APY stays unarmed through the Ledger session. Not enforced anywhere.",
+    "externalRequirements": "An APY arming on PhlimboV2 before the cutover.",
+    "whyNotMedium": "Protocol availability is not impacted: the cutover simply does not run, the live protocol is untouched, and a retry after granting the mint succeeds. The cost is operator time and diagnosis, not function."
+  },
+  "justification": "LOW. Failure mode is a whole-cutover abort in the local pass - nothing broadcasts, no value moves, no user position changes. What makes it reportable rather than noise is the Law-3 footgun shape: a silent skip plus an unexplained abort three contracts away is the opposite of an obvious consequence, and the one-line Phase 0 require that would turn it into a self-diagnosing failure costs nothing today (both sides read 0).",
+  "category": "cluster-interaction",
+  "plausibility": "n/a",
+  "regression": false,
+  "regressionBasis": "origin=new, carryoverOf=null, ledgerMatch=null, and the sanitizer's independent carryover re-check found no `fixed` entry matching this fingerprint. Not a regression.",
+  "severityHint": "low",
+  "severityHintDisposition": "CONFIRMED at low after independent re-derivation; the hint was not accepted on trust. See justification.",
+  "sanitizerVerdict": "PASS",
+  "knownIssueConsiderations": [
+    {
+      "knownIssue": "KI #11 (Minting rights requirements for PhlimboEA and PhusdStableMinter are configuration, not a bug)",
+      "applies": false,
+      "why": "CALIBRATION CHECK PASSED. KI #11 disposes of the complaint 'these contracts need a mint grant to work'. PR24-05 does not make that complaint. It is that _phase0_phlimboV3Preconditions READS the grant and only console.logs it (:784-787) while the migration's per-user payout path routes through PhlimboV2's BARE, reverting phUSD.mint (PhlimboV2.sol:495), and MigratorV2V3's try/catch converts the resulting revert into a SILENT UserMigrationSkipped with an advancing cursor, which then trips the hard require(v2.totalStaked()==0) gate at :1779 and aborts the entire cutover with only raw revert bytes as the diagnostic. The defect is that Phase 0 never ESTABLISHES a precondition it depends on, plus the silent-skip diagnosis gap. Not suppressed."
+    },
+    {
+      "knownIssue": "KI #10",
+      "applies": false,
+      "why": "Failure mode is a silent skip and an unexplained whole-cutover abort — the opposite of obvious. Law 3 footgun, in scope."
+    }
+  ],
+  "c4ValidityScreen": "No known-invalid class applies. Story 072's Kendu fee-on-transfer question was empirically cleared by this run's dry run (sent == received == credited), so no FoT-based suppression is available and none is invoked. Latency of the trigger is stated honestly and verified on chain (authorizedMinters(PhlimboV2) = (false,0), accPhUSDPerShare = 0 @ block 25678182).",
+  "dedupDecision": "KEPT — no overlap with any candidate or ledger entry",
+  "dedupReasoning": "Unique root cause (UncheckedPreconditionOnMigrationPayoutPath). Nearest neighbours checked and rejected: PR24-04 is about WHEN the V2 mint revoke lands, PR24-05 is about the grant being unasserted while the migration PAYS through it — opposite ends of the same authority, different phases (Phase 0 vs Phase 4e step 14), different fixes. Ledger b28492ce97 (L-07) is also a missing Phase 0 probe but on the snapshot FILE, an off-chain prerequisite with an unrelated failure mode. Kept whole.",
+  "originalId": "PR24-05",
+  "classificationOrigin": "CLASS-004",
+  "ledgerMatch": null,
+  "carryoverOf": null,
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-08-04T00:00:00Z",
+    "updatedAt": "2026-08-04T00:00:00Z",
+    "scanOrigin": "audit-script promotion-ready suite",
+    "classificationOrigin": "CLASS-004",
+    "source": "reports/phoenix-phase-2-staging/24/script-audits/promotion-ready-broadcast/classified-findings.json"
+  }
+}

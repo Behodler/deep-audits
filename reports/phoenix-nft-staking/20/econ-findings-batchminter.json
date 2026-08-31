@@ -1,0 +1,204 @@
+{
+  "project": "phoenix-nft-staking",
+  "scanTimestamp": "2026-07-20T00:00:00Z",
+  "scanType": "economic",
+  "commit": "0d1a0b2",
+  "scope": ["src/BatchNFTMinter.sol"],
+  "contractsScanned": 1,
+  "crossContractsRead": [
+    "lib/mutable/yield-claim-nft/src/dispatchers/NudgeRatchet.sol",
+    "lib/mutable/yield-claim-nft/src/dispatchers/BalancerPoolerV2.sol",
+    "lib/mutable/yield-claim-nft/src/dispatchers/Uniboost.sol",
+    "lib/stable-yield-accumulator/src/StableYieldAccumulator.sol",
+    "lib/phoenix-phase-2-staging/script/DeployMainnetNudgeRatchet.s.sol",
+    "lib/phoenix-phase-2-staging/script/FixRatchetBatchMinterSink.s.sol",
+    "lib/phoenix-phase-2-staging/script/MigrateBatchNFTMinter.s.sol",
+    "lib/phoenix-phase-2-staging/docs/BatchNFTMint/self-refund-fix-and-migration-plan.md"
+  ],
+  "pocFile": "workspace/phoenix-nft-staking/test/PoC_EconRatchetSweepAndDuplicates.t.sol",
+  "pocResult": "6/6 PASS at 0d1a0b2",
+
+  "mainnetParameters": {
+    "index4_BalancerPoolerV2": {
+      "paymentToken": "USDS 0xdC035D45d973E3EC169d2276DDab16f1e407384F",
+      "donatedAsset": "USDC 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 (via Sky PSM buyGem)",
+      "batchDonationSize": "15 percent (MigrateBatchNFTMinter.s.sol:342; progress.batch-minter-migrate.1.json)",
+      "growthBasisPoints": 1,
+      "nudgeSize": 40,
+      "batchMinter": "0x86866e01a115C17892Ed04c548F2e8638851029d",
+      "observedIncidentTx": "0x6d71d6fd..f14996 block 25242986: prior pot B=88.066035 USDC, own donation D=51.765728 USDC at the then-10% rate, 40 mints ~= 517.66 USDS"
+    },
+    "index7_NudgeRatchet": {
+      "paymentToken": "USDC (NudgeRatchet.primeToken())",
+      "donatedAsset": "USDC — 100 percent of every mint price (NudgeRatchet.sol:104)",
+      "mintPrice": "10 USDC, growth 100 bps",
+      "nudgeSize": 40,
+      "nudgeRewardToken": "USDS",
+      "batchMinterAsDeployed": "0x81896f48a95abea255cd38a3010e985b6051a1c7 (RatchetBatchNFTMinter) — i.e. the sink IS the entrypoint",
+      "pauser": "NOT SET on RatchetBatchNFTMinter (DeployMainnetNudgeRatchet.s.sol registers the Pauser on NFTStakerPriceScaled only) — no break-glass"
+    },
+    "potFunding": {
+      "primary": "StableYieldAccumulator.claim() routes nudgeSplit% of every claim payment in USDC to `nudge` (StableYieldAccumulator.sol:512-516). nudgeSplit = 30, reduced to 20 on 2026-06-10 (replace-sya). Unbounded, time-accumulating, unrelated to mint cost.",
+      "secondary": "BalancerPoolerV2 per-mint 15% USDS->USDC PSM donation (BalancerPoolerV2.sol:212, 260)",
+      "tertiary": "Uniboost.setDonationSplit(50) -> 50% of EYE/SCX/FLX mint price to 0x86866e (DeployMainnetUniboostCutover.s.sol:461-462)"
+    }
+  },
+
+  "watch19PremiseReDerivation": {
+    "watch": "WATCH-19-nudge-law1-reopen-trigger",
+    "premise1_potSmallerThanNudgeSizeTimesMintPrice": {
+      "status": "DEGRADED — holds empirically, NOT by construction",
+      "detail": "docs/multi-token-nudge.md §1 asserts 'by construction it is a fraction of the cost of the nudgeSize mints' and 'there is no configuration of this mechanism under which claiming is profitable-in-isolation'. This is false as stated. The PRIMARY funder is SYA's nudgeSplit drip (20-30% of every claim() payment), which accumulates monotonically with elapsed time and claim volume and has no relationship to mint cost, and nothing in BatchNFTMinter bounds it. The pot is bounded only by MEV competition, i.e. by bots claiming as soon as it becomes profitable — a rate argument, not a construction. Observed margin at the incident tx: pot 88.07 USDC vs 40-mint cost ~517.66 USDS (~6x headroom). Premise currently holds; the stated justification for it does not."
+    },
+    "premise2_mintedNFTsHaveNoRealizablePath": {
+      "status": "NO LONGER HOLDS",
+      "detail": "(a) NFTMinterV2 is a plain ERC1155Supply with no transfer restriction (NFTMinterV2.sol:16) — freely transferable, so an OTC/secondary bid exists. (b) The units are stakeable for phUSD emissions: NFTStaker at targetAPY 0.3e18 (30%) on the index-4 path (DeployMainnetNFTStaking.s.sol:64) and NFTStakerPriceScaled at 0.45e18 (45%) on the index-7 ratchet path (DeployMainnetNudgeRatchet.s.sol:116). (c) On the as-deployed ratchet wiring the mint is literally FREE (see ECON-001). Minting is therefore not a pure cost, so the break-even pot for a profitable claim is strictly BELOW nudgeSize*mintPrice by the NFT's yield NPV. There is no burn-for-underlying (NFTMinterV2.sol:341-345), which is the only part of the original premise that survives.",
+      "law1Verdict": "REOPEN — surfaced loudly. The 'honeypot framing does not apply' argument in §1 rests on both premises; one is now false and the other is empirical rather than structural."
+    }
+  },
+
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "cross-contract value leak / unbounded balance sweep",
+      "severityProposal": "medium",
+      "severityNote": "Re-rate HIGH if `cast call 0x7A4eD11160A06bB1C5b59091575d59707BE97a72 'batchMinter()(address)' --rpc-url $RPC_MAINNET` still returns 0x81896f48a95abea255cd38a3010e985b6051a1c7. In that state the drain is permissionless, free, and unmitigated (no pauser is set on 0x81896…). If it returns 0x86866e01a115C17892Ed04c548F2e8638851029d the corrective script has been broadcast and the live instance is safe — but the CODE-LEVEL defect below is unfixed either way.",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint (step 10)",
+      "line": 381,
+      "lineStart": 380,
+      "lineEnd": 387,
+      "codeSnippet": "uint256 remaining = paymentToken.balanceOf(address(this));\nif (remaining / DUST_THRESHOLD != 0) {\n    paymentToken.safeTransfer(msg.sender, remaining);\n    totalPaid = paymentAmount > remaining ? paymentAmount - remaining : 0;\n}",
+      "description": "Step 10 sweeps the contract's ENTIRE payment-token balance to msg.sender — not the caller's unspent budget — and is gated by neither `nudgeSize` nor `qualifies`. Whenever a dispatcher returns its own prime token to the batch minter, this converts the nudge pot into a permissionless, cost-free withdrawal at count=1, while the §4.1 guard (L426-428) simultaneously makes that same asset un-listable as a `rewardTokens` entry — so the pot can ONLY leave through the wrong door. The profiler recorded this as hypothetical (trust assumption #3, 'if a future dispatcher ever donated its own prime token'). It is not hypothetical: NudgeRatchet does exactly this by design and was deployed that way on mainnet.",
+      "crossContractPath": "NudgeRatchet.sol:104 `IERC20(_token).safeTransfer(batchMinter, bal)` forwards 100% of the USDC mint price to `batchMinter`. DeployMainnetNudgeRatchet.s.sol:342 sets `batchMinter_ = ratchetBatchNFTMinter`; :458 sets `RatchetBatchNFTMinter.setDispatcherIndex(7)`. Therefore paymentToken == NudgeRatchet.primeToken() == USDC == the donated asset. Entrypoint and sink are the same contract.",
+      "attackScenario": "1. Honest users mint ratchet NFTs at 10 USDC each through the UI; every mint parks 10 USDC on RatchetBatchNFTMinter as the intended nudge bounty.\n2. Attacker calls batchMint(count=1, recipient=self, paymentAmount=10 USDC, [], []). No qualification, no reward array.\n3. The single mint's 10 USDC round-trips back into the contract via the ratchet.\n4. Step 10 reads balanceOf(this) — the whole accumulated pot plus the attacker's own payment — and transfers all of it to msg.sender.\n5. Attacker keeps the pot, keeps their payment (the mint was free), and keeps the NFT.",
+      "economicImpact": "100% of ratchet mint revenue is extractable by any address for gas only. The nudgeSize=40 gate is fully bypassed. Also makes every batchMint through this instance a free mint, so the ERC1155 units — and the 45%-APY phUSD staking stream they unlock on NFTStakerPriceScaled — are acquired at zero net cost while the mint-debt hook has already accrued phUSD against them.",
+      "profitability": "Unconditionally profitable: the extraction cost is one mint whose payment is refunded in the same transaction. Gas only. Repeatable every time the pot refills.",
+      "affectedParties": ["protocol (nudge incentive budget)", "honest ratchet minters whose contribution funds the bounty", "the intended 40-batcher who can never win it"],
+      "poc": [
+        "PoC_RatchetPrimeTokenSweep.test_RatchetBatchMintIsFree — caller's USDC balance unchanged after 5 mints, receives all 5 NFTs, totalPaid == 0",
+        "PoC_RatchetPrimeTokenSweep.test_CountOneCallerSweepsEntireRatchetPot — 2,000 USDC pot from 200 honest direct mints drained by a count=1 caller who also keeps their payment",
+        "PoC_RatchetPrimeTokenSweep.test_QualifyingBatcherCannotListThePotAsset — the legitimate 40-batcher reverts BatchMint__RewardTokenIsPaymentToken on the very asset the count=1 caller walked off with"
+      ],
+      "ownerFootgunAnalysis": "Law 3 in-scope. A competent, non-malicious owner made exactly this wiring choice on mainnet and was surprised by it — the corrective script FixRatchetBatchMinterSink.s.sol:12-22 documents the discovery in the operator's own words ('a ratchet batchMint swept its own USDC back in during the loop and then refunded it to the caller'). It was caught by a single smoke-test mint, not by any contract-level signal. The contract offers no guard, no revert, and no event distinguishing 'refund of my surplus' from 'sweep of someone else's pot'.",
+      "recurrenceRisk": "The fix is operational (repoint the sink), not structural, and the same class is one setter away on the Uniboost path: Uniboost._dispatch donates `donationSplit`% of the PRIME token to `recipient` (currently 50%, pointed at 0x86866e whose payment token is USDS, so safe today). mainnet-addresses.ts:99-105 reserves EyeBatchNFTMinter / ScxBatchNFTMinter / FlxBatchNFTMinter slots. If any of those is deployed as the UI entrypoint for its Uniboost dispatcher and `Uniboost.setRecipient` is pointed at it — the natural symmetric choice, and precisely what was done for the ratchet — 50% of every EYE/SCX/FLX mint becomes a free count=1 sweep.",
+      "recommendation": "Bound the sweep to the caller's own unspent budget instead of reading balanceOf. Track spend explicitly (record paymentToken.balanceOf(address(this)) BEFORE the step-5 pull as `preExisting`, then refund `min(remaining, remaining - preExisting)`), or gate the sweep to `remaining - preExisting`. This also fixes the totalPaid mis-report (ECON-005). Cheaper defensive alternative: revert in batchMint if the post-loop payment-token balance exceeds the pre-pull balance plus paymentAmount, which fails closed on any self-sink wiring. Correct §4.1 and the contract NatSpec at L51-L56, which currently imply the payment token is protected when it is in fact the least protected asset the contract holds.",
+      "provenance": "The sweep is byte-identical since ab07199 [story-013] (2026-05-29) — it PREDATES story-022 and is unchanged by it. There is NO existing ledger entry for it (checked reports/phoenix-nft-staking/ledger.json, 22 entries). File as a NEW finding of a pre-existing defect: not a regression, not a carryover stub. What is new this cycle is the §4.1 guard, which converts the leak from 'dust escapes' into 'the pot can only escape this way'.",
+      "confidence": "high"
+    },
+
+    {
+      "id": "ECON-002",
+      "type": "regression of a fixed mainnet incident / incentive-mechanism nullification",
+      "severityProposal": "medium",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "_snapshotRewards / _payRewards",
+      "line": 458,
+      "lineStart": 452,
+      "lineEnd": 461,
+      "codeSnippet": "for (uint256 i; i < tokenCount; ++i) {\n    uint256 amount = snapshot[i];\n    if (amount == 0) continue;\n    address rewardToken = rewardTokens[i];\n    IERC20(rewardToken).safeTransfer(recipient, amount);   // paid per entry, no cumulative cap\n}",
+      "description": "Duplicate `rewardTokens` entries do not 'fail closed'. Each duplicate snapshots the same pre-loop balance B (L434) and the payout pass transfers B once per entry with no cumulative cap, succeeding while k*B <= B + D where D is this batch's own mid-loop donation. §4.5 and the NatSpec at L258-L266 assert the opposite and use that assertion as the stated justification for having no dedupe pass. Confirming the profiler's LOCAL-BM20-001 and adding the mainnet magnitude: this restores, bit for bit, the live incident that story-016's snapshot-before-loop was deployed to fix.",
+      "incidentLineage": "phoenix-phase-2-staging/docs/BatchNFTMint/self-refund-fix-and-migration-plan.md documents the live bug (tx 0x6d71d6fd…, block 25242986): a 40-batcher's own 51.77 USDC donation was refunded to them and 'Pot left for the next minter: 0'. The operational bleed-stop zeroed batchDonationSize on the index-4 pooler; MigrateBatchNFTMinter.s.sol:342/:489-493 RESTORES it to 15 in-broadcast after migration. Story-016 (5f863d2) fixed it in code by snapshotting before the loop. Story-022's no-dedupe policy re-opens it under caller control.",
+      "quantification": {
+        "atObservedShape": "count=40, 15% donation, price 12.94 USDS: D = 77.64 USDC vs observed pot B = 88.07 USDC. D < B, so k=2 reverts — the §4.5 claim HOLDS here. This is the mechanism's best case and it is narrow.",
+        "attackerControlsCount": "`count` is caller-chosen and unbounded above nudgeSize=40, and D scales linearly with it while B does not. At count=400: D = 776.40 USDC, k = floor(1 + D/B) = 9, payout = 9*B = 792.59 USDC of which 704.53 USDC (90.7% of D) is the batcher's own donation clawed back. Residual left for the next claimant: 71.87 USDC.",
+        "steadyState": "Back-to-back batching drives B to exactly the previous batch's donation, so D >= B holds by construction (prices ramp at 1 bps/mint) and k=2 always succeeds. PoC: prior pot 77.64 -> paid out 155.28 -> 0.00 left behind. The donate-forward mechanic is nullified permanently, not occasionally."
+      },
+      "attackScenario": "1. Batcher observes pot B on the BalancerPooler batch minter.\n2. Picks count >= 40 (larger count => larger own donation D).\n3. Calls batchMint(count, self, cost, [USDC, USDC, ... k times], [0,...,0]) with k = floor(1 + D/B).\n4. Snapshot writes B into all k slots; payout transfers B k times, succeeding because the mint loop has meanwhile deposited D.\n5. Batcher receives B + (k-1)*B ~= B + D: the prior pot AND their own 15% donation.",
+      "economicImpact": "Converts every batch mint into a 15%-discounted mint at protocol expense. The 15% is not the batcher's money in any meaningful sense — BalancerPoolerV2.sol:212-213 carves it out of the mint payment BEFORE pooling (`poolingUSDS = amount - donationUSDS`), so recapturing it diverts value that would otherwise have backed the NFT or seeded the pot. Correcting the profiler's framing: this is NOT purely self-funded. Secondary impact: the next claimant's seed can be driven to exactly zero, and §4.2's load-bearing documented invariant is false (Law-2 faithfulness break against docs/multi-token-nudge.md §4.2/§4.5).",
+      "profitability": "Not profitable in isolation (the batcher still pays 85% of the mint cost), but strictly dominant over the honest call for any batcher who is minting anyway, and it gives a front-running searcher a ~15% cost advantage in the winner-take-all pot auction over any honest claimer — see ECON-003.",
+      "affectedParties": ["protocol (nudge budget / NFT backing)", "the next claimant, whose seed is destroyed", "honest batchers who are outbid"],
+      "poc": [
+        "PoC_DuplicateMagnitudeMainnetShape.test_AtObservedShape_DuplicateStillFailsClosed",
+        "PoC_DuplicateMagnitudeMainnetShape.test_LargeBatchRecapturesItsOwnDonation",
+        "PoC_DuplicateMagnitudeMainnetShape.test_BackToBackSteadyState_DonateForwardNullified"
+      ],
+      "testCoverageGap": "test/BatchNFTMinterMultiTokenNudge.t.sol:656 test_DuplicateRewardTokenFailsClosed never calls setPerMintDonation, so it runs with D == 0 — the one configuration §4.2 explicitly says does not occur in production. The witness test certifies the property under an assumption the spec denies.",
+      "recommendation": "Cap cumulative payout per token against the live balance in _payRewards: `amount = Math.min(snapshot[i], IERC20(t).balanceOf(address(this)) - paidThisPass)` is O(n) and preserves the no-dedupe stance. Equivalently, assert the post-payout balance is >= preLoopBalance - totalSnapshotted. Then rewrite §4.5 and re-run the witness test WITH donations configured.",
+      "confidence": "high"
+    },
+
+    {
+      "id": "ECON-003",
+      "type": "MEV / incentive misalignment on the new caller-selected path",
+      "severityProposal": "low",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint",
+      "line": 378,
+      "lineStart": 349,
+      "lineEnd": 378,
+      "description": "The old M-01 (MEV nudge-pot front-run) is recorded 'fixed', but the fix was the minReward slippage floor, which §5 is explicit only protects the LOSER from paying mint costs for a sniped pot — it does nothing to prevent the front-run. Story-022 does not introduce a new front-run primitive, but it changes the auction's economics in two ways worth recording rather than closing.",
+      "detail": [
+        "(a) Cost asymmetry from ECON-002. A searcher who duplicates entries qualifies at ~85% of the honest cost, so in any gas/priority auction for the pot the duplicating searcher can outbid every honest claimer by up to D. The winner of the pot is now systematically the participant exploiting the §4.5 gap.",
+        "(b) `recipient` is caller-chosen and need not be msg.sender (L303 only checks non-zero), and both the NFTs and the entire reward payout go to `recipient` while the payment-token sweep goes to msg.sender. A searcher can therefore split the legs across addresses, which frustrates attribution but confers no additional extraction. Not a finding on its own.",
+        "(c) L-05 (minReward==0 opts out of the guard, wont-fix) is load-bearing here: a UI that defaults minRewards to zeros leaves every honest caller fully exposed to the snipe, and story-022 multiplied the number of zeros a UI must populate from one scalar to an array."
+      ],
+      "economicImpact": "No direct loss beyond ECON-002. The documented MEV posture (§5 'bot competition here is a subsidy to the protocol') stays true only while premise (1) holds; see ECON-004.",
+      "affectedParties": ["honest batchers"],
+      "profitability": "Derivative of ECON-002.",
+      "recommendation": "No separate code change; fixing ECON-002 restores auction symmetry. Consider a UI-level requirement that minRewards be populated non-zero.",
+      "confidence": "medium"
+    },
+
+    {
+      "id": "ECON-004",
+      "type": "design-assumption / documentation faithfulness (WATCH-19 premise re-derivation)",
+      "severityProposal": "low",
+      "contract": "docs/multi-token-nudge.md",
+      "function": "§1 'Why the honeypot framing does not apply'",
+      "line": 41,
+      "lineStart": 37,
+      "lineEnd": 48,
+      "description": "§1 claims 'by construction it is a fraction of the cost of the nudgeSize mints required to qualify' and 'there is no configuration of this mechanism under which claiming is profitable-in-isolation'. Neither is established by construction. See watch19PremiseReDerivation above: (1) the PRIMARY funder is StableYieldAccumulator's 20-30% nudgeSplit drip (StableYieldAccumulator.sol:512-516), an unbounded time-accumulating stream with no relationship to mint cost — nothing in BatchNFTMinter bounds the pot, only MEV competition does; (2) minted units are freely transferable ERC1155 and unlock 30%/45% phUSD staking APY, so the claimant's true cost is mintCost minus the NFT's yield NPV, strictly below what §1 assumes. The 'over-funding is the sender's error' disclaimer at L56-L61 does not cover this: the drip IS the designed funding path (DeployBatchNFTMinter.s.sol:31-33 names it 'PRIMARY 30% drip'), not an erroneous over-fund.",
+      "economicImpact": "No standalone loss — the observed margin is ~6x (88 USDC pot vs ~518 USDS for 40 mints). This is the amplifier that sets how bad ECON-001 and ECON-002 can get, and it removes the safety argument the design leans on. It also means a prolonged period of no batching (bots offline, gas spike, UI outage) lets the pot cross the profitability line with no on-chain brake.",
+      "affectedParties": ["protocol"],
+      "profitability": "A claim becomes profitable-in-isolation once pot > nudgeSize*mintPrice - NFT_NPV. Nothing enforces the inequality.",
+      "recommendation": "Either (a) cap the claimable payout per batch as a function of the payment actually routed through the batch (which would restore the 'by construction' claim honestly), or (b) rewrite §1 to state that the bound is empirical and maintained by bot competition plus operator discipline on nudgeSplit, and record the NFT's yield value in the break-even. Do not leave the stronger claim standing.",
+      "law1Note": "Surfaced under WATCH-19-nudge-law1-reopen-trigger. Premise (2) has stopped holding outright; premise (1) survives on evidence, not construction. Neither is inherited as 'already known'.",
+      "confidence": "high"
+    },
+
+    {
+      "id": "ECON-005",
+      "type": "accounting / event fidelity",
+      "severityProposal": "qa",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "batchMint / _payRewards",
+      "line": 384,
+      "lineStart": 380,
+      "lineEnd": 387,
+      "description": "Two reporting defects that mislead off-chain consumers on exactly the paths where value moved unexpectedly. (a) `totalPaid = paymentAmount > remaining ? paymentAmount - remaining : 0` floors at 0, so whenever the contract held a pre-existing payment-token balance the return value reports 0 net spend while the caller is net POSITIVE — this is the reporting face of ECON-001 and reads as 'free batch' rather than 'you took the pot'. (b) NudgePaid(recipient, token, amount) at L459 emits the SNAPSHOT amount, not the delivered amount, so on any fee-on-transfer or negatively-rebasing reward token the event over-reports what the recipient received.",
+      "economicImpact": "No direct loss. Any indexer, accounting job, or UI keyed on totalPaid or NudgePaid inherits the error.",
+      "affectedParties": ["integrators", "off-chain accounting"],
+      "recommendation": "Fixing ECON-001's sweep bound fixes (a) as a side effect. For (b), either emit the balance-delta or rename the field to make the snapshot semantics explicit.",
+      "confidence": "high"
+    },
+
+    {
+      "id": "ECON-006",
+      "type": "documented-risk residue (fee-on-transfer)",
+      "severityProposal": "qa",
+      "contract": "src/BatchNFTMinter.sol",
+      "function": "_payRewards / _snapshotRewards",
+      "line": 458,
+      "lineStart": 431,
+      "lineEnd": 458,
+      "description": "§4.4 explicitly brings fee-on-transfer into scope by documenting the decision not to defend against it: minRewards[i] floors the contract's PRE-TRANSFER balance (L431), never the delivered amount, so a FoT or negatively-rebasing token clears the floor and under-delivers. The profiler's residue is that the shortfall lands on `recipient`, an arbitrary caller-chosen address that never consented to the tradeoff the NatSpec frames as 'at the caller's discretion'.",
+      "verdict": "STAYS QA — it does not rise to Medium, and the fact that §4.4 documents it does not rescue it. The reasoning: the caller chooses BOTH the reward token AND the recipient. There is no path by which party A's choice of a taxed token imposes a loss on an unrelated party B — the only exposure is an integrator harming its own users through its own recipient parameter, which is an integration-quality issue, not a protocol vulnerability. The fee accrues to the token's own fee sink, never to the caller, so there is no extraction. This lands on the C4 known-invalid side (weird-ERC20 / user input) even with §4.4 bringing it into scope: documenting a risk makes it in-scope for DISCUSSION, it does not manufacture an attack path that the value flow does not support.",
+      "economicImpact": "Bounded by the tax rate on an asset the protocol does not use; borne by a recipient the caller selected.",
+      "affectedParties": ["a third-party recipient of an integrator's batch"],
+      "recommendation": "No code change (agreeing with §4.4). Reword the NatSpec at L252-L256 so the risk is attributed to `recipient` rather than to 'the caller', so an integrator reading it understands who actually eats the shortfall.",
+      "confidence": "high"
+    }
+  ],
+
+  "deferredToTier1": [
+    "LOCAL-BM20-004 unbounded caller-supplied arrays and count — accepted per §4.5/§8, all costs fall on the caller, no shared resource consumed. Already ledgered as L-02 (submitted)."
+  ],
+
+  "notSuppressed": [
+    "The cached known-issues in lib/phoenix-nft-staking/CLAUDE.md predate stories 017-022 and were not used to suppress anything above.",
+    "L-05 (minReward==0, wont-fix) was NOT used to suppress ECON-003(c); it is cited as an amplifier, not re-filed.",
+    "No 'malicious owner' vectors are reported. ECON-001's owner-wiring aspect is filed as a Law-3 non-obvious footgun, evidenced by the owner's own corrective script."
+  ]
+}

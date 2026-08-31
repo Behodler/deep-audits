@@ -32,7 +32,7 @@ The project-manager performs the following for every entry in `registered-projec
 - On fetch failure (no network, auth issue), record an error string for that row and continue — do not abort the whole table.
 
 ### 2c. Determine last-audited commit
-- Load `reports/ledgers/<friendly>.json` if it exists and read **`branchBaselines[<branch>].lastAuditedCommit`** — the commit last audited *on the branch this row is reporting*. Fall back to the top-level `lastAuditedCommit` only when the ledger has no `branchBaselines` (pre-dating the field) **and** the row's branch equals `defaultBranch`; otherwise report `(no baseline on <branch>)`. Never count "behind" against another branch's baseline — the number would be fiction.
+- Load `reports/<friendly>/ledger.json` if it exists and read **`branchBaselines[<branch>].lastAuditedCommit`** — the commit last audited *on the branch this row is reporting*. Fall back to the top-level `lastAuditedCommit` only when the ledger has no `branchBaselines` (pre-dating the field) **and** the row's branch equals `defaultBranch`; otherwise report `(no baseline on <branch>)`. Never count "behind" against another branch's baseline — the number would be fiction.
 - If the ledger is absent or has no `lastAuditedCommit`: record `(no ledger)` and skip the behind-count for that row. Do **not** fall back to the parent repo's submodule pointer — the pointer can be bumped without an audit, so it is not authoritative.
 - Also surface `lastRun` from the ledger if present (e.g., `reflax-yield-vault-06`) so the row links to a specific report directory.
 

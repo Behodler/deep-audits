@@ -1,0 +1,98 @@
+{
+  "project": "stable-yield-accumulator",
+  "contract": "src/StableYieldAccumulator.sol",
+  "reportDir": "reports/stable-yield-accumulator/12",
+  "submoduleHead": "71abe3e088559cb5d9c10e8475dc67e7cc57fac9",
+  "runTimestamp": "2026-06-07T00:00:00Z",
+  "runners": { "forge": true, "medusa": "1.5.1", "echidna": false },
+  "echidnaNote": "Echidna binary not installed in this environment; Medusa (Trail of Bits, primary) covered the stateful-fuzz role.",
+  "testFiles": {
+    "invariantSuite": "workspace/stable-yield-accumulator/test/Invariant_SYA.t.sol",
+    "paymentFloorPoC": "workspace/stable-yield-accumulator/test/PaymentFloor_SYA.t.sol",
+    "sharedMocks": "workspace/stable-yield-accumulator/test/mocks/SYAMocks.sol",
+    "medusaConfig": "workspace/stable-yield-accumulator/medusa.json"
+  },
+  "commands": {
+    "forge": "forge test --match-path 'test/*SYA*' -vv",
+    "medusa": "medusa fuzz --config medusa.json"
+  },
+  "summary": {
+    "structuralInvariantsHold": true,
+    "forgeInvariantRuns": 256,
+    "forgeCallsPerInvariant": 128000,
+    "forgeReverts": 0,
+    "medusaCalls": 100000,
+    "medusaWorkers": 8,
+    "medusaFailures": 0,
+    "passed": 13,
+    "failed": 0,
+    "drainConfirmed": true
+  },
+  "properties": [
+    {
+      "property": 1,
+      "name": "REGISTRY-SYNC",
+      "status": "HOLDS",
+      "evidence": "forge invariant_registrySync (256 runs / 128k calls, 0 reverts) + medusa property_registrySync (100k calls). isRegisteredStrategy[s] <=> in array <=> strategyTokens[s]!=0 held under add/remove churn on 3 spare strategies; no duplicates ever observed."
+    },
+    {
+      "property": 2,
+      "name": "SPLIT-CONSERVATION",
+      "status": "HOLDS",
+      "evidence": "forge invariant_splitConservation + invariant_globalConservation and medusa property_splitConservation/property_globalConservation all green across the full nudgeSplit [0,100] range and discount [0,50%]. nudgeAmount + phlimboAmount == actualPayment exactly; aggregate paid == nudge + phlimbo."
+    },
+    {
+      "property": 3,
+      "name": "DECIMAL-ROUNDTRIP",
+      "status": "HOLDS",
+      "evidence": "forge testFuzz_DecimalRoundtrip (256 runs over decimals 0..18, rate 0..1e20, x 0..1e27): denormalize(normalize(x))<=x always (never over-charges); exact when rate in {0,1e18}. test_Roundtrip_SubUnitFloorsToZero pins the L-01 boundary: 5e11 (half a 6-dec reward unit) -> 0, 1e12 -> 1."
+    },
+    {
+      "property": 4,
+      "name": "PAYMENT-FLOOR / ZERO-PAYMENT-WITH-YIELD DRAIN",
+      "status": "BROKEN (vulnerability empirically demonstrated)",
+      "severityHint": "potential-high / confirms Medium CODE-001 + ECON-01 and Low L-01",
+      "confirmsFindings": ["CODE-001", "ECON-01", "L-01 (ledger zero-payment floor)"],
+      "evidence": "test_DecimalDrain_UnconfiguredStrategyToken_ZeroPayment PASSES asserting the buggy behavior: with a 6-dec strategy token left UNCONFIGURED (tokenConfigs == (0,0)) and the 6-dec reward token configured, a claim delivered 1,000,000,000 (1000 tokens, 6-dec) of real yield to the claimer while actualPayment == 0 and phlimbo received 0. calculateClaimAmount() previewed 0 as well, so the loss is silent. Control test (token configured) charges the full 1000e6 -> proves the gap is the missing setTokenConfig, not the amount. test_ZeroFloor_TinyYield_ConfiguredTokens additionally shows the pure L-01 floor: 1e11 wei of an 18-dec token claimed for free even when everything is configured.",
+      "rootCause": "_normalizeAmount/_denormalizeAmount treat an unconfigured token (decimals==0 && rate==0) as 18-dec 1:1; an unconfigured <18-dec strategy token is under-normalized by 10**(18-d), and after the 18->reward-dec denormalize the payment floors to 0 (no minimum-payment / zero-floor re-guard; minRewardTokenSupplied defaults to 0).",
+      "pocBasis": true,
+      "pocFile": "workspace/stable-yield-accumulator/test/PaymentFloor_SYA.t.sol"
+    },
+    {
+      "property": 5,
+      "name": "NFT-COST",
+      "status": "HOLDS",
+      "evidence": "forge invariant_nftCostExactlyOne + medusa property_nftCostExactlyOne: every successful claim burns exactly 1 ERC1155 unit. Deterministic test_NoNFTBurnOnRevert confirms a ZeroAmount-reverting claim consumes no NFT (atomic); test_ExactlyOneNFTBurnedOnSuccess confirms the single-burn on success."
+    },
+    {
+      "property": 6,
+      "name": "NO-RESIDUAL",
+      "status": "HOLDS",
+      "evidence": "forge invariant_noResidual + medusa property_noResidual: accumulator reward-token balance and both strategy-token balances are 0 after every claim across 128k forge calls and 100k medusa calls. skimSurplus delivers underlying straight to the claimer; reward in == nudge out + phlimbo pull out."
+    }
+  ],
+  "failures": [
+    {
+      "invariant": "PAYMENT-FLOOR (property 4) — demonstrated as a passing PoC asserting the defect, not a failing assertion",
+      "runner": "forge",
+      "test": "test_DecimalDrain_UnconfiguredStrategyToken_ZeroPayment",
+      "counterexample": {
+        "setup": "rewardToken=USDC(6-dec) configured (6,1e18); strategy registered with a 6-dec underlying token left UNCONFIGURED; discount=0; minRewardTokenSupplied=0",
+        "sequence": [
+          "owner.setTokenConfig(reward, 6, 1e18)",
+          "owner.addYieldStrategy(strategy, tok6)  // tok6 UNCONFIGURED",
+          "strategy holds 1000e6 tok6 surplus",
+          "claimer.claim(nftIndex=1, min=0, exempt=[])"
+        ],
+        "result": "claimer receives 1000e6 (1000) tok6 of real yield; actualPayment == 0; phlimbo receives 0; preview also returned 0"
+      },
+      "severity": "potential-high",
+      "note": "This is the value-extraction drain. Surfaced by Tier-2 as Medium (CODE-001/ECON-01) gated on an owner config omission (a non-obvious footgun, in scope under Law 3) plus the structural L-01 zero-floor. Use this test as the PoC basis; severity to be set by severity-classifier."
+    }
+  ],
+  "notes": [
+    "All structural invariants (registry sync, split & global conservation, decimal round-trip bound, NFT cost, no residual) HOLD under both forge (256 runs) and medusa (100k calls, 8 workers) with zero reverts/failures.",
+    "The single broken property (4) is the intended target: it confirms CODE-001/ECON-01 (decimal-config drain) and ledger L-01 (zero-payment floor). It is encoded as a deterministic passing PoC that asserts payment==0 while yield>0, so it doubles as the runnable proof-of-concept.",
+    "Workspace is buildable at commit 71abe3e; forge build clean. Medusa 1.5.1 used as the stateful fuzzer (Echidna not installed)."
+  ]
+}
