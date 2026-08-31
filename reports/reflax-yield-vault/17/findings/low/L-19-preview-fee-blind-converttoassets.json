@@ -1,0 +1,83 @@
+{
+  "id": "L-19",
+  "issueId": "ryv17l19",
+  "project": "reflax-yield-vault",
+  "status": "ready",
+  "severity": "low",
+  "title": "Both exit previews are built on the fee-free convertToAssets, so the published guarantee is breached on every exit from a fee-charging vault",
+  "contract": "src/AYieldStrategy.sol",
+  "function": "previewExitFor",
+  "line": 571,
+  "lineStart": 571,
+  "lineEnd": 583,
+  "entryPoint": null,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "302656e234435430ebec32c9924e8626c03f6ab765bf0174729e8228d2322458",
+  "fingerprintBasis": "src/AYieldStrategy.sol:previewExitFor:PREVIEW-FEE-BLIND-CONVERTTOASSETS",
+  "rootCauseClass": "PREVIEW-FEE-BLIND-CONVERTTOASSETS",
+  "origin": "new",
+  "dedupId": "DEDUP-17-02",
+  "description": "Both previewExitFor implementations derive netGuaranteed from vault.convertToAssets (base at AYieldStrategy.sol:571-583; market via _exitFloor at ERC4626MarketYieldStrategy.sol:127-137, convertToAssets at :133). ERC4626 requires previewRedeem to express redemption fees and convertToAssets to ignore them, so the quote systematically over-states what redeem() delivers. ERC4626YieldStrategy already exposes the fee-aware quote at :83-85; story-050 criterion 10 deliberately forbade previewExitFor from using it, so the contract now ships two exit previews that disagree by the vault's exit fee, with the newer one carrying the word 'guarantees'.",
+  "impact": "The published exit guarantee is breached on every exit from a fee-charging vault; the Tier-3 census fires on 203 of 203 executed direct exits. Magnitude measured on chain rather than assumed: at block 25878009 the divergence on the actually-wired Tokemak Autopools is 0.004729% (autoDOLA) and 0.005300% (autoUSD), in the harmful direction (convertToAssets over-states what redeem delivers). Illustrative at a 5% redeem fee: netGuaranteed 1000e18, previewRedeem 950e18, delivered 950e18. Held at Low on its spec-deviation weight: a ~0.5 bp overstatement of a quote no code reads is three orders of magnitude below the C4 Medium value-leak limb.",
+  "attackPath": [
+    "A consumer reads netGuaranteed from a strategy wired to a fee-charging ERC4626 vault.",
+    "netGuaranteed is computed from convertToAssets, which by ERC4626 ignores the redemption fee.",
+    "withdraw() routes to vault.redeem, which charges the fee.",
+    "Delivered underlying is short of the guarantee by the full fee percentage, on every exit."
+  ],
+  "recommendation": "Read a fee-aware quote. Base netGuaranteed on vault.previewRedeem(shares) rather than convertToAssets(shares), or subtract the measured convertToAssets/previewRedeem delta. NOTE (load-bearing): F-01-050's proposed remedy (cap by _positionValue()) does NOT work \u2014 assertEq(posValue, net) passes because _positionValue is built on the same fee-blind conversion (ERC4626YieldStrategy.sol:61-63), so it is numerically identical to the number it was meant to correct.",
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-08-31T00:00:00Z",
+    "updatedAt": "2026-08-31T00:00:00Z",
+    "commit": "cdd07434a62ae4e1b158eef97dbfef3f2f47d6d9",
+    "scanOrigin": "reflax-yield-vault-17",
+    "classificationOrigin": "severity-classification.md",
+    "validityCheck": "VALID",
+    "severityAudit": "confirmed"
+  },
+  "faithfulness": true,
+  "faithfulnessLabel": "F-17-02",
+  "reportChannel": [
+    "qa-report.md",
+    "spec-conformance.md"
+  ],
+  "instances": [
+    "src/AYieldStrategy.sol:571-583 previewExitFor (base)",
+    "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:127-137 _exitFloor (convertToAssets at :133)"
+  ],
+  "pocFiles": [
+    "workspace/reflax-yield-vault/test/invariant/RealisticExitPreviewPoc.t.sol::testPoc_INV1_direct_exitFeeBreachesFloor (PASS)",
+    "workspace/reflax-yield-vault/test/poc-run17-pattern-match.t.sol::testPM3_DirectPreviewOverQuotesOnExitFeeVault (PASS)"
+  ],
+  "onChainMeasurement": {
+    "block": 25878009,
+    "rpc": "RPC_MAINNET from repo-root .envrc, live, no key expiry",
+    "autoDOLA": {
+      "vault": "0x79eB84B5E30Ef2481c8f00fD0Aa7aAd6Ac0AA54d",
+      "asset": "DOLA",
+      "convertToShares(1e18)": "842299129881071773",
+      "convertToAssets(shares)": "1000000014462599280",
+      "previewRedeem(shares)": "999952721565253485",
+      "divergence": "47292897345795 = 0.004729%"
+    },
+    "autoUSD": {
+      "vault": "0xa7569A44f348d3D70d8ad5889e50F78E33d80D35",
+      "asset": "USDC",
+      "convertToShares(1e6)": "908708949392523931",
+      "convertToAssets(shares)": "999999",
+      "previewRedeem(shares)": "999946",
+      "divergence": "53 = 0.005300%"
+    }
+  },
+  "escalationTrigger": "CORRECTED THRESHOLD (severity-auditor, mandatory): convertToAssets/previewRedeem divergence on a wired Autopool >= 10 bps, OR any step change in Tokemak's fee parameters => re-weigh to Medium. The classifier's original trigger ('any non-zero divergence => Medium') is SUPERSEDED: divergence is already non-zero at 0.0047%/0.0053%, so as written it would mechanically manufacture a false Medium at the next triage on 0.5 bps.",
+  "refileDisclosure": "ECON-A / c50c08f9ee587c02e38e089dd7aa2ee3ae64a9623bb1e6f1d138154b21fc7887 (Low, open) \u2014 'ERC4626YieldStrategy credits principal via fee-blind convertToAssets, persistently over-stating redeemable NAV.' severityScaling verbatim: 'Magnitude-bound to the EXTERNAL vault fee/curve config, NOT this contract. Over-credit scales LINEARLY with vault exit fee (PoC: 1% fee -> 10e18 over-credit on 1000e18). A future strategy wired to a non-trivial-exit-fee vault makes this SAME code path a MEDIUM. Retain the F-03 StableStaker:786 integration gate with \"magnitude = external vault fee config\" annotation (severity-auditor carry-forward).' AND F-16-003 / c705bd94ec78fd233ec72a1599f746cfe051b4357aaf5851fb041abd41d55d98 (faithfulness, open), gate verbatim from reports/reflax-yield-vault/16/submissions/spec-conformance.md:65: 'the gate must re-weigh severity against the *actual* vault wired at the integration point, not inherit ECON-A's stale Low.' RE-FILE BASIS: same primitive (fee-blind convertToAssets), different function, different claim, different consequence \u2014 ECON-A is deposit-side crediting on _acquireShares; this is an exit-side published delivery guarantee on a function that did not exist at ECON-A's commit. Filed as a new entry cross-linked to both; NOT merged into ECON-A (whose fingerprint is _acquireShares); ECON-A's stale Low is NOT inherited. Both are 'open', not 'acknowledged' \u2014 neither carries suppression authority in any case.",
+  "gateStatus": "F-16-003's Medium re-evaluation gate is TRIPPED this run by the deployed Tokemak autoDOLA/autoUSD wiring, and is now ADJUDICATED: the re-weigh lands on Low with an on-chain measurement behind it (0.0047%/0.0053%), not on ECON-A's inherited stale Low. A tripped gate left un-adjudicated is how a stale Low survives another run.",
+  "adjacentOpen": [
+    "L-11 / abd28a2f46c12893",
+    "L-09 / c6ec246f7e58dd29"
+  ]
+}

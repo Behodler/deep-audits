@@ -1,0 +1,57 @@
+{
+  "id": "L-22",
+  "issueId": "ryv17l22",
+  "project": "reflax-yield-vault",
+  "status": "ready",
+  "severity": "low",
+  "title": "The quoted floor is not honoured across a real quote->execute gap: minOut is re-derived from live state at execution, so the guarantee silently collapses with it",
+  "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+  "function": "_disposeShares",
+  "line": 245,
+  "lineStart": 245,
+  "lineEnd": 246,
+  "entryPoint": null,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "7a66fe7d5a963abdce52855b617f42bfe70f77c7fd72b0ac4bd75783fc49b963",
+  "fingerprintBasis": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:_disposeShares:QUOTE-EXECUTE-GAP-FLOOR-REDERIVED",
+  "rootCauseClass": "QUOTE-EXECUTE-GAP-FLOOR-REDERIVED",
+  "origin": "new",
+  "dedupId": "DEDUP-17-05",
+  "description": "_disposeShares re-derives minOut inline from live state at :245-246 rather than accepting or honouring the floor quoted by previewExitFor. _exitFloor (:127-135) and the inline recomputation (:245-246) are the SAME EXPRESSION by convention across three copies (the third is a test helper), an equality nothing enforces. The floor therefore holds ATOMICALLY and evaporates the moment a real quote->execute gap exists \u2014 which is the only mode in which a STATICCALL preview is useful.",
+  "impact": "Silent ~99% under-delivery: 19,602e18 quoted at T1, 181.9e18 delivered at T2 \u2014 0.93% of the guarantee, with no revert, no event and no signal. Census v1d_floorBreachesDeferred 35 direct / 1 market over r_deferredExits 35/13. This is the most severe SHAPE in the run.",
+  "attackPath": [
+    "Two clients are funded on the market strategy.",
+    "A consumer STATICCALLs previewExitFor at T1 and records netGuaranteed = 19,602e18.",
+    "The vault halves in value.",
+    "The OTHER client exits first, consuming shares.",
+    "The consumer executes at T2. _disposeShares recomputes minOut from live state, so the T1 floor is silently replaced by a much lower one.",
+    "181.9e18 is delivered against a 19,602e18 guarantee. No revert, no event, no signal."
+  ],
+  "recommendation": "Make the floor ENFORCEABLE rather than advisory: pass the quoted netGuaranteed into withdraw as a caller-supplied minOut and revert if execution cannot meet it, instead of recomputing it inline. Landing L-29 (capture vault.redeem's return and compare it to the quoted floor) first converts the silent failures into loud ones as an interim mitigation.",
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-08-31T00:00:00Z",
+    "updatedAt": "2026-08-31T00:00:00Z",
+    "commit": "cdd07434a62ae4e1b158eef97dbfef3f2f47d6d9",
+    "scanOrigin": "reflax-yield-vault-17",
+    "classificationOrigin": "severity-classification.md",
+    "validityCheck": "VALID",
+    "severityAudit": "confirmed"
+  },
+  "pocFiles": [
+    "test/invariant/RealisticExitPreviewPoc.t.sol::testPoc_INV1_market_floorBreachesAcrossQuoteExecuteGap (PASS)"
+  ],
+  "whyNotMedium": [
+    "Nobody sees the quote \u2014 zero consumers; the divergence is unobserved and unrelied-on today.",
+    "The delivery shortfall itself is already owner-accepted: 'debited for the requested amount regardless of what was received' is AYieldStrategy.sol:781-783 by explicit design ('shortfall accrues as yield'), and the FCFS-at-par socialization it implements is stable-staker 69c7666eee33698e... \u2014 wont-fix, 'intended design, confirmed by protocol owner'. What is NEW at cdd0743 is only that the protocol now publishes a number under the word 'guarantees' that this accepted design will not honour.",
+    "The PoC's two-exit-capable-client premise does not hold in the deployed wiring \u2014 CONFIRMED, not assumed: in the live ResumeStableStakerMigration broadcast (chain 1) each strategy receives setClient(..., true) for exactly two addresses, PhusdStableMinter (0x435B0A18...) and StableStaker (0xbce8ABC0...), and ONLY StableStaker receives setWithdrawer(true). One exit-capable client. The gap still opens on a price move alone, but the demonstrated 99% magnitude does not."
+  ],
+  "whyNotQA": "The floor's atomic correctness is an UNENFORCED CONVENTION \u2014 the same expression copied across three places (:127-135, :245-246, t.sol:44-52; pattern D-5), an equality nothing checks. It holds atomically (256,000 forge + 209,901 medusa calls, no counterexample) and evaporates the moment the gap is real.",
+  "distinctness": "LOAD-BEARING. Different harm from L-21 (silent vs revert), different root cause (the quote is not a snapshot), and DIFFERENT MITIGATION \u2014 the floor must become enforceable as a caller-supplied minOut, which L-21's AMM-quote fix does not deliver. Filing it under L-21 would let the wrong fix close it. It also fires on the DIRECT strategy (35 deferred breaches), which L-21 instance (a) does not touch at all.",
+  "escalationTrigger": "Any consumer that PERSISTS a netGuaranteed across blocks \u2014 an off-chain keeper, or a two-phase totalWithdrawal flow => Medium (value leak, stated assumptions, external requirement = a price move in the gap). WATCH-17-03.",
+  "disclosure": "stable-staker M-01 / 2b9a89d29c34df41aee609d0b5f2c6ae82c1e509877261424c2c20f317fbb0c3 (Medium, wont-fix), 'Par-exit front-run on the migration cushion.' triageReason verbatim: 'OWNER DECISION 2026-08-29, recorded in the owner's own terms. The finding is VALID \u2014 this is explicitly NOT a rejection on the merits and NOT a severity downgrade. It is closed wont-fix because the mitigation is OPERATIONAL rather than a code change, and is OUT OF SCOPE FOR THIS REPO: the pause() -> initiateMigration() -> unpause() sequence belongs in the deployment script that performs the migration, which lives in phoenix-phase-2-staging. Nothing in stable-staker can fix it.' ADJACENT, NOT A DUPLICATE: 2b9a89d2... is a stable-staker buffer-ordering value transfer between stakers; this is a reflax quote->execute gap where the strategy's own floor is silently re-derived. Its wont-fix reasoning ('nothing in stable-staker can fix it') carries NO authority over reflax code, where the fix IS a code change. Not suppressed.",
+  "fingerprintCorrection": "2b9a89d29c34df41... is the par-exit front-run entry; 69c7666eee33698e... is the OLDER, DIFFERENT FCFS-at-par entry ('Underwater withdraw buffer is FCFS at par, socializing strategy loss onto slow stakers', wont-fix, 'Intended design (confirmed by protocol owner)'). Verified directly against reports/stable-staker/ledger.json this run. Memory note stable-staker-run15-notes cites 69c7666e... for the par-exit front-run \u2014 that citation is WRONG and repair is owed (outside this lane)."
+}
