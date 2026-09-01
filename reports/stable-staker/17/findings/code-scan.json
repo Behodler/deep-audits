@@ -1,0 +1,68 @@
+{
+  "project": "stable-staker",
+  "scanTimestamp": "2026-09-01T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "mode": "regression",
+  "baseline": "fa06de5",
+  "head": "96d39ed",
+  "contractsScanned": 1,
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "access-control-bypass / spec-deviation",
+      "severity": "potential-low",
+      "severityRange": "low-to-medium",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "line": 605,
+      "lineStart": 536,
+      "lineEnd": 606,
+      "description": "`withdraw` -> `autoAnnihilate` is a complete, free, universal two-transaction bypass of the `claimEnabled` gate. `withdraw` books all pending reward to `unclaimedReward` (:417-419) and is NOT gated by `claimEnabled`. A caller who withdraws their full principal then re-enters `autoAnnihilate` with `user.amount == 0` gets `principalAsAntimatter = 0` -> `capped = 0` -> `netWanted = 0`, `excessBase = owed`, `gross = 0`, and the ENTIRE backlog is minted raw at :605. A partial withdraw tunes exactly how much comes out raw. Story-025's acceptance rationale for the excess-mint loophole states the condition 'requires reward accrual to exceed staked principal, which at realistic emission rates takes a long time'; that premise is FALSE. The story's headline claim that `autoAnnihilate()` 'becomes the only reward path' is likewise false.",
+      "codeSnippet": "// withdraw:417-419 (ungated by claimEnabled)\nif (pending > 0) {\n    unclaimedReward[token][msg.sender] += pending;\n}\n\n// autoAnnihilate:540-548\nuint256 principalAsAntimatter = user.amount * scale;\nuint256 capped = owed < principalAsAntimatter ? owed : principalAsAntimatter;\nnetWanted = capped / scale;\nexcessBase = owed - capped;\nrequire(netWanted > 0 || excessBase > 0, \"StableStaker: nothing to annihilate\");\n\n// autoAnnihilate:604-606\nif (excess > 0) {\n    antimatter.mint(msg.sender, excess);\n}",
+      "attackVector": "Any staker: (1) withdraw(token, user.amount) -- ungated, books the whole reward to unclaimedReward and zeroes user.amount; (2) autoAnnihilate(token, 0) -- netWanted=0, gross=0, the annihilate block is skipped entirely, and the full backlog is minted as raw Antimatter; (3) re-stake. Works for every staker regardless of reward-vs-principal ratio, works while Antimatter itself is paused (the `if (annihilatable > 0)` block is skipped, and Antimatter's `mint` is not `whenNotPaused`), and is free on the currently-wired direct ERC4626YieldStrategy (no round-trip haircut).",
+      "footgunTest": "A competent, non-malicious owner reading story-025's rationale believes the raw-Antimatter leak is rate-limited by emission-vs-principal and therefore negligible over a weeks-long teaching phase. It is not rate-limited at all. Surprise => in scope under Law 3.",
+      "impactBound": "No over-emission: `owed = annihilatable + dust + excess` is exactly conserved, so the bypass pays no more than `claim` would. The emission cap and all principal accounting are intact. Impact is confined to the teaching feature failing at its stated purpose, plus a falsified premise the owner will size the phase against.",
+      "severityNote": "Medium case: the entire point of the story-025 change is defeated (C4 'protocol function impacted'). Low case: story-025 explicitly instructs auditors that `claimEnabled` is 'a UX mechanism with a deliberate escape valve, not an access control' and that 'nothing in the protocol's safety argument may depend on antimatter being unobtainable while the flag is false'. Filed Low to avoid overstatement; the load-bearing content is the FALSIFIED RATIONALE, not a new exploit.",
+      "lawTwoItem": "Yes -- route to spec-conformance. Story `~/code/product-owner/stories/stable-staker/auto-complete/stable-staker-auto-annihilate/025-force-annihilation-on-claim.md` (state: auto-complete), Story Overview line ~15 and Auditor Note line ~205.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-002",
+      "type": "liveness / state-consistency",
+      "severity": "potential-low",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "line": 517,
+      "lineStart": 517,
+      "lineEnd": 517,
+      "description": "A holder with zero principal and a non-zero `unclaimedReward` backlog has no reward path at all while `claimEnabled == false` AND the pool is `Migrating`. `claim` has no `PoolState.Active` gate but is blocked by the flag (:440); `autoAnnihilate` requires Active (:517); `userMigrate` requires `amount > 0` (:866); `emergencyWithdraw` requires Active AND forfeits the backlog. The backlog survives `finalizeAndReset` (which only clears migrationInfo and poolState), so it is recoverable -- but only by an owner action (`setClaimEnabled(true)`) or by the pool being revived to Active.",
+      "codeSnippet": "// autoAnnihilate:517\nrequire(poolState[token] == PoolState.Active, \"StableStaker: pool not active\");\n// userMigrate:866\nrequire(userInfo[token][msg.sender].amount > 0, \"StableStaker: nothing staked\");",
+      "attackVector": "Not an attack -- an operational wedge. This is the exact user state CODE-001's bypass creates (fully withdrawn, backlog outstanding), and `claim`'s own NatSpec at :435-437 names it ('someone who fully withdrew and has not claimed yet'). Owner-recoverable, hence Low.",
+      "confidence": "high"
+    }
+  ],
+  "clearedRows": {
+    "classic-single-fn-reentrancy": "cleared -- CEI verified: every storage write is at :548-570, every interaction at :579+. No write follows an external call except the token allowance, reset to 0 at :602.",
+    "cross-contract-reentrancy": "cleared -- OZ ReentrancyGuard is contract-wide, so an A->B->A callback from `strategy.withdraw`, `vault.redeem`, the market strategy's AMM swap, or `antimatter.annihilate` cannot re-enter ANY mutator (stake/withdraw/claim/autoAnnihilate/emergencyWithdraw/initiateMigration/batchMigrate/userMigrate/depositFor are all nonReentrant). `antimatter.annihilate` is additionally nonReentrant on its own side (lib/antimatter@a5570ce Antimatter.sol:256).",
+    "cross-function-reentrancy": "cleared -- same contract-wide lock; the only unguarded mutator is `rescueERC20:1212` (onlyOwner, trailing transfer, no post-state).",
+    "read-only-reentrancy": "cleared -- enumerated every public/external view on StableStakerV2: pendingReward, claimableReward, getStakers, getStakersRange, stakerCount, getStakedTokens, withdrawDisabled, autoAnnihilateAvailable. NONE is a price/share-price/NAV/exchange-rate oracle (this is a MasterChef, not a vault). The one transiently-inconsistent window (totalStaked and user.amount debited by `gross` at :565-566 while strategy.principalOf still holds it, during strategy.withdraw) makes an integrator's solvency read CONSERVATIVE-INFLATED, and `withdrawDisabled` reads only strategy-side figures (_isUnderwater:1133) so it is unaffected.",
+    "erc721-receive-hook": "n/a -- no ERC721 surface, no _safeMint/safeTransferFrom in this contract.",
+    "erc1155-receive-hook": "n/a -- no ERC1155 surface.",
+    "erc777-hooks": "n/a -- pool tokens are owner-registered stablecoins; weird-ERC20 is permanently invalid on this project."
+  },
+  "clearedHypotheses": [
+    "Antimatter exchange-rate mismatch on the allowance at :600 -- NEGATIVE. `toStableAmount` (lib/antimatter@a5570ce Antimatter.sol:314-338) is a PURE DECIMAL RESCALE (`stableAmount = amount / scale` with an exact-representability revert), not a rate. So `toStableAmount(token, annihilatable) == netUsed` exactly, the `forceApprove(netUsed)` at :600 is exactly sized, and `_burn(msg.sender, amount)` burns exactly the `annihilatable` minted at :599 -- no stranded AM, no over/under-pull. The 'exchange rate is configurable' in the :513 NatSpec refers to minter.mint's phUSD output, not the stable pull.",
+    "Decimal fail-open zero-payment drain (the stable-yield-accumulator M-01 class) -- NEGATIVE. `annihilatable = netUsed * scale` and `netUsed <= netWanted`; if `netWanted == 0` then `annihilatable == 0` and the annihilate block is skipped. There is no path that pulls stable without burning matched AM. `_antimatterScale:1123-1127` fails closed on decimals > 18 or a reverting decimals(), and Antimatter independently re-checks via DecimalsMismatch.",
+    "`unclaimedReward` ASSIGNMENT at :548 clobbering a backlog -- NEGATIVE. `owed` is computed as `unclaimedReward + pending` at :538-539 BEFORE the assignment, and the assignment writes the sub-unit remainder `capped - netWanted*scale`. Conservation holds exactly: `netWanted*scale (annihilated) + remainder (re-booked) + excessBase (minted raw) == owed`. `rewardDebt` is re-based at :567 so `pending` cannot be double-counted.",
+    "`user.amount -= gross` underflow at :565 -- NEGATIVE. `gross = grossQuote > user.amount ? user.amount : grossQuote` at :558 caps it. `_stakers.remove` at :569 fires iff `user.amount == 0` post-debit, identical in shape to `withdraw:415-417`; it cannot fire early nor be skipped.",
+    "Third-party griefing of another user's exit price or floor -- NEGATIVE. `autoAnnihilate` takes no `onBehalfOf`/`for` parameter and acts strictly on `msg.sender`. Preview (:556) and execution (:579) are in the same transaction with no intervening external call, so preview/execute cannot be split across blocks. A same-block sandwich of the market strategy's swap is bounded by that strategy's own `minOut`, which is built with arithmetic byte-identical to the `netFloor` this contract enforces.",
+    "Underwater buffer branch drains the shared buffer at a grossed-up rate -- NEUTRAL, not a leak. `_routeExit:1186-1195` returns `gross` unmeasured and pays it from the buffer, but `user.amount`/`totalStaked` were also debited `gross` (:565-566) and the caller receives `netWanted` of phUSD plus `surplus = gross - netWanted` of stable at :609. Buffer out == book debited, 1:1, identical to `withdraw`. Note for the record that the 'MANDATORY MEASUREMENT' the NatSpec at :580-586 promises is VACUOUS on this branch (`received == gross >= netFloor` always) -- a documented carve-out (commit a961e10), safe because `t.balanceOf(this) >= amount` is checked directly at :1190.",
+    "ABI/selector drift on IAntimatter -- NEGATIVE, re-confirmed against lib/antimatter@a5570ce: mint(address,uint256):216, annihilate(address,address,uint256,uint256):253, toStableAmount(address,uint256):314. All three match src/interfaces/IAntimatter.sol."
+  ],
+  "observationsNotFiled": [
+    "EXIT_ROUNDING_ALLOWANCE sizing (:70, :587). For a direct ERC4626YieldStrategy, `netGuaranteed == grossToRequest == netWanted` (AYieldStrategy.sol:580-582) is an EXACT-EQUALITY claim, while delivery is convertToAssets(convertToShares(netWanted)) with two independent floors (ERC4626YieldStrategy.sol:126-138), so the shortfall is bounded by `pps + 1` raw asset units. The check needs `pps <= 1 + netFloor/10000`. For any annihilation at or above 0.01 units of the stable (netFloor >= 10_000 raw) the allowance is >= 3 and covers any realistic share price; only sub-cent annihilations can revert 'StableStaker: exit shortfall'. Dust-level and fail-closed -- NOT filed.",
+    "autoAnnihilateAvailable:1061 probes previewExitFor with netWanted=1 while the real call at :556 uses the full amount, so a capped or degraded quote for the real amount is not caught by the :557 grossQuote==0 check. The consequence -- the shortfall being diverted into the raw-AM `excess` path at :605 -- is documented at NatSpec item (d) (:493-495) and is subsumed by CODE-001, which already establishes that channel is wide open by a cheaper route. Folded into CODE-001, not filed separately.",
+    "`withdraw:424` and `autoAnnihilate:609` both forward the FULL measured `received` while debiting only the requested `amount`/`gross`, so a strategy that over-delivers pays protocol-owned yield to the caller. This contradicts _routeExit's own NatSpec ('sub-amount differences remain protocol-owned yield/loss'). PRE-EXISTING in `withdraw`, outside this run's regression delta -- flagged for econ-scanner, not filed here."
+  ]
+}

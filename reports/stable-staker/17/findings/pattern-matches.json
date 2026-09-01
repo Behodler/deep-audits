@@ -1,0 +1,214 @@
+{
+  "project": "stable-staker",
+  "run": 17,
+  "scanTimestamp": "2026-09-01T00:00:00Z",
+  "scanType": "pattern-matching",
+  "mode": "REGRESSION",
+  "baselineCommit": "fa06de5",
+  "headCommit": "96d39ed",
+  "patternDbVersion": "1.1",
+  "patternsChecked": 35,
+  "scope": ["src/StableStakerV2.sol", "src/interfaces/IAntimatter.sol"],
+  "scopeNote": "src/CrossVersionMigrator.sol, src/InPlaceMigrator.sol, src/versions/v1/StableStakerV1.sol unchanged this run (git diff fa06de5..96d39ed touches neither); signature sweep still run repo-wide over src/ for the negatives.",
+  "findingsCount": 2,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "CENTRALIZATION-ADMIN",
+      "type": "owner-footgun / reward-liveness-coupling",
+      "severity": "potential-low",
+      "contract": "src/StableStakerV2.sol",
+      "function": "setClaimEnabled / autoAnnihilate",
+      "line": 279,
+      "confidence": "medium",
+      "description": "setClaimEnabled(false) is the deployed default and closes claim:440 as the reward path, leaving autoAnnihilate:516 as the only user-facing mint. autoAnnihilate carries two liveness dependencies claim does not: (a) it requires poolState == Active (:517), and (b) its annihilatable leg calls antimatter.annihilate (:601), which is whenNotPaused against ANTIMATTER'S OWN Phoenix pauser (lib/antimatter@a5570ce Antimatter.sol:255) - a pauser StableStaker does not control. Consequences a non-malicious owner would plausibly be surprised by: with claimEnabled == false, (1) a pool moved to Migrating has NO open reward path at all (claim reverts on the gate, autoAnnihilate reverts on :517) until the migration exit runs; (2) a pause of the foreign Antimatter contract locks every caller with netWanted > 0 out of their accrued reward, with the only remedy being an owner setClaimEnabled(true) on a possibly-unavailable owner key.",
+      "matchedSignatures": ["onlyOwner", "require(msg.sender == owner"],
+      "evidence": [
+        "src/StableStakerV2.sol:279  function setClaimEnabled(bool enabled) external onlyOwner",
+        "src/StableStakerV2.sol:440  require(claimEnabled, \"StableStaker: claim disabled\");",
+        "src/StableStakerV2.sol:517  require(poolState[token] == PoolState.Active, \"StableStaker: pool not active\");",
+        "src/StableStakerV2.sol:601  antimatter.annihilate(token, msg.sender, annihilatable, minPhUSDOut);"
+      ],
+      "missingMitigations": [
+        "No auto-reopen of claim when poolState leaves Active",
+        "No local check that antimatter is unpaused before steering the only reward path through it"
+      ],
+      "lawBasis": "Law 3 footgun - non-obvious consequence of a legitimate owner action, not a malicious-owner vector.",
+      "genuineOrShapeMatch": "genuine, but the pattern maps only loosely (CENTRALIZATION-ADMIN is a generic single-key template); the real content is the cross-contract liveness coupling, not key custody."
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "type": "gate-bypass via sibling entry point",
+      "severity": "potential-low",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "line": 605,
+      "confidence": "medium",
+      "description": "claimEnabled is read at exactly one site (:440) and therefore gates claim ONLY. autoAnnihilate:605 mints RAW Antimatter to msg.sender's wallet with no claimEnabled check. For a caller with user.amount == 0 and a non-zero unclaimedReward backlog the arithmetic collapses to principalAsAntimatter = 0 -> capped = 0 -> netWanted = 0 -> excessBase = owed, so the ENTIRE backlog is minted raw at :605: autoAnnihilate is a complete functional substitute for the disabled claim. The same path also widens whenever gross is capped below what netWanted needs, since excess = excessBase + (netWanted - netUsed) * scale (:596).",
+      "matchedSignatures": ["mint(", "authorized minter"],
+      "evidence": [
+        "src/StableStakerV2.sol:540  uint256 principalAsAntimatter = user.amount * scale;",
+        "src/StableStakerV2.sol:542  uint256 capped = owed < principalAsAntimatter ? owed : principalAsAntimatter;",
+        "src/StableStakerV2.sol:596  uint256 excess = excessBase + (netWanted - netUsed) * scale;",
+        "src/StableStakerV2.sol:605  antimatter.mint(msg.sender, excess);"
+      ],
+      "missingMitigations": ["No claimEnabled (or equivalent policy) gate on the raw-AM excess mint"],
+      "genuineOrShapeMatch": "The GATE BYPASS is genuine and mechanically verified. The PATTERN'S OWN HARM (over-mint) does NOT apply and must not be claimed: autoAnnihilate re-uses byte-identical settle arithmetic to claim (:538-539 vs :442-446), drains unclaimedReward, and re-bases rewardDebt, so the header emission cap is intact. Conservation checks out exactly: minted = annihilatable + excess = owed - (capped - netWanted*scale), with the sub-unit remainder carried at :548. Impact is therefore spec/policy deviation, not value creation - Low unless story-025 states the teaching-phase gate is absolute, which is a Law-2 question for story-faithfulness, not for this tier.",
+      "suppressionNote": "The in-source NatSpec at :471-474 calls this 'a knowing, documented loophole'. Per the standing rule that in-source NatSpec carries no suppression authority, that comment does not sanitize the finding; only story-025 or owner triage can.",
+      "routeTo": "story-faithfulness (story-025), sanitizer"
+    }
+  ],
+  "manualReviewCount": 4,
+  "manualReview": [
+    {
+      "id": "MR-17-01",
+      "source": "pattern-db",
+      "patternId": "ROUNDING-DIRECTION",
+      "alsoConsidered": ["DIVISION-PRECISION", "Linear-Depletion (project-family class, no DB pattern id)"],
+      "type": "linear pro-ration of a non-linear floor",
+      "severity": "potential-low",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "line": 559,
+      "confidence": "low",
+      "description": "netFloor = (netQuote * gross) / grossQuote linearly rescales a floor that the market strategy computes non-linearly (_exitFloor = convertToAssets(convertToShares(gross)) * (MAX_BPS - slip) / MAX_BPS, ERC4626MarketYieldStrategy.sol:127-135). The division floors, which LOOSENS the safety check.",
+      "evidence": [
+        "src/StableStakerV2.sol:558  gross = grossQuote > user.amount ? user.amount : grossQuote;",
+        "src/StableStakerV2.sol:559  netFloor = grossQuote == 0 ? 0 : (netQuote * gross) / grossQuote;",
+        "src/StableStakerV2.sol:587  uint256 allowance = EXIT_ROUNDING_ALLOWANCE + (netFloor * EXIT_ROUNDING_ALLOWANCE_BPS) / MAX_BPS;"
+      ],
+      "assessment": "SHAPE MATCH, most likely not a finding. This is NOT the Linear-Depletion class the family was bitten by: there the linear formula was applied to a compounding/decaying quantity so the error accumulated as a RATE DRIFT. Here _exitFloor is linear in gross up to two floor() operations, so the pro-ration error is O(1) raw units and does not scale with gross. It is bounded by the 2-unit flat allowance below 10_000 raw units of netFloor and by the 1 bp proportional leg above it (1 bp >> a few raw units at any realistic size). No leak either: the direction of the error only slackens an anti-bypass check, it cannot mis-pay. Kept in manual review rather than dropped because the claim 'two floors cost at most 2 units' is asserted from the source, not proven; a Tier-3 bound would close it.",
+      "genuineOrShapeMatch": "shape match"
+    },
+    {
+      "id": "MR-17-02",
+      "source": "pattern-db",
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "patternFitNote": "weak/adjacent - the DB has no preview-vs-actual pattern; this is the inverse of the DB's 'step 2 re-reads a live value' shape (here step 1 probes a DIFFERENT argument than step 2 uses).",
+      "type": "preview/actual argument divergence",
+      "severity": "potential-low",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilateAvailable -> autoAnnihilate",
+      "line": 1061,
+      "confidence": "low",
+      "description": "The availability gate probes previewExitFor(token, address(this), 1) and only asserts grossQuote > 0 for a ONE-UNIT request; the real call at :556 previews the caller's full netWanted. A strategy (or a live vault/AMM state) that answers positively for 1 unit can return a deeply CAPPED quote for the real amount - grossToRequest capped to clientBalances, or sharesToSell capped to held shares (ERC4626MarketYieldStrategy.sol:162-187). :557 only catches grossQuote == 0.",
+      "evidence": [
+        "src/StableStakerV2.sol:1061  abi.encodeCall(IYieldStrategy.previewExitFor, (token, address(this), 1))",
+        "src/StableStakerV2.sol:1067  return grossQuote > 0;",
+        "src/StableStakerV2.sol:556  (uint256 grossQuote, uint256 netQuote) = _previewExit(token, netWanted);",
+        "src/StableStakerV2.sol:557  require(netWanted == 0 || grossQuote > 0, \"StableStaker: exit unavailable\");"
+      ],
+      "assessment": "The divergence is REAL and mechanically confirmed. Its harm is not a loss - a capped quote shrinks gross, the caller is debited less principal, and the displaced reward is minted raw at :605 - i.e. it FEEDS PATTERN-002 rather than causing an independent leak. The availability view's stated purpose (refusing to hand the caller a bypass of a closed claim, NatSpec :1044-1048) is therefore only enforced at the 1-unit granularity it probes. Low, and adjudication belongs to the interaction tier.",
+      "relatedFinding": "PATTERN-002",
+      "genuineOrShapeMatch": "genuine divergence, low impact"
+    },
+    {
+      "id": "MR-17-03",
+      "source": "pattern-db",
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "type": "par-exit on the shared underwater buffer, reached from a NEW entry point",
+      "severity": "potential-low",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate -> _routeExit",
+      "line": 1186,
+      "confidence": "low",
+      "description": "autoAnnihilate passes guardUnderwater = true (:579), but that branch does not revert when the idle buffer covers the request: it emits BufferWithdrawn, calls strategy.relinquishPrincipal(token, gross) and returns gross VERBATIM (:1186-1195). With a market strategy gross = ceilDiv(netWanted * MAX_BPS, MAX_BPS - slip) > netWanted, so received == gross, the floor check passes trivially, netUsed = netWanted, and surplus = gross - netWanted is transferred back to the caller at :609. The caller exits at PAR while the strategy is below par - the same allocation-rule arbitrage as the prior entries - via a path that consumes the grossed-up figure of the shared buffer per unit of reward annihilated.",
+      "evidence": [
+        "src/StableStakerV2.sol:579  uint256 received = _routeExit(token, gross, true);",
+        "src/StableStakerV2.sol:1186-1195  if (t.balanceOf(address(this)) >= amount) { emit BufferWithdrawn(...); strategy.relinquishPrincipal(token, amount); return amount; }",
+        "src/StableStakerV2.sol:609  IERC20(token).safeTransfer(msg.sender, surplus);"
+      ],
+      "priorLedgerEntries": [
+        {
+          "fingerprint": "69c7666eee",
+          "status": "wont-fix",
+          "title": "Underwater withdraw buffer is FCFS at par, socializing strategy loss onto slow stakers",
+          "triageReasonQuoted": "Intended design (confirmed by protocol owner). The underwater buffer pays daily-volume withdrawals at par during transient, mean-reverting underwater dips to avoid sparking panic and to avoid forcing users to realise losses by redeeming shares at the bottom; bank-run / mass-exit is handled separately by migrateOut with pro-rata distribution."
+        },
+        {
+          "fingerprint": "2b9a89d29c",
+          "status": "wont-fix",
+          "title": "Par-exit front-run on the migration cushion: story-020 turns the FCFS underwater buffer into a value transfer from the remaining cohort",
+          "triageReasonQuoted": "OWNER DECISION 2026-08-29 ... The finding is VALID - this is explicitly NOT a rejection on the merits and NOT a severity downgrade. It is closed wont-fix because the mitigation is OPERATIONAL rather than a code change, and is OUT OF SCOPE FOR THIS REPO: the pause() -> initiateMigration() -> unpause() sequence belongs in the deployment script ... which lives in phoenix-phase-2-staging."
+        }
+      ],
+      "reFileBasis": "DISCLOSED, NOT RE-FILED. A new fingerprint would mint if this were filed on autoAnnihilate rather than _routeExit, and dedup would not catch it - hence the explicit disclosure. But the re-file basis is weak and this tier does not assert one: (a) the per-caller bite is still capped by their own principal (gross = min(grossQuote, user.amount), :558), so no larger buffer drain than withdraw already permits; (b) autoAnnihilate is whenNotPaused, so the operational pause() mitigation the owner named for 2b9a89d29c covers it unchanged; (c) the caller is value-neutral against their own books (they surrender gross and receive netWanted of phUSD plus surplus of token). The one genuinely new observation is the RATE: autoAnnihilate consumes the grossed-up gross of buffer per unit of reward, where withdraw requests exactly amount - relevant to the owner's 'daily-volume' sizing assumption, and the reason this is surfaced rather than dropped.",
+      "genuineOrShapeMatch": "known class reaching new code; not an independent finding"
+    },
+    {
+      "id": "MR-17-04",
+      "source": "pattern-db",
+      "patternId": "FEE-ON-TRANSFER-ACCOUNTING",
+      "type": "approve-then-pull leg not balance-measured",
+      "severity": "potential-low",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "line": 600,
+      "confidence": "low",
+      "description": "Every other token movement in the new code is balance-measured (_routeExit:1196-1198, _pullToken:1109), but the annihilation leg mints annihilatable = netUsed * scale of Antimatter (:598-599) and then lets Antimatter PULL netUsed through the forceApprove at :600. On a fee-on-transfer token Antimatter receives less than netUsed while burning AM sized for the full netUsed, under-backing the annihilation on the foreign contract's side.",
+      "evidence": [
+        "src/StableStakerV2.sol:598  antimatter.mint(address(this), annihilatable);",
+        "src/StableStakerV2.sol:600  IERC20(token).forceApprove(address(antimatter), netUsed);",
+        "src/StableStakerV2.sol:601  antimatter.annihilate(token, msg.sender, annihilatable, minPhUSDOut);"
+      ],
+      "assessment": "Almost certainly C4-invalid: the token set is an owner-curated stablecoin allowlist (addToken:252) that must ALSO be registered on the phUSD stable minter, and generic fee-on-transfer is known-invalid unless in scope. Recorded rather than dropped only because the harm would land on the FOREIGN Antimatter/phUSD contract's backing, not on StableStaker, so it would not be caught by this contract's own conservation checks.",
+      "genuineOrShapeMatch": "shape match; expected invalid under the token allowlist"
+    }
+  ],
+  "patternsSkipped": [
+    {
+      "patternId": "FRONTRUN-APPROVE",
+      "reason": "SKIP RULE - pattern note states 'C4 typically considers this QA/known issue'. Not emitted as a primary finding.",
+      "hmTwistChecked": true,
+      "hmTwistResult": "NONE. The new forceApprove dance at :600-602 sets the allowance to exactly netUsed immediately before antimatter.annihilate and resets it to 0 immediately after, inside the same if (annihilatable > 0) block - no standing allowance window exists across transactions, and antimatter is immutable. This is also a clean regression against ledger f84992e9ac (InPlaceMigrator.migrateIn dangling forceApprove, status open/qa): the defect is NOT repeated in the new code."
+    }
+  ],
+  "checkedNoMatch": [
+    {
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "result": "NO MATCH - notVulnerableWhen satisfied",
+      "evidence": "_updatePool(token) runs at :533, ahead of the pending read at :538-539 and ahead of every share mutation (user.amount -= gross :565, pool.totalStaked -= gross :566); rewardDebt re-based at :567. Note this is the family the project WAS bitten by (ledger 0651258fcc: emergencyWithdraw shrinks totalStaked without _updatePool) - autoAnnihilate does not repeat it."
+    },
+    {
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "result": "NO MATCH on the over-mint leg (the gate-bypass leg is PATTERN-002)",
+      "evidence": "Conservation verified by hand: annihilatable + excess = netUsed*scale + excessBase + (netWanted-netUsed)*scale = owed - (capped - netWanted*scale), the remainder being carried at :548. Single _updatePool writer; unclaimedReward drained, not incremented."
+    },
+    {
+      "patternId": "INCORRECT-OPERATOR",
+      "result": "NO MATCH - boundary proven safe",
+      "evidence": "The netWanted == 0 escape at :557 was checked for a zero-net-but-nonzero-gross principal debit. It cannot occur: netWanted == 0 requires capped < scale; if user.amount >= 1 then principalAsAntimatter >= scale so capped = owed < scale, making excessBase = owed - capped = 0 and the require at :546 revert. Hence netWanted == 0 implies user.amount == 0, and gross = min(grossQuote, 0) = 0. The saturating floorWithAllowance at :588 is likewise safe (it only collapses when netFloor <= 2 raw units)."
+    },
+    {
+      "patternId": "MISSING-SLIPPAGE",
+      "result": "NO MATCH",
+      "evidence": "minPhUSDOut is a caller parameter forwarded verbatim to antimatter.annihilate (:601) for the phUSD leg; the token-exit leg is bounded by the measured received >= floorWithAllowance check at :589 plus the market strategy's own byte-identical minOut in _disposeShares."
+    },
+    {
+      "patternId": "YIELD-PRINCIPAL-ACCOUNTING-SKEW (NAV-guard-bypass sub-class)",
+      "result": "NO MATCH - prior class NOT reborn",
+      "evidence": "Ledger 969722dc9e ('setYieldStrategy underwater guard is rate-based, bypassed by AMM execution slippage', rootCause rate-vs-execution-residual) does NOT reappear on autoAnnihilate: unlike setYieldStrategy, autoAnnihilate measures the realised delta (_routeExit:1196-1198) and enforces it against the slippage-adjusted netFloor at :589, so execution slippage beyond the quote reverts rather than passing a rate-only guard. autoAnnihilate's guard is strictly stronger than withdraw's. Ledger 970d730732 (re-injection haircut, deposit leg, status fixed) has no deposit leg in the new code at all."
+    },
+    {
+      "patternId": "REENTRANCY-CROSS-FUNCTION / REENTRANCY-READONLY",
+      "result": "NO MATCH",
+      "evidence": "OZ ReentrancyGuard is a single contract-wide lock covering stake/withdraw/claim/autoAnnihilate/emergencyWithdraw/initiateMigration/batchMigrate/userMigrate/depositFor. CEI holds in autoAnnihilate: every storage write is at :548-570, ahead of the first interaction at :579. No value-reporting view of this contract is derived from a transiently-inconsistent state during the annihilate callback."
+    },
+    {
+      "patternId": "DOS-UNBOUNDED-LOOP",
+      "result": "NO MATCH - no loop introduced this run"
+    },
+    {
+      "patternId": "ERC4626-INFLATION, FIRST-DEPOSITOR-ATTACK, FLASH-LOAN-PRICE, ORACLE-STALE, ORACLE-ROUNDID, SIGNATURE-REPLAY, PERMIT-FRONTRUN, CROSS-CHAIN-REPLAY, DOUBLE-VOTING, TIMELOCK-BYPASS, UNPROTECTED-INIT, STORAGE-COLLISION, SELFDESTRUCT-FORCE-ETH, WEAK-PRNG, UNSAFE-DOWNCAST, DIVISION-PRECISION, REENTRANCY-ERC777, REENTRANCY-ERC721-RECEIVE, RETURN-VALUE-IGNORE, BATCH-PAYOUT-FIXED-POT, REWARD-RUNWAY-DEPLETION, EMISSION-WINDOW-BOUNDARY",
+      "result": "ZERO SIGNATURE HITS across src/ (mechanical grep sweep) or negated by the profile",
+      "evidence": "grep -rn --include=*.sol over src/ returned 0 for: ecrecover, ECDSA.recover, latestRoundData, AggregatorV3, delegatecall, 'initialize(', Initializable, selfdestruct, block.prevrandao, blockhash, difficulty, 'getReserves()', slot0, block.chainid, lzReceive, 'permit(', castVote, timelock, 'uint128(' / 'uint96(' / 'uint64(' / 'int128(', SafeCast, _safeMint, onERC721Received, onERC1155*, ERC777, 'totalSupply()', address(this).balance, msg.value, unchecked, assembly. REWARD-RUNWAY-DEPLETION / EMISSION-WINDOW-BOUNDARY: no windowEnd/rewardBudget model in V2 (rate-based antimatterPerSecond, mint-on-demand); the pre-existing 1-wei ceiling item is already ledgered as 9ee2d98fb3."
+    }
+  ],
+  "errors": [],
+  "coverageNotes": [
+    "The nested pin stable-staker compiles against for lib/antimatter is a5570ce, NEWER than the audits-repo top-level lib/antimatter HEAD 3a96fb7. All Antimatter claims above (annihilate whenNotPaused at Antimatter.sol:255) are read from the NESTED pin per the profile's warning."
+  ]
+}

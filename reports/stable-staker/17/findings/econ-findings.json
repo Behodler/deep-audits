@@ -1,0 +1,189 @@
+{
+  "project": "stable-staker",
+  "run": 17,
+  "scanType": "economic",
+  "mode": "REGRESSION",
+  "baseline": "fa06de5",
+  "head": "96d39ed",
+  "scanTimestamp": "2026-09-01T00:00:00Z",
+  "contractsScanned": 1,
+  "scope": [
+    "src/StableStakerV2.sol"
+  ],
+  "premise": "V2 emits Antimatter; Antimatter.annihilate mints 1 phUSD per AM burned with NO backing (lib/antimatter/src/Antimatter.sol:296 `_phUSD.mint(recipient, amount)`). The project-wide opportunity-cost and minter-cushion suppressions are VOID for V2. Over-emission of AM is direct dilution.",
+  "nestedPinsRead": {
+    "lib/reflax-yield-vault": "cdd0743",
+    "lib/antimatter": "a5570ce"
+  },
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "availability-brick / cross-contract fee blindness",
+      "severity": "potential-medium",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "line": 589,
+      "lineStart": 576,
+      "lineEnd": 592,
+      "confidence": "high",
+      "relatedTo": "spec-conformance-draft.md F-01 [canonical F-06] (supporting quantification, NOT a duplicate); reflax-yield-vault L-16",
+      "description": "The exit-shortfall floor's proportional allowance is 1 basis point (EXIT_ROUNDING_ALLOWANCE_BPS, src/StableStakerV2.sol:78) plus a flat 2 raw units (:70). Against the wired ERC4626YieldStrategy the floor collapses to netFloor == gross == netWanted (AYieldStrategy.previewExitFor's capped identity, lib/reflax-yield-vault/src/AYieldStrategy.sol:571-583, not overridden by ERC4626YieldStrategy), while the realised delivery is vault.redeem(convertToShares(amount)) (ERC4626YieldStrategy.sol:126-138) which is net of the vault's exit fee. The allowance is sized in ROUNDING units; the shortfall is PROPORTIONAL. Both allowances are `constant` with no setter, so there is no parameter remedy.",
+      "codeSnippet": "uint256 allowance = EXIT_ROUNDING_ALLOWANCE + (netFloor * EXIT_ROUNDING_ALLOWANCE_BPS) / MAX_BPS;\nuint256 floorWithAllowance = netFloor > allowance ? netFloor - allowance : 0;\nrequire(received > 0 && received >= floorWithAllowance, \"StableStaker: exit shortfall\");",
+      "quantification": {
+        "derivation": "netFloor == netWanted == N (capped identity, and gross == netWanted because netWanted <= user.amount by the cap at :543-544 and clientBalances == totalStaked by construction at stake:391-392). received ~= N*(1-f). Pass condition: N*(1-f) >= N - 2 - N/10000  <=>  N*(f - 1e-4) <= 2  <=>  N <= 2/(f - 1e-4) raw token units.",
+        "measuredFees": "Prior fork measurements recorded in the reflax-yield-vault audits (convertToAssets vs previewRedeem divergence on the live Tokemak autopools, NOT re-measured this run): run-16 autoUSD 1.07 bps, autoDOLA 0.21 bps; run-17 (block 25878009) autoUSD 0.53 bps, autoDOLA 0.47 bps.",
+        "thresholdAtMeasuredWorstCase": "autoUSD at 1.07 bps (f - 1e-4 = 7e-6): N <= 285,714 raw USDC units = 0.286 USDC. Every autoAnnihilate whose reward exceeds ~0.29 USDC reverts 'StableStaker: exit shortfall'.",
+        "decimalsCliff": "The flat 2-unit allowance is denominated in raw token units, so it is worth 2e-6 USDC on a 6-decimal pool and 2e-18 DOLA on an 18-decimal pool. On an 18-decimal pool token the ENTIRE margin is the 1 bp: at f = 1.5 bps the brick threshold is N <= 4e-13 DOLA, i.e. total.",
+        "conclusion": "The 1 bp allowance sits inside the measured mainnet range of the very vaults this strategy targets. The story's premise 'a case nobody has yet configured' is already false at least once on mainnet (autoUSD, 1.07 bps)."
+      },
+      "economicImpact": "With claimEnabled == false on deployment (:100, :440), autoAnnihilate is the ONLY reward path. When the wired autopool's discount crosses 1 bp, every staker's accrued Antimatter becomes unreachable for any non-dust amount. Principal exit still works (withdraw/emergencyWithdraw), but emergencyWithdraw forfeits the whole backlog (:630) - see ECON-002.",
+      "attackScenario": "No attacker required. 1. Owner deploys V2, claimEnabled false per the runbook. 2. ERC4626YieldStrategy wired over autoUSD. 3. The autopool's modeled discount moves above 1 bp (it has been measured at 1.07 bps). 4. Every autoAnnihilate above ~0.29 USDC of reward reverts. 5. The revert string names the strategy, not the constant, so the diagnosis points at the wrong contract.",
+      "profitability": "n/a - availability failure, not extraction.",
+      "affectedParties": [
+        "all stakers in the affected pool"
+      ],
+      "remedy": "Only setClaimEnabled(true) (which abandons the teaching phase for that pool) or a redeploy. Neither allowance is settable. Preferred fix per F-06: land a previewExitFor override on ERC4626YieldStrategy in reflax-yield-vault, or have autoAnnihilateAvailable pre-flight previewRedeem vs convertToAssets so the failure is legible.",
+      "footgunLaw3": "Yes. A competent non-malicious owner would be surprised: nothing in the runbook (CLAUDE.md 'Wiring (deployment)') ties the reward path's liveness to an external vault's fee parameter, and the constant that decides it is not visible as a configuration knob."
+    },
+    {
+      "id": "ECON-002",
+      "type": "value-loss trap / incentive misalignment",
+      "severity": "potential-medium",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate / emergencyWithdraw",
+      "line": 630,
+      "lineStart": 620,
+      "lineEnd": 637,
+      "confidence": "high",
+      "novel": true,
+      "description": "story-025 closed claim() behind claimEnabled but did not extend the underwater carve-out to the reward path. When the strategy is below par AND the idle buffer cannot cover the request, every reward path is shut simultaneously and the only exit destroys the reward. claim reverts on the gate (:440). autoAnnihilate reverts inside _routeExit (:1193 'StableStaker: strategy underwater') because it passes guardUnderwater = true (:579). withdraw reverts on the same line (:423). emergencyWithdraw is the sole remaining exit - it has no underwater guard (:634) but ZEROES the settled backlog (:630) and never mints.",
+      "codeSnippet": "// emergencyWithdraw\n// Forfeit the backlog too: the hatch stays the single rule \"no reward, principal out\".\nunclaimedReward[token][msg.sender] = 0;\n...\nuint256 payout = _routeExit(token, amount, false);",
+      "economicImpact": "The staker must choose between (a) principal and reward both frozen until the strategy recovers or the buffer is refilled, and (b) taking the haircut exit and forfeiting 100% of their accrued Antimatter - which, per the V2 premise, is 1 phUSD per unit. Before story-025 this trap did not exist: claim() was ungated, so the staker could claim first and then emergencyWithdraw. The gate is what converts a recoverable situation into a forced forfeiture.",
+      "attackScenario": "No attacker. 1. Strategy goes below par (negative yield / vault loss). 2. Idle buffer is smaller than the staker's gross request - it is working capital, not a solvency reserve, so this is the expected state at scale. 3. Staker with accrued reward has no reward path. 4. Needing their principal, they call emergencyWithdraw and lose the entire backlog.",
+      "profitability": "n/a - a loss to the user, not an extraction.",
+      "affectedParties": [
+        "stakers with an accrued backlog in an underwater pool"
+      ],
+      "raceDynamic": "The buffer is first-come-first-served (_routeExit:1188 `if (t.balanceOf(address(this)) >= amount)`). Story-025 adds reward-seeking callers to a queue previously containing only principal-seeking callers, so the buffer is exhausted sooner and the trap closes on later stakers first. Ordering here is a real MEV surface: front-running another staker's autoAnnihilate to claim the last of the buffer at par is profitable, because the buffer pays par on a below-par position.",
+      "remedy": "Either (a) exempt the reward-only leg from the underwater guard - a caller whose netWanted is 0 (excessBase only) moves no principal and should not be blocked; or (b) document the underwater case alongside the existing 'two-pause deadlock' obligation in CLAUDE.md, i.e. the owner flips claimEnabled(true) whenever any wired strategy is underwater; or (c) have emergencyWithdraw preserve unclaimedReward rather than zero it.",
+      "footgunLaw3": "Yes. CLAUDE.md anticipates exactly this class for the Antimatter pause ('The two-pause deadlock ... the owner flips claimEnabled to true for the duration of any antimatter pause') but does not anticipate it for the underwater case, so the operational obligation the design depends on is not written down for the condition most likely to occur."
+    },
+    {
+      "id": "ECON-003",
+      "type": "cross-repo escalation trigger fired",
+      "severity": "process / carryover",
+      "contract": "src/StableStakerV2.sol",
+      "function": "_previewExit / autoAnnihilate",
+      "line": 1175,
+      "lineStart": 1166,
+      "lineEnd": 1176,
+      "confidence": "high",
+      "description": "reflax-yield-vault run-17 held five previewExitFor findings at Low on ONE premise, recorded as WATCH-17-03: 'previewExitFor has zero consumers at every sibling's top-level HEAD - verified independently three times.' That premise is now false. StableStakerV2:556 calls _previewExit, which at :1175 calls strategy.previewExitFor(token, address(this), netWanted). This is previewExitFor's first production consumer anywhere in the tree.",
+      "armingAnalysis": {
+        "arms": "The base AYieldStrategy 'documented FLOOR that is really a CEILING' finding: previewExitFor returns min(netWanted, clientBalances) from storage with no vault call, so it cannot see the availableShares = vault.balanceOf(this) cap inside _disposeShares (ERC4626YieldStrategy.sol:131-133). autoAnnihilate consumes exactly that value as netFloor. It is DOMINATED, not exploitable: autoAnnihilate passes guardUnderwater = true (:579), and MR-17-05's dominance argument (cap-binds implies underwater) routes the call to the buffer branch or a revert before the false floor can matter. Dominance rests on two invariants that no test pins (AYieldStrategy.sol:48 p <= D, :772-776 a <= p). Keep the DominanceRun17Grounding grounding test.",
+        "doesNotArm": "The market override's quote-to-execute gap finding (quoted 19,602e18, delivered 181.9e18). In autoAnnihilate the preview (:556) and the execution (:579) are in the same transaction with no intervening external call and no attacker-controlled callback (nonReentrant, CEI holds to :571), so the within-transaction guarantee the market override provides is intact.",
+        "alsoArms": "reflax-yield-vault run-17's 'one-directional write-down over-delivery (+474e18)' was held at Low because 'V1 is wired, not V2'. autoAnnihilate is V2-only code, so the moment V2 is deployed that rating expires. V2 has zero broadcast hits on any chain as of this run, so the Low still holds today."
+      },
+      "economicImpact": "Not a bug in itself. It is a ledger-reconciliation obligation: five reflax-yield-vault entries were rated on a premise this commit invalidates.",
+      "affectedParties": [
+        "audit process"
+      ],
+      "action": "Orchestrator: reconcile against reflax-yield-vault ledger WATCH-17-03 before this run closes. Do not silently carry the Low ratings forward."
+    },
+    {
+      "id": "ECON-004",
+      "type": "buffer drain amplification",
+      "severity": "low",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "line": 609,
+      "lineStart": 576,
+      "lineEnd": 610,
+      "confidence": "high",
+      "relatedTo": "spec-conformance-draft.md F-04 (economic quantification of the same behaviour)",
+      "description": "On the underwater-but-buffer-covers branch, _routeExit:1188-1191 returns `gross` UNMEASURED and calls relinquishPrincipal(token, gross), which moves zero assets and only writes down clientBalances (AYieldStrategy.sol:700-716). With a market strategy gross = ceilDiv(netWanted*MAX_BPS, MAX_BPS - slip) > netWanted, so the caller receives netWanted of annihilation plus surplus = gross - netWanted from the shared buffer (:591, :609).",
+      "quantification": {
+        "callerPnL": "NEUTRAL. The caller is debited `gross` at :565-566 and receives value `gross` (netWanted consumed by the annihilation, gross - netWanted returned as surplus). There is no extraction relative to calling withdraw(gross) directly, which takes the identical buffer branch.",
+        "excessBufferDrawn": "netWanted * slip / (MAX_BPS - slip) per call. At slip = 200 bps and a 100 USDC reward, 2.04 USDC of extra buffer beyond what the reward required.",
+        "wiredConfiguration": "NIL. For the wired ERC4626YieldStrategy, previewExitFor is the capped identity so grossQuote == netWanted and gross == netWanted: there is no gross-up, surplus is always 0, and the surplus leg at :607-609 is dead code except on a market strategy. The finding is latent against a future market-strategy wiring, not live today.",
+        "socialisedLoss": "Each unit of gross paid at par from the buffer while the position is below par transfers (1 - totalBalanceOf/principalOf) * gross of loss onto the remaining stakers. autoAnnihilate scales that transfer by 1/(1-slip) relative to the reward the caller actually wanted, and - because claimEnabled is false - the caller cannot opt out by claiming instead."
+      },
+      "economicImpact": "A reward-collection action force-liquidates 1/(1-slip) times more principal at par from a shared, finite, below-par-backed buffer than the reward required. Bounded and small at realistic tolerances; not a caller profit.",
+      "attackScenario": "Not an attack. The loop is not amplifiable: netWanted is capped at the caller's own accrued reward (:543-544), which is bounded by the emission cap, and splitting into many small calls does not increase the total gross drawn (gross is proportional to netWanted, so N calls of netWanted/N draw the same total plus per-call ceilDiv dust of at most N units).",
+      "profitability": "Not profitable. Caller PnL is zero versus withdraw; gas is a pure loss.",
+      "affectedParties": [
+        "remaining stakers in an underwater pool",
+        "protocol buffer"
+      ]
+    },
+    {
+      "id": "ECON-005",
+      "type": "negative result - emission conservation VERIFIED",
+      "severity": "informational",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "lineStart": 536,
+      "lineEnd": 606,
+      "confidence": "high",
+      "description": "Requested check: does owed == annihilated + rawMinted + carriedDust hold across the decimals scaling? It holds EXACTLY, at every boundary. Given scale = 10**(18-dec) (:524, :1123-1127), owed = unclaimedReward + pending (:538-539), principalAsAntimatter = user.amount * scale (:540), capped = min(owed, principalAsAntimatter) (:543), netWanted = capped / scale (:544), excessBase = owed - capped (:545), carriedDust = capped - netWanted*scale (:548). Minted = annihilatable + excess = netUsed*scale + [excessBase + (netWanted - netUsed)*scale] (:593, :596) = netWanted*scale + excessBase = (capped - carriedDust) + excessBase = owed - carriedDust. No over-emission on any path.",
+      "boundaries": {
+        "zeroStake": "user.amount == 0 => principalAsAntimatter = 0, capped = 0, netWanted = 0, excessBase = owed, dust = 0, gross = 0 (:558). Entire backlog minted raw at :605. Conserved.",
+        "dustStake": "owed < scale with non-zero principal => capped = owed, netWanted = 0, excessBase = 0 => require(:546) REVERTS 'nothing to annihilate'. The :548 write is rolled back. Reward below one raw token unit is temporarily unreachable (claim is also gated) but accrues, not stranded.",
+        "wholePosition": "owed >= principalAsAntimatter => capped = user.amount*scale, netWanted = user.amount, dust = 0, gross = min(grossQuote, user.amount) = user.amount. netUsed <= netWanted always (:590) so :596 cannot underflow. Conserved.",
+        "eighteenDecimals": "scale == 1 => carriedDust is identically 0."
+      },
+      "note": "The :548 assignment (not +=) is correct: rewardDebt is re-based at :567, so the mapping is fully drained and re-seeded with exactly the sub-unit remainder. No double-count.",
+      "affectedParties": []
+    },
+    {
+      "id": "ECON-006",
+      "type": "negative result - surplus leg NOT exploitable",
+      "severity": "informational",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "line": 609,
+      "confidence": "high",
+      "description": "Requested check: can a caller engineer received > netWanted so that surplus pays them more than their position is worth? No. surplus = received - netUsed where netUsed = min(received, netWanted) (:590-591), and the caller was debited `gross` at :565. Extraction requires received > gross, not received > netWanted. Paths examined: (a) DIRECT ERC4626YieldStrategy - _disposeShares redeems convertToShares(gross) and the vault floors assets back, so received <= gross strictly; surplus is structurally 0. (b) MARKET strategy - received can exceed gross only if the AMM prices vault shares above the vault's own convertToAssets NAV; a caller creating that premium by buying shares first loses more on the round trip than the surplus returns (self-sandwich is not profitable). (c) DONATION to the vault - inflates the share price, which raises convertToAssets symmetrically in both previewExitFor and the realised redeem, and the donor loses the donation. (d) DONATION of `token` to StableStaker - _routeExit measures a delta (:1195-1197), so balanceBefore absorbs it exactly. (e) UNDERWATER buffer branch - received == gross by construction, so surplus = gross - netWanted and the caller is exactly neutral (see ECON-004). Forwarding measured over-delivery to the caller is also not new: withdraw:423-424 already forwards the measured delta.",
+      "affectedParties": []
+    },
+    {
+      "id": "ECON-007",
+      "type": "near-vacuous availability probe - NOT a free option",
+      "severity": "low",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilateAvailable",
+      "line": 1061,
+      "lineStart": 1051,
+      "lineEnd": 1068,
+      "confidence": "high",
+      "relatedTo": "spec-conformance-draft.md F-03 and F-05",
+      "description": "Requested check: is the netWanted = 1 probe a free option for the caller? No - but the probe is weaker than its NatSpec claims. For the DIRECT strategy previewExitFor(1) returns (min(1, clientBalances), _) and clientBalances >= 1 is already guaranteed by the principalOf != 0 early-return at :1058, so grossQuote == 1 > 0 unconditionally: the strategy leg is a tautology. For the MARKET strategy, ceilDiv(1*MAX_BPS, MAX_BPS - slip) == 1 for any slip < 5000 bps, so the probe returns true for every tolerance except the single case slip == MAX_BPS. The view therefore detects exactly one condition - a 100% slippage tolerance - and detects neither a cap-binding real quote nor a fee-charging vault (ECON-001).",
+      "whyNotAFreeOption": "A deeply-capped real quote does shrink `gross` and divert the remainder into the raw-AM path at :605, but total Antimatter is conserved (ECON-005): the caller receives the same `owed` either way. The only difference is form - annihilated now against their own principal, or raw AM they must later pair with their own stablecoin at the same 1:1 rate (Antimatter.sol:265, toStableAmount). There is no extra AM, so no free option in value terms. What it does bypass is the teaching gate, and CLAUDE.md's auditor note settles that explicitly: 'Auditors should read claimEnabled as a UX mechanism with a deliberate escape valve, not as an access control. Nothing in the protocol's safety argument may depend on antimatter being unobtainable while the flag is false.' Recorded here rather than filed, per Law 1 visible-parking.",
+      "residual": "The finding that survives is honesty of the view, not extraction: autoAnnihilateAvailable(token) returning true does not mean autoAnnihilate(token) will succeed, and the UI it was written for will show a live button on a pool where every call reverts (ECON-001). That is F-03's shape, and ECON-001 widens it.",
+      "affectedParties": [
+        "UI consumers"
+      ]
+    },
+    {
+      "id": "ECON-008",
+      "type": "negative result - linear pro-ration bounded",
+      "severity": "informational",
+      "contract": "src/StableStakerV2.sol",
+      "function": "autoAnnihilate",
+      "line": 559,
+      "confidence": "high",
+      "description": "Requested check: the linear pro-ration netFloor = netQuote * gross / grossQuote over a non-linear floor - which way does it err, and can a caller pick gross to maximise it? (1) In the WIRED configuration it never engages: for ERC4626YieldStrategy grossQuote = min(netWanted, clientBalances) and netWanted <= user.amount <= clientBalances (stake:391-392 credits the same figure the strategy books), so grossQuote == gross and netFloor == netQuote exactly. The pro-ration is a no-op. (2) On a MARKET strategy the cap bites only when grossQuote > user.amount. The true floor is _exitFloor(gross) = floor(convertToAssets(min(convertToShares(gross), availableShares)) * (1-slip)/MAX_BPS) (ERC4626MarketYieldStrategy.sol:127-135) - a staircase whose step is one share-price granule, not a curve. The linear estimate and the staircase differ by at most one granule plus the pro-ration's own floor (<= 1 unit), i.e. an ABSOLUTE error of ~1-2 raw units, independent of gross. (3) Direction: the pro-ration floors, which LOOSENS the check by <= 1 unit; the staircase mismatch can go either way by <= 1 granule. (4) Not amplifiable: because the error is absolute rather than proportional, a caller choosing gross (via their stake size and claim timing) cannot scale it - the same 2-unit flat allowance that absorbs it at 1 USDC absorbs it at 1,000,000 USDC. The exploitable asymmetry in this function is the proportional one in ECON-001, not this one.",
+      "affectedParties": []
+    }
+  ],
+  "assumptionsAndGaps": [
+    "Tokemak autopool fee figures in ECON-001 are PRIOR fork measurements recorded in the reflax-yield-vault run-16 and run-17 audits (named blocks), not re-measured in this run. A fork re-measurement of previewRedeem vs convertToAssets on autoUSD/autoDOLA at current HEAD would settle ECON-001's severity between Medium and Low.",
+    "StableStakerV2 has no broadcast record on any chain as of this run (reflax-yield-vault run-17 finding). Every finding here is pre-deployment; none is live on mainnet. This is context for severity, not a suppressant - claimEnabled == false is the deployment default, so these are precisely the pre-deployment findings that matter.",
+    "The audits-repo top-level lib/antimatter (3a96fb7) is BEHIND the pin stable-staker compiles against (a5570ce). All Antimatter claims here were read from the nested pin."
+  ],
+  "suppressedByDesign": [
+    "The raw-Antimatter excess path at :605 bypassing the closed claim gate. CLAUDE.md's 'Auditor note - annihilation exceeding principal' declares this a knowing, documented loophole and states the safety argument may not depend on the gate. Not filed; recorded in ECON-007.",
+    "Underwater par payouts from the idle buffer generally. CLAUDE.md's underwater carve-out declares this deliberate ('the buffer doing exactly the job it exists for'). Only the story-025-introduced amplification (ECON-004) and the forfeiture trap (ECON-002) are filed."
+  ],
+  "fLabelMapping": "CANONICAL F-LABEL MAPPING (reconciled 2026-09-01): F-01=CLASS-001, F-02=CLASS-009, F-03=CLASS-010, F-04=CLASS-011, F-05=CLASS-012, F-06=CLASS-002. Authority is the published submissions/spec-conformance.md. This stage artifact originally used a draft numbering in which the CLASS-002 item was F-01; it has been renumbered to F-06 so every artifact resolves every F-label identically. F-01 (CLASS-001) was raised at classification time and has no entry in this stage file."
+}
