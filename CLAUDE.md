@@ -11,13 +11,13 @@ This repository contains the audit tooling used to review the Phoenix/Behodler s
 Every audit decision — what to scan, what to report, how to rank, what to suppress — obeys a strict, ordered hierarchy. Lower laws yield to higher ones (Asimov-style). When laws conflict, the lowest-numbered one wins. This hierarchy is the authority behind the agent rules; where a C4 convention contradicts it, the laws win (C4 is an output spec, not the goal).
 
 1. **No exploits (security is paramount).** This is DeFi; a live exploit is the worst possible outcome. **Recall beats report-tidiness** — never silently drop a plausibly-security-relevant finding to keep a report clean. If a finding must be set aside, park it in a *visible* channel (manual-review / spec-conformance / carryover) with the reason, never in a log nobody reads.
-2. **Faithfulness to stories.** Features must do what the `[story-NNN]` they derive from says. **The story documents themselves live outside this repo, in `~/code/product-owner/stories/`** — a `[story-NNN]` commit subject is a *pointer* to one of those documents, not the story. Read the document (see **Stories** under Critical Rules); supporting intent also lives in `lib/<project>/docs/` and the project `CLAUDE.md`. **Law 1 overrides:** if a story's own intended behaviour would introduce an exploit, flag the unsafe story — do not bless a faithful-but-exploitable implementation.
+2. **Faithfulness to stories.** Features must do what the `[story-NNN]` they derive from says. **The story documents themselves live outside this repo, in `~/code/product-owner/stories/`** — a `[story-NNN]` commit subject is a *pointer* to one of those documents, not the story. Read the document (see **Stories** under Critical Rules); supporting intent also lives in `<project>/src/docs/` and the project `CLAUDE.md`. **Law 1 overrides:** if a story's own intended behaviour would introduce an exploit, flag the unsafe story — do not bless a faithful-but-exploitable implementation.
 3. **The owner is trusted — for KNOWING actions only.** Assume the owner is **non-malicious**: never report "a malicious owner could…" vectors (a self-audit cannot stop a malicious owner, and the owner is not their own adversary — such findings are pure noise). But an owner action with a *non-obvious* consequence that **unknowingly** enables a Law-1 exploit or breaks a Law-2 story is a **footgun**, and footguns are **in scope** — surfaced as operational hazards with safe-config guidance, at honest severity. The test: *"would a competent, non-malicious owner be surprised by this consequence?"* Surprise ⇒ footgun ⇒ report. Obvious ⇒ trusted ⇒ suppress.
 
 ## Terminology
 
-- **Source repo** - A repository containing the Solidity project to be audited. Source repos are added as git submodules in `lib/`.
-- **Project name** - Always the upstream repo name. The submodule dir (`lib/<name>`), the registry key in `registered-projects.json`, the report-dir family (`reports/<name>/XX/`), the ledger (`reports/<name>/ledger.json`), and the workspace dir (`workspace/<name>/`) are all the **same canonical string**. There is no separate "friendly name" alias — project name and repo name must agree.
+- **Source repo** - A repository containing the Solidity project to be audited. A source repo is added as the `src/` git submodule of its own project directory.
+- **Project name** - Always the upstream repo name. The project directory (`<name>/`, holding `src/`, `work/`, `reports/XX/` and `ledger.json`) and the registry key in `registered-projects.json` are the **same canonical string**. There is no separate "friendly name" alias — project name and repo name must agree.
 
 ## Critical Rules
 
@@ -25,7 +25,7 @@ Every audit decision — what to scan, what to report, how to rank, what to supp
 
 **Submodules are initialized recursively.** This project audits the *living latest* of each repo **and its nested dependencies** — we are not crystallizing a pinned ABI, we are reviewing the code as it actually is today. Adding (`/add-project`), updating (`/update-lib`), and the SessionStart hook all init `--recursive` by default. Read-only still applies: pull the full nested tree, but never modify it. `/update-lib` accepts `--no-recursive` as an explicit per-run opt-out, and `--branch <b>` to park a submodule on an existing upstream branch (see **Auditing a branch** below).
 
-**Scope is default-in-scope — a denylist, not an allowlist (Law 1).** Every first-party `.sol` in a submodule is in scope by default; the only baked-in exclusion is the project's own nested `lib/**` (third-party + forked deps, handled at the findings layer). A **new** first-party contract introduced by a code change — a fresh migrator, a new strategy — is **automatically in scope and scanned**, never silently dropped and never gated behind a "is this in scope?" confirmation. The per-project `scope` array in `registered-projects.json` is an advisory focus hint and cached snapshot, **never** the gate; see `registered-projects.json` → `scopePolicy` for the authoritative semantics. Rationale: recall beats report-tidiness — risking extra tokens on a contract nobody cares about is acceptable; risking a live exploit in a contract that slipped under the radar is not. Cull noise at **triage** (`/ledger`), not by withholding the scan. A project may add *extra* human-chosen exclusions to its `outOfScope`, but under-scoping must never hide a first-party contract.
+**Scope is default-in-scope — a denylist, not an allowlist (Law 1).** Every first-party `.sol` in a submodule is in scope by default; the only baked-in exclusion is the project's own nested `src/lib/**` (third-party + forked deps, handled at the findings layer). A **new** first-party contract introduced by a code change — a fresh migrator, a new strategy — is **automatically in scope and scanned**, never silently dropped and never gated behind a "is this in scope?" confirmation. The per-project `scope` array in `registered-projects.json` is an advisory focus hint and cached snapshot, **never** the gate; see `registered-projects.json` → `scopePolicy` for the authoritative semantics. Rationale: recall beats report-tidiness — risking extra tokens on a contract nobody cares about is acceptable; risking a live exploit in a contract that slipped under the radar is not. Cull noise at **triage** (`/ledger`), not by withholding the scan. A project may add *extra* human-chosen exclusions to its `outOfScope`, but under-scoping must never hide a first-party contract.
 
 **Stories are external, and must always be retrieved (Law 2).** The `[story-NNN]` prefix on a commit subject (e.g. `[story-073] Seed phUSD/Kendu nudge streams…`) is a **pointer**, not the story. The authoritative story documents live in the read-only tree `~/code/product-owner/stories/`, laid out as:
 
@@ -37,17 +37,19 @@ Every audit decision — what to scan, what to report, how to rank, what to supp
   `find ~/code/product-owner/stories/<storyDir> -type f -name '<NNN>-*.md' -o -type f -name '<NNN>.*-*.md'`
 - **The state folder is metadata, not a filter.** `incomplete` / `review` stories are still in scope (code frequently lands before the story is closed out), and `archive` still explains shipped behaviour. Note which state a story came from — a landed feature whose story sits in `incomplete` is itself worth flagging.
 - **The directory name is not the project name** (`reflax-yield-vault` → `vault-RM`, `phoenix-phase-2-staging` → `phStaging2`). Never guess it. Use the project's `storyDir` field in `registered-projects.json` — a verified cache of the **authoritative** mapping in `~/code/product-owner/registered-project-list.md`, which lists `<storyDir>:<path under ~/code/>` per line and resolves mechanically via `git -C ~/code/<path> remote get-url origin` (the remote's basename is the audit project name). If a lookup misses or a project is added, re-derive from that file and refresh `storyDir`.
-- **Read-only, like `lib/`.** Never write to the stories tree.
+- **Read-only, like every `<project>/src/`.** Never write to the stories tree.
 - **Never grade faithfulness from a commit subject alone, and never report "the story is external / unavailable."** If a glob returns zero hits, say the story genuinely does not exist; if it returns several, report the ambiguity rather than picking one. This applies to `/analyze`, `/full-audit`, **and `/audit-script`** — a deployment script is judged against its story exactly like a contract is. Authoritative semantics: `registered-projects.json` → `storyPolicy`.
 
 ## Architecture
 
 ### Directory Structure
-- `lib/` - Git submodules containing auditable Solidity projects (read-only audit references)
+- `<project>/` - One directory per audit project, each holding everything about it
+- `<project>/src/` - The audited source, a git submodule, **read-only**
 - `~/code/product-owner/stories/<storyDir>/` - **External, read-only** story documents; the Law-2 source of truth (see Critical Rules → Stories)
-- `workspace/<project>/` - Writable clones for PoC/test development (gitignored; PoCs and Tier-3 tests live here)
-- `reports/<project>/XX/` - Per-run audit output, sequentially versioned
-- `reports/<project>/ledger.json` - Persistent findings ledger (open/fixed/triaged across runs)
+- `<project>/work/` - Writable clone for PoC/test development (gitignored; PoCs and Tier-3 tests live here)
+- `<project>/reports/XX/` - Per-run audit output, sequentially versioned
+- `<project>/ledger.json` - Persistent findings ledger (open/fixed/triaged across runs)
+- `lib/` - The audit repo's *own* foundry dependencies (forge-std, openzeppelin-contracts); nothing audited lives here
 - `patterns/` - Vulnerability pattern database
 - `tools/` - Cloned auditing tools (e.g. 4naly3er)
 - `documentation/` - C4 official documentation for reference
@@ -57,7 +59,16 @@ The commands, agents and toolchain hook are no longer stored in this repo. They 
 
 The plugin's SessionStart hook provisions the deterministic toolchain (idempotent, network-failure-safe): Foundry, Slither, Halmos, Aderyn, Medusa, Semgrep, and 4naly3er, plus `git submodule update --init`. The pipeline degrades gracefully when a tool is missing. Because a plugin hook fires in every project on the machine, a guard runs first and provisions only when the session's working directory, or an ancestor of it, holds `.audit-project` or `registered-projects.json` — this repo's root holds both.
 
-**The commands still assume this repo's layout.** They resolve `lib/<project>`, `workspace/<project>` and `reports/<project>/NN` relative to the repo root, so a session must still be started here, not in a subdirectory. Making them project-relative is the work that would allow per-project sessions.
+### Path resolution — where a command resolves paths from
+
+Command and agent files write paths as `<project>/src`, `<project>/work`, `<project>/reports/NN` and `<project>/ledger.json`, always relative to the **audit root**. Two roots are resolved before any of those paths mean anything, and both are found by walking *upward* from the session's working directory:
+
+- **Audit root** — the nearest ancestor containing `registered-projects.json`. This is where every `<project>/…` path is anchored.
+- **Project root** — the nearest ancestor containing `.audit-project`. When the session is started inside a project directory, this is that project, and a command invoked without a project argument operates on it.
+
+A session started at the audit root behaves exactly as before: no project root is found, so every command needs its `<project>` argument. A session started inside `stable-staker/` finds both, so `/full-audit` with no argument audits stable-staker, and searches are rooted in that project rather than fanning out across every project in the repo. **This is the reason for the per-project layout** — one project's files are what a session should pay for.
+
+Sibling projects are still reachable: they are directories beside the current one under the audit root, and `registered-projects.json` indexes all of them. Read across when a finding genuinely crosses a boundary.
 
 ### Multi-Agent Workflow
 Custom Claude Code commands orchestrate specialized agents in tiers:
@@ -90,14 +101,14 @@ Two consequences follow, both authoritative in `registered-projects.json` → `b
 **Discarding a branch → `abandoned`.** When a branch is thrown away upstream, `/ledger <project> abandon-branch <branch>` retires the findings whose `branchesSeen` is *exactly* that branch — their code no longer exists anywhere — as status `abandoned`. Findings also seen on another branch are left untouched and named in the output. `abandoned` is a disposal for scan purposes (suppressed, not carried over, hidden by `/open-issues`) but it is **not** a judgement about the bug the way `wont-fix` is: nobody chose to live with it, the code just went away. It is human-set only, fully reversible via `/ledger … reopen`, and never applied to a branch that was **merged** into the trunk — merging makes those findings trunk findings, so abandoning them would bury live bugs. If a scan finds an `abandoned` finding again on a live branch, that is a regression, not a suppression.
 
 ### Re-verifying a single finding (`/recheck`)
-`/recheck <project> <label-or-fingerprint>` re-proves **one** finding against the current submodule HEAD without running discovery. It is **PoC-replay first**: it syncs the writable `workspace/` source to the target commit (preserving the PoC), re-runs the finding's PoC, and classifies the result as **STILL-LIVE** / **LIKELY-FIXED** / **INCONCLUSIVE** (a PoC that no longer *compiles* is inconclusive bit-rot, not a fix). Use it for a localized post-fix re-check; the command itself bounces you to `/full-audit` when the change is broader than the finding's contract.
+`/recheck <project> <label-or-fingerprint>` re-proves **one** finding against the current submodule HEAD without running discovery. It is **PoC-replay first**: it syncs the writable `<project>/work/` source to the target commit (preserving the PoC), re-runs the finding's PoC, and classifies the result as **STILL-LIVE** / **LIKELY-FIXED** / **INCONCLUSIVE** (a PoC that no longer *compiles* is inconclusive bit-rot, not a fix). Use it for a localized post-fix re-check; the command itself bounces you to `/full-audit` when the change is broader than the finding's contract.
 
 `/recheck` is deliberately **baseline-preserving and single-entry**: it never writes `lastAuditedCommit`, never bumps `lastSeenRun`, never moves `lastRun`, and never auto-flips a status — it records its outcome in recheck-only fields (`lastRecheckedCommit`/`lastRecheckedAt`/`recheckResult`) on the one entry and *proposes* the `/ledger` command for any status change. Pick `/recheck` to answer "is this specific finding still real?"; pick the regression `/full-audit` to also catch issues the fix may have introduced — `/recheck` is blind to new bugs by design.
 
 ### Auditing a script entry point (`/audit-script`)
 For integration mega-repos (e.g. `phoenix-phase-2-staging`) that stage dozens of one-shot deployment/migration scripts over nested submodules, auditing the whole project is wasteful — but a **specific operational script** often needs review. `/audit-script <project> <npm-script-name> [--full] [--no-fork]` scopes the audit to a single `package.json` script entry point and the precise slice it cuts across, answering: does it do what it intends, does it introduce unintended side effects, and have other problems surfaced because of it.
 
-It resolves the **transitive closure** of the entry point — the forge/JS command chain, the Solidity import graph (via `foundry.toml` remappings), the deployed on-chain addresses it mutates (mapped back to nested-submodule source), the off-chain state files the JS chain writes, and a ranked **cluster** of sibling scripts that touch the same contracts (shared addresses / story tag / skipped-step / `Temp`/`Fix` evidence). It then verifies side effects empirically by running the script's **preview** variant against a mainnet fork (from `workspace/`, never `lib/`) and diffing observed state writes against the script's stated intent and its own `require`/assert pre/post-conditions. Output is **both** a narrative `review.md` and structured findings fed through the normal dedup → sanitize → classify → ledger pipeline — including the **same `submissions/` artifacts as `/full-audit`**: one `submissions/<label>.md` per High/Medium carrying the ledger fingerprint verbatim and a Recommended Mitigation section, a `qa-report.md` for Low/Centralization, and `spec-conformance.md` for faithfulness. `review.md` supplements those, never replaces them.
+It resolves the **transitive closure** of the entry point — the forge/JS command chain, the Solidity import graph (via `foundry.toml` remappings), the deployed on-chain addresses it mutates (mapped back to nested-submodule source), the off-chain state files the JS chain writes, and a ranked **cluster** of sibling scripts that touch the same contracts (shared addresses / story tag / skipped-step / `Temp`/`Fix` evidence). It then verifies side effects empirically by running the script's **preview** variant against a mainnet fork (from `<project>/work/`, never `<project>/src/`) and diffing observed state writes against the script's stated intent and its own `require`/assert pre/post-conditions. Output is **both** a narrative `review.md` and structured findings fed through the normal dedup → sanitize → classify → ledger pipeline — including the **same `submissions/` artifacts as `/full-audit`**: one `submissions/<label>.md` per High/Medium carrying the ledger fingerprint verbatim and a Recommended Mitigation section, a `qa-report.md` for Low/Centralization, and `spec-conformance.md` for faithfulness. `review.md` supplements those, never replaces them.
 
 Findings carry an `entryPoint` discriminator that is folded into the fingerprint (`sha256(contract:function:rootCauseClass[:entryPoint])`), so script-audit findings reconcile **per entry point**, never collide with contract-scan findings on the same `contract:function`, and an empty `entryPoint` reproduces the legacy hash byte-for-byte (so `/analyze` and `/full-audit` are unaffected). Fork-based verification reads `RPC_MAINNET`/`ETHERSCAN_API_KEY` from the repo-root `.envrc`; a failed RPC liveness probe **alerts the user** (possible expired key) rather than silently degrading — pass `--no-fork` for static-only reasoning. New agents: **script-closure-mapper** (scope resolution) and **script-auditor** (intent + side-effect + cluster lens).
 
@@ -138,7 +149,7 @@ forge test --match-test testFunctionName
 forge test -vvvv
 
 # Add auditable project as submodule
-git submodule add <repo-url> lib/<project-name>
+git submodule add <repo-url> <project-name>/src
 ```
 
 ## C4 Severity Classifications (Regular Audits)
