@@ -53,7 +53,11 @@ Every audit decision — what to scan, what to report, how to rank, what to supp
 - `documentation/` - C4 official documentation for reference
 
 ### Tooling
-The `.claude/hooks/session-start.sh` SessionStart hook provisions the deterministic toolchain (idempotent, network-failure-safe): Foundry, Slither, Halmos, Aderyn, Medusa, Semgrep, and 4naly3er, plus `git submodule update --init`. The pipeline degrades gracefully when a tool is missing.
+The commands, agents and toolchain hook are no longer stored in this repo. They live in the **`audit-pipeline` Claude Code plugin** (`~/code/audit-toolkit`), installed user-wide, so they load in any session rather than only one started at this repo's root. Install with `/plugin marketplace add ~/code/audit-toolkit` then `/plugin install audit-pipeline@audit-toolkit`.
+
+The plugin's SessionStart hook provisions the deterministic toolchain (idempotent, network-failure-safe): Foundry, Slither, Halmos, Aderyn, Medusa, Semgrep, and 4naly3er, plus `git submodule update --init`. The pipeline degrades gracefully when a tool is missing. Because a plugin hook fires in every project on the machine, a guard runs first and provisions only when the session's working directory, or an ancestor of it, holds `.audit-project` or `registered-projects.json` — this repo's root holds both.
+
+**The commands still assume this repo's layout.** They resolve `lib/<project>`, `workspace/<project>` and `reports/<project>/NN` relative to the repo root, so a session must still be started here, not in a subdirectory. Making them project-relative is the work that would allow per-project sessions.
 
 ### Multi-Agent Workflow
 Custom Claude Code commands orchestrate specialized agents in tiers:
