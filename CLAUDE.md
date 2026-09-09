@@ -78,6 +78,46 @@ Custom Claude Code commands orchestrate specialized agents in tiers:
 4. **Filtering** - deduplicator, then sanitizer (known issues + ledger reconciliation)
 5. **Output** - severity-classifier, finding-manager (writes run dir + upserts ledger), poc-generator, report-writer, qa-bundler
 
+### Reading a ledger — never read the whole file
+
+A ledger is the largest artefact in this repository by a wide margin, and reading one
+whole is what pushes a single request past the standard context window. The measured
+sizes, and what each holds:
+
+| project | ledger | ≈ tokens | entries |
+|---|---|---|---|
+| phoenix-nft-staking | 512 KB | 128,000 | 91 |
+| stable-staker | 444 KB | 111,000 | 85 |
+| phoenix-phase-2-staging | 441 KB | 110,000 | 152 |
+| phlimbo-ea | 343 KB | 86,000 | 90 |
+
+One field causes it. In `phoenix-nft-staking`, `note` is 252 KB of the 345 KB of entry
+data, averaging 2,765 bytes per entry, because triage appends to it every time a
+finding is touched. Titles, fingerprints, statuses and paths together are under a tenth
+of the file.
+
+So **project the fields you need with `jq`; never `cat` or `Read` a ledger**, and pull
+`note` only for the entry you are actually triaging:
+
+```bash
+# baselines only — what /update-lib and /audit-status need
+jq '{project, lastAuditedCommit, lastRun, branchBaselines}' <project>/ledger.json
+
+# the triage index — every entry, without the narrative fields
+jq '[.findings[] | {id, label, fingerprint, title, contract, function,
+                    severity, status, firstSeenRun, lastSeenRun}]' <project>/ledger.json
+
+# status counts — for a summary line
+jq '.findings | group_by(.status) | map({status: .[0].status, n: length})' <project>/ledger.json
+
+# one entry in full, note included — only once the selector has resolved
+jq '.findings[] | select(.fingerprint | startswith("<prefix>"))' <project>/ledger.json
+```
+
+Reconciliation by fingerprint, status filtering, and open/fixed counting all work off
+the index. Writing is unaffected: an upsert still rewrites the file, it just must not
+read the whole thing first to decide what to write.
+
 ### Re-running an audit (regression mode)
 Re-running `/analyze <project>` or `/full-audit <project>` defaults to a **regression scan** when a ledger exists: it focuses on files changed since the last audited commit and reconciles findings against the ledger, so previously-seen issues are not re-reported. A finding that reappears after being marked `fixed` is flagged as a **REGRESSION**. Pass `--full` to force a cold scan. Triage findings (fix-pending / acknowledge / wont-fix / fixed / reopen) with `/ledger <project>`; those statuses are authoritative and never auto-overwritten.
 
