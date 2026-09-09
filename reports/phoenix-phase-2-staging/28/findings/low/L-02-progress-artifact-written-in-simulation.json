@@ -1,0 +1,117 @@
+{
+ "id": "L-02",
+ "issueId": "pps28l2",
+ "project": "phoenix-phase-2-staging",
+ "status": "ready",
+ "severity": "low",
+ "title": "The deployment progress file the API serves is written during the SIMULATION pass, ~15 minutes before the transactions it certifies are mined, and is never refreshed afterwards",
+ "contract": "script/DeployMocks.s.sol",
+ "contractFromSubmoduleRoot": "script/DeployMocks.s.sol",
+ "contractRepoPath": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+ "function": "_writeProgressFile",
+ "line": 1564,
+ "lineStart": 1564,
+ "lineEnd": 1564,
+ "locations": [
+  {
+   "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+   "function": "_writeProgressFile",
+   "lineStart": 1564,
+   "lineEnd": 1564
+  }
+ ],
+ "entryPoint": "dev",
+ "branch": "master",
+ "branchesSeen": [
+  "master"
+ ],
+ "fingerprint": "88af91804ec23988388adb33bf17ec90f86825dc6ec017a5b31bc142f415d4bb",
+ "fingerprintBasis": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol:_writeProgressFile:ProgressArtifactWrittenInSimulationNotAfterBroadcast:dev",
+ "fingerprintSource": "dedup/classifier (accepted as given; NOT recomputed)",
+ "fingerprintNote": "Copied VERBATIM from classified-findings.json. NOT recomputed and NOT shortened by finding-manager. The fingerprint is the only collision-proof key for this record: the label is run-scoped and collides by name with pre-existing run-05 / run-21 / run-26 / run-27 `dev` ledger labels that are different findings.",
+ "rootCauseClass": "ProgressArtifactWrittenInSimulationNotAfterBroadcast",
+ "category": "unintended-side-effect",
+ "origin": "new",
+ "regression": false,
+ "firstSeenRun": "phoenix-phase-2-staging-28",
+ "lastSeenRun": "phoenix-phase-2-staging-28",
+ "auditedCommit": "f929b5b36629f73d17e350e383c77e2f24c40d71",
+ "entryPointBaseline": {
+  "from": "1d8a3a7515adca7819c530a01a87c132863a5ae2",
+  "to": "f929b5b36629f73d17e350e383c77e2f24c40d71",
+  "note": "Delta scope for this record. entryPointBaselines.dev only — the project lastAuditedCommit (0e190e8) and branchBaselines.master were NOT the diff base and were NOT advanced by this run."
+ },
+ "description": "`run()` calls `_writeProgressFile()` at :1564, after `vm.stopBroadcast()` at :1560. `_writeProgressFile` uses `vm.writeJson` (a cheatcode, not a transaction), so it executes during forge's local SIMULATION pass — before a single transaction has been dispatched — and is never re-run after the broadcast completes.\n\nProved by file mtimes on the full clean run: `DEV_START=2026-09-07T11:28:36`; `server/deployments/progress.31337.json` mtime `2026-09-07 11:28`; `ONCHAIN EXECUTION COMPLETE & SUCCESSFUL` and `broadcast/DeployMocks.s.sol/31337/run-latest.json` at `11:43`. The artifact asserting `\"deploymentStatus\": \"completed\"` for 72 contracts predates the 394 transactions that deploy them by roughly fifteen minutes.\n\nConsequence: if the broadcast leg fails, reverts, is interrupted, or (per the race finding) lands on the wrong chain, `progress.31337.json` still reads `completed` with all 72 contracts and their addresses — because it was written from the simulation, where everything always succeeds. `server/index.js` then loads exactly that file and serves it from `/progress`, `/contracts` and the startup banner. I confirmed this end-to-end mid-audit: an earlier run whose broadcast was cut off partway still left a `completed` progress file behind.\n\nDISTINCT FROM ledger L-01 `1e8cc0dc58ba` (open), which records that the status string is hard-coded to \"completed\". That is about the VALUE written; this is about WHEN it is written. Fixing the hard-coded string alone would not help, because at write time the broadcast genuinely has not started and no honest status is available yet.",
+ "impact": "The single artifact that everything downstream — the API, the generated TypeScript address bindings, and any human checking whether the stack came up — treats as the record of a deployment is a record of a dry run. It cannot distinguish a successful broadcast from a failed one, an interrupted one, or one applied to a stale chain. Local-only, so Low, but it is the mechanism by which the other failure modes in this cluster stay invisible.",
+ "attackPath": [
+  "Not an attack. The artefact cannot distinguish a successful broadcast from a failed, interrupted, or stale-chain one; downstream consumers present it as live state."
+ ],
+ "recommendation": "Move the progress write out of the forge script and into a post-broadcast step that reads `broadcast/DeployMocks.s.sol/31337/run-latest.json` — the file forge writes only after `ONCHAIN EXECUTION COMPLETE & SUCCESSFUL` — and derives status and per-contract deployment from the actual receipts. A minimal version: add a `node server/build-progress.js 31337` step to `deploy:local` after the forge invocation, and have `_writeProgressFile` stamp `\"deploymentStatus\": \"simulated\"` so an unconverted artifact is self-identifying rather than falsely reassuring.",
+ "evidence": "DeployMocks.s.sol:1560 (`vm.stopBroadcast()`), :1564 (`_writeProgressFile()`), :2620-2646 (`vm.writeJson`); mtime of server/deployments/progress.31337.json (11:28) vs broadcast/DeployMocks.s.sol/31337/run-latest.json (11:43) on the full clean run; `DEV_START=2026-09-07T11:28:36+02:00` in scratchpad/dev-full.log; server/index.js:19-23.",
+ "classification": {
+  "assetImpact": "None. `_writeProgressFile` runs during the SIMULATION pass (observed mtime 11:28 vs broadcast completion 11:43) and is never refreshed, so `progress.31337.json` - which the API, the generated TypeScript address bindings and any human checking the stack all treat as the record of a deployment - is a record of a dry run.",
+  "attackPath": [
+   "Not an attack. The artefact cannot distinguish a successful broadcast from a failed, interrupted, or stale-chain one; downstream consumers present it as live state."
+  ],
+  "likelihood": "certain on every run.",
+  "assumptions": "none",
+  "externalRequirements": "local only."
+ },
+ "severityRationale": "Low: local-only with no funds at risk, but it is the mechanism by which the other failure modes in this cluster stay invisible - it is the producer half of L-04's consumer-side over-claiming, and it is what lets M-01's stale-chain run emit a clean-looking artefact. Kept strictly separate from ledger L-01 (1e8cc0dc...), which is the hard-coded deploymentStatus VALUE; this is the TIMING.",
+ "severityNote": "Proposed low; CONFIRMED low. LEDGER-INTEGRITY HAZARD attached (FR-28-03): ledger entry L-01 is recorded with rootCauseClass 'WriteBeforeBroadcast', a TIMING string that actually describes THIS finding while L-01's title records the VALUE defect. A future reconciliation could match this finding to L-01 on the class string and silently collapse it - a Law-1 recall failure. Human /ledger correction required; the classifier did not change it.",
+ "proposedSeverity": "low",
+ "plausibility": "n/a",
+ "reportRouting": "qa",
+ "faithfulness": false,
+ "flaggedForReview": true,
+ "relatedFindings": [
+  "DEV28-05 (consumer side of the same artifact)",
+  "DEV28-01 (a wrong-chain broadcast still leaves a \"completed\" artifact)"
+ ],
+ "relatedLedger": [
+  {
+   "fingerprint": "1e8cc0dc58ba0ecbe43faf12ea343e3d6eb784c36d3ad2b0141668e33777871e",
+   "label": "L-01",
+   "relation": "explicitly-not-duplicate (rule 2)",
+   "basis": "value vs timing; see triage note about L-01's rootCauseClass string"
+  }
+ ],
+ "dedupDecision": "KEEP",
+ "dedupReasoning": "Run rule 2 forbids collapsing this into ledger L-01 1e8cc0dc58ba, and the evidence independently supports it: L-01 is the hard-coded deploymentStatus \"completed\" VALUE, this is WHEN the file is written (_writeProgressFile runs in forge's local simulation pass — mtime 11:28 vs ONCHAIN EXECUTION COMPLETE at 11:43). Fixing the string alone cannot help, because at write time no honest status exists yet. NOTE FOR TRIAGE: ledger L-01 is recorded with rootCauseClass \"WriteBeforeBroadcast\" — a TIMING label on an entry whose title describes the VALUE. That mismatch means a future fingerprinting pass could mistakenly reconcile these two as one; flagged so a human can correct the ledger entry's class rather than have the split silently collapse later.",
+ "sanitizerDecision": {
+  "action": "PASS",
+  "reason": "no ledger match on entryPoint \"dev\"; no known-issue suppression available (see knownIssueStatus); in scope under the default-in-scope denylist",
+  "knownIssueSuppression": "UNAVAILABLE",
+  "pinnedApartFrom": {
+   "fingerprint": "1e8cc0dc58ba0ecbe43faf12ea343e3d6eb784c36d3ad2b0141668e33777871e",
+   "label": "L-01",
+   "status": "open",
+   "basis": "L-01 is the hard-coded deploymentStatus \"completed\" VALUE; DEV28-15 is the TIMING (file written during the simulation pass, mtime 11:28, vs broadcast completion 11:43, never refreshed). Same contract:function, different defect. See FR-28-03 — L-01's recorded rootCauseClass string is the hazard, not this finding."
+  }
+ },
+ "sourceFiles": [
+  "28/script-audits/dev/candidate-findings.json"
+ ],
+ "originalId": "DEV28-15",
+ "originalIds": [
+  "DEV28-15"
+ ],
+ "classificationId": "CLASS-05",
+ "poc": {
+  "required": false,
+  "reason": "C4 requires a coded PoC for High/Medium only; this finding is Low.",
+  "file": null,
+  "status": "not-owed"
+ },
+ "labelCollisionWarning": "Run-scoped label only. On entry point `dev` the ledger already holds run-05/21/26/27 findings under the same label strings with different fingerprints. Never key any artifact, carryover copy or ledger operation on this label; key on fingerprint 88af91804ec2… (or issueId pps28l2).",
+ "ledgerWriteNote": "Upserted to reports/phoenix-phase-2-staging/ledger.json as a NEW entry, status `open`, entryPoint `dev`, branch `master`, branchesSeen [\"master\"], firstSeenRun/lastSeenRun phoenix-phase-2-staging-28. No pre-existing ledger status was read, written or flipped by the creation of this record.",
+ "metadata": {
+  "createdAt": "2026-09-07T12:20:00+02:00",
+  "updatedAt": "2026-09-07T12:20:00+02:00",
+  "scanOrigin": "SCRIPT-AUDIT-dev-run-28",
+  "classificationOrigin": "CLASS-05",
+  "sourceRecordId": "DEV28-15",
+  "run": "phoenix-phase-2-staging-28",
+  "entryPoint": "dev"
+ }
+}

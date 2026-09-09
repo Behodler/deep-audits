@@ -1,0 +1,70 @@
+{
+  "entryPoint": "dev",
+  "project": "phoenix-phase-2-staging",
+  "submodulePath": "lib/phoenix-phase-2-staging",
+  "headCommit": "f929b5b",
+  "regressionBase": "1d8a3a7",
+  "intentComment": "//local-deploy: \"Story 003 — local Anvil deployment orchestration\". `dev` itself carries no own doc-comment; it is the composite one-shot boot of the local anvil chain (clean, anvil, DeployMocks, yield sim, address extraction, TS codegen, API server).",
+  "variants": {
+    "base": {
+      "key": "dev",
+      "command": "npm run clean:local && npm run start:anvil & sleep 3 && LOCAL_PROMO_KENDU=true npm run deploy:local && ./simulate-yield.sh && npm run extract:addresses && npm run generate:ts-anvil && npm run serve",
+      "broadcasts": true,
+      "broadcastTarget": "local anvil chainId 31337 only (never mainnet)",
+      "envFlags": ["LOCAL_PROMO_KENDU=true", "--broadcast", "--slow", "--gas-estimate-multiplier 300"],
+      "requiredEnvNotSetByTheKey": ["ANVIL_PRIVATE_KEY"]
+    }
+  },
+  "noVariantsNote": "There are NO dev:preview / dev:dry / dev:broadcast siblings. `dev` is the only key in its stem. It is inherently a broadcasting key (forge --broadcast) but only against http://localhost:8545.",
+  "shellDecomposition": {
+    "note": "`&` binds looser than `&&`, so the line is TWO pipelines, not one.",
+    "pipelineA_background": {
+      "text": "npm run clean:local && npm run start:anvil",
+      "runsInBackground": true,
+      "effect": "wipes local state, then starts a long-lived anvil (never exits)"
+    },
+    "pipelineB_foreground": {
+      "text": "sleep 3 && LOCAL_PROMO_KENDU=true npm run deploy:local && ./simulate-yield.sh && npm run extract:addresses && npm run generate:ts-anvil && npm run serve",
+      "runsInBackground": false,
+      "steps": [
+        { "step": 1, "cmd": "sleep 3", "role": "fixed-duration readiness proxy for anvil; no health probe" },
+        { "step": 2, "key": "deploy:local", "cmd": "npm run clean:local && forge script script/DeployMocks.s.sol:DeployMocks --rpc-url http://localhost:8545 --broadcast --slow --gas-estimate-multiplier 300", "role": "the sole forge target; note it re-runs clean:local a SECOND time" },
+        { "step": 3, "cmd": "./simulate-yield.sh", "role": "cast send MockDola.mint(MockAutoDOLA, 2300e18) using the well-known anvil key 0xac09…ff80" },
+        { "step": 4, "key": "extract:addresses", "cmd": "node server/extract-addresses.js 31337", "role": "progress.31337.json -> local.json" },
+        { "step": 5, "key": "generate:ts-anvil", "cmd": "node server/generate-ts-addresses.js 31337", "role": "local.json -> addresses.ts (shared interface) + local-addresses.ts" },
+        { "step": 6, "key": "serve", "cmd": "node server/index.js", "role": "express API on :3001-ish serving /contracts, /progress, /health; blocks forever" }
+      ]
+    },
+    "raceCharacterisation": [
+      "clean:local runs CONCURRENTLY with pipeline B, not before it. Ordering between the background wipe and the foreground `sleep 3` is unsynchronised. In practice the wipe wins (rm is fast, sleep is 3s), but nothing enforces it.",
+      "deploy:local's own leading `npm run clean:local` re-runs the wipe a second time, at a point where anvil is already up. That second wipe includes `rm -rf ~/.foundry/anvil/tmp/*` — it deletes anvil scratch state from under the RUNNING anvil that pipeline A just started, and it deletes broadcast/*/31337 that the immediately following forge run is about to write.",
+      "Anvil readiness is asserted only by `sleep 3` — no `cast block-number` / port poll. On a cold machine (anvil binary paging in, WSL2 under load) 3s can be short; DeployMocks then fails on its first RPC call with a connection error and the chain aborts before any `&&` successor runs, leaving a live orphan anvil from pipeline A.",
+      "STALE-ANVIL FAILURE MODE (the dangerous one): if an anvil is ALREADY listening on 8545, pipeline A's `anvil --port 8545` fails to bind and dies, but `sleep 3` in pipeline B does not care. deploy:local then broadcasts DeployMocks onto the PRE-EXISTING chain — which may already hold a prior deployment. The run appears to succeed, but nonces, addresses and wiring are layered onto stale state, and progress.31337.json is rewritten as if it were a fresh chain. There is no `require(block.chainid == 31337)` genesis-freshness assert in DeployMocks, so nothing catches it.",
+      "Because pipeline A is backgrounded, its exit status is discarded; `npm run dev` reports success/failure only for pipeline B.",
+      "`npm run serve` never returns, so Ctrl-C kills the foreground server but leaves the background anvil running — which is precisely the stale-anvil precondition for the NEXT `npm run dev`."
+    ]
+  },
+  "forgeTarget": {
+    "file": "script/DeployMocks.s.sol",
+    "contract": "DeployMocks",
+    "entryFn": "run",
+    "lines": 2648,
+    "changedInDelta": true,
+    "broadcastKey": "vm.envUint(\"ANVIL_PRIVATE_KEY\") at DeployMocks.s.sol:387 — NOT set by the `dev` key or by any .envrc present in the submodule; documented only in the project CLAUDE.md:476 (0xac0974bec…ff80, anvil account 0). Absent env => the whole chain aborts at step 2.",
+    "envReads": [
+      { "name": "ANVIL_PRIVATE_KEY", "required": true, "default": null },
+      { "name": "LOCAL_PROMO_KENDU", "required": false, "default": "true (vm.envOr, DeployMocks.s.sol:398)", "setByDevTo": "true", "note": "The delta added this to `dev` explicitly, pinning the ARMED leg. Since the vm.envOr default is already true, setting it in `dev` is a no-op today — but it makes the DORMANT leg unreachable from `dev` without editing package.json." }
+    ],
+    "chainIdAssert": "none — DeployMocks contains no require(block.chainid == 31337)"
+  },
+  "jsChain": {
+    "pre": [],
+    "post": [
+      { "cmd": "./simulate-yield.sh", "kind": "shell+cast" },
+      { "file": "server/extract-addresses.js", "args": ["31337"] },
+      { "file": "server/generate-ts-addresses.js", "args": ["31337"] },
+      { "file": "server/index.js", "args": [], "kind": "long-running server" }
+    ]
+  },
+  "chainId": 31337
+}
