@@ -1,0 +1,107 @@
+    function _rehearseDispatcherSwap(address deployer) internal {
+        console.log("\n=== Phase 7.6: Dispatcher-swap cutover rehearsal (script-audit run-26, L-01) ===");
+
+        UniboostMintDebtHook hook = uniboostHookEYE;
+        address oldUb = address(uniboostEYE);
+        uint256 idx = nftMinterV2.dispatcherToIndex(oldUb);
+        require(idx == REHEARSAL_SWAP_INDEX, "rehearsal: UniboostEYE is not on the expected dispatcher index");
+
+        // ---- 0. NON-VACUITY FIRST. ----
+        // `pull()` is a NO-OP at zero debt, so a conservation assertion taken across a pull on an
+        // empty ledger is trivially true and proves nothing. Drive a real mint through index 1 so
+        // the ledger is non-zero at pull time, then gate on it below.
+        _accrueIndex1MintDebt(deployer, idx);
+
+        // ---- 1. Snapshot everything the swap must preserve. ----
+        uint256 mintDebtBefore = hook.mintDebt();
+        require(
+            mintDebtBefore > 0,
+            "VACUOUS REHEARSAL: uniboost hook mintDebt is zero at pull time, so the conservation assertion below would prove NOTHING - do NOT relax this gate, fix the accrual"
+        );
+        address recipientBefore = hook.recipient();
+        uint8 ratioBefore = hook.ratio();
+        uint256 recipientPhusdBefore = phUSD.balanceOf(recipientBefore);
+        (, uint256 priceBefore, uint256 growthBefore, bool disabledBefore) = nftMinterV2.configs(idx);
+
+        // ---- 2. pull(), then MINT-DEBT CONSERVATION. ----
+        // Non-vacuous by construction: `mintDebtBefore` was just gated above as strictly positive,
+        // so the recipient's phUSD balance MUST move by exactly that amount.
+        hook.pull();
+        require(hook.mintDebt() == 0, "uniboost hook mintDebt != 0 after pull");
+        require(
+            phUSD.balanceOf(recipientBefore) - recipientPhusdBefore == mintDebtBefore,
+            "CONSERVATION FAILED: the phUSD realised by hook.pull() does not equal the mint debt it retired - do NOT relax this gate"
+        );
+        console.log("  hook.pull() realised NON-ZERO mint debt (phUSD wei):", mintDebtBefore);
+
+        // ---- 3. The replacement, built with the SAME constructor arguments as the incumbent. ----
+        Uniboost newUb = new Uniboost(address(rewardToken), address(uniRouter), poolEYE, address(eyeToken), deployer);
+        console.log("  replacement UniboostEYE deployed at:", address(newUb));
+        _wireUniboost(newUb, "UniboostEYE(replacement)");
+
+        // The hook's `scale` is IMMUTABLE (`10 ** (18 - primeDecimals)`), so a replacement under a
+        // reused hook MUST carry the same 6-decimal prime or every future mint inflates the debt by
+        // 1e12. Assert BEFORE repointing, mirroring DeployMainnetPromotionReady.s.sol:1475-1479.
+        require(
+            newUb.primeToken() == address(rewardToken),
+            "replacement Uniboost is not USDC-primed (the reused hook's scale is IMMUTABLE)"
+        );
+        require(rewardToken.decimals() == 6, "USDC (MockRewardToken) decimals != 6");
+
+        // ---- 4. Repoint, in the fail-closed order and no other. ----
+        hook.setDispatcher(address(newUb));
+        newUb.setHook(IDispatchHook(address(hook)));
+
+        // ---- 5. THE INTERMEDIATE-WINDOW ASSERTION. ----
+        // Asserted STRUCTURALLY rather than by a live probe: a reverting call issued while
+        // `vm.startBroadcast` is active is recorded into the broadcast bundle and would fail
+        // `deploy:local`. This mismatch IS the property that makes a mint on the index revert
+        // `OnlyDispatcher()`, and asserting it is deterministic.
+        require(hook.dispatcher() == address(newUb), "intermediate window: hook did not repoint to the new dispatcher");
+        (address midDispatcher,,,) = nftMinterV2.configs(idx);
+        require(
+            midDispatcher == oldUb,
+            "intermediate window: the index already moved - the fail-closed window was never entered"
+        );
+        console.log("  intermediate window OK: hook -> NEW dispatcher while the index still carries the OLD one");
+        console.log("    a mint on this index right now would revert OnlyDispatcher(). That is the correct direction.");
+
+        // ---- 7. Replace, then read the whole config back. ----
+        // `replaceDispatcher` touches NEITHER price NOR growthBasisPoints NOR disabled — which is
+        // exactly the claim these assertions pin.
+        nftMinterV2.replaceDispatcher(idx, address(newUb));
+        (address d, uint256 price, uint256 growth, bool disabled) = nftMinterV2.configs(idx);
+        require(d == address(newUb), "configs(idx).dispatcher != the replacement Uniboost");
+        require(price == priceBefore && growth == growthBefore, "configs(idx) price/growth not preserved");
+        require(disabled == disabledBefore, "configs(idx) disabled flag not preserved");
+        require(price < 1e12, "index price is not 6-decimal-shaped");
+        console.log("  replaceDispatcher OK; price/growth preserved:", price, growth);
+
+        // ---- 8. Post-swap invariants. ----
+        require(address(newUb.hook()) == address(hook), "replacement dispatcher is not carrying the REUSED hook");
+        require(hook.recipient() == recipientBefore, "hook recipient changed across the swap");
+        require(hook.ratio() == ratioBefore, "hook ratio changed across the swap");
+        require(
+            nftMinterV2.dispatcherToIndex(address(newUb)) == idx, "dispatcherToIndex did not move to the replacement"
+        );
+        require(nftMinterV2.dispatcherToIndex(oldUb) == 0, "dispatcherToIndex still resolves the RETIRED dispatcher");
+
+        // ---- 9. Finalise, so the local chain ends FULLY WORKING (the UI is tested against it). ----
+        // The full `_finalizeUniboost` recipe, not a subset: the dispatcher's own `recipient` (the
+        // DONATION recipient) is a different field from the hook's `recipient`, and a fresh
+        // Uniboost arrives with it unset, which would silently disable the donation branch.
+        _finalizeUniboost(newUb, hook, address(batchNFTMinter), deployer);
+
+        // ---- 10. The address book must name the dispatcher that is actually LIVE on the index. ----
+        // `deployments[...]` is edited in place rather than re-`_trackDeployment`ed: the latter also
+        // pushes onto `contractNames`, which would emit a DUPLICATE key into the progress-file JSON.
+        // The key is reused, so no new `_markConfigured` entry is required.
+        uniboostEYE = newUb;
+        deployments["UniboostEYE"].addr = address(newUb);
+        require(deployments["UniboostEYE"].addr == address(newUb), "UniboostEYE address key did not repoint");
+        console.log("  UniboostEYE address key repointed to the live index-1 dispatcher:", address(newUb));
+
+        _pinNudgeRatchetStaticClaims();
+
+        console.log("  Phase 7.6 complete: setDispatcher / setHook / replaceDispatcher / pull all EXECUTED locally.");
+    }

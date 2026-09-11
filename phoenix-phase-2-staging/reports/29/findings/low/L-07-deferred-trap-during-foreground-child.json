@@ -1,0 +1,103 @@
+{
+  "title": "A SIGINT or SIGTERM delivered to dev-local.sh's own pid rather than its process group leaves anvil running",
+  "severity": "low",
+  "severityRationale": "QA-level. The interactive Ctrl-C that story-081 set out to fix works correctly — verified. This is the narrow non-interactive variant, and its worst outcome is the leftover anvil that the new gates now refuse to deploy onto, i.e. a loud wedge rather than a silent absorption.",
+  "contract": "dev-local.sh",
+  "function": "cleanup / trap",
+  "lineStart": 35,
+  "lineEnd": 46,
+  "entryPoint": "dev",
+  "rootCauseClass": "DeferredTrapDuringForegroundChild",
+  "category": "unintended-side-effect",
+  "description": "`trap cleanup EXIT INT TERM` runs cleanup only once bash regains control. While dev-local.sh is blocked on its final foreground child, `npm run serve`, a trapped signal delivered to the shell alone is queued and never handled, because `npm run serve` never returns. An interactive Ctrl-C is unaffected — the terminal signals the entire foreground process group, so node exits, npm exits, and bash then runs cleanup — but `kill -INT <pid>` or `kill <pid>` against the pid a developer copies out of `ps` does not.",
+  "failureScenario": "A developer has `npm run dev` running, wants the port back, and does not have the terminal in front of them — they are in a second shell, or a script, or an editor task. They run `ps aux | grep dev-local`, take the pid, and `kill` it. Nothing happens: bash has the signal queued behind `npm run serve`, which never returns, so cleanup never runs. The developer sees no 'Tearing down Anvil' line, assumes the kill landed, and moves on. anvil is still bound to :8545 and its deployer nonce is now non-zero from the completed deployment, so their next `npm run dev` refuses at the pre-flight and their next `npm run deploy:local:forge` reverts with 'DeployMocks: chain is not fresh' — the script telling them, correctly but confusingly, about a node they believe they already killed.",
+  "impact": "The developer believes they stopped the stack; anvil is still bound to :8545 at a non-zero deployer nonce, so the next `npm run dev` refuses at its pre-flight and the next `npm run deploy:local:forge` reverts on the freshness gate until they `pkill anvil`.",
+  "evidence": "With the stack fully up (dev-local.sh pid 48591, anvil pid 48640, `npm run serve` answering HTTP 200 on :3001), ran `kill -INT 48591`; 6 seconds later: `dev-local ALIVE`, `48640 anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --block-time 2` still listed, `node server/index.js` still listed, `cast block-number --rpc-url http://localhost:8545` -> 583. Control: `kill -INT -48579` (the process GROUP, i.e. what Ctrl-C does) produced `Tearing down Anvil (pid 48640)...`, anvil gone, and `cast block-number` -> `Error: error sending request for url (http://localhost:8545/)`.",
+  "recommendation": "Have cleanup also kill anvil's process group, and stop blocking on a child that ignores the queued trap — e.g. run `npm run serve` in the background and `wait` on it (bash runs a pending trap as soon as `wait` is interrupted), or `exec` the server so there is no shell left to deceive. A one-line note in the script's usage comment that the stack must be stopped with Ctrl-C, not `kill <pid>`, would also close it.",
+  "dedup": {
+    "verdict": "NEW",
+    "dedupId": "DEDUP-29-07",
+    "mintNewFingerprint": true,
+    "fingerprintBasis": "dev-local.sh:cleanup / trap:DeferredTrapDuringForegroundChild:dev",
+    "relatedLedgerEntries": [
+      "11311795cd60 (run-28 M-01, fix-pending) - this is a residual gap in the SAME script that fix introduced",
+      "DEDUP-29-01 (leaked-node consumer)"
+    ],
+    "reasoning": "A distinct mechanism from DEDUP-29-06 (shell trap deferral while a foreground child runs, vs duplicated flags). Worth noting for triage but NOT collapsing: a leaked anvil left alive by this defect is precisely the pre-existing node that DEDUP-29-01 and 11311795cd60 then absorb, so the three form a chain of separate defects, not one finding. It is a residual gap in the story-081 fix rather than an incomplete fix of 11311795cd60 - 11311795cd60's claim is about freshness/ownership assertion, which dev-local.sh now does perform.",
+    "doNotCollapseWith": [
+      "DEDUP-29-06",
+      "11311795cd60"
+    ]
+  },
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "sanitization": {
+    "reconciliation": {
+      "origin": "new",
+      "mintNewFingerprint": true,
+      "fingerprintBasis": "dev-local.sh:cleanup / trap:DeferredTrapDuringForegroundChild:dev"
+    },
+    "knownIssueAnnotations": [],
+    "validity": {
+      "knownInvalidChecked": true,
+      "matchedKnownInvalidPattern": null,
+      "law3": "non-malicious developer assumed; no malicious-dev framing present in this finding (grep-verified across the candidate set)",
+      "footgunTest": "a competent, non-malicious developer would be surprised by this consequence => footgun, in scope",
+      "localOnlyNotASuppressionGround": "`dev` is a local rehearsal harness on a throwaway anvil chain; the harm channel is FALSE ASSURANCE about a mainnet cutover, which is legitimate. Local-only was not used as a suppression ground.",
+      "verdict": "VALID - passed through"
+    }
+  },
+  "id": "CLASS-29-07",
+  "label": "L-07",
+  "proposedSeverity": "low",
+  "severityMoved": false,
+  "movedDirection": null,
+  "plausibility": "plausible",
+  "regression": false,
+  "routing": "qa-report.md (Low band; no High/Medium this run, so no individual submissions/<label>.md is owed)",
+  "storyDeviation": null,
+  "classification": {
+    "assetImpact": "None. A leaked local anvil process.",
+    "attackPath": [
+      "No attacker. Signal-delivery path:",
+      "1. A developer has `npm run dev` running and wants the port back from a second shell, a script, or an editor task.",
+      "2. They take the pid from `ps` and `kill` it.",
+      "3. bash has the signal queued behind its final foreground child `npm run serve`, which never returns, so `trap cleanup EXIT INT TERM` never runs.",
+      "4. No 'Tearing down Anvil' line appears; the developer assumes the kill landed.",
+      "5. anvil stays bound to :8545 at a non-zero deployer nonce, so the next `npm run dev` refuses at the pre-flight and the next `npm run deploy:local:forge` reverts with 'DeployMocks: chain is not fresh' - about a node they believe they already killed."
+    ],
+    "likelihood": "moderate; killing by pid from a second shell is ordinary developer behaviour.",
+    "assumptions": "The signal is delivered to the script's own pid rather than to its process group.",
+    "externalRequirements": "None."
+  },
+  "classifierJustification": "Low CONFIRMED, though it is the closest call in the set after DEDUP-29-06 and its own severityRationale says 'QA-level' - preserved verbatim above, and I disagree with it. Two things keep it at Low rather than QA. First, it is a real functional gap in the script's stated cleanup contract, silently violated: the script promises to tear anvil down, prints nothing when it does not, and the developer's belief that they stopped the stack is false - a competent developer would be surprised, so the footgun test is met. Second, it is not isolated: the leaked anvil this defect produces is PRECISELY the pre-existing node that L-05 (DEDUP-29-01) then absorbs, so it feeds a chain rather than sitting inert. It stays well below Medium because the interactive Ctrl-C that story-081 actually set out to fix WORKS - verified this run - this is only the narrow non-interactive variant, and its worst outcome is the loud wedge the new gates produce, not a silent absorption.",
+  "caveatsForHuman": [
+    "NOT an incompleteFixOf ledger 11311795cd60. That entry's claim is freshness/ownership ASSERTION, which dev-local.sh now performs correctly; this is a residual gap in the same script, a different mechanism. Filing it as an incomplete fix would wrongly signal the story-081 patch is defective, when execution proved it complete.",
+    "NOT a story-081 faithfulness deviation: story-081's acceptance scopes teardown to the developer Ctrl-C-ing out, and that path works. The non-interactive kill was never claimed. It is therefore a code Low, not an F-XX.",
+    "Chain to keep intact for triage: L-07 leaks the node -> L-05 absorbs it -> 11311795cd60 was the `dev`-side half, now fixed. Three separate defects, not one finding; do not collapse."
+  ],
+  "auditorSeverityRationalePreserved": true,
+  "isFaithfulnessFinding": false,
+  "issueId": "pps29l7",
+  "fingerprint": "49b9904ee12a1abe85b63d458fee5ede6f8dd447a309191e51b4efd40a220a56",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-29",
+  "commit": "9563c68094e516a91d27684252e6a103271d69cf",
+  "headCommit": "9563c68",
+  "status": "ready",
+  "origin": "new",
+  "firstSeenRun": "phoenix-phase-2-staging-29",
+  "lastSeenRun": "phoenix-phase-2-staging-29",
+  "ledgerContract": "lib/phoenix-phase-2-staging/dev-local.sh",
+  "fingerprintBasis": "lib/phoenix-phase-2-staging/dev-local.sh:cleanup / trap:DeferredTrapDuringForegroundChild:dev",
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-09-10T00:15:22Z",
+    "updatedAt": "2026-09-10T00:15:22Z",
+    "scanOrigin": "script-audit-29-dev",
+    "classificationOrigin": "CLASS-29-07"
+  },
+  "isNewLedgerEntry": true
+}

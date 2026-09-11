@@ -1,0 +1,59 @@
+FILE: script/archives/DeployMainnetPromotionReady.s.sol
+1752:            PhlimboV3 v3 = new PhlimboV3(PHUSD, v2Reward, v2Duration);
+2085:            "DepositPageViewV3.phlimbo != new PhlimboV3"
+    ///        12    Revoke V2's migrator role.
+    ///        13    THE COMPLETENESS GATE: `totalStaked() == 0`. MUST precede step 14.
+    ///        14    Revoke V2's phUSD mint authority. Safe ONLY after 11 and 13 — see the
+    ///              file header's amended `setMinter` section for the freeze-the-principal
+    ///              failure this ordering avoids.
+    ///
+    ///      NOT DONE ANYWHERE IN HERE, both deliberate and both asserted in Phase 7:
+    ///        * NO `phlimboV2.pause()`. Pausing breaks the migration while APPEARING to
+    ///          succeed. This is the inverse of Phase 6. See the file header.
+    ///        * NO `phlimboV3.startPromotion(...)`. `promoToken == address(0)` is a designed
+    ///          state; arming a promotion mid-Ledger-session would commit live funds to a
+    ///          running depletion clock for no benefit.
+    ///
+    ///      Every step is `_isConfigured`-gated on its own key, so a resumed leg is
+    ///      idempotent and never re-runs a landed transaction.
+    function _phase4e_phlimboV3Cutover() internal {
+        console.log("\n=== Phase 4e: PhlimboV3 cutover + V2 migration (story 076) ===");
+        _requirePhlimboV2BitIndex();
+
+        IPhlimboV2Like v2 = IPhlimboV2Like(PHLIMBO_V2);
+
+        // ---- 1. Deploy PhlimboV3, mirroring V2's live config. ----
+        // `depletionDuration` and `rewardToken` are read LIVE off V2 rather than hardcoded,
+        // matching `_mirrorTokenConfig`/`_mirrorStrategy`'s house style: a retune on V2
+        // between planning and broadcast must carry over, not be silently reverted.
+        if (_isDeployed("PhlimboV3")) {
+            newPhlimboV3 = deployments["PhlimboV3"].addr;
+            console.log("  PhlimboV3 already deployed at:", newPhlimboV3);
+        } else {
+            address v2Reward = address(v2.rewardToken());
+            uint256 v2Duration = v2.depletionDuration();
+            // Constructor-set, so no separate `setDepletionDuration` call is needed (and a
+            // second call would only re-emit and recompute an identical rate).
+            require(v2Duration > 0, "PhlimboV3 ctor requires depletionDuration > 0");
+            uint256 g = gasleft();
+            PhlimboV3 v3 = new PhlimboV3(PHUSD, v2Reward, v2Duration);
+            newPhlimboV3 = address(v3);
+            _trackDeployment("PhlimboV3", newPhlimboV3, g - gasleft());
+            console.log("  PhlimboV3 deployed at:", newPhlimboV3);
+            console.log("    phUSD / rewardToken / depletionDuration:", PHUSD, v2Reward, v2Duration);
+        }
+        require(IOwnable(newPhlimboV3).owner() == OWNER, "PhlimboV3 owner != OWNER (msg.sender was not the Ledger key)");
+        // A fresh V3 must arrive with no promotion armed and no roles set. Asserting it here
+        // rather than only in Phase 7 catches a wrong-address resume immediately.
+        require(PhlimboV3(newPhlimboV3).promoToken() == IERC20(address(0)), "PhlimboV3 arrived with a promo token set");
+
+        // ---- 2/3. Mirror V2's APY. TWO-STEP preview -> commit. ----
+        if (!_isConfigured("p4e_v3_apy")) {
+            uint256 targetBps = v2.desiredAPYBps();
+            _setDesiredAPYTwoStep(newPhlimboV3, targetBps, "PhlimboV3");
+            _trackConfig("p4e_v3_apy");
+        }
+
+        // ---- 4. Pauser wiring, both directions. ----
+        if (!_isConfigured("p4e_v3_pauser")) {
+            PhlimboV3(newPhlimboV3).setPauser(PAUSER);

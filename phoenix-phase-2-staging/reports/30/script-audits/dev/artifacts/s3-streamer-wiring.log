@@ -1,0 +1,137 @@
+=== setNudgeStreamer call sites + surrounding asserts ===
+901:        balancerPoolerV2.setNudgeStreamer(address(nudgeStreamer));
+902:        console.log("BalancerPoolerV2.setNudgeStreamer -> NudgeStreamer");
+910:        // Story 073: `_finalizeUniboost` additionally calls setNudgeStreamer. The staker step
+959:        //     mandated (NudgeRatchet.sol:39-43): whitelist -> registerStream -> setNudgeStreamer;
+961:        nudgeRatchet.setNudgeStreamer(address(nudgeStreamer));
+962:        console.log("NudgeRatchet.setNudgeStreamer -> NudgeStreamer");
+1205:        // setNudgeStreamer below — keeps the guard dormant at deploy time. Do not reorder.
+1265:        stableYieldAccumulator.setNudgeStreamer(address(nudgeStreamer));
+1266:        console.log("SYA.setNudgeStreamer ->", address(nudgeStreamer));
+1267:        require(stableYieldAccumulator.nudgeStreamer() == address(nudgeStreamer), "SYA nudgeStreamer not wired");
+1729:    ///      wired — i.e. every mint on indices 1/2/3. `setNudgeStreamer` therefore is NOT optional
+1731:    ///      (Uniboost.sol:38-41) is whitelist -> registerStream -> setNudgeStreamer, and the first
+1736:        dispatcher.setNudgeStreamer(address(nudgeStreamer));
+2110:    ///        4. `setNudgeStreamer` on the batch minter and, later, on all six donors.
+2201:        batchNFTMinter.setNudgeStreamer(address(nudgeStreamer));
+2202:        console.log("BatchNFTMinter.setNudgeStreamer -> NudgeStreamer");
+
+=== _finalizeUniboost body ===
+    /// @dev Deferred (Phase 3.7) per-dispatcher donation wiring: 50% of mint USDC -> batchNFTMinter
+    ///      (the BalancerPoolerV2 index-4 LSP batch minter), remaining 50% retained for pool().
+    /// @dev Story 073: the donation branch is now streamer-gated. `Uniboost._dispatch` reverts
+    ///      `"Uniboost: nudgeStreamer unset"` whenever `donationAmount > 0` and no streamer is
+    ///      wired — i.e. every mint on indices 1/2/3. `setNudgeStreamer` therefore is NOT optional
+    ///      polish; it is what keeps these three dispatchers mintable at all. Mandated ordering
+    ///      (Uniboost.sol:38-41) is whitelist -> registerStream -> setNudgeStreamer, and the first
+    ///      two already ran in `_deployStreamerAndBatchMinter`.
+    function _finalizeUniboost(Uniboost dispatcher, UniboostMintDebtHook, address batchMinter, address) internal {
+        dispatcher.setRecipient(batchMinter);
+        dispatcher.setDonationSplit(50);
+        dispatcher.setNudgeStreamer(address(nudgeStreamer));
+    }
+
+    /// @dev Two static claims about the index-7 hook, asserted rather than exercised by a swap.
+    ///      Actually swapping index 7 would mean re-wiring `RatchetNFTStaker`,
+    ///      `RatchetBatchNFTMinter`, the nudge streamer and the target APY on the exact chain the
+    ///      UI is about to be tested against; blast radius won. These two read-only assertions
+    ///      regression-gate the claims for free, so a hook or ratio drift still fails the run
+    ///      loudly.
+    function _pinNudgeRatchetStaticClaims() internal view {
+
+=== _deployStreamerAndBatchMinter body ===
+    function _deployStreamerAndBatchMinter(address deployer) internal {
+        uint256 gasBefore = gasleft();
+        nudgeStreamer = new NudgeStreamer(deployer);
+        _trackDeployment("NudgeStreamer", address(nudgeStreamer), gasBefore - gasleft());
+        console.log("NudgeStreamer deployed at:", address(nudgeStreamer));
+
+        gasBefore = gasleft();
+        batchNFTMinter = new BatchNFTMinterMultiToken(deployer);
+        // Reuse the EXISTING "BatchNFTMinter" tracked key: the address pipeline, mainnet-addresses
+        // and the UI all resolve the shared donor sink under that name, and it is still the shared
+        // donor sink — only its type changed.
+        _trackDeployment("BatchNFTMinter", address(batchNFTMinter), gasBefore - gasleft());
+        console.log("BatchNFTMinterMultiToken deployed at:", address(batchNFTMinter));
+
+        // Derive the pinned dispatcher index rather than hard-coding it, so a registration-order
+        // change can't silently mis-wire the batch minter.
+        uint256 batchDispatcherIndex = nftMinterV2.dispatcherToIndex(address(balancerPoolerV2));
+        require(batchDispatcherIndex != 0, "BalancerPoolerV2 not registered with NFTMinterV2");
+
+        // THE SINGLE HIGHEST-RISK LINE IN THIS STORY. `setNudgeTokenWhitelist(token, true)` reverts
+        // `BatchMint__RewardTokenIsPaymentToken(token)` when the added token equals the pinned
+        // dispatcher's `primeToken()`. Mainnet index 4 is USDS-primed, so USDC is addable there.
+        // Locally the pooler derives its prime token from `IERC4626(sUSDS).asset()`, which is USDS
+        // — assert it explicitly so a mock rewire fails loudly HERE rather than as a confusing
+        // revert three calls later.
+        require(
+            balancerPoolerV2.primeToken() == address(usds),
+            "index-4 prime token must be USDS (else USDC is unwhitelistable)"
+        );
+
+        batchNFTMinter.setTokenMinter(ITokenMinterV2(address(nftMinterV2)));
+        console.log("BatchNFTMinter.setTokenMinter -> NFTMinterV2");
+        batchNFTMinter.setDispatcherIndex(batchDispatcherIndex);
+        console.log("BatchNFTMinter.setDispatcherIndex ->", batchDispatcherIndex);
+
+        // `setNudgePaymentToken` does not exist on the multi-token contract — the single-token
+        // nudge field is replaced by this ordered whitelist. The ORDER here is the order
+        // `batchMint`'s `minRewards` array must use (see `getNudgeTokens()`); unwhitelisting uses
+        // swap-and-pop, so callers must re-fetch rather than cache it.
+        batchNFTMinter.setNudgeTokenWhitelist(address(rewardToken), true); // USDC (6dp)
+        batchNFTMinter.setNudgeTokenWhitelist(address(phUSD), true); // phUSD (18dp)
+        batchNFTMinter.setNudgeTokenWhitelist(address(mockKendu), true); // Kendu (18dp)
+        require(batchNFTMinter.getNudgeTokens().length == 3, "expected 3 whitelisted nudge tokens");
+        console.log("BatchNFTMinter nudge tokens whitelisted: USDC, phUSD, Kendu");
+
+        batchNFTMinter.setNudgeSize(MOCK_NUDGE_SIZE);
+        console.log("BatchNFTMinter.setNudgeSize ->", MOCK_NUDGE_SIZE);
+
+        // Story 072 flags the mainnet batch minter as un-pausable (a gap it inherits); close it
+        // here. setPauser BEFORE register — register() validates pauser() == address(this).
+        batchNFTMinter.setPauser(address(pauser));
+        pauser.register(address(batchNFTMinter));
+        console.log("BatchNFTMinter registered with Pauser");
+
+        // Streams must exist before any donor is pointed at the streamer, or the first donation
+        // reverts. `LOCAL_STREAM_DURATION` is 6 hours by deliberate local divergence.
+        nudgeStreamer.registerStream(address(batchNFTMinter), address(rewardToken), LOCAL_STREAM_DURATION);
+        console.log("NudgeStreamer stream registered for USDC, duration:", LOCAL_STREAM_DURATION);
+
+        if (armKenduPromo) {
+            nudgeStreamer.registerStream(address(batchNFTMinter), address(phUSD), LOCAL_STREAM_DURATION);
+            nudgeStreamer.registerStream(address(batchNFTMinter), address(mockKendu), LOCAL_STREAM_DURATION);
+            console.log("NudgeStreamer streams registered for phUSD / Kendu (armed leg)");
+
+            // Seed the two donorless streams. USDC is funded by real donors (Uniboost, the ratchet,
+            // the pooler, SYA); phUSD and Kendu have none, so without this the UI renders two
+            // permanently empty reward slots and the three-stream divergence buys nothing.
+            // `collectNudge` requires a registered stream, hence its position after registerStream.
+            _seedNudgeStream(deployer, address(phUSD), LOCAL_PHUSD_NUDGE_SEED);
+            _seedNudgeStream(deployer, address(mockKendu), LOCAL_KENDU_NUDGE_SEED);
+        } else {
+            // DORMANT leg: phUSD and Kendu stay whitelisted but UNREGISTERED and UNFUNDED, exactly
+            // as on day-one mainnet. `batchMint` still quotes them (zero pending), so this is the
+            // configuration the UI must render gracefully.
+            console.log("LOCAL-ONLY: phUSD / Kendu streams NOT registered or seeded (LOCAL_PROMO_KENDU=false)");
+            console.log("  -> whitelisted-but-unregistered, the day-one mainnet shape");
+        }
+
+        // Last: the batch minter learns to flush its own accrued stream inside batchMint.
+        batchNFTMinter.setNudgeStreamer(address(nudgeStreamer));
+        console.log("BatchNFTMinter.setNudgeStreamer -> NudgeStreamer");
+    }
+
+    /// @dev Acts as a DONOR of `token` to `batchNFTMinter`'s stream: mints `amount` to the
+    ///      deployer, approves the streamer and calls `collectNudge`. This is the local stand-in
+    ///      for the organic donors USDC has and phUSD/Kendu do not.
+    ///
+    ///      Doubles as the fee-on-transfer probe. `collectNudge` does
+    ///      `safeTransferFrom(donor, streamer, amount)` and then credits `buffer += amount`
+    ///      UNCONDITIONALLY — it never measures what actually landed. A taxed token would
+    ///      therefore over-credit the buffer and the stream would run dry mid-window, so the
+    ///      balance-delta assertion below is load-bearing, not decorative. The delta is exact
+    ///      rather than approximate because the stream was registered moments ago with an empty
+    ///      buffer, so `collectNudge`'s pre-settle transfers nothing out.
+    function _seedNudgeStream(address deployer, address token, uint256 amount) internal {

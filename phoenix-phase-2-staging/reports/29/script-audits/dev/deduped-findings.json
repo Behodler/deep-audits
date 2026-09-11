@@ -1,0 +1,302 @@
+{
+  "run": "phoenix-phase-2-staging-29",
+  "entryPoint": "dev",
+  "generatedBy": "deduplicator",
+  "inputCount": 7,
+  "survivingCount": 7,
+  "newFingerprintCount": 6,
+  "reconciledToExistingCount": 1,
+  "removedCount": 0,
+  "setAsideCount": 0,
+  "findings": [
+    {
+      "title": "verify-stable-staker.sh silently adopts whatever node already holds 8545 when its own anvil fails to bind, running the V1->V2 cutover verification on a node it does not own and leaving that node dirty and alive",
+      "severity": "low",
+      "severityRationale": "Low, and the severity is now settled on evidence rather than assumption. DeployMocks.s.sol:445 blocks adoption of a DIRTY node, so the only reachable case is a foreign node that was FRESH (deployer nonce 0) at hand-off - which means the deployment landing on it is functionally identical to one on a self-started anvil (same deterministic CREATE addresses, same state) and the verification result it produces is legitimate rather than false. The one scenario that could have made the result genuinely misleading - a mainnet-forked anvil forced to chainid 31337, which would slip past the chainid gate - WAS TESTED AND IS BLOCKED: the deployer 0xf39Fd6e5... is a publicly-known test key with a real mainnet nonce of 7893, so the freshness gate fires and not a single mock is deployed. Both remaining consequences are LOUD, not silent: the next `npm run dev` refuses at its pre-flight and the next `npm run test:stable-staker` reverts on the freshness gate. Local harness, throwaway chain, no user funds, no mainnet broadcast. That is Low. It is still a real defect and still the same root cause as run-28 M-01 - the operator is told `Anvil is up.` about a process that is dead, and the harness verifies a mainnet-cutover mechanism on a node whose provenance it never established.",
+      "contract": "verify-stable-staker.sh",
+      "function": "readiness loop (lines 51-57) + cleanup (lines 32-40)",
+      "lineStart": 51,
+      "lineEnd": 57,
+      "entryPoint": "test:stable-staker",
+      "rootCauseClass": "UnownedNodeAbsorbsRehearsal",
+      "category": "cluster-interaction",
+      "relatedFinding": "Same root cause as ledger 11311795cd60 (run-28 M-01, `dev`, status fix-pending). That entry is scoped to the `dev` entry point and is COMPLETELY FIXED at 9563c68 — this is NOT a re-file of it and NOT an incomplete fix of it; it is the identical defect surviving in the sibling entry point story-080 retargeted in this same delta. Disclosed rather than silently minted as a fresh issue.",
+      "faithfulness": "story-081's remit was 'fix `dev`'; it did that. The sibling was in scope of story-080 (which retargeted verify-stable-staker.sh onto StableStakerV2) but neither story revisited its orchestration.",
+      "description": "verify-stable-staker.sh starts its own anvil unconditionally — there is no port pre-flight, where dev-local.sh:48-55 now has one. Its readiness loop (lines 51-57) polls only `cast block-number`, with no `kill -0 \"$ANVIL_PID\"` liveness check (dev-local.sh:76-79 has one), no ANVIL_UP flag, and no listener-ownership comparison (dev-local.sh:99-116 has one). When another process already holds :8545, the script's own anvil dies on 'Address already in use', the readiness loop is satisfied by the FOREIGN node, and the script announces 'Anvil is up.' about a pid that no longer exists. At exit, cleanup() kills that dead recorded pid and leaves the foreign node running. DeployMocks.s.sol:445 (`require(vm.getNonce(deployer) == 0, ...)`) still blocks the case where the foreign node carries a prior deployment, so adoption only succeeds against a FRESH foreign node.",
+      "failureScenario": "A developer leaves an anvil running from an earlier session or another tool - they ran `npm run start:anvil` in a second terminal to poke at something, or a previous `test:stable-staker` exited via the path in this finding. That node is fresh: nothing has deployed to it, so the deployer's nonce is 0. The developer runs `npm run test:stable-staker`. The script's own anvil dies immediately on 'Address already in use'; the readiness loop nevertheless sees the foreign node answer and prints 'Anvil is up.'; `deploy:local` deploys the whole mock stack onto the foreign node, which passes both the chainid and the freshness gate because it is fresh; STEP 1-3 stake, advance the clock by a day, assert the Antimatter accrual and the withdraw, and the script reports 'ALL ASSERTIONS PASSED'. The developer believes they exercised an isolated node they started and controlled; they did not, and the script never told them their anvil died. On exit, cleanup kills the dead pid and the foreign node survives at a deployer nonce of 480. The developer's next `npm run dev` now refuses at its pre-flight with 'something is already answering on http://localhost:8545', and their next `npm run test:stable-staker` reverts with 'DeployMocks: chain is not fresh', until they work out that they need to `pkill anvil`.\n\nTHE BOUNDARY, ESTABLISHED BY TEST: the adopted node must be genuinely fresh for this to reach the assertions. The two worse variants both fail closed. If the leftover node already carries a deployment, the freshness gate reverts before anything is deployed. If it is a mainnet fork forced to `--chain-id 31337` - the case that would have made the passing verification genuinely misleading, because the mock stack would land on top of real forked state - the gate also reverts, because the deployer is anvil's public account 0 and its real mainnet nonce is 7893 (measured on a live fork at block 25943238; zero mocks deployed, zero assertions reached). So the harm is bounded to running on an unowned-but-equivalent node, plus the leftover-node wedge - which is what holds this at Low rather than Medium.",
+      "impact": "(a) The story-080 V1->V2 cutover verification - the automated check that certifies the migration mechanics before they are mirrored to mainnet - executes against a node the operator did not start, does not observe, and cannot attest to. Because the adopted node must be fresh for the deploy to succeed, what passed did legitimately pass; the loss is the operator's ability to know that. (b) The run leaves the now-dirty foreign node alive at deployer nonce 480, wedging both local entry points until a manual `pkill anvil`. (c) The 'Anvil is up.' line is affirmatively false whenever this triggers, which is the specific misreport story-081 added `kill -0` to dev-local.sh to prevent. The impact does NOT extend to a mock stack landing on forked mainnet state: that variant was tested against a live mainnet fork and is blocked by the freshness gate.",
+      "evidence": "Setup, measured in the SAME shell invocation immediately before launching the sibling:\n  $ anvil --host 0.0.0.0 --port 8545 --chain-id 31337 &\n  $ FPID=$(ss -lptnH 'sport = :8545' | grep -o 'pid=[0-9]*' | cut -d= -f2)\n  $ echo \"FOREIGN anvil pid=$FPID nonce=$(cast nonce 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --rpc-url http://localhost:8545)\"\n  FOREIGN anvil pid=58309 nonce=0\nThen `cd <project>/work && npm run test:stable-staker`. Observed in the log, in order:\n  === Cleaning previous local deployment artifacts ===\n  Anvil pid: 58397\n  Anvil is up.\n  === Deploying mocks (deploy:local) ===\n  ...\n  === verify-stable-staker.sh: ALL ASSERTIONS PASSED ===\n`ps -p 58397` -> 'own anvil 58397 DEAD'. Neither gate fired at any point in the run: `grep -c 'chain is not fresh' D2.log` -> 0 and `grep -c 'DeployMocks: local only' D2.log` -> 0, which independently confirms the deployer nonce was still 0 when `deploy:local` ran. After exit: `ps -p 58309` -> `58309 anvil --host 0.0.0.0 --port 8545 --chain-id 31337` (STILL ALIVE), `cast nonce 0xf39Fd6e5... --rpc-url http://localhost:8545` -> 480. Control: on a clean machine the same command passes and tears its own anvil down correctly (`Tearing down Anvil (pid 57455)...`, no residual process).",
+      "evidenceCaveat": "The nonce was measured at hand-off (immediately before `npm run test:stable-staker` was launched), not at the exact instant `deploy:local` executed. Nothing transacted as the deployer in between — the foreign anvil was started without --block-time and sat idle — and the two never-fired gates above prove the nonce was still 0 at the require. Stating this plainly rather than claiming a measurement I did not take at that instant.",
+      "recommendation": "Give verify-stable-staker.sh the same three guards dev-local.sh now has, or better, factor them into one shared helper both source: (1) a port pre-flight that refuses to start when `cast block-number` on :8545 succeeds, with the same 'kill it (pkill anvil) and re-run' message; (2) a `kill -0 \"$ANVIL_PID\"` check inside the readiness loop plus an ANVIL_UP flag, so a dead anvil fails loudly instead of the loop falling through on a foreign node's answer; (3) the ss/lsof listener-ownership comparison. Also upgrade `set -e` to `set -Eeuo pipefail` and widen `trap cleanup EXIT` to `EXIT INT TERM`, for the reason story-081 gave: the defect class being fixed is a discarded exit status.",
+      "forkedNodeResidual": "CLOSED BY TEST, not parked. Question: can a mainnet-forked anvil forced to `--chain-id 31337` be adopted by the sibling, landing the mock stack on top of forked mainnet state? ANSWER: NO - the freshness gate blocks it. Commands and real output:\n  $ . /home/justin/code/audits/.envrc   # RPC_MAINNET\n  $ anvil --fork-url $RPC_MAINNET --chain-id 31337 --port 8545 &\n      Fork / Block number: 25943238 / Chain ID: 31337 / Listening on 127.0.0.1:8545\n  $ cast chain-id     --rpc-url http://localhost:8545  -> 31337      (P5 chainid gate PASSES - does NOT fire)\n  $ cast block-number --rpc-url http://localhost:8545  -> 25943238\n  $ cast nonce 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --rpc-url http://localhost:8545 -> 7893\n  $ cast balance 0xf39Fd6e5... -> 10000000000000000000000   (anvil funds its dev account even on a fork, but PRESERVES the forked nonce)\n  $ cd <project>/work && npm run test:stable-staker    -> EXIT=1\n      Anvil pid: 61175 / Anvil is up. / === Deploying mocks (deploy:local) ===\n      |- [0] console::log(\"Chain ID:\", 31337 [3.133e4]) [staticcall]\n      |- [0] VM::getNonce(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266) [staticcall]\n      |   |- <- [Return] 7893\n      +- <- [Revert] DeployMocks: chain is not fresh - a prior deployment is already on 8545; kill it and re-run\n      Error: script failed: DeployMocks: chain is not fresh - ...\n  $ grep -c 'deployed at:'          F-verify.log -> 0   (ZERO mocks deployed onto the fork)\n  $ grep -c 'ALL ASSERTIONS PASSED' F-verify.log -> 0   (the sibling asserted nothing)\nWHY IT HOLDS: the deployer is anvil's well-known account 0, whose private key is public, so on real mainnet it has been used ~7893 times. Any mainnet fork therefore inherits a large non-zero nonce and trips the freshness gate. This is a property of the forked state, not of the script - a fork of a chain where that address had never transacted would still be adopted - but for the mainnet fork this repo actually targets, the gate is decisive.",
+      "devExposure": "`dev` IS NOT EXPOSED AT ALL - only the sibling is. dev-local.sh's port pre-flight refuses ANY node that answers on 8545, one layer before the chainid and freshness gates are ever reached. Verified against the same live fork:\n  $ cd <project>/work && ./dev-local.sh\n  === Pre-flight: checking nothing already owns http://localhost:8545 ===\n  Error: something is already answering on http://localhost:8545.\n         A leftover node would silently absorb this deployment and every\n         post-condition would still pass. Kill it (pkill anvil) and re-run.\nThis is exactly the asymmetry the finding is about: story-081 gave `dev` a guard that makes the question moot, and did not give it to the sibling, which has to fall back on the Solidity gate.",
+      "dedup": {
+        "verdict": "NEW",
+        "dedupId": "DEDUP-29-01",
+        "mintNewFingerprint": true,
+        "fingerprintBasis": "verify-stable-staker.sh:readiness loop (lines 51-57) + cleanup (lines 32-40):UnownedNodeAbsorbsRehearsal:test:stable-staker",
+        "relatedLedgerEntries": [
+          "11311795cd60 (run-28 M-01, fix-pending)"
+        ],
+        "reasoning": "Same ROOT CAUSE family as 11311795cd60 (a harness adopts a node whose provenance it never established) but a DIFFERENT entry point: test:stable-staker vs dev. entryPoint is folded into the fingerprint by design, so this is a distinct ledger entry, not a re-file. Explicitly NOT an incompleteFixOf 11311795cd60: that entry is a COMPLETE fix for the `dev` entry point (dev-local.sh owns its anvil pid and pre-flights the port); the sibling shell script was simply never brought under the same discipline. Filing it as an incomplete fix would wrongly signal that the `dev` patch is defective.",
+        "doNotCollapseWith": [
+          "11311795cd60",
+          "DEDUP-29-05",
+          "DEDUP-29-06",
+          "DEDUP-29-07"
+        ]
+      }
+    },
+    {
+      "title": "`npm run dev` cannot run on a clean shell: ANVIL_PRIVATE_KEY is hard-required by DeployMocks but is set nowhere in the repository, and the .env.example the docs describe does not exist",
+      "severity": "low",
+      "severityRationale": "Fails loudly and immediately, naming the exact variable, so it is discoverable rather than silent — that caps it well below the false-assurance channel. But it breaks the sole developer entry point for anyone who does not already have the variable in their ambient environment, which is an onboarding stop, not merely an annoyance.",
+      "contract": "script/DeployMocks.s.sol",
+      "function": "run",
+      "lineStart": 419,
+      "lineEnd": 419,
+      "entryPoint": "dev",
+      "rootCauseClass": "UndeclaredAmbientEnvDependency",
+      "category": "intent-mismatch",
+      "description": "DeployMocks.s.sol:419 reads `vm.envUint(\"ANVIL_PRIVATE_KEY\")`. Neither dev-local.sh, package.json, nor any tracked file in the repository sets or exports it; `git ls-files | grep -i env` returns nothing and there is no .envrc, .env or .env.example in the source tree. Its only in-repo occurrence is a literal inside CLAUDE.md:476, in a block headed 'Required Variables in `.env`' — a file the repo neither ships nor ships an example of, even though CLAUDE.md:93-94 lists `.env.example` in its own directory-layout diagram and CLAUDE.md:454 instructs the reader to 'Create `.envrc.example`'. The same variable is read by script/interactions/StakeStableStaker.s.sol:37 and ClaimWithdrawStableStaker.s.sol:40, so `npm run test:stable-staker` inherits the dependency.",
+      "failureScenario": "A new developer clones phoenix-phase-2-staging, runs `npm install`, and follows the documented entry point with `npm run dev`. The port pre-flight passes, clean:local runs and deletes two tracked files, anvil starts and all four shell gates pass — and then the forge leg reverts at DeployMocks.s.sol:419 with 'environment variable \"ANVIL_PRIVATE_KEY\" not found'. There is no .env.example in the tree to copy, so the only path to the value is finding the literal buried at CLAUDE.md:476. The developer is left with no dev stack and a working tree in which broadcast/DeployMocks.s.sol/31337/run-latest.json and server/deployments/progress.31337.json are now deleted.",
+      "impact": "A developer cloning the repo and running the documented entry point gets a revert rather than a dev stack. This audit's own happy-path run only succeeded because direnv had already exported the variable from an out-of-repo .envrc; re-running with `env -u ANVIL_PRIVATE_KEY` reproduced the failure.",
+      "evidence": "Ran: `cd <project>/work && env -u ANVIL_PRIVATE_KEY ./dev-local.sh` -> EXIT=1.\nTrace excerpt:\n  [4141] DeployMocks::run()\n    |- [0] VM::envUint(\"ANVIL_PRIVATE_KEY\") [staticcall]\n    |   |- <- [Revert] vm.envUint: environment variable \"ANVIL_PRIVATE_KEY\" not found\n  Error: script failed: vm.envUint: environment variable \"ANVIL_PRIVATE_KEY\" not found\nProvenance of the value in the passing run: `/home/justin/code/audits/.envrc` line 18 plus a byte-identical gitignored copy at `<project>/work/.envrc` (`git check-ignore -v .envrc` -> `.gitignore:6:.envrc`). `ls -a <project>/src | grep -i env` -> no match.",
+      "recommendation": "Either default it in the script — `vm.envOr(\"ANVIL_PRIVATE_KEY\", uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80))`, which is safe precisely because DeployMocks.s.sol:443 already requires chainid 31337 and the key is anvil's publicly-known account 0 — or export it in dev-local.sh next to the existing `LOCAL_PROMO_KENDU=true`. Whichever is chosen, commit the `.env.example` / `.envrc.example` that CLAUDE.md:93 and :454 already promise, so the dependency is discoverable before the revert.",
+      "dedup": {
+        "verdict": "DUPLICATE-ESCALATION (reconciled to existing ledger entry)",
+        "dedupId": "DEDUP-29-02",
+        "mintNewFingerprint": false,
+        "reconcilesTo": "d3aa1e35c995",
+        "reconcilesToLabel": "Q-02",
+        "preserveExistingRootCauseClass": "UndocumentedRequiredEnvVar",
+        "proposedRootCauseClassREJECTED": "UndeclaredAmbientEnvDependency",
+        "proposedSeverityChange": {
+          "from": "qa",
+          "to": "low",
+          "applyVia": "/ledger (human)"
+        },
+        "reasoning": "Same contract (script/DeployMocks.s.sol), same function (run), same entryPoint (dev), same defect: ANVIL_PRIVATE_KEY is hard-required by vm.envUint and is not provided by the entry point. Q-02 already owns this. The new claim is a SHARPENING of the same root cause, not a second one: verified independently this run that the identifier appears in the tree only at CLAUDE.md:476 (prose) and in seven vm.envUint call sites, with no .env, no .env.example and no shell export anywhere, so `npm run dev` cannot complete on a clean shell. That escalates the CONSEQUENCE (entry point unrunnable, not merely undocumented) and warrants qa -> low on the EXISTING entry. Minting UndeclaredAmbientEnvDependency would re-hash contract:function:rootCauseClass:entryPoint into a second fingerprint for one defect and orphan Q-02's history - the ledger rootCauseClass mislabel trap. The rootCauseClass string is therefore left VERBATIM as UndocumentedRequiredEnvVar; only a human /ledger action may change it, and doing so re-mints the fingerprint.",
+        "ledgerAction": "UPDATE d3aa1e35c995: bump lastSeenRun to phoenix-phase-2-staging-29, append the clean-shell reproduction to note, propose severity qa->low. Do NOT insert a new entry."
+      }
+    },
+    {
+      "title": "verify-stable-staker.sh and its package.json doc key both state an assertion the harness no longer makes (~10 Antimatter vs the caller's pro-rata share)",
+      "severity": "low",
+      "severityRationale": "QA/documentation, no execution consequence — the harness itself is correct and self-documents the change. Kept at Low rather than QA only because it is an undeclared divergence from a ticked story-080 acceptance line, and the two stale surfaces are the first thing a developer reads when a run fails.",
+      "contract": "verify-stable-staker.sh",
+      "function": "header comment (lines 6-10); package.json `//verify-stable-staker`",
+      "lineStart": 6,
+      "lineEnd": 10,
+      "entryPoint": "test:stable-staker",
+      "rootCauseClass": "DocumentedAssertionDivergesFromImplementation",
+      "category": "drift",
+      "faithfulness": "UNDECLARED story-080 deviation. The acceptance checklist's ticked line reads 'changed the reward assertion from ~10 phUSD claimed to ~10 Antimatter ACCRUED'. The implementation instead asserts the caller's pro-rata share, correctly, because story-080's OWN Phase 6.5b seeding put 12 more actors in the DOLA pool. That change is right; it is simply not among the six Autonomous Decisions the story records, so the closure manifest's deviation list is one short.",
+      "description": "verify-stable-staker.sh:9 says it asserts 'the accrued reward (~10 Antimatter)' and package.json:36 repeats 'assert ~10 Antimatter accrued'. ClaimWithdrawStableStaker.s.sol:86-98 actually computes `expected = (EXPECTED_DAILY_REWARD * stakedPrincipal) / totalStakedNow` and bounds the observed accrual to +/-1% of that. The divergence is caused by story-080 itself: Phase 6.5b now seeds 12 cutover actors into every V1 pool and migrates them to V2, so the verifier's own stake is a minority of V2's DOLA pool and its daily share is well under 10.",
+      "failureScenario": "A developer changes the DOLA pool's `antimatterPerDay` rate, or adds a staker to the Phase 6.5b seed set, and `npm run test:stable-staker` starts failing on 'reward below the pro-rata daily lower bound'. They read the script header and the package.json doc key, both of which tell them the harness asserts '~10 Antimatter accrued'. The printed figure is 4.5455. They conclude the emission rate is broken and go looking for a bug in StableStakerV2's accrual maths, when the assertion that actually fired is a pro-rata bound whose denominator their change moved. The two doc surfaces have been wrong since ac70af6 and point the investigation at the wrong contract.",
+      "impact": "A developer whose run trips the reward bound will compare the printed figure against a documented '~10' that has been wrong since ac70af6, and look for a bug in the emission rate rather than in the pool composition.",
+      "evidence": "Ran: `cd <project>/work && npm run test:stable-staker` (clean machine). Observed:\n  claimableReward (Antimatter): 4545507154882125000\n  Expected pro-rata daily reward (Antimatter): 4545454545454545454\n  Antimatter reward accrued (pro-rata share of 10/day): 4545507154882125000\n  === verify-stable-staker.sh: ALL ASSERTIONS PASSED ===\nagainst verify-stable-staker.sh:9 `# the accrued reward (~10 Antimatter), that \\`claim\\` is still closed, and the` and package.json:36 `assert ~10 Antimatter accrued`.",
+      "recommendation": "Update both strings to say the assertion is the caller's pro-rata share of the pool's 10 Antimatter/day (the in-script comment at ClaimWithdrawStableStaker.s.sol:86-91 already explains it well and can be quoted), and record the change as a story-080 Autonomous Decision so the checklist tick matches what shipped.",
+      "dedup": {
+        "verdict": "NEW",
+        "dedupId": "DEDUP-29-03",
+        "mintNewFingerprint": true,
+        "fingerprintBasis": "verify-stable-staker.sh:header comment (lines 6-10); package.json `//verify-stable-staker`:DocumentedAssertionDivergesFromImplementation:test:stable-staker",
+        "relatedLedgerEntries": [],
+        "reasoning": "Doc/implementation divergence in verify-stable-staker.sh's own header and its package.json doc key. No existing ledger entry covers assertion-text drift on this script. Deliberately NOT collapsed with DEDUP-29-04: different file (verify-stable-staker.sh vs server/deployments/mainnet-addresses.ts), different mechanism (a stale human-readable assertion string vs an absent type-level drift guard), different remedy. Both happen to be story-080 faithfulness flags, which is a shared PROVENANCE, not a shared root cause - collapsing on provenance would erase one of two independent story-080 deviations.",
+        "doNotCollapseWith": [
+          "DEDUP-29-04"
+        ]
+      }
+    },
+    {
+      "title": "story-080's declared drift guard between mainnet-addresses.ts and the regenerated ContractAddresses interface does not exist, and the two files already disagree",
+      "severity": "low",
+      "severityRationale": "No runtime consequence in this repo — mainnet-addresses.ts is a hand-maintained copy-out artifact and nothing in-tree reads it. But `dev` REGENERATES the interface every run, so the one thing standing between a silent key-set drift and a broken downstream UI is a check the story claims to have performed and that no tool can perform.",
+      "contract": "server/deployments/mainnet-addresses.ts",
+      "function": "mainnetAddresses: ContractAddresses",
+      "lineStart": 39,
+      "lineEnd": 39,
+      "entryPoint": "dev",
+      "rootCauseClass": "UnenforceableDeclaredDriftGuard",
+      "category": "drift",
+      "faithfulness": "Story-080 acceptance, ticked: 'Confirm `tsc` passes — the `: ContractAddresses` annotation on `mainnetAddresses` is the only drift guard between the two files.' Autonomous Decision 6 honestly records that it was NOT run because no tsconfig.json exists. The honesty is creditable; the ticked box is not met, and the story's own statement that this is 'the only drift guard' means there is now no drift guard at all.",
+      "description": "`npm run dev` regenerates server/deployments/addresses.ts (the ContractAddresses interface) on every run via server/generate-ts-addresses.js:63. The hand-maintained server/deployments/mainnet-addresses.ts must satisfy that interface. There is no tsconfig.json anywhere outside node_modules, so nothing type-checks it. Comparing the two key sets today: all 56 interface keys are present in mainnet-addresses.ts (the direction that would be a hard tsc error is clean), but mainnet-addresses.ts carries three keys — BurnerEYE, BurnerFlax, BurnerSCX — that the interface does not declare, which TypeScript's excess-property checking on a typed object literal would reject. The guard the story leans on would therefore fail today if it existed.",
+      "failureScenario": "A future story adds or removes a `_trackDeployment` call in DeployMocks — exactly what story-080 did when it dropped StableStaker and added Antimatter and StableStakerV2. The next `npm run dev` regenerates addresses.ts with the new key set. Nobody updates the hand-maintained mainnet-addresses.ts, because the story's stated safety net is `tsc` and no tsconfig.json exists for `tsc` to act on. The repo's CI (forge fmt --check, forge build --sizes, forge test) has nothing to say about TypeScript. The drift surfaces later, in a downstream UI project that copies both files in and fails to build, or worse reads a key that silently resolves to undefined.",
+      "impact": "A future `_trackDeployment` addition or removal in DeployMocks silently re-shapes the interface that mainnet-addresses.ts is annotated against, and nothing catches it until a downstream UI build breaks. This delta already exercised that path (StableStaker removed, Antimatter and StableStakerV2 added).",
+      "evidence": "`find <project>/work -maxdepth 2 -name 'tsconfig*.json' -not -path './node_modules/*'` -> no results. Key-set comparison script over addresses.ts / mainnet-addresses.ts / local-addresses.ts:\n  interface keys: 56 | mainnet keys: 59 | local keys: 56\n  IN INTERFACE, MISSING FROM mainnet-addresses.ts: []\n  IN mainnet-addresses.ts, NOT IN INTERFACE: ['BurnerEYE', 'BurnerFlax', 'BurnerSCX']\n  interface-vs-local delta: []",
+      "recommendation": "Add a minimal tsconfig.json covering server/deployments/*.ts with `strict: true`, and either declare the three Burner* keys on ContractAddresses (by adding their `_trackDeployment` calls, the codegen path story-080 itself insists on) or drop them from mainnet-addresses.ts. Then wire `tsc --noEmit` into the same GitHub workflow that already runs `forge fmt --check` / `forge build --sizes` / `forge test`, so the guard is enforced rather than asserted.",
+      "dedup": {
+        "verdict": "NEW",
+        "dedupId": "DEDUP-29-04",
+        "mintNewFingerprint": true,
+        "fingerprintBasis": "server/deployments/mainnet-addresses.ts:mainnetAddresses: ContractAddresses:UnenforceableDeclaredDriftGuard:dev",
+        "relatedLedgerEntries": [
+          "98e727214903 (L-07, seed artifact de-tracked) - adjacent file family only, distinct defect"
+        ],
+        "reasoning": "Independently verified this run: no tsconfig.json exists anywhere outside lib/, so the `: ContractAddresses` annotation story-080 names as 'the only drift guard' is never type-checked, and the two files already disagree. Not covered by 98e727214903, which is about a DELETED seed artifact breaking standalone runs, not about an unenforced type annotation. Not collapsed with DEDUP-29-03 - see that entry's reasoning.",
+        "doNotCollapseWith": [
+          "DEDUP-29-03"
+        ]
+      }
+    },
+    {
+      "title": "Phase 6.5b leaves CrossVersionMigrator holding the migrator role on both stakers, unlike the Phase 7.4 cutover 400 lines below it, and the terminal residual-privilege sweep does not cover the migrator role",
+      "severity": "low",
+      "severityRationale": "Not an access-control vulnerability: CrossVersionMigrator.initiateMigration and .migrate are both onlyOwner (CrossVersionMigrator.sol:147, :161) and the owner is trusted (Law 3). It is filed because the rehearsal is the template for a mainnet cutover and it certifies an end state that the file's own adjacent precedent treats as unacceptable residue — a competent operator mirroring this phase to mainnet would be surprised to learn the retired staker kept a live migrator role. QA-adjacent; deliberately not rated Medium.",
+      "contract": "script/DeployMocks.s.sol",
+      "function": "_rehearseStableStakerCutover",
+      "lineStart": 2304,
+      "lineEnd": 2312,
+      "entryPoint": "dev",
+      "rootCauseClass": "MissingPostStepConfiguration",
+      "category": "unintended-side-effect",
+      "description": "Phase 6.5b sets `stableStaker.setMigrator(migrator)` and `stableStakerV2.setMigrator(migrator)` (DeployMocks.s.sol:2245-2246) and never unsets either. It revokes the retired V1's phUSD mint grant at :2308 — the residue story-080 explicitly asked it to decide about — but not its migrator role. The immediately comparable phase in the same file, the story-079 PhlimboV2->V3 cutover, does the opposite: step 12 at DeployMocks.s.sol:2704-2706 is `phlimbo.setMigrator(address(0)); require(phlimbo.migrator() == address(0), ...); console.log(\"PhlimboV2.setMigrator(0) - migrator role revoked\")`. The terminal `_sweepResidualPrivileges` (:2038, run-26 L-04), which exists precisely to catch leftover privileges, asserts only the phUSD minter table via `_requireLiveMinter` and has no migrator row.",
+      "failureScenario": "The mainnet StableStakerV1->V2 cutover is scripted, as intended, from this rehearsal — it is the only executable description of the sequence, and its post-conditions are what the operator trusts. The operator mirrors Phase 6.5b: seed, wire the migrator on both sides, initiate, page and migrate, assert the pools drained, revoke V1's phUSD grant, done. Every assertion passes and the terminal residual-privilege sweep reports a clean phUSD ACL, because the sweep only knows about phUSD. The live StableStakerV2 is left in production with a CrossVersionMigrator — a contract with no address-book key, so it does not appear in any address surface anyone reviews — permanently holding its `migrator` role. A single later owner-signed `initiateMigration` through that contract moves a production pool to PoolState.Migrating, at which point every stake, withdraw and claim reverts with 'StableStaker: pool not active' until the pool is finalized and reset. The operator had no signal that the role was still live, because the sweep that exists to give exactly that signal does not check it.",
+      "impact": "The local chain ends every `dev` run with an untracked, address-book-less CrossVersionMigrator retaining `migrator` on the live StableStakerV2 — a role whose `initiateMigration` would move a production pool to PoolState.Migrating and block every stake/withdraw/claim (StableStakerV1.sol:331/352/396 and the V2 equivalent). The rehearsal therefore does not exercise, and does not prove, the role tear-down step that a mainnet cutover would need.",
+      "evidence": "`grep -n 'setMigrator' script/DeployMocks.s.sol` -> :2214, :2245, :2246 in Phase 6.5b with no `setMigrator(address(0))`; :2704 `phlimbo.setMigrator(address(0));` in Phase 7.4. `_sweepResidualPrivileges` (DeployMocks.s.sol:2038-2064) contains only `_requireLiveMinter` rows. `grep -n 'onlyOwner' lib/stable-staker/src/CrossVersionMigrator.sol` -> :147 `function initiateMigration(address token) external onlyOwner`, :161 `function migrate(address token, address[] calldata users) external onlyOwner`. Observed in the happy-path run log: `CrossVersionMigrator (untracked) deployed at: 0xe044814c9eD1e6442Af956a817c161192cBaE98F`, and the run ends with `end-state phUSD ACL asserted: ...` and no migrator assertion.",
+      "recommendation": "Mirror Phase 7.4: after `_assertStableStakerCutover` passes for all three pools, call `stableStaker.setMigrator(address(0))` with a read-back require, and add a migrator row to `_sweepResidualPrivileges` asserting the expected end-state migrator for every staker and Phlimbo the script deploys — the same table idiom `_requireLiveMinter` already uses, so drift names its own offender. If the destination V2 is intended to keep its migrator (the Phase 7.4 precedent leaves PhlimboV3's in place), assert that positively rather than leaving it unstated.",
+      "dedup": {
+        "verdict": "NEW (related-but-distinct sibling of b8e3d59139ae)",
+        "dedupId": "DEDUP-29-05",
+        "mintNewFingerprint": true,
+        "fingerprintBasis": "script/DeployMocks.s.sol:_rehearseStableStakerCutover:MissingPostStepConfiguration:dev",
+        "relatedLedgerEntries": [
+          "b8e3d59139ae (L-04, unrevoked deployer phUSD mint authority, fix-pending)"
+        ],
+        "reasoning": "Both are residual-privilege defects in DeployMocks, which is why they are worth naming together, but they are NOT one finding: different function (_rehearseStableStakerCutover vs run/_seedNudgeStream), different privilege (the migrator role on both stakers vs phUSD mint authority for the deployer), different holder (CrossVersionMigrator vs the deploy script itself), and different remedies. b8e3d59139ae's pending fix does not touch the migrator role, so collapsing them would let this one ride out on the other's fix and vanish when that entry closes. Keep separate; cross-reference only.",
+        "doNotCollapseWith": [
+          "b8e3d59139ae"
+        ]
+      }
+    },
+    {
+      "title": "dev-local.sh duplicates start:anvil's flags inline, so editing the start:anvil key no longer reaches `npm run dev`",
+      "severity": "low",
+      "severityRationale": "Pure QA drift surface with no current consequence — the two are byte-identical today. Filed because it was newly created by this delta and is silent by construction: nothing fails, the two just diverge.",
+      "contract": "dev-local.sh",
+      "function": "anvil launch",
+      "lineStart": 69,
+      "lineEnd": 71,
+      "entryPoint": "dev",
+      "rootCauseClass": "DuplicatedConfigurationSurface",
+      "category": "drift",
+      "description": "dev-local.sh:69 starts anvil directly rather than via `npm run start:anvil`, for a good and documented reason: `$!` must be anvil's own pid or the listener-ownership comparison at :110 and the trap at :36 would both be meaningless. The consequence is that the flag string now exists in two places, and package.json's `start:anvil` key — left byte-identical on purpose — is no longer on `dev`'s path.",
+      "failureScenario": "A developer needs the local chain to mine instantly instead of every 2 seconds, or needs more pre-funded accounts, or wants to point the local stack at a fork. They edit the obvious place — the `start:anvil` key in package.json — confirm it by running `npm run start:anvil` directly, and see the new behaviour. They then run `npm run dev` and get the OLD configuration, with no error and no warning, because dev-local.sh:69 carries its own copy of the flags. Debugging starts from the false premise that the flag change did not take effect at all.",
+      "impact": "A future change to the anvil configuration made in the obvious place (the `start:anvil` npm key: a different chain id, a `--fork-url`, a `--block-time` change, extra accounts) silently does not apply to `npm run dev`, and the two local environments diverge without any error.",
+      "evidence": "`package.json` -> `start:anvil = anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --block-time 2`; `dev-local.sh:69` -> `anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --block-time 2 &`. Byte-identical as of 9563c68.",
+      "recommendation": "Keep the direct launch (the pid reasoning is correct) but stop duplicating the string: define the flags once — e.g. an `ANVIL_FLAGS` value sourced from a single file that `start:anvil` also uses, or have dev-local.sh read the flags out of package.json — or, at minimum, add a comment on the `start:anvil` key pointing at dev-local.sh:69 so an editor of either is told about the other.",
+      "dedup": {
+        "verdict": "NEW",
+        "dedupId": "DEDUP-29-06",
+        "mintNewFingerprint": true,
+        "fingerprintBasis": "dev-local.sh:anvil launch:DuplicatedConfigurationSurface:dev",
+        "relatedLedgerEntries": [],
+        "reasoning": "dev-local.sh is new in this delta (story-081), so no prior entry can cover it. Deliberately NOT collapsed with DEDUP-29-07 despite sharing the file: this is a configuration-duplication drift hazard in the anvil LAUNCH line, DEDUP-29-07 is a signal-delivery defect in the trap/cleanup path. Same file is not a root cause. Flagged as the weakest of the seven for triage judgement - see flaggedForReview.",
+        "doNotCollapseWith": [
+          "DEDUP-29-07"
+        ]
+      }
+    },
+    {
+      "title": "A SIGINT or SIGTERM delivered to dev-local.sh's own pid rather than its process group leaves anvil running",
+      "severity": "low",
+      "severityRationale": "QA-level. The interactive Ctrl-C that story-081 set out to fix works correctly — verified. This is the narrow non-interactive variant, and its worst outcome is the leftover anvil that the new gates now refuse to deploy onto, i.e. a loud wedge rather than a silent absorption.",
+      "contract": "dev-local.sh",
+      "function": "cleanup / trap",
+      "lineStart": 35,
+      "lineEnd": 46,
+      "entryPoint": "dev",
+      "rootCauseClass": "DeferredTrapDuringForegroundChild",
+      "category": "unintended-side-effect",
+      "description": "`trap cleanup EXIT INT TERM` runs cleanup only once bash regains control. While dev-local.sh is blocked on its final foreground child, `npm run serve`, a trapped signal delivered to the shell alone is queued and never handled, because `npm run serve` never returns. An interactive Ctrl-C is unaffected — the terminal signals the entire foreground process group, so node exits, npm exits, and bash then runs cleanup — but `kill -INT <pid>` or `kill <pid>` against the pid a developer copies out of `ps` does not.",
+      "failureScenario": "A developer has `npm run dev` running, wants the port back, and does not have the terminal in front of them — they are in a second shell, or a script, or an editor task. They run `ps aux | grep dev-local`, take the pid, and `kill` it. Nothing happens: bash has the signal queued behind `npm run serve`, which never returns, so cleanup never runs. The developer sees no 'Tearing down Anvil' line, assumes the kill landed, and moves on. anvil is still bound to :8545 and its deployer nonce is now non-zero from the completed deployment, so their next `npm run dev` refuses at the pre-flight and their next `npm run deploy:local:forge` reverts with 'DeployMocks: chain is not fresh' — the script telling them, correctly but confusingly, about a node they believe they already killed.",
+      "impact": "The developer believes they stopped the stack; anvil is still bound to :8545 at a non-zero deployer nonce, so the next `npm run dev` refuses at its pre-flight and the next `npm run deploy:local:forge` reverts on the freshness gate until they `pkill anvil`.",
+      "evidence": "With the stack fully up (dev-local.sh pid 48591, anvil pid 48640, `npm run serve` answering HTTP 200 on :3001), ran `kill -INT 48591`; 6 seconds later: `dev-local ALIVE`, `48640 anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --block-time 2` still listed, `node server/index.js` still listed, `cast block-number --rpc-url http://localhost:8545` -> 583. Control: `kill -INT -48579` (the process GROUP, i.e. what Ctrl-C does) produced `Tearing down Anvil (pid 48640)...`, anvil gone, and `cast block-number` -> `Error: error sending request for url (http://localhost:8545/)`.",
+      "recommendation": "Have cleanup also kill anvil's process group, and stop blocking on a child that ignores the queued trap — e.g. run `npm run serve` in the background and `wait` on it (bash runs a pending trap as soon as `wait` is interrupted), or `exec` the server so there is no shell left to deceive. A one-line note in the script's usage comment that the stack must be stopped with Ctrl-C, not `kill <pid>`, would also close it.",
+      "dedup": {
+        "verdict": "NEW",
+        "dedupId": "DEDUP-29-07",
+        "mintNewFingerprint": true,
+        "fingerprintBasis": "dev-local.sh:cleanup / trap:DeferredTrapDuringForegroundChild:dev",
+        "relatedLedgerEntries": [
+          "11311795cd60 (run-28 M-01, fix-pending) - this is a residual gap in the SAME script that fix introduced",
+          "DEDUP-29-01 (leaked-node consumer)"
+        ],
+        "reasoning": "A distinct mechanism from DEDUP-29-06 (shell trap deferral while a foreground child runs, vs duplicated flags). Worth noting for triage but NOT collapsing: a leaked anvil left alive by this defect is precisely the pre-existing node that DEDUP-29-01 and 11311795cd60 then absorb, so the three form a chain of separate defects, not one finding. It is a residual gap in the story-081 fix rather than an incomplete fix of 11311795cd60 - 11311795cd60's claim is about freshness/ownership assertion, which dev-local.sh now does perform.",
+        "doNotCollapseWith": [
+          "DEDUP-29-06",
+          "11311795cd60"
+        ]
+      }
+    }
+  ],
+  "carriedForwardUnchanged": [
+    {
+      "fingerprint": "dcf756f7a897",
+      "label": "F-01",
+      "reason": "Neither commit in this delta touches _seedNudgeStream or the LOCAL_PROMO_KENDU pin. Carried forward verbatim; not re-derived, not re-filed, not re-fingerprinted."
+    },
+    {
+      "fingerprint": "beb259209f88",
+      "label": "F-02",
+      "reason": "Neither commit in this delta touches _seedNudgeStream. Carried forward verbatim; not re-derived, not re-filed, not re-fingerprinted."
+    }
+  ],
+  "setAside": [],
+  "setAsideNote": "EMPTY BY RESULT, NOT BY OMISSION. All 7 candidates survive: 6 mint new fingerprints and 1 (DEDUP-29-02) reconciles into existing entry d3aa1e35c995 rather than minting a near-duplicate. Nothing was quality-filtered, nothing was dropped as tool noise, and no finding left this run invisibly. Consequently no manual-review.json was written for this pass - there is nothing to park.",
+  "flaggedForReview": [
+    {
+      "dedupId": "DEDUP-29-06",
+      "question": "DuplicatedConfigurationSurface (anvil flags duplicated between start:anvil and dev-local.sh) is the weakest of the seven and is close to the maintainability/QA line. It is retained because it has a concrete divergence failureScenario and because dropping it is exactly the report-tidiness trade Law 1 forbids, but a human may reasonably triage it to QA at /ledger."
+    },
+    {
+      "dedupId": "DEDUP-29-02",
+      "question": "Severity escalation qa -> low on existing entry d3aa1e35c995 is PROPOSED only. A human must apply it via /ledger. Note also that the value IS documented at CLAUDE.md:476, which partially contradicts Q-02's title text 'nor documents it anywhere the operator will look' - the accurate claim is that it is documented only in prose and provided by no mechanism."
+    }
+  ],
+  "ledgerNotes": [
+    {
+      "fingerprint": "bd268808fbd5",
+      "auditorJudgement": "failed-run variant is a SHARPENING of the same root cause, deliberately not minted as a new fingerprint",
+      "verdict": "CONFIRMED",
+      "reasoning": "Same contract (package.json), same function (clean:local / deploy:local), same entryPoint (dev), same defect: the clean step deletes git-TRACKED files (broadcast/DeployMocks.s.sol/31337/run-latest.json and server/deployments/progress.31337.json). The new evidence changes only the CONSEQUENCE - on a failed run the deletions are never re-created, so the operator is left with a dirty tree and no stack - which is a worse manifestation of one defect, not a second defect. Minting a fingerprint for it would split one entry's history in two. Recommend appending the failed-run evidence to bd268808fbd5's note at /ledger and leaving the fingerprint untouched.",
+      "caveat": "One scope shift SHOULD be recorded on that entry: the '...AndLiveNode' half of its rootCauseClass no longer holds for `dev`, because dev-local.sh now runs clean:local BEFORE anvil starts. It still holds for deploy:local as invoked by verify-stable-staker.sh. This is a note, not a re-classification - editing the rootCauseClass string would re-mint the fingerprint."
+    },
+    {
+      "fingerprint": "8aa45828a222",
+      "verdict": "NOT RE-FILED",
+      "reasoning": "wont-fix on 2026-09-08 owner triage, and the auditor reports the fix landed. No candidate in this set touches wagmi.config.ts or the update:hooks publish chain, so there is no re-file risk and no disclosure obligation under the re-filing-an-owner-wont-fix rule."
+    },
+    {
+      "fingerprint": "eda176428286",
+      "verdict": "NOT FOUND IN LEDGER",
+      "reasoning": "Named in the dedup brief as an existing `dev` entry, but no finding in phoenix-phase-2-staging/ledger.json has a fingerprint with this prefix. Flagged rather than assumed benign: either the prefix is mistyped in the brief or an entry is missing. No candidate was reconciled against it."
+    },
+    {
+      "fingerprint": "c8c6fe8557a8",
+      "verdict": "NO OVERLAP",
+      "reasoning": "L-05 no-terminating-success-signal. No candidate this run concerns dev's exit semantics."
+    },
+    {
+      "fingerprint": "c35f8cdc52dc",
+      "verdict": "NO OVERLAP",
+      "reasoning": "L-01 OpenZeppelin canonicalization / storage layout. Unrelated to all seven candidates."
+    },
+    {
+      "fingerprint": "98e727214903",
+      "verdict": "NO OVERLAP (adjacent only)",
+      "reasoning": "L-07 de-tracked local.json. Shares the server/deployments directory with DEDUP-29-04 but is a distinct defect - see DEDUP-29-04 reasoning."
+    },
+    {
+      "fingerprint": "12bcca3b617c",
+      "verdict": "NO OVERLAP",
+      "reasoning": "L-03 Kendu promotion armed locally. No candidate this run concerns _armLocalKenduPromotion."
+    },
+    {
+      "fingerprint": "b8e3d59139ae",
+      "verdict": "RELATED SIBLING, NOT DUPLICATE",
+      "reasoning": "See DEDUP-29-05 reasoning."
+    }
+  ]
+}

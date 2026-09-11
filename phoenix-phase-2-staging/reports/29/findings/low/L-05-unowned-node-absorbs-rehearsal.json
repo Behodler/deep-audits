@@ -1,0 +1,125 @@
+{
+  "title": "verify-stable-staker.sh silently adopts whatever node already holds 8545 when its own anvil fails to bind, running the V1->V2 cutover verification on a node it does not own and leaving that node dirty and alive",
+  "severity": "low",
+  "severityRationale": "Low, and the severity is now settled on evidence rather than assumption. DeployMocks.s.sol:445 blocks adoption of a DIRTY node, so the only reachable case is a foreign node that was FRESH (deployer nonce 0) at hand-off - which means the deployment landing on it is functionally identical to one on a self-started anvil (same deterministic CREATE addresses, same state) and the verification result it produces is legitimate rather than false. The one scenario that could have made the result genuinely misleading - a mainnet-forked anvil forced to chainid 31337, which would slip past the chainid gate - WAS TESTED AND IS BLOCKED: the deployer 0xf39Fd6e5... is a publicly-known test key with a real mainnet nonce of 7893, so the freshness gate fires and not a single mock is deployed. Both remaining consequences are LOUD, not silent: the next `npm run dev` refuses at its pre-flight and the next `npm run test:stable-staker` reverts on the freshness gate. Local harness, throwaway chain, no user funds, no mainnet broadcast. That is Low. It is still a real defect and still the same root cause as run-28 M-01 - the operator is told `Anvil is up.` about a process that is dead, and the harness verifies a mainnet-cutover mechanism on a node whose provenance it never established.",
+  "contract": "verify-stable-staker.sh",
+  "function": "readiness loop (lines 51-57) + cleanup (lines 32-40)",
+  "lineStart": 51,
+  "lineEnd": 57,
+  "entryPoint": "test:stable-staker",
+  "rootCauseClass": "UnownedNodeAbsorbsRehearsal",
+  "category": "cluster-interaction",
+  "relatedFinding": "Same root cause as ledger 11311795cd60 (run-28 M-01, `dev`, status fix-pending). That entry is scoped to the `dev` entry point and is COMPLETELY FIXED at 9563c68 — this is NOT a re-file of it and NOT an incomplete fix of it; it is the identical defect surviving in the sibling entry point story-080 retargeted in this same delta. Disclosed rather than silently minted as a fresh issue.",
+  "faithfulness": "story-081's remit was 'fix `dev`'; it did that. The sibling was in scope of story-080 (which retargeted verify-stable-staker.sh onto StableStakerV2) but neither story revisited its orchestration.",
+  "description": "verify-stable-staker.sh starts its own anvil unconditionally — there is no port pre-flight, where dev-local.sh:48-55 now has one. Its readiness loop (lines 51-57) polls only `cast block-number`, with no `kill -0 \"$ANVIL_PID\"` liveness check (dev-local.sh:76-79 has one), no ANVIL_UP flag, and no listener-ownership comparison (dev-local.sh:99-116 has one). When another process already holds :8545, the script's own anvil dies on 'Address already in use', the readiness loop is satisfied by the FOREIGN node, and the script announces 'Anvil is up.' about a pid that no longer exists. At exit, cleanup() kills that dead recorded pid and leaves the foreign node running. DeployMocks.s.sol:445 (`require(vm.getNonce(deployer) == 0, ...)`) still blocks the case where the foreign node carries a prior deployment, so adoption only succeeds against a FRESH foreign node.",
+  "failureScenario": "A developer leaves an anvil running from an earlier session or another tool - they ran `npm run start:anvil` in a second terminal to poke at something, or a previous `test:stable-staker` exited via the path in this finding. That node is fresh: nothing has deployed to it, so the deployer's nonce is 0. The developer runs `npm run test:stable-staker`. The script's own anvil dies immediately on 'Address already in use'; the readiness loop nevertheless sees the foreign node answer and prints 'Anvil is up.'; `deploy:local` deploys the whole mock stack onto the foreign node, which passes both the chainid and the freshness gate because it is fresh; STEP 1-3 stake, advance the clock by a day, assert the Antimatter accrual and the withdraw, and the script reports 'ALL ASSERTIONS PASSED'. The developer believes they exercised an isolated node they started and controlled; they did not, and the script never told them their anvil died. On exit, cleanup kills the dead pid and the foreign node survives at a deployer nonce of 480. The developer's next `npm run dev` now refuses at its pre-flight with 'something is already answering on http://localhost:8545', and their next `npm run test:stable-staker` reverts with 'DeployMocks: chain is not fresh', until they work out that they need to `pkill anvil`.\n\nTHE BOUNDARY, ESTABLISHED BY TEST: the adopted node must be genuinely fresh for this to reach the assertions. The two worse variants both fail closed. If the leftover node already carries a deployment, the freshness gate reverts before anything is deployed. If it is a mainnet fork forced to `--chain-id 31337` - the case that would have made the passing verification genuinely misleading, because the mock stack would land on top of real forked state - the gate also reverts, because the deployer is anvil's public account 0 and its real mainnet nonce is 7893 (measured on a live fork at block 25943238; zero mocks deployed, zero assertions reached). So the harm is bounded to running on an unowned-but-equivalent node, plus the leftover-node wedge - which is what holds this at Low rather than Medium.",
+  "impact": "(a) The story-080 V1->V2 cutover verification - the automated check that certifies the migration mechanics before they are mirrored to mainnet - executes against a node the operator did not start, does not observe, and cannot attest to. Because the adopted node must be fresh for the deploy to succeed, what passed did legitimately pass; the loss is the operator's ability to know that. (b) The run leaves the now-dirty foreign node alive at deployer nonce 480, wedging both local entry points until a manual `pkill anvil`. (c) The 'Anvil is up.' line is affirmatively false whenever this triggers, which is the specific misreport story-081 added `kill -0` to dev-local.sh to prevent. The impact does NOT extend to a mock stack landing on forked mainnet state: that variant was tested against a live mainnet fork and is blocked by the freshness gate.",
+  "evidence": "Setup, measured in the SAME shell invocation immediately before launching the sibling:\n  $ anvil --host 0.0.0.0 --port 8545 --chain-id 31337 &\n  $ FPID=$(ss -lptnH 'sport = :8545' | grep -o 'pid=[0-9]*' | cut -d= -f2)\n  $ echo \"FOREIGN anvil pid=$FPID nonce=$(cast nonce 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --rpc-url http://localhost:8545)\"\n  FOREIGN anvil pid=58309 nonce=0\nThen `cd <project>/work && npm run test:stable-staker`. Observed in the log, in order:\n  === Cleaning previous local deployment artifacts ===\n  Anvil pid: 58397\n  Anvil is up.\n  === Deploying mocks (deploy:local) ===\n  ...\n  === verify-stable-staker.sh: ALL ASSERTIONS PASSED ===\n`ps -p 58397` -> 'own anvil 58397 DEAD'. Neither gate fired at any point in the run: `grep -c 'chain is not fresh' D2.log` -> 0 and `grep -c 'DeployMocks: local only' D2.log` -> 0, which independently confirms the deployer nonce was still 0 when `deploy:local` ran. After exit: `ps -p 58309` -> `58309 anvil --host 0.0.0.0 --port 8545 --chain-id 31337` (STILL ALIVE), `cast nonce 0xf39Fd6e5... --rpc-url http://localhost:8545` -> 480. Control: on a clean machine the same command passes and tears its own anvil down correctly (`Tearing down Anvil (pid 57455)...`, no residual process).",
+  "evidenceCaveat": "The nonce was measured at hand-off (immediately before `npm run test:stable-staker` was launched), not at the exact instant `deploy:local` executed. Nothing transacted as the deployer in between — the foreign anvil was started without --block-time and sat idle — and the two never-fired gates above prove the nonce was still 0 at the require. Stating this plainly rather than claiming a measurement I did not take at that instant.",
+  "recommendation": "Give verify-stable-staker.sh the same three guards dev-local.sh now has, or better, factor them into one shared helper both source: (1) a port pre-flight that refuses to start when `cast block-number` on :8545 succeeds, with the same 'kill it (pkill anvil) and re-run' message; (2) a `kill -0 \"$ANVIL_PID\"` check inside the readiness loop plus an ANVIL_UP flag, so a dead anvil fails loudly instead of the loop falling through on a foreign node's answer; (3) the ss/lsof listener-ownership comparison. Also upgrade `set -e` to `set -Eeuo pipefail` and widen `trap cleanup EXIT` to `EXIT INT TERM`, for the reason story-081 gave: the defect class being fixed is a discarded exit status.",
+  "forkedNodeResidual": "CLOSED BY TEST, not parked. Question: can a mainnet-forked anvil forced to `--chain-id 31337` be adopted by the sibling, landing the mock stack on top of forked mainnet state? ANSWER: NO - the freshness gate blocks it. Commands and real output:\n  $ . /home/justin/code/audits/.envrc   # RPC_MAINNET\n  $ anvil --fork-url $RPC_MAINNET --chain-id 31337 --port 8545 &\n      Fork / Block number: 25943238 / Chain ID: 31337 / Listening on 127.0.0.1:8545\n  $ cast chain-id     --rpc-url http://localhost:8545  -> 31337      (P5 chainid gate PASSES - does NOT fire)\n  $ cast block-number --rpc-url http://localhost:8545  -> 25943238\n  $ cast nonce 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 --rpc-url http://localhost:8545 -> 7893\n  $ cast balance 0xf39Fd6e5... -> 10000000000000000000000   (anvil funds its dev account even on a fork, but PRESERVES the forked nonce)\n  $ cd <project>/work && npm run test:stable-staker    -> EXIT=1\n      Anvil pid: 61175 / Anvil is up. / === Deploying mocks (deploy:local) ===\n      |- [0] console::log(\"Chain ID:\", 31337 [3.133e4]) [staticcall]\n      |- [0] VM::getNonce(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266) [staticcall]\n      |   |- <- [Return] 7893\n      +- <- [Revert] DeployMocks: chain is not fresh - a prior deployment is already on 8545; kill it and re-run\n      Error: script failed: DeployMocks: chain is not fresh - ...\n  $ grep -c 'deployed at:'          F-verify.log -> 0   (ZERO mocks deployed onto the fork)\n  $ grep -c 'ALL ASSERTIONS PASSED' F-verify.log -> 0   (the sibling asserted nothing)\nWHY IT HOLDS: the deployer is anvil's well-known account 0, whose private key is public, so on real mainnet it has been used ~7893 times. Any mainnet fork therefore inherits a large non-zero nonce and trips the freshness gate. This is a property of the forked state, not of the script - a fork of a chain where that address had never transacted would still be adopted - but for the mainnet fork this repo actually targets, the gate is decisive.",
+  "devExposure": "`dev` IS NOT EXPOSED AT ALL - only the sibling is. dev-local.sh's port pre-flight refuses ANY node that answers on 8545, one layer before the chainid and freshness gates are ever reached. Verified against the same live fork:\n  $ cd <project>/work && ./dev-local.sh\n  === Pre-flight: checking nothing already owns http://localhost:8545 ===\n  Error: something is already answering on http://localhost:8545.\n         A leftover node would silently absorb this deployment and every\n         post-condition would still pass. Kill it (pkill anvil) and re-run.\nThis is exactly the asymmetry the finding is about: story-081 gave `dev` a guard that makes the question moot, and did not give it to the sibling, which has to fall back on the Solidity gate.",
+  "dedup": {
+    "verdict": "NEW",
+    "dedupId": "DEDUP-29-01",
+    "mintNewFingerprint": true,
+    "fingerprintBasis": "verify-stable-staker.sh:readiness loop (lines 51-57) + cleanup (lines 32-40):UnownedNodeAbsorbsRehearsal:test:stable-staker",
+    "relatedLedgerEntries": [
+      "11311795cd60 (run-28 M-01, fix-pending)"
+    ],
+    "reasoning": "Same ROOT CAUSE family as 11311795cd60 (a harness adopts a node whose provenance it never established) but a DIFFERENT entry point: test:stable-staker vs dev. entryPoint is folded into the fingerprint by design, so this is a distinct ledger entry, not a re-file. Explicitly NOT an incompleteFixOf 11311795cd60: that entry is a COMPLETE fix for the `dev` entry point (dev-local.sh owns its anvil pid and pre-flights the port); the sibling shell script was simply never brought under the same discipline. Filing it as an incomplete fix would wrongly signal that the `dev` patch is defective.",
+    "doNotCollapseWith": [
+      "11311795cd60",
+      "DEDUP-29-05",
+      "DEDUP-29-06",
+      "DEDUP-29-07"
+    ]
+  },
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "sanitization": {
+    "reconciliation": {
+      "origin": "new",
+      "mintNewFingerprint": true,
+      "fingerprintBasis": "verify-stable-staker.sh:readiness loop (lines 51-57) + cleanup (lines 32-40):UnownedNodeAbsorbsRehearsal:test:stable-staker",
+      "disclosure": {
+        "required": true,
+        "priorEntry": "11311795cd60678435822a60f5df8ceb4350d465c12065ba56f7275164f3a8ee",
+        "priorEntryLabel": "M-01 (run-28, medium, fix-pending -> fixed PROPOSED this run)",
+        "relationship": "same root-cause family (a harness adopts a node whose provenance it never established), DIFFERENT entry point (test:stable-staker vs dev)",
+        "isRefile": false,
+        "isIncompleteFixOf": false,
+        "basisForSeparateFiling": "entryPoint is folded into the fingerprint by design, so dedup cannot flag this against 11311795cd60 and it would otherwise be filed silently as unrelated. The story-081 fix is COMPLETE for `dev` (proved by execution this run); verify-stable-staker.sh was simply never brought under the same ownership/freshness discipline. Filing it as an incompleteFixOf would wrongly signal the dev patch is defective.",
+        "readerWarning": "Do not close this finding when 11311795cd60 closes; they are separate surfaces."
+      }
+    },
+    "knownIssueAnnotations": [
+      {
+        "cachedKnownIssue": "Mock contracts with unlimited minting (testing infrastructure only)",
+        "resemblance": "adjacent only (local mock harness context); does not describe unowned-node adoption",
+        "suppressed": false
+      }
+    ],
+    "validity": {
+      "knownInvalidChecked": true,
+      "matchedKnownInvalidPattern": null,
+      "law3": "non-malicious developer assumed; no malicious-dev framing present in this finding (grep-verified across the candidate set)",
+      "footgunTest": "a competent, non-malicious developer would be surprised by this consequence => footgun, in scope",
+      "localOnlyNotASuppressionGround": "`dev` is a local rehearsal harness on a throwaway anvil chain; the harm channel is FALSE ASSURANCE about a mainnet cutover, which is legitimate. Local-only was not used as a suppression ground.",
+      "verdict": "VALID - passed through"
+    }
+  },
+  "id": "CLASS-29-01",
+  "label": "L-05",
+  "proposedSeverity": "low",
+  "severityMoved": false,
+  "movedDirection": null,
+  "plausibility": "plausible",
+  "regression": false,
+  "routing": "qa-report.md (Low band; no High/Medium this run, so no individual submissions/<label>.md is owed)",
+  "storyDeviation": null,
+  "classification": {
+    "assetImpact": "None. Throwaway anvil chain (chainId 31337), no user funds, no mainnet broadcast, no external attacker. The asset actually at stake is OPERATOR ASSURANCE about the story-080 V1->V2 cutover mechanics, not value.",
+    "attackPath": [
+      "No attacker. Accident path, reproduced empirically as side-effects test D2:",
+      "1. A leftover/foreign anvil already holds :8545 at deployer nonce 0 (e.g. a second-terminal `npm run start:anvil`).",
+      "2. `npm run test:stable-staker` starts its own anvil, which dies immediately on 'Address already in use'.",
+      "3. The readiness loop polls only `cast block-number` (no `kill -0 $ANVIL_PID`), is satisfied by the FOREIGN node, and prints 'Anvil is up.' about a dead pid.",
+      "4. deploy:local + STEP1/2/3 run on the unowned node and report 'ALL ASSERTIONS PASSED'.",
+      "5. cleanup kills the dead pid; the foreign node survives at deployer nonce 480, wedging the next `dev` and the next `test:stable-staker`."
+    ],
+    "likelihood": "moderate for the trigger (a leftover anvil is a routine developer state); the CONSEQUENCE is bounded because both worse variants fail closed.",
+    "assumptions": "The adopted node must be genuinely FRESH (deployer nonce 0) to reach the assertions; DeployMocks.s.sol:445 blocks a dirty node.",
+    "externalRequirements": "A foreign node bound to :8545 before the script runs."
+  },
+  "classifierJustification": "CONFIRMED Low; the walk-back from Medium is correct and I endorse it on the evidence, not on deference. The false-assurance channel is legitimate in principle but is empirically CLOSED here in both directions that would make a passing verification misleading: (a) a dirty adopted node reverts at the freshness gate before anything deploys; (b) the mainnet-fork variant - the only one that would land the mock stack on top of real forked state - was TESTED against a live fork at block 25943238 and FAILS CLOSED (chainid forced to 31337 so the chainid gate does not fire, but anvil preserves the forked deployer nonce 7893, so the freshness gate fires; grep -c 'deployed at:' = 0, grep -c 'ALL ASSERTIONS PASSED' = 0). What remains reachable is adoption of an unowned-but-EQUIVALENT node: byte-identical deterministic CREATE addresses were observed against the self-started run, so the verification that passed did legitimately pass. The residual loss is the operator's ability to KNOW that, plus a leftover-node wedge whose two downstream symptoms are both LOUD (pre-flight refusal; 'chain is not fresh' revert). Loud + no false result + no funds = Low, not Medium. It is a genuine defect and a genuine footgun ('Anvil is up.' is affirmatively false), so it is not QA either.",
+  "caveatsForHuman": [
+    "HONEST RESIDUAL, recorded not suppressed: the freshness gate is decisive because of WHICH key anvil hands out (account 0 = 0xf39Fd6e5..., a heavily-used public test key), NOT by design. A fork of a chain on which that address never transacted would still be adopted, and the mock stack would land on top of real forked state. That is a caveat and a re-weigh trigger, not a Medium trigger today: the finding as filed concerns local anvil adoption, and no such fork target is in this repo's workflow.",
+    "REOPEN/RE-WEIGH TRIGGER: if the freshness gate is ever changed to something other than a nonce check on account 0, or if a fork target with an unused deployer enters the workflow, re-weigh to Medium.",
+    "DISCLOSURE OBLIGATION (from sanitize block, preserved): related to ledger 11311795cd60 (run-28 M-01, medium, fix-pending) by ROOT CAUSE FAMILY only. Different entryPoint (test:stable-staker vs dev), which is folded into the fingerprint by design. It is NOT a re-file and NOT an incompleteFixOf - the story-081 `dev` fix is COMPLETE, proved by execution. Do NOT close this when 11311795cd60 closes."
+  ],
+  "auditorSeverityRationalePreserved": true,
+  "isFaithfulnessFinding": false,
+  "issueId": "pps29l5",
+  "fingerprint": "2f86e3864eadb6e29715fda85d1f5df51a5acf56dff39466505d7defadb69551",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-29",
+  "commit": "9563c68094e516a91d27684252e6a103271d69cf",
+  "headCommit": "9563c68",
+  "status": "ready",
+  "origin": "new",
+  "firstSeenRun": "phoenix-phase-2-staging-29",
+  "lastSeenRun": "phoenix-phase-2-staging-29",
+  "ledgerContract": "lib/phoenix-phase-2-staging/verify-stable-staker.sh",
+  "fingerprintBasis": "lib/phoenix-phase-2-staging/verify-stable-staker.sh:readiness loop (lines 51-57) + cleanup (lines 32-40):UnownedNodeAbsorbsRehearsal:test:stable-staker",
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-09-10T00:15:22Z",
+    "updatedAt": "2026-09-10T00:15:22Z",
+    "scanOrigin": "script-audit-29-dev",
+    "classificationOrigin": "CLASS-29-01"
+  },
+  "isNewLedgerEntry": true
+}

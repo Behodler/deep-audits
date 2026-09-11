@@ -1,0 +1,113 @@
+{
+  "title": "Phase 6.5b leaves CrossVersionMigrator holding the migrator role on both stakers, unlike the Phase 7.4 cutover 400 lines below it, and the terminal residual-privilege sweep does not cover the migrator role",
+  "severity": "low",
+  "severityRationale": "Not an access-control vulnerability: CrossVersionMigrator.initiateMigration and .migrate are both onlyOwner (CrossVersionMigrator.sol:147, :161) and the owner is trusted (Law 3). It is filed because the rehearsal is the template for a mainnet cutover and it certifies an end state that the file's own adjacent precedent treats as unacceptable residue — a competent operator mirroring this phase to mainnet would be surprised to learn the retired staker kept a live migrator role. QA-adjacent; deliberately not rated Medium.",
+  "contract": "script/DeployMocks.s.sol",
+  "function": "_rehearseStableStakerCutover",
+  "lineStart": 2304,
+  "lineEnd": 2312,
+  "entryPoint": "dev",
+  "rootCauseClass": "MissingPostStepConfiguration",
+  "category": "unintended-side-effect",
+  "description": "Phase 6.5b sets `stableStaker.setMigrator(migrator)` and `stableStakerV2.setMigrator(migrator)` (DeployMocks.s.sol:2245-2246) and never unsets either. It revokes the retired V1's phUSD mint grant at :2308 — the residue story-080 explicitly asked it to decide about — but not its migrator role. The immediately comparable phase in the same file, the story-079 PhlimboV2->V3 cutover, does the opposite: step 12 at DeployMocks.s.sol:2704-2706 is `phlimbo.setMigrator(address(0)); require(phlimbo.migrator() == address(0), ...); console.log(\"PhlimboV2.setMigrator(0) - migrator role revoked\")`. The terminal `_sweepResidualPrivileges` (:2038, run-26 L-04), which exists precisely to catch leftover privileges, asserts only the phUSD minter table via `_requireLiveMinter` and has no migrator row.",
+  "failureScenario": "The mainnet StableStakerV1->V2 cutover is scripted, as intended, from this rehearsal — it is the only executable description of the sequence, and its post-conditions are what the operator trusts. The operator mirrors Phase 6.5b: seed, wire the migrator on both sides, initiate, page and migrate, assert the pools drained, revoke V1's phUSD grant, done. Every assertion passes and the terminal residual-privilege sweep reports a clean phUSD ACL, because the sweep only knows about phUSD. The live StableStakerV2 is left in production with a CrossVersionMigrator — a contract with no address-book key, so it does not appear in any address surface anyone reviews — permanently holding its `migrator` role. A single later owner-signed `initiateMigration` through that contract moves a production pool to PoolState.Migrating, at which point every stake, withdraw and claim reverts with 'StableStaker: pool not active' until the pool is finalized and reset. The operator had no signal that the role was still live, because the sweep that exists to give exactly that signal does not check it.",
+  "impact": "The local chain ends every `dev` run with an untracked, address-book-less CrossVersionMigrator retaining `migrator` on the live StableStakerV2 — a role whose `initiateMigration` would move a production pool to PoolState.Migrating and block every stake/withdraw/claim (StableStakerV1.sol:331/352/396 and the V2 equivalent). The rehearsal therefore does not exercise, and does not prove, the role tear-down step that a mainnet cutover would need.",
+  "evidence": "`grep -n 'setMigrator' script/DeployMocks.s.sol` -> :2214, :2245, :2246 in Phase 6.5b with no `setMigrator(address(0))`; :2704 `phlimbo.setMigrator(address(0));` in Phase 7.4. `_sweepResidualPrivileges` (DeployMocks.s.sol:2038-2064) contains only `_requireLiveMinter` rows. `grep -n 'onlyOwner' lib/stable-staker/src/CrossVersionMigrator.sol` -> :147 `function initiateMigration(address token) external onlyOwner`, :161 `function migrate(address token, address[] calldata users) external onlyOwner`. Observed in the happy-path run log: `CrossVersionMigrator (untracked) deployed at: 0xe044814c9eD1e6442Af956a817c161192cBaE98F`, and the run ends with `end-state phUSD ACL asserted: ...` and no migrator assertion.",
+  "recommendation": "Mirror Phase 7.4: after `_assertStableStakerCutover` passes for all three pools, call `stableStaker.setMigrator(address(0))` with a read-back require, and add a migrator row to `_sweepResidualPrivileges` asserting the expected end-state migrator for every staker and Phlimbo the script deploys — the same table idiom `_requireLiveMinter` already uses, so drift names its own offender. If the destination V2 is intended to keep its migrator (the Phase 7.4 precedent leaves PhlimboV3's in place), assert that positively rather than leaving it unstated.",
+  "dedup": {
+    "verdict": "NEW (related-but-distinct sibling of b8e3d59139ae)",
+    "dedupId": "DEDUP-29-05",
+    "mintNewFingerprint": true,
+    "fingerprintBasis": "script/DeployMocks.s.sol:_rehearseStableStakerCutover:MissingPostStepConfiguration:dev",
+    "relatedLedgerEntries": [
+      "b8e3d59139ae (L-04, unrevoked deployer phUSD mint authority, fix-pending)"
+    ],
+    "reasoning": "Both are residual-privilege defects in DeployMocks, which is why they are worth naming together, but they are NOT one finding: different function (_rehearseStableStakerCutover vs run/_seedNudgeStream), different privilege (the migrator role on both stakers vs phUSD mint authority for the deployer), different holder (CrossVersionMigrator vs the deploy script itself), and different remedies. b8e3d59139ae's pending fix does not touch the migrator role, so collapsing them would let this one ride out on the other's fix and vanish when that entry closes. Keep separate; cross-reference only.",
+    "doNotCollapseWith": [
+      "b8e3d59139ae"
+    ]
+  },
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "sanitization": {
+    "reconciliation": {
+      "origin": "new",
+      "mintNewFingerprint": true,
+      "fingerprintBasis": "script/DeployMocks.s.sol:_rehearseStableStakerCutover:MissingPostStepConfiguration:dev"
+    },
+    "knownIssueAnnotations": [
+      {
+        "cachedKnownIssue": "Mock contracts with unlimited minting (testing infrastructure only)",
+        "resemblance": "superficial - this finding is about a residual migrator ROLE left on both stakers after a rehearsed cutover, not about mock mint caps",
+        "suppressed": false
+      },
+      {
+        "cachedKnownIssue": "Admin trust assumptions for registering stablecoins, setting rates, etc. (operational risk)",
+        "resemblance": "superficial - a non-obvious residual-privilege footgun in a rehearsal, not an asserted admin-trust assumption",
+        "suppressed": false
+      }
+    ],
+    "validity": {
+      "knownInvalidChecked": true,
+      "matchedKnownInvalidPattern": null,
+      "law3": "non-malicious developer assumed; no malicious-dev framing present in this finding (grep-verified across the candidate set)",
+      "footgunTest": "a competent, non-malicious developer would be surprised by this consequence => footgun, in scope",
+      "localOnlyNotASuppressionGround": "`dev` is a local rehearsal harness on a throwaway anvil chain; the harm channel is FALSE ASSURANCE about a mainnet cutover, which is legitimate. Local-only was not used as a suppression ground.",
+      "verdict": "VALID - passed through"
+    }
+  },
+  "id": "CLASS-29-05",
+  "label": "L-06",
+  "proposedSeverity": "low",
+  "severityMoved": false,
+  "movedDirection": null,
+  "plausibility": "plausible",
+  "regression": false,
+  "routing": "qa-report.md (Low band; no High/Medium this run, so no individual submissions/<label>.md is owed)",
+  "storyDeviation": null,
+  "classification": {
+    "assetImpact": "None on the local throwaway chain. The PROSPECTIVE impact, if the mainnet cutover is mirrored from this rehearsal, is availability: a live CrossVersionMigrator retaining `migrator` on production StableStakerV2, whose owner-signed initiateMigration would move a pool to PoolState.Migrating and revert every stake/withdraw/claim with 'StableStaker: pool not active' until the pool is finalized and reset.",
+    "attackPath": [
+      "No attacker; this is a Law-3 operational footgun, not an access-control vulnerability (CrossVersionMigrator.initiateMigration and .migrate are both onlyOwner at :147/:161, and the owner is trusted).",
+      "1. Phase 6.5b sets stableStaker.setMigrator(migrator) and stableStakerV2.setMigrator(migrator) (DeployMocks.s.sol:2245-2246) and never unsets either.",
+      "2. It revokes the retired V1's phUSD mint grant at :2308 but not its migrator role.",
+      "3. The terminal _sweepResidualPrivileges (:2038) - which exists precisely to catch leftover privileges - asserts only the phUSD minter table and has NO migrator row, so it reports a clean end state.",
+      "4. An operator scripts the mainnet cutover from this rehearsal (it is the only executable description of the sequence) and mirrors the phase.",
+      "5. Production V2 is left with an address-book-less CrossVersionMigrator holding `migrator`, with no signal, because the mechanism built to give that signal does not check it."
+    ],
+    "likelihood": "low for the full chain: it needs the mainnet script to be derived from this phase, the operator not to notice, and a later erroneous initiateMigration through a contract with no address-book key.",
+    "assumptions": "That the rehearsal is the template for the mainnet cutover - which is its stated purpose, and is the premise of the whole entry point.",
+    "externalRequirements": "A mainnet cutover that does not yet exist, plus a subsequent owner-signed call."
+  },
+  "classifierJustification": "Low CONFIRMED - but this is the STRONGEST Medium candidate in the set and the classification is deliberate, not reflexive. The Medium case is real: the rehearsal certifies an end state that the file's OWN adjacent precedent treats as unacceptable residue (the story-079 PhlimboV2->V3 cutover at :2704-2706 does `setMigrator(address(0))` with a read-back require and a console line), and a residual-privilege sweep that reports clean while a live role remains is exactly the false-assurance channel that earned run-28 its Mediums. Three things hold it at Low. (1) The certified-wrong end state has NO consequence where it actually exists - a throwaway 31337 chain with no funds. (2) The mainnet consequence requires code that does not exist yet; the ROOT CAUSE is demonstrated (the missing setMigrator(0) and the missing sweep row), so this is not the 'speculation on future code' known-invalid, but a prospective harm two owner-actions away is not 'protocol function or availability impacted' today. (3) The correct template is visible in the SAME FILE 400 lines below, so an operator mirroring the sequence has a competing and correct precedent in front of them. Under 'when uncertain, classify lower' and 'an honest Low beats an overstated Medium', Low. It is well above QA: the footgun test is met squarely - a competent, non-malicious operator WOULD be surprised to learn the retired staker kept a live migrator role while the sweep called the end state clean.",
+  "caveatsForHuman": [
+    "RE-WEIGH TO MEDIUM TRIGGER, and it should be honoured rather than forgotten: the moment a mainnet StableStakerV1->V2 cutover script is actually derived from Phase 6.5b, the prospective leg becomes concrete and this is a Medium. Re-weigh at that point, do not wait for a second audit to rediscover it.",
+    "Do NOT collapse with, and do NOT let it close alongside, ledger b8e3d59139ae (L-04, deployer phUSD mint authority, fix-pending). Different function, different privilege, different holder, different remedy; b8e3d59139ae's pending fix does not touch the migrator role, so a collapse would let this ride out on that fix and vanish when it closes. The fix-pending reconciliation for b8e3d59139ae is scoped EXACTLY to phUSD mint authority for this reason.",
+    "The recommendation's second half matters as much as the first: adding a migrator row to _sweepResidualPrivileges (the same table idiom _requireLiveMinter uses) is what makes future drift name its own offender. If the destination V2 is INTENDED to keep its migrator - the Phase 7.4 precedent leaves PhlimboV3's in place - assert that positively rather than leaving it unstated.",
+    "Not suppressed under the cached known-issues 'Admin trust assumptions' entry: those 11 entries carry no suppression authority (knownIssuesFile absent at HEAD), and the finding is a non-obvious footgun rather than an asserted admin-trust assumption."
+  ],
+  "auditorSeverityRationalePreserved": true,
+  "isFaithfulnessFinding": false,
+  "issueId": "pps29l6",
+  "fingerprint": "08adbb6928403acea22a033a75ad797e7fe88f7bd15aff8c16af81f554cc3cd8",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-29",
+  "commit": "9563c68094e516a91d27684252e6a103271d69cf",
+  "headCommit": "9563c68",
+  "status": "ready",
+  "origin": "new",
+  "firstSeenRun": "phoenix-phase-2-staging-29",
+  "lastSeenRun": "phoenix-phase-2-staging-29",
+  "ledgerContract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+  "fingerprintBasis": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol:_rehearseStableStakerCutover:MissingPostStepConfiguration:dev",
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-09-10T00:15:22Z",
+    "updatedAt": "2026-09-10T00:15:22Z",
+    "scanOrigin": "script-audit-29-dev",
+    "classificationOrigin": "CLASS-29-05"
+  },
+  "isNewLedgerEntry": true
+}
