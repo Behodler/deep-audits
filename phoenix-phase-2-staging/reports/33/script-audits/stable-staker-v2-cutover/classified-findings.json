@@ -1,0 +1,348 @@
+{
+  "classificationReport": {
+    "timestamp": "2026-09-15T10:00:00Z",
+    "project": "phoenix-phase-2-staging",
+    "run": "phoenix-phase-2-staging-33",
+    "entryPoint": "stable-staker-v2-cutover",
+    "sourceCommit": "29aeb2b",
+    "inputFindings": 4,
+    "classified": 3,
+    "carriedUnchanged": [
+      "Q-02 1c859cdebb6424756c073b1358559f38d84feff33eb6f6a6563414e352a03542 (qa, still-open, no reclassification)"
+    ],
+    "counts": {
+      "high": 0,
+      "medium": 0,
+      "low": 3,
+      "qa": 1
+    },
+    "faithfulness": [
+      "NEW-01",
+      "NEW-02"
+    ],
+    "footguns": [
+      "NEW-01",
+      "NEW-03"
+    ],
+    "borderlineForHumanReview": [
+      "NEW-02"
+    ],
+    "notes": [
+      "No High/Medium, so no submissions/<label>.md files are required from this run.",
+      "NEW-02 and NEW-03 compound: fixing NEW-03, or topping up OWNER, removes the most likely halt that makes NEW-02 unresumable. They are kept as separate entries because they have independent root causes and independent fixes.",
+      "L-04 should stay open until NEW-01 is dispositioned (sanitizer flag).",
+      "Ledger not modified."
+    ],
+    "severityAudit": {
+      "timestamp": "2026-09-15T11:00:00Z",
+      "verdicts": {
+        "NEW-01": "AGREE low",
+        "NEW-02": "AGREE low (borderline Medium flag retained)",
+        "NEW-03": "AGREE low"
+      },
+      "severityChanges": 0,
+      "note": "Added a severityAudit object to each finding. No classifier field was changed."
+    }
+  },
+  "findings": [
+    {
+      "id": "NEW-01",
+      "title": "Phase 7 registers StableStakerV2 with the global Pauser while V2 is still paused, so the permissionless Pauser.pause() reverts EnforcedPause for 3 transactions, and indefinitely if the run halts there. This contradicts story 084's 'breaker stays live all session'",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+      "sourcePath": "phoenix-phase-2-staging/src/script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "_phase7_finalize",
+      "lineStart": 605,
+      "lineEnd": 615,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "RegisteredWhilePausedWindowBricksGlobalPause",
+      "category": "unintended-side-effect",
+      "story": "story-084 (auto-complete, machine-approved). Its NatSpec L33-36 and the //stable-staker-v2-cutover:broadcast doc key (package.json L52) claim the breaker stays live for the whole Ledger session.",
+      "relatedLedger": "L-04 46c053534c58 (sibling mechanism in Phase 1, proposed fixed); L-03 0711215fcc17",
+      "description": "V2 is paused in Phase 3 (pauser OWNER) and stays paused through the migration. Phase 7 then runs, in this order: `v2.setPauser(PAUSER)` (L605), `Pauser.register(v2)` (L606), `antimatter.setPauser(PAUSER)` (L607), `Pauser.register(antimatter)` (L609), and only then `v2.unpause()` (L614). `Pauser.pause()` (lib/pauser/src/Pauser.sol L56-69) loops `IPausable(c).pause()` over every registrant with no try/catch. Once register(V2) lands, the loop reaches V2, whose pauser is now the Pauser, and OZ `_pause()` reverts `EnforcedPause()` because V2 is already paused. The whole global pause reverts. This is the registered-while-paused brick that story 084 fixed for V1 in Phase 1 by unregistering V1 before pausing it. The mirror rule for V2 is to unpause before registering, and it is not applied. The window is not forced: `unpause` is owner-or-pauser, and `register` only requires `pauser() == Pauser`. The script's preview simulation runs only at phase0, after-phase1 and after-phase8, and the Phase-8/verify sweep checks only the end state, so nothing in the repo detects the window.",
+      "impact": "For 3 Ledger-signed transactions near the end of the session (register V2, Antimatter.setPauser, register Antimatter), every EYE-funded `Pauser.pause()` reverts and pauses none of the 26-27 protocol registrants, including the live strategies YS_DOLA/YS_USDC/YS_USDE. If the session halts inside the window (Ledger timeout, RPC error, operator interrupt), the permissionless circuit breaker stays dead until someone resumes. The runbook tells the operator to run `:preview` before resuming, but on that halted state preview reverts at phase0 with 'first failing registrant: <V2>', because the tolerance covers V1 only. The operator is left without a rehearsal and without a clear explanation, and an operator who follows story 084's guidance ('a halt is dangerous only between setPauser and unregister') may walk away. A broadcast-mode resume does converge through the unpause gate. No funds move by themselves; the harm is losing the emergency pause while it is dead.",
+      "evidence": "Fork, block 25981150. `forge test --match-path test/audit-run33/CutoverAuditRun33.t.sol --match-test test_P7W_registeredWhilePausedWindow -vv --threads 1` PASS: GLOBAL_PAUSE|P7-after-V2.setPauser(Pauser)|SUCCEEDED; |P7-after-register(V2)|REVERTED|err=0xd93c0665 (EnforcedPause); same after Antimatter.setPauser and register(Antimatter); HALTED_P7|preview run()|globalPause(phase0): ... first failing registrant: 0x5582...8161 (V2); |P7-after-V2.unpause()|SUCCEEDED|registered=27; the real _phase8_wiringAssertions passes on the replicated end state (fork-logs/r33-test_P7W_registeredWhilePausedWindow.log). Control test_P7W_fixOrderingControl PASS: with unpause moved before register, the breaker is live after every step (fork-logs/r33-test_P7W_fixOrderingControl.log). test_P7W_haltedStateBroadcastResumeConverges PASS: a broadcast-mode resume heals. The call order was checked against the anvil broadcast receipts: txs #41 setPauser(V2), #42 register(V2), #43 setPauser(Antimatter), #44 register(Antimatter), #45 unpause() (fork-logs/anvil-broadcast-gas-budget.txt).",
+      "recommendation": "In `_phase7_finalize`, move `if (!_doneV2Unpaused()) v2.unpause(); require(_doneV2Unpaused(), ...)` to immediately after `v2.setPauser(PAUSER)` and before `IPauserRegistry(PAUSER).register(address(v2))`, so V2 is never registered while paused. The finalized marker (`v2.pauser() == PAUSER`) is unchanged, and a resume from 'pauser handed back, still paused' still converges through the same gate. Extend `test/CutoverStableStakerV2Mainnet.fork.t.sol` with a per-transaction Pauser.pause() probe across Phase 7, like test_P7W_registeredWhilePausedWindow. Correct the NatSpec (L33-36, L76-80) and the :broadcast doc key so they name the one remaining forced window: the single tx between V1.setPauser(OWNER) and Pauser.unregister(V1).",
+      "dedupStatus": "kept-new",
+      "fingerprintInput": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol:_phase7_finalize:RegisteredWhilePausedWindowBricksGlobalPause:stable-staker-v2-cutover",
+      "expectedFingerprint": "fc44ca36bccc72681b8ec2f608c5539068ad4a705e4185adb16bd96ba88d43c5",
+      "relatedTo": [
+        {
+          "label": "L-04",
+          "fingerprint": "46c053534c586895fece77ca5a74f0991e02d36f5c513251c6847e84787f96b6",
+          "relation": "sibling-mechanism, not duplicate",
+          "reason": "L-04 is the Phase-1 V1 window: V1 is repausered to OWNER while still registered, and Pauser.pause() reverts with 'only pauser'. NEW-01 is the Phase-7 V2 window: V2 is registered while still paused, and Pauser.pause() reverts with EnforcedPause. The contract, the tx sequence, the revert and the fix (unpause V2 before register) are all different, and fixing one does not fix the other. Recheck proposes L-04 LIKELY-FIXED for its own mechanism. Kept separate as the caller instructed."
+        },
+        {
+          "label": "L-03",
+          "fingerprint": "0711215fcc1767f9aff5cee42cead479a605b37e56ccbfb5d025eaac211cae06",
+          "relation": "coverage-gap context",
+          "reason": "L-03's fix (the after-phase8 global-pause simulation) samples only 3 stages, so it cannot see the intra-Phase-7 window. The defect is the call ordering, not the missing check L-03 described."
+        }
+      ],
+      "fingerprint": "fc44ca36bccc72681b8ec2f608c5539068ad4a705e4185adb16bd96ba88d43c5",
+      "fingerprintVerified": true,
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "origin": "new",
+      "ledgerMatch": null,
+      "proceedsToClassification": true,
+      "originalSeverity": "low",
+      "plausibility": "n/a",
+      "faithfulness": true,
+      "footgun": true,
+      "regression": false,
+      "reportChannel": "spec-conformance (F-XX) at Low; cross-reference from QA bundle",
+      "classification": {
+        "assetImpact": "No asset moves. The permissionless EYE-burn global circuit breaker (Pauser.pause) is unavailable for 26-27 registrants, including live strategies YS_DOLA/YS_USDC/YS_USDE, for 3 attended txs (#42-#44), or longer if the session halts inside that window.",
+        "attackPath": [
+          "1. Operator broadcasts the cutover; Phase 7 runs v2.setPauser(PAUSER) then Pauser.register(V2) while V2 is still paused (from Phase 3)",
+          "2. Any Pauser.pause() loops to V2, whose OZ _pause() reverts EnforcedPause, reverting the whole global pause",
+          "3. An unrelated emergency on another registrant during that window cannot be stopped by an EYE holder",
+          "4. If the session halts there, the breaker stays dead until a resume or a manual owner tx; :preview reverts at phase0 on that state"
+        ],
+        "likelihood": "low - requires a genuine emergency elsewhere in the protocol to coincide with a 3-tx attended window, or a halt landing exactly inside it and remaining unrecovered while an emergency occurs",
+        "assumptions": "Operator-attended Ledger session; OWNER is Pauser owner and V2 owner and can heal with a single tx (v2.unpause(), which is owner-or-pauser) as soon as they understand the state.",
+        "externalRequirements": "A concurrent exploit/emergency on some registrant during the window (or an unrecovered halt in it). No attacker can create the window or extend it."
+      },
+      "justification": "Low. The emergency breaker is a protocol function and its loss is real, but it is bounded to 3 attended txs, needs an independent emergency to coincide, and the owner (who is at the keyboard) can restore it with one call to v2.unpause(). Registrants whose pauser is the Pauser cannot be paused individually by anyone else during the window, so the mitigation depends on the owner acting, not on third parties. There is no loss path without hypotheticals, so this is not Medium. It is a clear Law-2 deviation from story-084 ('breaker stays live all session'), and a Law-3 footgun: a runbook-following operator would be surprised both that the breaker is dead and that :preview refuses. Tag faithfulness=true and route to spec-conformance as F-XX at Low; keep L-04 open until it is dispositioned.",
+      "borderline": false,
+      "severityClassified": true,
+      "severityAudit": {
+        "verdict": "AGREE",
+        "claimedSeverity": "low",
+        "assessedSeverity": "low",
+        "agreement": true,
+        "confidence": "high",
+        "premisesChecked": [
+          "The tx order matches the anvil receipts (anvil-broadcast-gas-budget.txt #41-#45)",
+          "At 0.3-0.4 gwei, NEW-03's first rejected tx is never in Phase 7"
+        ],
+        "rationale": "Receipts #41-#45 confirm the order: setPauser V2, register V2, setPauser AM, register AM, unpause V2. The window is 3 attended txs. It causes harm only if an unrelated emergency happens during it, and the owner at the keyboard can end it with one v2.unpause(). NEW-03 halts land at #32, #35 or #37 for 0.3-0.4 gwei, not in #42-#44, so the ETH-shortfall halt does not stretch this window. It is a real Law-2 deviation from story-084 and a Law-3 footgun, but not a Medium availability loss. Low is correct.",
+        "findingId": "NEW-01",
+        "fingerprint": "fc44ca36bccc72681b8ec2f608c5539068ad4a705e4185adb16bd96ba88d43c5",
+        "timestamp": "2026-09-15T11:00:00Z",
+        "auditor": "severity-auditor",
+        "forgeVersion": "1.5.1-stable b0a9dd9"
+      }
+    },
+    {
+      "id": "NEW-02",
+      "title": "The story-085 aggregate floor counts a staker's permissionless V1.userMigrate self-exit as V2 principal loss. A correct cutover then fails :verify with a false 'below pre-migration principal floor' alarm, the smoke preview is blocked, and a halted run can never be resumed",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/helpers/StableStakerCutoverCore.sol",
+      "sourcePath": "phoenix-phase-2-staging/src/script/helpers/StableStakerCutoverCore.sol (+ phoenix-phase-2-staging/src/script/VerifyStableStakerV2Cutover.s.sol L223-235)",
+      "function": "_aggregatePrincipalFloor",
+      "lineStart": 427,
+      "lineEnd": 518,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "AggregateFloorCountsSelfExitAsLoss",
+      "category": "intent-mismatch",
+      "story": "story-085 (floor), story-086 (the verifier reuses the floor; its NatSpec L45-46 says self-exits via userMigrate 'never deposit into V2' and excludes them from the per-user check, but not from the floor). The story-086 review/auto-complete notes say 'the aggregate floor and straggler checks still bound each pool' when discussing partial log sets. None of the 085/086 tests covers a userMigrate self-exit during the Migrating window, and the floor misreads that designed exit path as a loss.",
+      "description": "The floor is `v2Staked >= (P - v1Staked) * (MAX_BPS - bps) / MAX_BPS - n * WEI_SLACK`, where `P = V1.migrationInfo(token).principalSnapshot` is frozen at `initiateMigration`. `StableStakerV1.userMigrate` (L593) is permissionless and not pause-gated. From the moment `initiateMigration` lands, any V1 staker can take their snapshot credit to their own wallet. `batchMigrate` then skips them silently (StableStakerV1 L539: 'already self-migrated positions return 0 and are skipped'), and on chain the broadcast's local-pass user list still succeeds. The self-exited principal remains inside `P` and has left `v1Staked`, but V2 never receives it, so `P - v1Staked` overstates what was due to move by exactly that principal. The per-pool headroom at the fork block is about 0.24 DOLA, 0.236 USDC and 6.46 USDe. Any self-exit larger than that trips the floor even when every remaining staker was migrated within bound. In the broadcast, the local pass plans and asserts before the self-exit and passes. The self-exit lands between the `initiateMigration` and `migrate` txs (the `--slow` Ledger session puts at least one block between them), and the chain ends correct. The post-chain checks that re-read live state then fail.",
+      "impact": "(1) `:verify`, which `:broadcast` chains right after the address patch, reverts with 'cutover-post: V2 booked total below pre-migration principal floor (067)' on a correct cutover, and the chained `:preview` smoke test never runs. The operator sees a principal-loss alarm on mainnet with no loss, and may take unnecessary emergency action. (2) If the broadcast halted after that pool's migrate tx and before Phase 7 (for example the ETH shortfall in NEW-03, which halts at tx #37), every resume leg reverts at the same floor in its local pass. The resume cannot migrate the remaining pools or finalize without editing the script. V2 stays paused and unregistered from the Pauser, the V1 phUSD mint is not revoked, and V2 stakers have only emergencyWithdraw. No funds are lost, and the owner can recover with a script edit or manual transactions.",
+      "evidence": "Fork, block 25981150, real phases, core and verifier. `forge test --match-path test/audit-run33/CutoverAuditRun33.t.sol --match-test test_SX_selfExitBetweenTxs_verifierFalseFailsOnFloor -vv --threads 1` PASS: SELF_EXIT|user=0x25AdA296...4eb1|V1principal=5499869851883238089|paidToWallet=5499860523851791803; all 29 other positions migrated; real Phase 8 passes; floor 1222483056933011776952 > v2Staked 1217223596276947632021; verifier revert 'cutover-post: V2 booked total below pre-migration principal floor (067)'; preview run() on the same state reverts identically (fork-logs/r33-test_SX_selfExitBetweenTxs_verifierFalseFailsOnFloor.log). Control test_SX_controlNoSelfExit_verifierPasses PASS with 29 users re-checked (fork-logs/r33-test_SX_controlNoSelfExit_verifierPasses.log). test_SX_haltedResumeCannotFinish PASS: halt after the DOLA migrate, then resume run() reverts on the DOLA floor; USDC poolState still Active, V2 paused and not registered (fork-logs/r33-test_SX_haltedResumeCannotFinish.log). The verifier harness is the story's own VerifyStableStakerV2CutoverHarness (injected addresses and recorded logs). Its live path was separately proven equivalent on anvil (fork-logs/anvil-verify-clean.log).",
+      "recommendation": "Anchor the loss gate on quantities a self-exit cannot move. (a) Replace the P-anchored aggregate floor with an exit-realization bound read from V1: `(R, P) = V1.migrationInfo(token); require(min(R, P) * MAX_BPS >= P * (MAX_BPS - exitBps))`, where exitBps is 0-2 for ERC4626 and slippageToleranceBps + 1 for market strategies. That bounds the pre -> credit haircut for every user, however they exit. Keep the per-user credit -> credited check: in-leg in the cutover, and from MigratedOut/DepositedFor logs in the verifier. (b) Alternatively, keep the floor and subtract self-exited principal. In the verifier, sum the UserMigrated credits from the same log fetch and convert them back to principal (`credit * P / min(R,P)`, plus 1 wei per exiter). The cutover script cannot recover that from state, so (a) is preferable there. Add a StableStakerCutoverDust / verifier fork test where a staker calls userMigrate between initiate and migrate. Correct the story-086 review claim in the NatSpec.",
+      "dedupStatus": "kept-new",
+      "canonicalFunctionNote": "The candidate function string is a long compound. Suggest that finding-manager canonicalize it to `_aggregatePrincipalFloor` (StableStakerCutoverCore L427, where the P-anchored formula lives) so the fingerprint stays stable across runs. The alternative `_assertPoolPostMigration` does NOT collide with F-01, because rootCauseClass differs. Do not use the verbatim compound string, because any wording change in the call-site note would re-mint the fingerprint.",
+      "fingerprintInput": "lib/phoenix-phase-2-staging/script/helpers/StableStakerCutoverCore.sol:_aggregatePrincipalFloor:AggregateFloorCountsSelfExitAsLoss:stable-staker-v2-cutover",
+      "expectedFingerprint": "cf4b531aee540a854c4f68201857a360f1af1970c5e2800fc00673749f610abc",
+      "expectedFingerprintAlt_assertPoolPostMigration": "7027be85f9618783eb8a62bc7e76681b12d1217d918a9fd43250a24ca5515bd4",
+      "relatedTo": [
+        {
+          "label": "F-01",
+          "fingerprint": "dfed4279095251f3acd34987e79e3a1eecfce16adaca31cc6c776e8f724e713a",
+          "relation": "descendant-of-fix, distinct root cause",
+          "reason": "F-01 (TautologicalPostCondition) was a floor that could never fail, which is a false-green. NEW-02 is the story-085 replacement floor failing on a correct cutover because P still counts permissionless userMigrate self-exits, which is a false-red. It is not an incomplete fix: the F-01 tautology is gone (recheck falsification test). It is also not a regression: the defect is in the new anchor, not a return of the old one. Kept separate as the caller instructed."
+        },
+        {
+          "label": "L-02",
+          "fingerprint": "2c82d65e65e163c9f986c669aaf0b56abcfc80ae9f91016dd3f84fc1fb6b7da7",
+          "relation": "residual context",
+          "reason": "The recheck of L-02 (verify/preview chain) names NEW-02 as its only residual. L-02 was about a false-green chain, and NEW-02 is a false-red, so the root cause is different."
+        },
+        {
+          "id": "NEW-03",
+          "relation": "compounding",
+          "reason": "A NEW-03 ETH-shortfall halt mid-Phase 6, combined with a self-exit, turns into a resume that cannot finish without a script edit. The two findings have independent root causes and independent fixes, so they are not merged."
+        }
+      ],
+      "fingerprint": "cf4b531aee540a854c4f68201857a360f1af1970c5e2800fc00673749f610abc",
+      "fingerprintVerified": true,
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "functionFull": "_assertPoolPostMigration / _aggregatePrincipalFloor (reached from VerifyStableStakerV2Cutover._verifyPhase6_migration and from every cutover Phase-6 resume leg)",
+      "canonicalFunctionDecision": "orchestrator: _aggregatePrincipalFloor (StableStakerCutoverCore L427)",
+      "origin": "new",
+      "ledgerMatch": null,
+      "proceedsToClassification": true,
+      "originalSeverity": "low",
+      "plausibility": "n/a",
+      "faithfulness": true,
+      "footgun": false,
+      "regression": false,
+      "reportChannel": "QA report (Low) plus a spec-conformance cross-reference (story-085/086 floor semantics)",
+      "classification": {
+        "assetImpact": "No principal lost; on-chain end state is correct. Impact: (a) :verify raises a false principal-loss alarm on a correct cutover and the chained :preview smoke test never runs; (b) conditional on an independent halt between that pool's migrate and Phase 7, every resume leg reverts on the floor, leaving V2 paused and unregistered, V1 phUSD mint un-revoked, and migrated V2 stakers limited to emergencyWithdraw until the owner edits the script or sends the remaining txs manually.",
+        "attackPath": [
+          "1. Griefer stakes > headroom in V1 before broadcast (about 0.24 DOLA / 0.236 USDC / 6.46 USDe; V1 stake is whenNotPaused, so this must happen before Phase 1)",
+          "2. Griefer watches the mempool/chain for V1.initiateMigration(token) and calls permissionless V1.userMigrate(token) before that pool's migrate tx (--slow guarantees >= 1 block)",
+          "3. Griefer receives their full snapshot credit (cost is gas only); batchMigrate skips them; the broadcast, whose requires were evaluated in local simulation, still completes",
+          "4. Post-chain :verify reverts 'below pre-migration principal floor (067)'; if the run had halted before Phase 7 for another reason, resume run() reverts on the same floor"
+        ],
+        "likelihood": "medium for the false-red (cheap, deliberate, and also reachable by innocent stakers using the designed escape hatch); low for the unresumable-halt consequence, which additionally requires an independent halt (e.g. NEW-03) inside Phase 6",
+        "assumptions": "Script requires are evaluated in the forge local pass, so a self-exit cannot itself make the broadcast halt; it only poisons post-chain checks and resume legs. The owner controls the script source and can edit or bypass the floor.",
+        "externalRequirements": "For availability impact: a separate halt between a pool's migrate and Phase 7. For operator harm from the false alarm: an operator acting on a false loss signal."
+      },
+      "justification": "Low (borderline Medium, flagged). A third party can trigger it on purpose for gas cost only, and innocent stakers can trigger it too, so reachability is not hypothetical. But on its own it produces a false-red alarm on a correct end state, with no principal lost and no halt of the broadcast. The availability consequence (a paused, unregistered V2 and a still-live V1 mint) needs an independent halt as well, and the owner, who controls the script, can recover it with a script edit or manual txs. C4 Medium requires that protocol function is actually impaired without stacked preconditions, and a compound-precondition, owner-recoverable, no-loss outcome falls short of that. It remains a real defect in the story-085/086 safety gate (a verification that cries wolf on mainnet), so it must not be buried: it is tagged faithfulness=true and fixed before broadcast. A reviewer who weighs 'the post-broadcast verifier is unusable whenever any V1 staker self-exits' as a broken protocol function could reasonably argue Medium. The sticking points are that the verifier is off-chain tooling and nothing on chain is harmed.",
+      "borderline": true,
+      "borderlineNote": "Low vs Medium. Upgrade to Medium if the owner considers :verify/resume availability a protocol function, or if a halt inside Phase 6 is judged likely (NEW-03 makes it likely at >= 0.31 gwei).",
+      "severityClassified": true,
+      "severityAudit": {
+        "verdict": "AGREE",
+        "claimedSeverity": "low",
+        "assessedSeverity": "low",
+        "agreement": true,
+        "confidence": "medium",
+        "keepBorderlineFlag": true,
+        "premisesChecked": [
+          "P1 (halt mode): tested on local anvil with forge 1.5.1-stable (b0a9dd9), the :broadcast flags (--broadcast --skip-simulation --slow --legacy --with-gas-price --gas-estimate-multiplier 200) and a low-balance key. Forge sent 5 txs and then aborted with -32003 'Insufficient funds for gas * price + value' (nonce 0->5). Forge does not pre-check the total ETH needed. With simulation on, it prints 'Estimated amount required' and still sends 5 of 9 txs before halting (nonce 5->10). With --skip-simulation it prints no estimate at all. The mid-run halt premise HOLDS.",
+          "P2 (window): initiateMigration and migrate are separate txs mined in consecutive blocks (anvil receipts #31/#32 at 0x18c70fe/0x18c70ff, then #34/#35 and #36/#37). With --slow, forge waits for the initiateMigration receipt and a Ledger confirmation before it sends migrate. StableStakerV1.userMigrate (L939) is permissionless, needs only poolState==Migrating, and has no whenNotPaused. A griefer or an ordinary staker can land a self-exit in that window, even in the same block right after initiateMigration. HOLDS.",
+          "P3 (effect without a halt): the on-chain cutover completes and the end state is correct. :verify reverts inside _verifyPhase6_migration (L235), so it also SKIPS _verifyPhase7_finalize, _verifyPerUserCredits, the story-084 registrant sweep and the Phase 8 wiring assertions. The chained :preview smoke test never runs. The failure is loud, not silent, and an operator can reason past it by summing the UserMigrated logs. Without a halt, the impact stays in off-chain tooling.",
+          "P4 (simulation): userMigrate requires Migrating, which only exists after initiateMigration lands on chain, so the local pass of a fresh run can never see a self-exit. The only live window runs from the initiateMigration being mined to the post-chain checks. On a resume, the local pass sees the self-exit and run() reverts before any tx is sent. HOLDS."
+        ],
+        "rationale": "All four premises hold, so the classifier's two-precondition structure is accurate. Without a halt, NEW-02 raises a false principal-loss alarm on a correct end state. It fails closed, moves no assets, and leaves V2 live and correct. With a halt, the paused-V2 and still-live V1 mint state is caused by the halt itself, which NEW-03 alone already produces. NEW-02 only turns 'top up and re-run' into 'edit the script or send manual txs' and points the owner the wrong way with its alarm. That extra harm is recovery friction on an owner-recoverable, no-loss state over a small TVL (about 1.2k DOLA, 2.0k USDC and 2.6k USDe), so Low stands. The classifier understated two things, both recorded here for triage. (1) When the floor false-fails, the verifier also skips the Phase 7, per-user credit, registrant-sweep and Phase 8 checks, not only :preview. (2) Precondition (b) is not purely external. Mid-session halts have happened before in this project (story-071/073). The USDe initiateMigration (#36) swaps through an AMM with an on-chain minOut of ideal*(1-slippageToleranceBps), so a price move beyond tolerance, natural or pushed by a frontrunner, would revert #36 on chain after the DOLA/USDC migrates landed and halt forge. This path has NOT been checked against the live USDe strategy bytecode. A griefer would pay AMM round-trip losses for no gain, so it does not lift the finding to Medium, but it does undercut the idea that no attacker can influence the halt. Keep the borderline flag. Upgrade to Medium if human triage counts a griefer-caused halt plus a self-exit, which cannot be resumed without a script edit, as an availability impact.",
+        "upgradeTriggers": [
+          "The live USDe strategy's on-chain slippage revert is confirmed to be cheaply manipulable",
+          "The owner counts :verify or resume availability as a protocol function"
+        ],
+        "findingId": "NEW-02",
+        "fingerprint": "cf4b531aee540a854c4f68201857a360f1af1970c5e2800fc00673749f610abc",
+        "timestamp": "2026-09-15T11:00:00Z",
+        "auditor": "severity-auditor",
+        "forgeVersion": "1.5.1-stable b0a9dd9"
+      }
+    },
+    {
+      "id": "NEW-03",
+      "title": "The 46-transaction cutover fits OWNER's ETH balance only at the pinned 0.3 gwei, with 0.000147 ETH to spare. At 0.31 gwei or more, tx #37 (the USDe migrate) is rejected for funds and the run halts mid-Phase 6, and neither the script nor the runbook states an ETH budget",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+      "sourcePath": "phoenix-phase-2-staging/src/script/CutoverStableStakerV2Mainnet.s.sol; phoenix-phase-2-staging/src/package.json L52-53",
+      "function": "_phase0_preconditions",
+      "lineStart": 236,
+      "lineEnd": 298,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "MissingGasBudgetPreflight",
+      "category": "drift",
+      "description": "`:broadcast` pins `--legacy --with-gas-price 0.3gwei --gas-estimate-multiplier 200`, and its doc key says 'base fee was ~0.16 gwei at planning - re-check before signing'. Phase 0 checks owners, pausers, strategies and mint rights, but not whether OWNER can pay for the ~47 transactions. A full broadcast rehearsal on an anvil fork of 25981150 used 18,317,077 gas. OWNER's live balance is 0.005642012 ETH (nonce 1631, unchanged since run-32). At 0.3 gwei the run costs 0.005495 ETH and succeeds with 0.000147 ETH left. With the actual per-tx gas limits, a node's upfront `balance >= gasLimit * price` check rejects tx #37 (USDe `migrate`) at any price of 0.31 gwei or more, and tx #32 at 0.4 gwei. An operator who follows 're-check base fee' and raises the price even slightly halts the run mid-Phase 6.",
+      "impact": "The halt lands after the USDe pool is initiated (V1 USDe funds idle, pool Migrating) and before its 7 stakers are migrated or V2 is finalized: V2 stays paused and unregistered, and the V1 mint is not revoked. The run is recoverable by topping up and resuming, since every step is state-gated, but it turns a single session into an unplanned halted state. Combined with NEW-02, the resume can be blocked. No direct fund loss.",
+      "evidence": "fork-logs/anvil-broadcast-leg1.log: local anvil fork of 25981150, forge script --broadcast --skip-simulation --slow --legacy --with-gas-price 0.3gwei --gas-estimate-multiplier 200 --unlocked, ONCHAIN EXECUTION COMPLETE & SUCCESSFUL, 46 txs, OWNER balance after 146889306269851 wei. fork-logs/anvil-broadcast-gas-budget.txt: per-tx gasUsed; actual gas limits from `cast tx <hash> gas`; first rejected tx is #37 at 0.31-0.35 gwei and #32 at 0.4 gwei. The pre-tx balance before #37 was 1079992206269851 wei against a 3383096 * 0.3 gwei = 1014928800000000 wei requirement.",
+      "recommendation": "Add a broadcast-mode pre-flight in Phase 0: `require(OWNER.balance >= CUTOVER_GAS_BUDGET * gasPrice * 12 / 10, \"Phase0: OWNER ETH below cutover gas budget\")`, with CUTOVER_GAS_BUDGET about 18.4M gas from the anvil rehearsal and gasPrice taken from `tx.gasprice` or an env cap. State the ETH budget in the :broadcast doc key (for example 'needs >= 0.0064 ETH at 0.35 gwei; top up OWNER before signing').",
+      "dedupStatus": "kept-new",
+      "fingerprintInput": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol:_phase0_preconditions:MissingGasBudgetPreflight:stable-staker-v2-cutover",
+      "expectedFingerprint": "d6896c6e843de66ebc7ef9202fb8071aa60fcc13a3f22b69323f1256f58d7bcd",
+      "commonFindingFilterNote": "Not filtered as tool-noise. It is fork-measured: 18.3M gas, a 0.000147 ETH margin, and tx #37 rejected at 0.31 gwei or more against the live OWNER balance. The halt has a concrete operational consequence on a mainnet Ledger session. No ledger entry has a gas or ETH-budget root cause.",
+      "relatedTo": [
+        {
+          "id": "NEW-02",
+          "relation": "compounding",
+          "reason": "See NEW-02."
+        }
+      ],
+      "fingerprint": "d6896c6e843de66ebc7ef9202fb8071aa60fcc13a3f22b69323f1256f58d7bcd",
+      "fingerprintVerified": true,
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "origin": "new",
+      "ledgerMatch": null,
+      "proceedsToClassification": true,
+      "originalSeverity": "qa",
+      "plausibility": "n/a",
+      "faithfulness": false,
+      "footgun": true,
+      "regression": false,
+      "reportChannel": "QA report (Low, operational hazard)",
+      "classification": {
+        "assetImpact": "No asset loss. The run halts mid-Phase 6 at tx #37 (USDe migrate) with the USDe pool Migrating, V2 paused and unregistered, and the V1 mint not revoked, until OWNER is topped up and the run resumed.",
+        "attackPath": [
+          "1. Operator follows the :broadcast doc key ('re-check base fee before signing') and raises --with-gas-price to >= 0.31 gwei",
+          "2. OWNER holds 0.005642 ETH; the node rejects tx #37 on its upfront balance >= gasLimit*price check",
+          "3. The session halts mid-Phase 6; the operator must top up ETH and resume (state-gated, converges)"
+        ],
+        "likelihood": "medium - the margin is 0.000147 ETH at the pinned price, and the runbook itself invites a price change",
+        "assumptions": "The OWNER balance is unchanged at broadcast time (0.005642012 ETH, nonce 1631); gas matches the anvil rehearsal (18.3M).",
+        "externalRequirements": "Gas price >= 0.31 gwei chosen at signing, or a pre-broadcast OWNER spend."
+      },
+      "justification": "Low. This is a non-obvious operator footgun (Law 3): the runbook's own advice to re-check the base fee leads to a mid-session halt. The halt is fully recoverable by topping up and resuming, with no asset loss and no third-party trigger. Its main significance is compounding: it is the most likely halt that turns NEW-02 into an unresumable run, so the owner should fix it (add an ETH pre-flight and state the budget, or simply top up OWNER) before broadcast. The sanitizer's 'qa' label is raised to Low, not Medium, because it is purely operational with a trivial remedy.",
+      "borderline": false,
+      "severityClassified": true,
+      "severityAudit": {
+        "verdict": "AGREE",
+        "claimedSeverity": "low",
+        "assessedSeverity": "low",
+        "agreement": true,
+        "confidence": "high",
+        "premisesChecked": [
+          "Forge 1.5.1 sends txs one at a time and halts mid-run when funds run out. It has no ETH pre-check in either simulation mode (local anvil experiment, see NEW-02 P1). Under --skip-simulation it does not print 'Estimated amount required' either, so the operator sees no warning before signing.",
+          "The halt index (#37 at 0.31-0.35 gwei, #32 at 0.4) comes from actual per-tx gas limit x price against the OWNER balance, which matches the node's upfront balance check."
+        ],
+        "rationale": "The premise holds, and the finding is slightly understated, because --skip-simulation suppresses forge's only ETH estimate. Still, the halt moves no assets, the node error is explicit, and the fix is to top up and re-run the state-gated script. No third party is involved. This is an operational footgun (Law 3) and Low is correct. It is also the most likely trigger for NEW-02's blocked resume, so fix it before broadcast.",
+        "findingId": "NEW-03",
+        "fingerprint": "d6896c6e843de66ebc7ef9202fb8071aa60fcc13a3f22b69323f1256f58d7bcd",
+        "timestamp": "2026-09-15T11:00:00Z",
+        "auditor": "severity-auditor",
+        "forgeVersion": "1.5.1-stable b0a9dd9"
+      }
+    },
+    {
+      "id": "Q-02-reraise",
+      "title": "The package.json //StableStakerV2Cutover operator comment still describes the superseded story-082 end state ('2 bps + 2 wei', 'V1 pauser back to Pauser and V1 UNPAUSED'), the opposite of what story 083 made the script do",
+      "severity": "qa",
+      "contract": "lib/phoenix-phase-2-staging/package.json",
+      "sourcePath": "phoenix-phase-2-staging/src/package.json",
+      "function": "//StableStakerV2Cutover",
+      "lineStart": 49,
+      "lineEnd": 49,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "DocumentedIntentDivergesFromImplementation",
+      "category": "drift",
+      "reconcilesTo": "Q-02 1c859cdebb6424756c073b1358559f38d84feff33eb6f6a6563414e352a03542 (STILL-LIVE; same contract/function/rootCauseClass, so the fingerprint should reproduce)",
+      "description": "L49 is unchanged at 29aeb2b. Besides the run-32 drift, it now also contradicts story 084: it says 'pause V1' in Phase 1, while the script runs the setPauser -> unregister -> pause retire triple, and it says 'V1 pauser back to Pauser and V1 UNPAUSED, ... a paused registered contract would make the global Pauser.pause() loop revert'. It contradicts story 085 by describing 'strategy principal >= V2 booked' as the post-condition, which is now a lockstep plus an aggregate floor. It does not mention the story-086 :verify step. Stories 084 and 086 both excluded it from scope.",
+      "impact": "The primary operator summary of a 47-tx mainnet Ledger session describes the wrong V1 end state and the wrong safety checks. An operator who compares chain state against it would judge a correct cutover wrong, for example V1 left paused and unregistered.",
+      "evidence": "package.json L49 at 29aeb2b, byte-identical to 884ccf8 (closure-manifest intentCommentDelta 'unchanged'); compare script L33-36, L315-348 and StableStakerCutoverCore L510-527.",
+      "recommendation": "Rewrite `//StableStakerV2Cutover` to match 082 as amended by 083-086: Phase 1 V1 retirement (pauser OWNER, unregister, pause; V1 left paused), per-user bound 2/61 bps + 1000 wei, the aggregate floor plus lockstep, and the :broadcast chain `patch && :verify && :preview`. Or reduce it to a pointer to the script NatSpec and the per-variant doc keys.",
+      "dedupStatus": "reconciled-to-existing",
+      "reconcilesToLabel": "Q-02",
+      "reconcilesToFingerprint": "1c859cdebb6424756c073b1358559f38d84feff33eb6f6a6563414e352a03542",
+      "fingerprintInput": "lib/phoenix-phase-2-staging/package.json://StableStakerV2Cutover:DocumentedIntentDivergesFromImplementation:stable-staker-v2-cutover",
+      "expectedFingerprint": "1c859cdebb6424756c073b1358559f38d84feff33eb6f6a6563414e352a03542",
+      "fingerprintVerified": true,
+      "reconciliationNote": "The recomputed sha256 matches the ledger Q-02 byte-for-byte, so this is the same entry and not a new finding. It is kept in the stream (not removed) so the sanitizer and finding-manager can bump lastSeenRun on Q-02 (status open, STILL-LIVE) and append the run-33 delta: the comment also contradicts stories 084, 085 and 086. It must not be given a new label or filed as a new submission.",
+      "fingerprint": "1c859cdebb6424756c073b1358559f38d84feff33eb6f6a6563414e352a03542",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "origin": "still-open",
+      "ledgerLabel": "Q-02",
+      "ledgerStatus": "open",
+      "bumpLastSeenRun": "phoenix-phase-2-staging-33",
+      "regenerateReport": false,
+      "carryover": true,
+      "run33Delta": "Comment additionally contradicts stories 084 (retire triple, V1 left paused+unregistered), 085 (aggregate floor + lockstep) and omits story-086 :verify.",
+      "severityClassified": false,
+      "classificationNote": "still-open ledger Q-02; existing severity qa retained per orchestrator"
+    }
+  ]
+}

@@ -1,0 +1,231 @@
+{
+  "project": "phoenix-phase-2-staging",
+  "run": 32,
+  "entryPoint": "stable-staker-v2-cutover",
+  "story": "story-083 (supersedes story-082 Decision 9; story file state folder: auto-complete)",
+  "generatedBy": "severity-classifier",
+  "generatedAt": "2026-09-15",
+  "input": "reports/32/script-audits/stable-staker-v2-cutover/sanitized-findings.json",
+  "sourceHead": "884ccf8",
+  "branch": "master",
+  "labelPolicy": "Run-scoped labels continue the run-31 series for this entryPoint. L-01..L-03, F-01..F-03 and Q-01 are held by ledger entries (F-02/F-03 wont-fix still hold their labels), so the new findings take L-04, Q-02 and Q-03.",
+  "summary": {
+    "high": 0,
+    "medium": 0,
+    "low": 3,
+    "qa": 3,
+    "newClassified": { "low": 1, "qa": 2 },
+    "carryoversUnchanged": ["L-02 (low)", "F-01 (low)", "Q-01 (qa)"],
+    "faithfulness": {
+      "standalone": ["F-01"],
+      "crossListed": ["L-02"]
+    },
+    "footguns": ["L-04"],
+    "regressions": 0,
+    "incompleteFix": ["Q-01 (code changed in 884ccf8, verifier half survives; status open, not fix-pending)"],
+    "flaggedForHumanReview": [
+      "L-04 (Medium considered and rejected; recommend fixing before broadcast because the fix is one gated call moved into Phase 1 and is fork-proven)",
+      "Q-01 (INCOMPLETE FIX signal carried from sanitizer)"
+    ]
+  },
+  "preBroadcastRecommendations": [
+    "L-04: move Pauser.unregister(V1) into Phase 1 before V1.pause(), so the global breaker stays live for the whole Ledger session and across any STOP-AND-REPORT halt",
+    "Q-02: correct the //StableStakerV2Cutover doc key the signer reads at broadcast"
+  ],
+  "classifiedFindings": [
+    {
+      "id": "CLASS-L-04",
+      "originalId": "SSV2C32-01",
+      "label": "L-04",
+      "title": "From Phase 1 until Phase 7's Pauser.unregister(V1), V1 is paused with pauser OWNER but still registered, so the permissionless global Pauser.pause() reverts for all 26 registrants for the whole cutover session, or indefinitely if the run halts",
+      "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "_phase1_pauseV1 / _phase7_finalize",
+      "lineStart": 272,
+      "lineEnd": 564,
+      "rootCauseClass": "RegisteredPausableRepauserWindowBricksGlobalPause",
+      "entryPoint": "stable-staker-v2-cutover",
+      "branch": "master",
+      "branchesSeen": ["master"],
+      "fingerprint": "46c053534c586895fece77ca5a74f0991e02d36f5c513251c6847e84787f96b6",
+      "origin": "new",
+      "regression": false,
+      "severity": "low",
+      "scannerProposedSeverity": "low",
+      "severityChange": "unchanged from working severity (Medium considered and rejected)",
+      "plausibility": "plausible",
+      "faithfulness": false,
+      "storyIntentNote": "The script is faithful to story-083's letter: the story knowingly keeps Phase 1's setPauser(OWNER)+pause() and moves unregister to Phase 7. The story's own rationale ('a paused registered contract bricks the global pause'; 'once V1 is unregistered, that risk is gone') covers only the end state. The story does not consider the mid-run window its ordering creates. That is a gap in the story's safety reasoning (Law 1 over Law 2), not a deviation in the implementation, so the finding is not routed to spec-conformance.",
+      "footgun": true,
+      "footgunTest": "Surprising to a competent, non-malicious owner. The owner has just cleared the two pre-paused registrants specifically so the global breaker works. Story 083 states the exact hazard (a paused, registered contract bricks Pauser.pause()) and still orders the steps so that the script creates this state for ~40 transactions. Nothing in the preview output or the Phase 8 asserts surfaces it. In scope as an operational hazard.",
+      "verified": "verified on fork @25978784 (test_W_windowBricksGlobalPause, test_W2)",
+      "reportRouting": ["qa-report (operational hazard / footgun)"],
+      "classification": {
+        "assetImpact": "None directly. The script moves no value because of this. What degrades is the protocol-wide permissionless emergency stop, for all 26 registrants including the yield strategies that custody staker principal, PhlimboV3 and the hooks. That lasts for a bounded operational window. Harm happens only if an independent exploit that needs a global pause coincides with that window.",
+        "attackPath": [
+          "1. The owner broadcasts the cutover (--slow, Ledger). Phase 1 sets V1.pauser = OWNER and pauses V1. V1 stays registered at index 18.",
+          "2. For the rest of Phases 1-6 (~40 tx), and for any time after a STOP-AND-REPORT halt before Phase 7, Pauser.pause() loops over the registrants with no try/catch and reverts at V1 with 'StableStaker: only pauser'. No registrant is paused.",
+          "3. An unrelated incident hits a registered contract during the window. An EYE holder or monitor calls Pauser.pause(), which reverts.",
+          "4. The owner can pause only V1 directly (1 of 26). Restoring the breaker needs Pauser.unregister(V1) (1 owner tx) followed by a retried pause. Otherwise it takes per-contract setPauser+pause pairs."
+        ],
+        "likelihood": "low. The window is certain on every run (it is structural, not state-dependent), but it matters only with a coincident incident during a bounded, attended session. The indefinite-halt case raises the exposure but still needs a coincident incident.",
+        "assumptions": "The operator runs the script as written. No other registrant is independently paused (true on live state after the owner's cleanup; pre-cutover global pause SUCCEEDED 26/26).",
+        "externalRequirements": "A separate exploit or incident on a Pauser registrant during the Phase 1 to Phase 7 window that the response relies on the global Pauser.pause() to stop.",
+        "remediesEnumerated": [
+          "During an incident: owner sends Pauser.unregister(V1) (allowed, since V1.pauser()==OWNER != Pauser). Pauser.pause() then succeeds for the remaining 25 (fork-proven: window-after-early-unregister SUCCEEDED registered=25). Recovery takes 1 owner tx plus the pause.",
+          "Script fix: in _phase1_pauseV1, run setPauser(OWNER) -> unregister(V1) gated on isRegistered -> pause(). Fork-proven: the unmodified Phase 7 gates skip, run() PASSES, and the resume paths converge.",
+          "Verification: a preview-only simulated Pauser.pause() at Phase 0, after Phase 1 and at Phase 8. This overlaps with L-03 clause (b).",
+          "Conclusion: bounded and recoverable without a contract change. Not permanent."
+        ]
+      },
+      "severityDeliberation": {
+        "caseForMedium": "The emergency pause is a safety function, and C4 Medium includes impact on 'availability of a protocol function'. The window also covers the whole Ledger session and has no upper bound if the run halts and the operator walks away. The trigger is deterministic, not an edge case.",
+        "caseForLow": [
+          "Consistency: run-31 L-03 (0711215fcc17) classified a strictly broader condition as Low. There, the global breaker was dead permanently for 30 contracts, including V2 and Antimatter on arrival. This finding is a transient, script-induced subset of the same impact class, so rating it above L-03 would invert the ordering.",
+          "Pausing is defence in depth, not a user-facing function. No user-facing protocol function (stake, withdraw, claim, yield) loses availability, and no exploit is enabled. It only removes one mitigation for an independent exploit.",
+          "The operator of the window is the owner, who holds the one-tx restore (unregister V1) and a per-contract fallback on every registrant. The global path is gated behind a single owner action, not lost.",
+          "The session is bounded and attended. The indefinite case requires both a halt and the operator leaving without resuming, plus a coincident incident.",
+          "Ambiguous-impact rule: default to the lower severity and flag for review."
+        ],
+        "decision": "Low, as a footgun / operational hazard. Flagged for human review with a strong pre-broadcast fix recommendation: the fix is cheap and fork-proven, and it closes the only thing currently breaking the global breaker."
+      },
+      "relatedFindings": [
+        "L-03 0711215fcc17 (end-state breaker; clause (b) 'Phase 8 asserts registration, not a working breaker' is still live). Separate root cause; shares the simulated-pause verification remedy."
+      ],
+      "justification": "Deterministic, fork-verified loss of the permissionless global emergency pause for the duration of the cutover, caused by the script's step ordering. It is a non-obvious footgun (Law 3) and in scope. It is not High: no asset is at risk because of it. It is not Medium: it degrades a defence-in-depth control during a bounded, attended window, needs a coincident independent incident to cause harm, the owner can restore it in one transaction, and the permanent protocol-wide version of the same impact (L-03) is already Low."
+    },
+    {
+      "id": "CLASS-Q-02",
+      "originalId": "SSV2C32-02",
+      "label": "Q-02",
+      "title": "The package.json //StableStakerV2Cutover operator comment still describes the superseded story-082 end state ('2 bps + 2 wei', 'V1 pauser back to Pauser and V1 UNPAUSED'), the opposite of what story 083 made the script do",
+      "contract": "lib/phoenix-phase-2-staging/package.json",
+      "function": "//StableStakerV2Cutover",
+      "lineStart": 49,
+      "lineEnd": 49,
+      "rootCauseClass": "DocumentedIntentDivergesFromImplementation",
+      "entryPoint": "stable-staker-v2-cutover",
+      "branch": "master",
+      "branchesSeen": ["master"],
+      "fingerprint": "1c859cdebb6424756c073b1358559f38d84feff33eb6f6a6563414e352a03542",
+      "origin": "new",
+      "regression": false,
+      "severity": "qa",
+      "scannerProposedSeverity": "qa",
+      "severityChange": "unchanged",
+      "plausibility": "n/a",
+      "faithfulness": false,
+      "storyIntentNote": "The implementation matches story 083. The stale artefact is the operator doc key, which story 083's comment-update task did not reach (that task lists script NatSpec, _printSummary and the address-patch JS, not package.json). This is a documentation defect, not a behavioural story deviation.",
+      "footgun": false,
+      "verified": "verified (package.json unchanged 1c1608c..884ccf8; preview log contradicts the key)",
+      "reportRouting": ["qa-report"],
+      "classification": {
+        "assetImpact": "None. No on-chain effect.",
+        "attackPath": [
+          "1. The operator reads the doc key before signing, as instructed.",
+          "2. The preview log ('V1 pauser -> OWNER, unregistered from Pauser, left paused') contradicts the key.",
+          "3. The operator either aborts a correct run or, after broadcast, 'restores' V1 to pauser=Pauser, unpaused and re-registered."
+        ],
+        "likelihood": "low. It needs the operator to trust the stale key over the script's own preview output and Phase 8 asserts.",
+        "assumptions": "The operator reconciles the preview against the doc key.",
+        "externalRequirements": "none"
+      },
+      "justification": "C4 QA 'issues with comments'. A deliberate post-broadcast 'restore' to the documented 082 state would be an obvious, attended owner action, and it returns V1 to a state (unpaused, pauser=Pauser, registered) that keeps the global pause working, so no exploit follows. Worth fixing before broadcast because the audience is the Ledger signer, but it does not reach Low."
+    },
+    {
+      "id": "CLASS-Q-03",
+      "originalId": "SSV2C32-03",
+      "label": "Q-03",
+      "title": "The story-080 DeployMocks cutover rehearsal still asserts a 2-wei per-user slack and leaves dev V1 unpaused and registered with the Pauser, so it no longer rehearses the story-083 mainnet end state or its forced setPauser -> unregister -> pause ordering",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "_rehearseStableStakerCutover / _assertStableStakerCutover",
+      "lineStart": 2053,
+      "lineEnd": 2095,
+      "rootCauseClass": "RehearsalDivergesFromMainnetEndState",
+      "entryPoint": "stable-staker-v2-cutover",
+      "branch": "master",
+      "branchesSeen": ["master"],
+      "fingerprint": "30510f331ea8d0067a9552be68956070da9429bcaaaf01c9bd3647a8e890a815",
+      "origin": "new",
+      "regression": false,
+      "severity": "qa",
+      "scannerProposedSeverity": "qa",
+      "severityChange": "unchanged",
+      "plausibility": "n/a",
+      "faithfulness": false,
+      "storyIntentNote": "Treated like run-31 Q-01 (same rehearsal-drift family, faithfulness false): story 080's purpose is a faithful local rehearsal, and this drift weakens it, but story 083 itself discloses the drift as a carried-forward non-blocking [low]. It is disclosed, so it is not hidden from the owner. Not routed to spec-conformance, for consistency with Q-01.",
+      "footgun": false,
+      "verified": "verified (DeployMocks.s.sol L2088-2092 '+ 2'; no unregister(stableStaker) or stableStaker.pause() in the file at 884ccf8)",
+      "reportRouting": ["qa-report"],
+      "classification": {
+        "assetImpact": "None. Dev/Anvil only. The mainnet end state is fork-verified independently (test_A).",
+        "attackPath": [
+          "1. A future edit regresses Phase 7's retirement ordering, or the slack, in the mainnet script.",
+          "2. The DeployMocks rehearsal does not exercise either, so it stays green.",
+          "3. The regression is caught only by the mainnet :preview against live state, which still runs before broadcast."
+        ],
+        "likelihood": "low. It needs a future regression, and the mainnet preview remains a backstop.",
+        "assumptions": "The mainnet :preview is still run before broadcast, as the runbook requires.",
+        "externalRequirements": "none"
+      },
+      "justification": "Test-fidelity drift with no mainnet effect and a working backstop (live-state preview). It is consistent with run-31 Q-01 (QA) and the dev rehearsal-drift entries. It is kept separate from Q-01 because the missing content, function, story authority and closure criteria are all independent. QA."
+    },
+    {
+      "id": "CLASS-L-02",
+      "originalId": "SSV2C32-04",
+      "label": "L-02",
+      "title": "The post-broadcast `:preview` 'verification' re-executes any outstanding step under prank instead of asserting it is already done, so a partial or diverged mainnet cutover verifies green",
+      "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "run / _phase1.._phase7 (idempotent skip-if-done gates) / _phase8_wiringAssertions",
+      "rootCauseClass": "VerificationPassSimulatesMissingSteps",
+      "entryPoint": "stable-staker-v2-cutover",
+      "fingerprint": "2c82d65e65e163c9f986c669aaf0b56abcfc80ae9f91016dd3f84fc1fb6b7da7",
+      "origin": "still-open",
+      "regression": false,
+      "severity": "low",
+      "faithfulness": true,
+      "footgun": false,
+      "severityChange": "unchanged (ledger severity preserved; not reclassified)",
+      "reportRouting": ["qa-report", "spec-conformance (cross-listed, as in run-31)"],
+      "carryoverNote": "Re-observed at 884ccf8. The script changed (story 083) and test_C3 shows V1 retirement is also masked. Narrative-only note extension; contract/function/rootCauseClass unchanged."
+    },
+    {
+      "id": "CLASS-F-01",
+      "originalId": "SSV2C32-05",
+      "label": "F-01",
+      "title": "The '067 floor' post-condition compares two numbers that are booked identically, so it cannot fail; story-067's zero-haircut anchor on the pre-migration booked total is not implemented",
+      "contract": "lib/phoenix-phase-2-staging/script/helpers/StableStakerCutoverCore.sol",
+      "function": "_assertPoolPostMigration",
+      "rootCauseClass": "TautologicalPostCondition",
+      "entryPoint": "stable-staker-v2-cutover",
+      "fingerprint": "dfed4279095251f3acd34987e79e3a1eecfce16adaca31cc6c776e8f724e713a",
+      "origin": "still-open",
+      "regression": false,
+      "severity": "low",
+      "faithfulness": true,
+      "footgun": false,
+      "severityChange": "unchanged (ledger severity preserved; not reclassified)",
+      "reportRouting": ["spec-conformance"],
+      "carryoverNote": "StableStakerCutoverCore.sol unchanged 1c1608c..884ccf8."
+    },
+    {
+      "id": "CLASS-Q-01",
+      "originalId": "SSV2C32-06",
+      "label": "Q-01",
+      "title": "The story-080 DeployMocks rehearsal omits the Antimatter phUSD mint grant that the mainnet script proves load-bearing, and the local verifier never calls autoAnnihilate, so the rehearsal cannot exercise V2's only reward path",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "_deployAntimatterAndStableStakerV2",
+      "rootCauseClass": "RehearsalDivergesFromMainnetWiring",
+      "entryPoint": "stable-staker-v2-cutover",
+      "fingerprint": "ca095edfd77eb5c995570804e32901905437b90bc37ed74d5484860593878257",
+      "origin": "still-open",
+      "reconciliationSignal": "INCOMPLETE-FIX",
+      "regression": false,
+      "severity": "qa",
+      "faithfulness": false,
+      "footgun": false,
+      "severityChange": "unchanged (ledger severity preserved; not reclassified)",
+      "reportRouting": ["qa-report"],
+      "carryoverNote": "The grant half was fixed in 884ccf8 (phUSD.setMinter(antimatter) + _requireLiveMinter). The verifier/autoAnnihilate half is still live. Do not propose fixed."
+    }
+  ]
+}

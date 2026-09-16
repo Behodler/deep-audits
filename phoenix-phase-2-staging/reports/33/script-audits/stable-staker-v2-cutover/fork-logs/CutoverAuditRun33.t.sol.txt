@@ -1,0 +1,674 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+// AUDIT-AUTHORED (reports/33 script-audit of stable-staker-v2-cutover @ 29aeb2b). NOT part of the audited
+// source. Fork harness: drives the REAL cutover phases / core helpers / verifier (inherited, unmodified) under
+// prank on a mainnet fork pinned at FORK_BLOCK and probes the resulting state. Never broadcasts.
+
+import "@forge-std/Test.sol";
+import {Vm, VmSafe} from "@forge-std/Vm.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {CrossVersionMigrator} from "stable-staker/CrossVersionMigrator.sol";
+import {IStableStakerMigratable} from "stable-staker/interfaces/IStableStakerMigratable.sol";
+import {IYieldStrategy} from "reflax-yield-vault/interfaces/IYieldStrategy.sol";
+import {
+    CutoverStableStakerV2Mainnet,
+    IPausableLike,
+    IPauserRegistry,
+    IPhUSDOwner,
+    IMigratorRole
+} from "../../script/CutoverStableStakerV2Mainnet.s.sol";
+import {ICutoverStaker, ICutoverStrategy, ICutoverMigrator} from "../../script/helpers/StableStakerCutoverCore.sol";
+import {VerifyStableStakerV2CutoverHarness} from "../VerifyStableStakerV2CutoverGuards.t.sol";
+
+interface I4626Like {
+    function convertToShares(uint256) external view returns (uint256);
+}
+
+interface IV1User {
+    function stake(address token, uint256 amount) external;
+    function userMigrate(address token) external;
+}
+
+contract Harness33 is CutoverStableStakerV2Mainnet {
+    function p0() external {
+        isPreview = true;
+        _phase0_preconditions();
+    }
+
+    function p1() external {
+        vm.startPrank(OWNER);
+        _phase1_pauseV1();
+        vm.stopPrank();
+    }
+
+    function p2() external {
+        vm.startPrank(OWNER);
+        _phase2_antimatter();
+        vm.stopPrank();
+    }
+
+    function p3() external {
+        vm.startPrank(OWNER);
+        _phase3_stakerV2();
+        vm.stopPrank();
+    }
+
+    function p4() external {
+        vm.startPrank(OWNER);
+        _phase4_pools();
+        vm.stopPrank();
+    }
+
+    function p5() external {
+        vm.startPrank(OWNER);
+        _phase5_mintRights();
+        vm.stopPrank();
+    }
+
+    function p6() external {
+        vm.startPrank(OWNER);
+        _phase6_migration();
+        vm.stopPrank();
+    }
+
+    function p7() external {
+        vm.startPrank(OWNER);
+        _phase7_finalize();
+        vm.stopPrank();
+    }
+
+    function p8() external view {
+        _phase8_wiringAssertions();
+    }
+
+    function simPause(string memory stage, bool tolerateV1Only) external {
+        _assertGlobalPauseWorks(stage, tolerateV1Only);
+    }
+
+    /// Phase 6 L519-538 verbatim (migrator CREATE + setMigrator both sides + probes), no per-token loop.
+    function p6Setup() external {
+        vm.startPrank(OWNER);
+        if (address(migrator) == address(0)) {
+            migrator = new CrossVersionMigrator(
+                IStableStakerMigratable(STABLE_STAKER_V1), IStableStakerMigratable(address(v2)), OWNER
+            );
+        }
+        if (IMigratorRole(STABLE_STAKER_V1).migrator() != address(migrator)) {
+            IMigratorRole(STABLE_STAKER_V1).setMigrator(address(migrator));
+        }
+        if (v2.migrator() != address(migrator)) v2.setMigrator(address(migrator));
+        vm.stopPrank();
+        require(_doneMigratorWired() && _doneMigratorIdentity(), "harness: migrator");
+    }
+
+    function initiate(address t) external {
+        vm.startPrank(OWNER);
+        _initiatePool(ICutoverMigrator(address(migrator)), ICutoverStaker(STABLE_STAKER_V1), t, _strategyFor(t));
+        vm.stopPrank();
+    }
+
+    function planMigratable(address t) external view returns (address[] memory) {
+        return _planPool(ICutoverStaker(STABLE_STAKER_V1), t, _strategyFor(t)).migratable;
+    }
+
+    /// The exact on-chain effect of a broadcast `migrate` tx whose user list was computed in forge's local pass.
+    function rawMigrate(address t, address[] memory users) external {
+        vm.prank(OWNER);
+        migrator.migrate(t, users);
+    }
+
+    /// Phase 6 per-token body L546-556, verbatim.
+    function migrateAndAssert(address t) external {
+        vm.startPrank(OWNER);
+        address ys = _strategyFor(t);
+        ICutoverStaker v1 = ICutoverStaker(STABLE_STAKER_V1);
+        _initiatePool(ICutoverMigrator(address(migrator)), v1, t, ys);
+        PoolPlan memory plan = _migratePool(ICutoverMigrator(address(migrator)), v1, t, ys, MIGRATE_CHUNK, _stragglerCap(t));
+        _assertPoolPostMigration(v1, ICutoverStaker(address(v2)), t, ys, plan, _maxLossBps(ys), WEI_SLACK);
+        vm.stopPrank();
+    }
+
+    function migrateNoAssert(address t) external returns (address[] memory users, uint256[] memory pre, uint256[] memory credit) {
+        vm.startPrank(OWNER);
+        address ys = _strategyFor(t);
+        PoolPlan memory plan = _migratePool(
+            ICutoverMigrator(address(migrator)), ICutoverStaker(STABLE_STAKER_V1), t, ys, MIGRATE_CHUNK, _stragglerCap(t)
+        );
+        vm.stopPrank();
+        return (plan.migratable, plan.migratablePre, plan.migratableCredit);
+    }
+
+    /// Per-leg post-condition with the plan THIS leg executed (the cutover's own Phase-6 shape).
+    function assertWithPlan(address t, address[] memory users, uint256[] memory pre, uint256[] memory credit)
+        external
+        view
+    {
+        PoolPlan memory plan;
+        plan.migratable = users;
+        plan.migratablePre = pre;
+        plan.migratableCredit = credit;
+        address ys = _strategyFor(t);
+        _assertPoolPostMigration(
+            ICutoverStaker(STABLE_STAKER_V1), ICutoverStaker(address(v2)), t, ys, plan, _maxLossBps(ys), WEI_SLACK
+        );
+    }
+
+    /// Resume-leg / verifier shape: live re-plan (empty migratable), exactly what VerifyStableStakerV2Cutover L223-235 runs.
+    function assertLivePlan(address t) external view {
+        address ys = _strategyFor(t);
+        PoolPlan memory plan = _planPool(ICutoverStaker(STABLE_STAKER_V1), t, ys);
+        _assertPoolPostMigration(
+            ICutoverStaker(STABLE_STAKER_V1), ICutoverStaker(address(v2)), t, ys, plan, _maxLossBps(ys), WEI_SLACK
+        );
+    }
+
+    /// The pre-story-085 "067 floor" (lockstep) in isolation.
+    function lockstepHolds(address t) external view returns (bool) {
+        (,,, uint256 v2Staked) = ICutoverStaker(address(v2)).poolInfo(t);
+        return ICutoverStrategy(_strategyFor(t)).principalOf(t, address(v2)) >= v2Staked;
+    }
+
+    function floorOf(address t) external view returns (uint256 floor, uint256 v2Staked) {
+        (, uint256 P) = ICutoverStaker(STABLE_STAKER_V1).migrationInfo(t);
+        (,,, uint256 v1Staked) = ICutoverStaker(STABLE_STAKER_V1).poolInfo(t);
+        (,,, v2Staked) = ICutoverStaker(address(v2)).poolInfo(t);
+        floor = _aggregatePrincipalFloor(
+            P, v1Staked, _maxLossBps(_strategyFor(t)), ICutoverStaker(address(v2)).stakerCount(t), WEI_SLACK
+        );
+    }
+
+    function resetTokens() external {
+        delete tokens;
+    }
+}
+
+contract CutoverAuditRun33 is Test {
+    uint256 constant FORK_BLOCK = 25981150;
+    address constant OWNER = 0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6;
+    address constant V1 = 0xbce8ABC09BaEDCabE93419bF875f6186e182079A;
+    address constant PAUSER = 0x7c5A8EeF1d836450C019FB036453ac6eC97885a3;
+    address constant PHUSD = 0xf3B5B661b92B75C71fA5Aba8Fd95D7514A9CD605;
+    address constant DOLA = 0x865377367054516e17014CcdED1e7d814EDC9ce4;
+    address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address constant USDE = 0x4c9EDD5852cd905f086C759E8383e09bff1E68B3;
+    address constant YS_DOLA = 0x1760E05356Ec1FBBA159C730781dCfB9920524e2;
+    address constant YS_USDC = 0xaFDf8DeA96a0F37Aae4869f813901bf73a3eAB83;
+    address constant YS_USDE = 0xaC2e5936Eca286eC364d4D5Bcca33145fBe57f95;
+    bytes4 constant ENFORCED_PAUSE = bytes4(keccak256("EnforcedPause()"));
+    bytes32 constant MIGRATED_OUT = keccak256("MigratedOut(address,address,uint256,uint256)");
+    bytes32 constant USER_MIGRATED = keccak256("UserMigrated(address,address,uint256)");
+    bytes32 constant DEPOSITED_FOR = keccak256("DepositedFor(address,address,uint256)");
+
+    Harness33 h;
+
+    function setUp() public {
+        vm.createSelectFork(vm.envString("RPC_MAINNET"), FORK_BLOCK);
+        vm.setEnv("PREVIEW_MODE", "true");
+        h = new Harness33();
+    }
+
+    // ------------------------------------------------------------------ helpers
+    function _tryGlobalPause(string memory tag) internal returns (bool ok, bytes memory err) {
+        address actor = makeAddr("run33-eye-actor");
+        address eye = IPauserRegistry(PAUSER).eyeToken();
+        uint256 burn = IPauserRegistry(PAUSER).eyeBurnAmount();
+        uint256 snap = vm.snapshotState();
+        deal(eye, actor, burn, false);
+        vm.prank(actor);
+        IERC20(eye).approve(PAUSER, burn);
+        vm.prank(actor);
+        (ok, err) = PAUSER.call(abi.encodeWithSignature("pause()"));
+        uint256 n = IPauserRegistry(PAUSER).getPausableContracts().length;
+        vm.revertToState(snap);
+        console2.log(string.concat(
+            "GLOBAL_PAUSE|", tag, ok ? "|SUCCEEDED" : "|REVERTED", "|registered=", vm.toString(n),
+            ok ? "" : string.concat("|err=", vm.toString(err))
+        ));
+    }
+
+    function _reason(bytes memory ret) internal pure returns (string memory) {
+        if (ret.length < 68) return string(abi.encodePacked("raw:", ret));
+        bytes memory body = new bytes(ret.length - 4);
+        for (uint256 i = 0; i < body.length; i++) {
+            body[i] = ret[i + 4];
+        }
+        return abi.decode(body, (string));
+    }
+
+    function _contains(string memory hay, string memory needle) internal pure returns (bool) {
+        bytes memory a = bytes(hay);
+        bytes memory b = bytes(needle);
+        if (b.length == 0 || b.length > a.length) return false;
+        for (uint256 i = 0; i <= a.length - b.length; i++) {
+            bool m = true;
+            for (uint256 j = 0; j < b.length; j++) {
+                if (a[i + j] != b[j]) {
+                    m = false;
+                    break;
+                }
+            }
+            if (m) return true;
+        }
+        return false;
+    }
+
+    function _through5() internal {
+        h.p0();
+        h.p1();
+        h.p2();
+        h.p3();
+        h.p4();
+        h.p5();
+    }
+
+    function _feed(VerifyStableStakerV2CutoverHarness vf, Vm.Log[] memory logs) internal {
+        address v2 = address(h.v2());
+        for (uint256 i = 0; i < logs.length; i++) {
+            Vm.Log memory l = logs[i];
+            if (l.topics.length < 3) continue;
+            bool v1Evt = l.emitter == V1 && (l.topics[0] == MIGRATED_OUT || l.topics[0] == USER_MIGRATED);
+            bool v2Evt = l.emitter == v2 && l.topics[0] == DEPOSITED_FOR;
+            if (!v1Evt && !v2Evt) continue;
+            vf.addLog(l.emitter, l.topics[0], l.topics[1], l.topics[2], l.data);
+        }
+    }
+
+    function _newVerifier(Vm.Log[] memory logs) internal returns (VerifyStableStakerV2CutoverHarness vf) {
+        vm.setEnv("PREVIEW_MODE", "false");
+        vf = new VerifyStableStakerV2CutoverHarness();
+        vf.inject(address(h.antimatter()), address(h.v2()), address(h.migrator()), h.phusdMaskAtPhase0(), h.phusdMintVersionAtPhase0());
+        _feed(vf, logs);
+    }
+
+    // ======================================================================================================
+    // A. State diff of the real phases 0-7 (intended vs unintended writes)
+    // ======================================================================================================
+    function test_A_stateDiff() public {
+        address[] memory regBefore = IPauserRegistry(PAUSER).getPausableContracts();
+        vm.recordLogs();
+        vm.startStateDiffRecording();
+        h.p0();
+        h.p1();
+        h.p2();
+        h.p3();
+        h.p4();
+        h.p5();
+        h.p6();
+        h.p7();
+        Vm.AccountAccess[] memory acc = vm.stopAndReturnStateDiff();
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        h.p8();
+        for (uint256 i = 0; i < acc.length; i++) {
+            if (acc[i].kind == VmSafe.AccountAccessKind.Create) console2.log(string.concat("CREATE|", vm.toString(acc[i].account)));
+            for (uint256 j = 0; j < acc[i].storageAccesses.length; j++) {
+                Vm.StorageAccess memory s = acc[i].storageAccesses[j];
+                if (!s.isWrite || s.previousValue == s.newValue) continue;
+                console2.log(string.concat("W|", vm.toString(s.account), "|", vm.toString(s.slot), "|", vm.toString(s.previousValue), "|", vm.toString(s.newValue)));
+            }
+        }
+        for (uint256 i = 0; i < logs.length; i++) {
+            console2.log(string.concat("EV|", vm.toString(logs[i].emitter), "|", logs[i].topics.length > 0 ? vm.toString(logs[i].topics[0]) : "anon"));
+        }
+        address[] memory regAfter = IPauserRegistry(PAUSER).getPausableContracts();
+        console2.log(string.concat("PAUSER_REG|before=", vm.toString(regBefore.length), "|after=", vm.toString(regAfter.length)));
+        console2.log(string.concat("MIGRATORS|V1.migrator=", vm.toString(IMigratorRole(V1).migrator()), "|V2.migrator=", vm.toString(IMigratorRole(address(h.v2())).migrator())));
+        console2.log(string.concat("ADDR|Antimatter=", vm.toString(address(h.antimatter())), "|V2=", vm.toString(address(h.v2())), "|CVM=", vm.toString(address(h.migrator()))));
+    }
+
+    // ======================================================================================================
+    // L-04 re-check: EYE-funded Pauser.pause() after every Phase-1 tx and after each later phase
+    // ======================================================================================================
+    function test_L04_breakerAtEveryPhase1StepAndPhase() public {
+        h.p0();
+        (bool ok0,) = _tryGlobalPause("phase0");
+        assertTrue(ok0, "live state breaker");
+        vm.prank(OWNER);
+        IPausableLike(V1).setPauser(OWNER);
+        (bool okA, bytes memory eA) = _tryGlobalPause("P1-after-setPauser(OWNER)");
+        assertFalse(okA, "documented 1-tx window (forced by Pauser.unregister precondition)");
+        assertEq(eA, abi.encodeWithSignature("Error(string)", "StableStaker: only pauser"));
+        vm.prank(OWNER);
+        IPauserRegistry(PAUSER).unregister(V1);
+        (bool okB,) = _tryGlobalPause("P1-after-unregister(V1)");
+        assertTrue(okB);
+        vm.prank(OWNER);
+        IPausableLike(V1).pause();
+        (bool okC,) = _tryGlobalPause("P1-after-pause(V1)");
+        assertTrue(okC);
+        h.p1(); // real Phase 1 on the manually-retired state: every gate skips, read-backs pass
+        h.p2();
+        (bool ok2,) = _tryGlobalPause("after-phase2");
+        h.p3();
+        (bool ok3,) = _tryGlobalPause("after-phase3");
+        h.p4();
+        (bool ok4,) = _tryGlobalPause("after-phase4");
+        h.p5();
+        (bool ok5,) = _tryGlobalPause("after-phase5");
+        h.p6();
+        (bool ok6,) = _tryGlobalPause("after-phase6");
+        assertTrue(ok2 && ok3 && ok4 && ok5 && ok6, "breaker live phases 2-6");
+    }
+
+    // ======================================================================================================
+    // NEW: Phase 7 registers V2 with the Pauser while V2 is still paused -> Pauser.pause() reverts EnforcedPause
+    // until V2.unpause(), 3 txs later. Replicates _phase7_finalize L568-616 tx-by-tx, then proves the end state
+    // equals the real Phase 7's by running the real _phase8_wiringAssertions.
+    // ======================================================================================================
+    function test_P7W_registeredWhilePausedWindow() public {
+        _through5();
+        h.p6();
+        address v2 = address(h.v2());
+        address am = address(h.antimatter());
+        (bool ok6,) = _tryGlobalPause("P7-start");
+        assertTrue(ok6);
+
+        vm.startPrank(OWNER);
+        IYieldStrategy(YS_DOLA).setSetAsideBufferRecipient(v2);
+        IYieldStrategy(YS_USDC).setSetAsideBufferRecipient(v2);
+        IPhUSDOwner(PHUSD).setMinter(V1, false);
+        IPausableLike(v2).setPauser(PAUSER); // L605
+        vm.stopPrank();
+        (bool okS,) = _tryGlobalPause("P7-after-V2.setPauser(Pauser)");
+        assertTrue(okS, "V2 not yet registered");
+
+        vm.prank(OWNER);
+        IPauserRegistry(PAUSER).register(v2); // L606
+        assertTrue(IPausableLike(v2).paused(), "V2 is still paused when registered");
+        (bool okR, bytes memory eR) = _tryGlobalPause("P7-after-register(V2)");
+        assertFalse(okR, "WINDOW: registered+paused V2 bricks the loop");
+        assertEq(eR, abi.encodeWithSelector(ENFORCED_PAUSE), "EnforcedPause from V2.pause()");
+
+        vm.prank(OWNER);
+        IPausableLike(am).setPauser(PAUSER); // L607
+        (bool okAS, bytes memory eAS) = _tryGlobalPause("P7-after-Antimatter.setPauser(Pauser)");
+        assertFalse(okAS);
+        assertEq(eAS, abi.encodeWithSelector(ENFORCED_PAUSE));
+
+        vm.prank(OWNER);
+        IPauserRegistry(PAUSER).register(am); // L609
+        (bool okAR, bytes memory eAR) = _tryGlobalPause("P7-after-register(Antimatter)");
+        assertFalse(okAR);
+        assertEq(eAR, abi.encodeWithSelector(ENFORCED_PAUSE));
+
+        // ---- HALT HERE (e.g. Ledger timeout before the unpause tx). What does the runbook's :preview do? ----
+        uint256 snap = vm.snapshotState();
+        try h.simPause("phase0", true) {
+            revert("expected phase0 simulation to revert on a halted Phase-7 state");
+        } catch (bytes memory ret) {
+            string memory r = _reason(ret);
+            console2.log(string.concat("HALTED_P7|preview phase0 simulation|", r));
+            assertTrue(_contains(r, vm.toString(v2)), "names V2 as the culprit (tolerance is V1-only)");
+        }
+        // full preview run() on the halted state (runbook: run :preview before resuming)
+        h.resetTokens();
+        try h.run() {
+            revert("expected preview run() to revert on a halted Phase-7 state");
+        } catch (bytes memory ret2) {
+            console2.log(string.concat("HALTED_P7|preview run()|", _reason(ret2)));
+        }
+        vm.revertToState(snap);
+
+        vm.prank(OWNER);
+        IPausableLike(v2).unpause(); // L614
+        (bool okU,) = _tryGlobalPause("P7-after-V2.unpause()");
+        assertTrue(okU, "breaker restored only after unpause");
+
+        h.p8(); // replicated Phase 7 reached exactly the real end state
+    }
+
+    /// A broadcast-mode RESUME from the halted Phase-7 state converges (the unpause gate heals it).
+    function test_P7W_haltedStateBroadcastResumeConverges() public {
+        _through5();
+        h.p6();
+        address v2 = address(h.v2());
+        address am = address(h.antimatter());
+        vm.startPrank(OWNER);
+        IYieldStrategy(YS_DOLA).setSetAsideBufferRecipient(v2);
+        IYieldStrategy(YS_USDC).setSetAsideBufferRecipient(v2);
+        IPhUSDOwner(PHUSD).setMinter(V1, false);
+        IPausableLike(v2).setPauser(PAUSER);
+        IPauserRegistry(PAUSER).register(v2);
+        IPausableLike(am).setPauser(PAUSER);
+        IPauserRegistry(PAUSER).register(am);
+        vm.stopPrank();
+        (bool dead,) = _tryGlobalPause("HALT-before-unpause");
+        assertFalse(dead);
+        h.resetTokens();
+        h.p0();
+        h.p1();
+        h.p2();
+        h.p3();
+        h.p4();
+        h.p5();
+        h.p6();
+        h.p7();
+        h.p8();
+        (bool alive,) = _tryGlobalPause("HALT-after-resume");
+        assertTrue(alive);
+    }
+
+    /// Control for the fix: the same Phase 7 with V2.unpause() moved before register(V2) never bricks the breaker.
+    function test_P7W_fixOrderingControl() public {
+        _through5();
+        h.p6();
+        address v2 = address(h.v2());
+        address am = address(h.antimatter());
+        vm.startPrank(OWNER);
+        IYieldStrategy(YS_DOLA).setSetAsideBufferRecipient(v2);
+        IYieldStrategy(YS_USDC).setSetAsideBufferRecipient(v2);
+        IPhUSDOwner(PHUSD).setMinter(V1, false);
+        IPausableLike(v2).setPauser(PAUSER);
+        IPausableLike(v2).unpause();
+        vm.stopPrank();
+        (bool a,) = _tryGlobalPause("FIX-after-unpause");
+        vm.prank(OWNER);
+        IPauserRegistry(PAUSER).register(v2);
+        (bool b,) = _tryGlobalPause("FIX-after-register(V2)");
+        vm.prank(OWNER);
+        IPausableLike(am).setPauser(PAUSER);
+        vm.prank(OWNER);
+        IPauserRegistry(PAUSER).register(am);
+        (bool c,) = _tryGlobalPause("FIX-after-register(Antimatter)");
+        assertTrue(a && b && c);
+        h.p8();
+    }
+
+    // ======================================================================================================
+    // F-01 falsification: the story-085 floor can fail where the old lockstep cannot
+    // ======================================================================================================
+    function _haircutDolaThenMigrate(uint256 haircutBps)
+        internal
+        returns (address[] memory users, uint256[] memory pre, uint256[] memory credit)
+    {
+        _through5();
+        h.p6Setup();
+        address vault = ICutoverStrategy(YS_DOLA).vault();
+        uint256 shares = IERC20(vault).balanceOf(YS_DOLA);
+        if (haircutBps > 0) {
+            // Shares are commingled across the strategy's clients: leave the strategy holding only
+            // (1 - haircut) of the shares V1's principal needs, so V1's exit realizes R ~= P * (1 - haircut).
+            (,,, uint256 staked) = ICutoverStaker(V1).poolInfo(DOLA);
+            uint256 need = I4626Like(vault).convertToShares(staked);
+            uint256 keep = need * (10_000 - haircutBps) / 10_000;
+            require(shares > keep, "harness: strategy holds fewer shares than the haircut target");
+            vm.prank(YS_DOLA);
+            IERC20(vault).transfer(makeAddr("haircut-sink"), shares - keep);
+        }
+        h.initiate(DOLA);
+        (uint256 R, uint256 P) = ICutoverStaker(V1).migrationInfo(DOLA);
+        console2.log(string.concat("HAIRCUT|bps=", vm.toString(haircutBps), "|R=", vm.toString(R), "|P=", vm.toString(P)));
+        (users, pre, credit) = h.migrateNoAssert(DOLA);
+    }
+
+    function test_F01_cleanPassesBothShapes() public {
+        (address[] memory u, uint256[] memory p, uint256[] memory c) = _haircutDolaThenMigrate(0);
+        h.assertWithPlan(DOLA, u, p, c);
+        h.assertLivePlan(DOLA);
+        (uint256 floor, uint256 staked) = h.floorOf(DOLA);
+        console2.log(string.concat("F01|clean|floor=", vm.toString(floor), "|v2Staked=", vm.toString(staked)));
+    }
+
+    function test_F01_haircut5bps_floorFailsLockstepPasses() public {
+        (address[] memory u, uint256[] memory p, uint256[] memory c) = _haircutDolaThenMigrate(5);
+        assertTrue(h.lockstepHolds(DOLA), "old '067 floor' (lockstep) is blind to the loss");
+        (uint256 floor, uint256 staked) = h.floorOf(DOLA);
+        console2.log(string.concat("F01|5bps|floor=", vm.toString(floor), "|v2Staked=", vm.toString(staked)));
+        try h.assertWithPlan(DOLA, u, p, c) {
+            revert("per-leg assert unexpectedly passed");
+        } catch (bytes memory r1) {
+            console2.log(string.concat("F01|5bps|single-leg|", _reason(r1)));
+        }
+        try h.assertLivePlan(DOLA) {
+            revert("resume/verifier-shape floor unexpectedly passed");
+        } catch (bytes memory r2) {
+            string memory s = _reason(r2);
+            console2.log(string.concat("F01|5bps|resume-leg(empty plan)|", s));
+            assertTrue(_contains(s, "V2 booked total below pre-migration principal floor"), "floor fires");
+        }
+    }
+
+    function test_F01_haircut1bps_withinBoundPasses() public {
+        _haircutDolaThenMigrate(1);
+        h.assertLivePlan(DOLA);
+        (uint256 floor, uint256 staked) = h.floorOf(DOLA);
+        console2.log(string.concat("F01|1bps(within 2bps bound)|floor=", vm.toString(floor), "|v2Staked=", vm.toString(staked)));
+    }
+
+    // ======================================================================================================
+    // NEW: a V1 staker who self-exits (permissionless userMigrate) between the initiateMigration tx and the
+    // migrate tx leaves a CORRECT cutover that the aggregate floor (verifier + any resume/preview leg) rejects.
+    // ======================================================================================================
+    function _cutoverWithOptionalSelfExit(bool selfExit) internal returns (Vm.Log[] memory logs, address exiter, uint256 exitAmt) {
+        _through5();
+        vm.recordLogs();
+        h.p6Setup();
+        // DOLA: exactly the broadcast shape - list planned in the local pass, a self-exit lands between txs.
+        h.initiate(DOLA);
+        address[] memory planned = h.planMigratable(DOLA);
+        if (selfExit) {
+            for (uint256 i = 0; i < planned.length; i++) {
+                (uint256 a,) = ICutoverStaker(V1).userInfo(DOLA, planned[i]);
+                if (a > exitAmt) {
+                    exitAmt = a;
+                    exiter = planned[i];
+                }
+            }
+            // choose the SMALLEST staker above 1 DOLA to show the threshold is low
+            for (uint256 i = 0; i < planned.length; i++) {
+                (uint256 a,) = ICutoverStaker(V1).userInfo(DOLA, planned[i]);
+                if (a > 1e18 && a < exitAmt) {
+                    exitAmt = a;
+                    exiter = planned[i];
+                }
+            }
+            uint256 balBefore = IERC20(DOLA).balanceOf(exiter);
+            vm.prank(exiter);
+            IV1User(V1).userMigrate(DOLA);
+            console2.log(string.concat(
+                "SELF_EXIT|user=", vm.toString(exiter), "|V1principal=", vm.toString(exitAmt),
+                "|paidToWallet=", vm.toString(IERC20(DOLA).balanceOf(exiter) - balBefore)
+            ));
+        }
+        h.rawMigrate(DOLA, planned); // on chain: already-exited user skipped by batchMigrate
+        h.migrateAndAssert(USDC);
+        h.migrateAndAssert(USDE);
+        h.p7();
+        logs = vm.getRecordedLogs();
+        h.p8(); // real Phase 8 wiring assertions pass
+        assertEq(ICutoverStaker(V1).stakerCount(DOLA), 0, "every DOLA V1 staker exited (migrated or self-exited)");
+    }
+
+    function test_SX_controlNoSelfExit_verifierPasses() public {
+        (Vm.Log[] memory logs,,) = _cutoverWithOptionalSelfExit(false);
+        VerifyStableStakerV2CutoverHarness vf = _newVerifier(logs);
+        vf.run();
+        console2.log("SX|control|verifier PASSED|users re-checked", vf.verifiedUserCount());
+    }
+
+    function test_SX_selfExitBetweenTxs_verifierFalseFailsOnFloor() public {
+        (Vm.Log[] memory logs, address exiter,) = _cutoverWithOptionalSelfExit(true);
+        (uint256 floor, uint256 staked) = h.floorOf(DOLA);
+        console2.log(string.concat("SX|DOLA|floor=", vm.toString(floor), "|v2Staked=", vm.toString(staked), "|shortfall=", vm.toString(floor > staked ? floor - staked : 0)));
+        (uint256 inV2,) = ICutoverStaker(address(h.v2())).userInfo(DOLA, exiter);
+        assertEq(inV2, 0, "exiter holds nothing in V2 - by their own choice");
+
+        VerifyStableStakerV2CutoverHarness vf = _newVerifier(logs);
+        try vf.run() {
+            revert("verifier unexpectedly passed");
+        } catch (bytes memory ret) {
+            string memory r = _reason(ret);
+            console2.log(string.concat("SX|verifier|", r));
+            assertTrue(_contains(r, "V2 booked total below pre-migration principal floor"), "false loss alarm");
+        }
+
+        // The runbook's post-verify / resume :preview hits the same floor.
+        vm.setEnv("PREVIEW_MODE", "true");
+        h.resetTokens();
+        try h.run() {
+            revert("preview run() unexpectedly passed");
+        } catch (bytes memory ret2) {
+            console2.log(string.concat("SX|preview run() on same state|", _reason(ret2)));
+        }
+    }
+
+    /// Resume consequence: broadcast halts after the DOLA migrate (before USDC/USDe and Phase 7) and a DOLA staker had
+    /// self-exited in between. The resume leg (same local pass as :broadcast / :preview) reverts at DOLA's Phase-6 floor
+    /// before it can migrate USDC/USDe or finalize - the cutover cannot be completed without editing the script.
+    function test_SX_haltedResumeCannotFinish() public {
+        _through5();
+        h.p6Setup();
+        h.initiate(DOLA);
+        address[] memory planned = h.planMigratable(DOLA);
+        address exiter;
+        uint256 best = type(uint256).max;
+        for (uint256 i = 0; i < planned.length; i++) {
+            (uint256 a,) = ICutoverStaker(V1).userInfo(DOLA, planned[i]);
+            if (a > 1e18 && a < best) {
+                best = a;
+                exiter = planned[i];
+            }
+        }
+        vm.prank(exiter);
+        IV1User(V1).userMigrate(DOLA);
+        h.rawMigrate(DOLA, planned);
+        // ---- HALT. Resume: ----
+        h.resetTokens();
+        try h.run() {
+            revert("resume unexpectedly completed");
+        } catch (bytes memory ret) {
+            string memory r = _reason(ret);
+            console2.log(string.concat("SX_RESUME|exiterPrincipal=", vm.toString(best), "|", r));
+            assertTrue(_contains(r, "V2 booked total below pre-migration principal floor"));
+        }
+        assertEq(ICutoverStaker(V1).poolState(USDC), 0, "USDC pool never initiated");
+        assertTrue(IPausableLike(address(h.v2())).paused(), "V2 left paused");
+        assertFalse(IPauserRegistry(PAUSER).isRegistered(address(h.v2())), "V2 not under the global breaker");
+    }
+
+    // ======================================================================================================
+    // L-01 re-check: planted dust stakes against WEI_SLACK = 1000
+    // ======================================================================================================
+    function test_L01_plantedDust() public {
+        address g1 = makeAddr("dola-dust-9");
+        address g2 = makeAddr("usdc-dust-3");
+        deal(DOLA, g1, 9);
+        deal(USDC, g2, 3);
+        vm.startPrank(g1);
+        IERC20(DOLA).approve(V1, 9);
+        IV1User(V1).stake(DOLA, 9);
+        vm.stopPrank();
+        vm.startPrank(g2);
+        IERC20(USDC).approve(V1, 3);
+        (bool okU,) = V1.call(abi.encodeWithSelector(IV1User.stake.selector, USDC, 3));
+        vm.stopPrank();
+        (uint256 a1,) = ICutoverStaker(V1).userInfo(DOLA, g1);
+        (uint256 a2,) = ICutoverStaker(V1).userInfo(USDC, g2);
+        console2.log(string.concat("L01|planted|DOLA=", vm.toString(a1), "|USDC=", vm.toString(a2), "|usdcStakeOk=", okU ? "1" : "0"));
+        h.run();
+        (uint256 p1,) = ICutoverStaker(address(h.v2())).userInfo(DOLA, g1);
+        (uint256 p2,) = ICutoverStaker(address(h.v2())).userInfo(USDC, g2);
+        console2.log(string.concat("L01|cutover PASSED|V2 DOLA=", vm.toString(p1), "|V2 USDC=", vm.toString(p2)));
+    }
+}

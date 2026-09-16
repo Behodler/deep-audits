@@ -1,0 +1,112 @@
+{
+  "id": "L-04",
+  "issueId": "pps32l4",
+  "label": "L-04",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-32",
+  "status": "ready",
+  "severity": "low",
+  "title": "From Phase 1 until Phase 7's Pauser.unregister(V1), V1 is paused with pauser OWNER but still registered, so the permissionless global Pauser.pause() reverts for all 26 registrants for the whole cutover session, or indefinitely if the run halts",
+  "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+  "function": "_phase1_pauseV1 / _phase7_finalize",
+  "line": 272,
+  "lineStart": 272,
+  "lineEnd": 564,
+  "rootCauseClass": "RegisteredPausableRepauserWindowBricksGlobalPause",
+  "entryPoint": "stable-staker-v2-cutover",
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "commit": "884ccf8c4fc2cd0ece179745bf2ea381e2bba51e",
+  "fingerprint": "46c053534c586895fece77ca5a74f0991e02d36f5c513251c6847e84787f96b6",
+  "fingerprintBasis": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol:_phase1_pauseV1 / _phase7_finalize:RegisteredPausableRepauserWindowBricksGlobalPause:stable-staker-v2-cutover",
+  "fingerprintProvenance": "Copied verbatim from reports/32/script-audits/stable-staker-v2-cutover/classified-findings.json (not recomputed). finding-manager cross-check: sha256(fingerprintBasis) reproduces it byte-for-byte.",
+  "origin": "new",
+  "regression": false,
+  "faithfulness": false,
+  "footgun": true,
+  "plausibility": "plausible",
+  "verified": "verified on fork @25978784 (test_W_windowBricksGlobalPause, test_W2)",
+  "scannerProposedSeverity": "low",
+  "description": "`Pauser.pause()` (lib/pauser/src/Pauser.sol L56-66) is the protocol's permissionless emergency breaker: anyone burning 1000 EYE can trigger it. It loops `IPausable(c).pause()` over every registrant with no try/catch. Phase 1 (L282-285) moves V1's pauser to OWNER and pauses V1, but V1 is only removed from the registry in Phase 7 (L558-560), about 40 transactions later. Throughout that window the loop reaches V1 (index 18) and reverts `StableStaker: only pauser`, so the whole call reverts and no registrant is paused. The registrants include the live yield strategies that custody every staker's principal, PhlimboV3 and the hooks. OWNER is the direct pauser of only 1 of the 26 registrants during the window (V1 itself), so an owner who notices an incident cannot pause the rest either without first unregistering V1. The window lasts the whole `--slow` Ledger session. Phase 6 also carries several `STOP AND REPORT` reverts, as do the resume procedure and the halt-and-trim runbook, so a halt anywhere between Phase 1 and Phase 7 leaves the breaker dead until someone resumes the run. Story 083's rationale ('once V1 is unregistered, that risk is gone') addresses only the END state. The window predates 083: 082 also paused V1 in Phase 1 while it stayed registered. In run-31 the window was masked because the Pauser was already bricked by two pre-paused registrants, which the owner has since removed. The window is therefore now the only thing that breaks the breaker, and a competent owner who has just cleared the registry would not expect the cutover to re-break it.",
+  "impact": "The protocol-wide emergency pause is unavailable to everyone (EYE holders and the owner-through-Pauser) for the cutover duration, or indefinitely after a halted run. An exploit on any registered contract during that window cannot be stopped through the designated mechanism. No direct loss is caused by the script itself; this is an availability hazard for the incident-response path during a planned operation. It is recoverable by the owner in one transaction (`Pauser.unregister(V1)`) once someone notices.",
+  "attackPath": [
+    "1. The owner broadcasts the cutover (--slow, Ledger). Phase 1 sets V1.pauser = OWNER and pauses V1. V1 stays registered at index 18.",
+    "2. For the rest of Phases 1-6 (~40 tx), and for any time after a STOP-AND-REPORT halt before Phase 7, Pauser.pause() loops over the registrants with no try/catch and reverts at V1 with 'StableStaker: only pauser'. No registrant is paused.",
+    "3. An unrelated incident hits a registered contract during the window. An EYE holder or monitor calls Pauser.pause(), which reverts.",
+    "4. The owner can pause only V1 directly (1 of 26). Restoring the breaker needs Pauser.unregister(V1) (1 owner tx) followed by a retried pause. Otherwise it takes per-contract setPauser+pause pairs."
+  ],
+  "classification": {
+    "assetImpact": "None directly. The script moves no value because of this. What degrades is the protocol-wide permissionless emergency stop, for all 26 registrants including the yield strategies that custody staker principal, PhlimboV3 and the hooks. That lasts for a bounded operational window. Harm happens only if an independent exploit that needs a global pause coincides with that window.",
+    "attackPath": [
+      "1. The owner broadcasts the cutover (--slow, Ledger). Phase 1 sets V1.pauser = OWNER and pauses V1. V1 stays registered at index 18.",
+      "2. For the rest of Phases 1-6 (~40 tx), and for any time after a STOP-AND-REPORT halt before Phase 7, Pauser.pause() loops over the registrants with no try/catch and reverts at V1 with 'StableStaker: only pauser'. No registrant is paused.",
+      "3. An unrelated incident hits a registered contract during the window. An EYE holder or monitor calls Pauser.pause(), which reverts.",
+      "4. The owner can pause only V1 directly (1 of 26). Restoring the breaker needs Pauser.unregister(V1) (1 owner tx) followed by a retried pause. Otherwise it takes per-contract setPauser+pause pairs."
+    ],
+    "likelihood": "low. The window is certain on every run (it is structural, not state-dependent), but it matters only with a coincident incident during a bounded, attended session. The indefinite-halt case raises the exposure but still needs a coincident incident.",
+    "assumptions": "The operator runs the script as written. No other registrant is independently paused (true on live state after the owner's cleanup; pre-cutover global pause SUCCEEDED 26/26).",
+    "externalRequirements": "A separate exploit or incident on a Pauser registrant during the Phase 1 to Phase 7 window that the response relies on the global Pauser.pause() to stop.",
+    "remediesEnumerated": [
+      "During an incident: owner sends Pauser.unregister(V1) (allowed, since V1.pauser()==OWNER != Pauser). Pauser.pause() then succeeds for the remaining 25 (fork-proven: window-after-early-unregister SUCCEEDED registered=25). Recovery takes 1 owner tx plus the pause.",
+      "Script fix: in _phase1_pauseV1, run setPauser(OWNER) -> unregister(V1) gated on isRegistered -> pause(). Fork-proven: the unmodified Phase 7 gates skip, run() PASSES, and the resume paths converge.",
+      "Verification: a preview-only simulated Pauser.pause() at Phase 0, after Phase 1 and at Phase 8. This overlaps with L-03 clause (b).",
+      "Conclusion: bounded and recoverable without a contract change. Not permanent."
+    ]
+  },
+  "severityRationale": "Deterministic, fork-verified loss of the permissionless global emergency pause for the duration of the cutover, caused by the script's step ordering. It is a non-obvious footgun (Law 3) and in scope. It is not High: no asset is at risk because of it. It is not Medium: it degrades a defence-in-depth control during a bounded, attended window, needs a coincident independent incident to cause harm, the owner can restore it in one transaction, and the permanent protocol-wide version of the same impact (L-03) is already Low.",
+  "severityDeliberation": {
+    "caseForMedium": "The emergency pause is a safety function, and C4 Medium includes impact on 'availability of a protocol function'. The window also covers the whole Ledger session and has no upper bound if the run halts and the operator walks away. The trigger is deterministic, not an edge case.",
+    "caseForLow": [
+      "Consistency: run-31 L-03 (0711215fcc17) classified a strictly broader condition as Low. There, the global breaker was dead permanently for 30 contracts, including V2 and Antimatter on arrival. This finding is a transient, script-induced subset of the same impact class, so rating it above L-03 would invert the ordering.",
+      "Pausing is defence in depth, not a user-facing function. No user-facing protocol function (stake, withdraw, claim, yield) loses availability, and no exploit is enabled. It only removes one mitigation for an independent exploit.",
+      "The operator of the window is the owner, who holds the one-tx restore (unregister V1) and a per-contract fallback on every registrant. The global path is gated behind a single owner action, not lost.",
+      "The session is bounded and attended. The indefinite case requires both a halt and the operator leaving without resuming, plus a coincident incident.",
+      "Ambiguous-impact rule: default to the lower severity and flag for review."
+    ],
+    "decision": "Low, as a footgun / operational hazard. Flagged for human review with a strong pre-broadcast fix recommendation: the fix is cheap and fork-proven, and it closes the only thing currently breaking the global breaker."
+  },
+  "storyIntentNote": "The script is faithful to story-083's letter: the story knowingly keeps Phase 1's setPauser(OWNER)+pause() and moves unregister to Phase 7. The story's own rationale ('a paused registered contract bricks the global pause'; 'once V1 is unregistered, that risk is gone') covers only the end state. The story does not consider the mid-run window its ordering creates. That is a gap in the story's safety reasoning (Law 1 over Law 2), not a deviation in the implementation, so the finding is not routed to spec-conformance.",
+  "footgunTest": "Surprising to a competent, non-malicious owner. The owner has just cleared the two pre-paused registrants specifically so the global breaker works. Story 083 states the exact hazard (a paused, registered contract bricks Pauser.pause()) and still orders the steps so that the script creates this state for ~40 transactions. Nothing in the preview output or the Phase 8 asserts surfaces it. In scope as an operational hazard.",
+  "recommendation": "Move V1's retirement to the start of the window. In `_phase1_pauseV1`, immediately after `setPauser(OWNER)`, call `Pauser.unregister(V1)` (gated on `isRegistered`) BEFORE `pause()`, and require `!isRegistered(V1)`. Keep the Phase 7 block as the idempotent backstop it already is. This is fork-proven compatible: the unmodified Phase 7 gates skip, and the resume paths still converge. Also add a preview-only check that simulates the full `Pauser.pause()` (deal EYE, approve, call inside `snapshotState/revertToState`) in Phase 0 and again after Phase 1 and in Phase 8, so 'registered' is proven to mean 'actually pausable' at every stage. Document in the runbook that a halted run must be resumed, or V1 unregistered, before the operator walks away.",
+  "evidence": "Fork @25978784, audit harness test_W_windowBricksGlobalPause (fork-logs/h32-test_W_windowBricksGlobalPause.log): `WINDOW_AFTER_P1|V1.paused=true|V1.pauser==OWNER=true|V1.registered=true`; EYE-funded `Pauser.pause()` -> `GLOBAL_PAUSE|window-after-phase1|REVERTED|...StableStaker: only pauser`; after the real Phase 6 -> `GLOBAL_PAUSE|window-after-phase6|REVERTED|...only pauser`; `WINDOW_OWNER_DIRECT_PAUSERS|1of26`. Baseline on live state: `GLOBAL_PAUSE|pre-cutover(live state)|SUCCEEDED|registered=26|pausedAfter=26`. Post-finalize: `SUCCEEDED|registered=27|pausedAfter=27` (test_B). Remedy proof: `Pauser.unregister(V1)` during the window -> `GLOBAL_PAUSE|window-after-early-unregister|SUCCEEDED|registered=25`, and the UNMODIFIED `run()` then completes (`WINDOW_REMEDY|...PASSED (Phase 7 gate skipped)`); from fresh state test_W2 (setPauser(OWNER) + unregister + pause before run()) -> global pause SUCCEEDED and run() PASSED.",
+  "reportRouting": [
+    "qa-report (operational hazard / footgun)"
+  ],
+  "relatedFindings": [
+    "L-03 0711215fcc17 (end-state breaker; clause (b) 'Phase 8 asserts registration, not a working breaker' is still live). Separate root cause; shares the simulated-pause verification remedy."
+  ],
+  "uniquenessVsSiblings": "L-03 is the END-STATE breaker: after finalize, V2/Antimatter are handed to a Pauser whose loop already reverted on two pre-paused registrants, and Phase 8 asserts registration rather than a working breaker. This finding is a TRANSIENT MID-RUN window (Phase 1 -> Phase 7) created by the script's own ordering: V1 paused + pauser OWNER + still registered. Root cause is different (step ordering vs pre-existing registry state / unverified end state), the trigger is different (every run, including a clean registry, vs pre-paused third-party registrants), and the primary fix is different (unregister V1 inside Phase 1 vs removing pre-paused registrants / verifying the end state). test_B shows the end state now succeeds 27/27 while test_W shows the window still reverts, so one can be fixed while the other is live. That is the decisive proof they are separate.",
+  "story": "story-083",
+  "poc": {
+    "file": "phoenix-phase-2-staging/work/test/audit-run32/CutoverAuditRun32.t.sol",
+    "tests": [
+      "test_W_windowBricksGlobalPause",
+      "test_W2_earlyUnregisterFromPhase0State",
+      "test_B_globalPauseBeforeAndAfterCutover"
+    ],
+    "logs": [
+      "phoenix-phase-2-staging/reports/32/script-audits/stable-staker-v2-cutover/fork-logs/h32-test_W_windowBricksGlobalPause.log",
+      "phoenix-phase-2-staging/reports/32/script-audits/stable-staker-v2-cutover/fork-logs/h32-test_W2_earlyUnregisterFromPhase0State.log",
+      "phoenix-phase-2-staging/reports/32/script-audits/stable-staker-v2-cutover/fork-logs/h32-test_B_globalPauseBeforeAndAfterCutover.log"
+    ],
+    "status": "passing",
+    "kind": "fork evidence harness (mainnet fork @25978784); [PASS] lines are the logged demonstrations. Not re-run by finding-manager. A coded PoC is not required at Low/QA.",
+    "lastRun": "2026-09-15"
+  },
+  "pocStatus": "passing",
+  "flaggedForHumanReview": true,
+  "preBroadcastBlocker": true,
+  "preBroadcastRecommendation": "Move Pauser.unregister(V1) into Phase 1 before V1.pause().",
+  "classificationOrigin": "CLASS-L-04",
+  "originalId": "SSV2C32-01",
+  "metadata": {
+    "createdAt": "2026-09-15T00:00:00Z",
+    "updatedAt": "2026-09-15T00:00:00Z",
+    "scanOrigin": "script-audit-32-stable-staker-v2-cutover (SSV2C32-01)",
+    "classificationOrigin": "CLASS-L-04",
+    "writtenBy": "finding-manager, run phoenix-phase-2-staging-32"
+  },
+  "reportDir": "phoenix-phase-2-staging/reports/32"
+}

@@ -1,0 +1,88 @@
+{
+  "id": "L-02",
+  "label": "L-02",
+  "issueId": "pps31l2",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-32",
+  "reportDir": "phoenix-phase-2-staging/reports/32",
+  "commit": "884ccf8c4fc2cd0ece179745bf2ea381e2bba51e",
+  "baseline": "1c1608c",
+  "status": "ready",
+  "severity": "low",
+  "title": "The post-broadcast `:preview` 'verification' re-executes any outstanding step under prank instead of asserting it is already done, so a partial or diverged mainnet cutover verifies green",
+  "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+  "function": "run / _phase1.._phase7 (idempotent skip-if-done gates) / _phase8_wiringAssertions",
+  "lineStart": 146,
+  "lineEnd": 643,
+  "rootCauseClass": "VerificationPassSimulatesMissingSteps",
+  "entryPoint": "stable-staker-v2-cutover",
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "2c82d65e65e163c9f986c669aaf0b56abcfc80ae9f91016dd3f84fc1fb6b7da7",
+  "fingerprintBasis": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol:run / _phase1.._phase7 (idempotent skip-if-done gates) / _phase8_wiringAssertions:VerificationPassSimulatesMissingSteps:stable-staker-v2-cutover",
+  "fingerprintVerified": "sha256(fingerprintBasis) reproduces the stored ledger fingerprint byte-for-byte; copied verbatim from classified-findings.json.",
+  "origin": "still-open",
+  "reconciliationSignal": null,
+  "regression": false,
+  "isNewLedgerEntry": false,
+  "faithfulness": true,
+  "footgun": false,
+  "description": "The package.json doc key and the story both claim that after a broadcast, `:preview` \"re-runs every assertion and smoke test against the live deployment\", with every phase detecting \"from on-chain state that it is done and skips\". In fact every phase is `if (!done) do();`. Preview impersonates OWNER, so any step that did NOT land on mainnet is silently performed inside the simulation, and Phase 8 then asserts the simulated state. Nothing in preview mode, not even with a progress file loaded, requires that zero mutations were needed. The per-user loss bound is also evaluated only over `plan.migratable` from the same leg, which is empty after a broadcast, so the on-chain credits are never re-checked. This is the run-22 `ForgeLocalPassPrecedesBroadcast` family: all planning and assertions run in forge's local pass, and the batches are frozen there, before the Ledger session sends ~47 transactions with `--slow --skip-simulation`. A V1 `stake` that lands after the local pass but before the Phase-1 `pause()` transaction (cf. ledger c04da307336c on promotion-ready) is absent from every batch. Phase 7 then revokes V1's phUSD mint anyway, which bricks that user's `userMigrate` while their frozen pending is non-zero. The chained preview then migrates them in simulation and reports success.",
+  "impact": "The operator's only automated outcome check can report a finished cutover while mainnet has V1 phUSD mint still live, V2 still paused, or a staker stranded on V1 behind a revoked mint. Remedies exist (owner re-grant plus re-run), but nothing surfaces the need for them. No direct loss is proven. Mainnet per-user loss stays bounded by the strategies' own minOut floors.",
+  "attackPath": [
+    "1. Broadcast: forge's local pass plans and freezes about 47 transactions, then the Ledger session sends them with --slow --skip-simulation.",
+    "2. Some step does not land, e.g. setMinter(V1,false) or v2.unpause(), or a V1 stake lands between the local pass and the Phase-1 pause tx and is absent from every frozen batch.",
+    "3. The operator runs :preview to verify; every phase is if(!done) do() under vm.startPrank(OWNER), so the missing step is performed in simulation.",
+    "4. Phase 8 asserts the simulated state and prints output byte-identical to a clean run (fork-verified: MASK_REVOKE and MASK_PAUSED_V2 both PASS)."
+  ],
+  "recommendation": "Unchanged from run-31, extended. When `isPreview` and the progress file has `deploymentStatus == completed`, run a verify-only pass BEFORE `vm.startPrank` that requires every phase's done-condition, including the V1 retirement triple (pauser==OWNER, !isRegistered, paused), instead of performing it. Revert `verify: step X not on chain` on any gap, and only then run the smoke tests.",
+  "originalRecommendation": "Add a separate assert-only verifier (mirroring story-075's standalone VerifyPromotionReady.s.sol) or an explicit VERIFY_ONLY env-flag mode that never calls vm.startPrank/vm.startBroadcast and never mutates. Gate it on ON-CHAIN state, not on the progress file: do NOT key verify-only mode off progress-file deploymentStatus == completed, because progress files can be stamped completed during forge's local pass (ledger 1e8cc0dc58ba). In that mode every phase must require(alreadyDone, 'verify: step X not on chain') and never perform it. Live asserts must include: V1 phUSD mint revoked, V2 and Antimatter unpaused, V1 stakerCount/totalStaked per pool <= the straggler allow-list, V2 pauser == Pauser, and the Antimatter minter set. Re-check the per-user loss bound from on-chain receipts (V1 MigratedOut / V2 DepositedFor events, or persisted pre-migration principals) against V2 userInfo rather than the empty same-leg plan. Separately, assert that the set of V1 stakers at the Phase-1 pause block equals the frozen planning set, and fail loudly if a staker raced the window.",
+  "evidence": "Fork @25978784 (fork-logs/h32-test_C*.log): test_C `MASK_REVOKE|preview run() PASSED although V1 phUSD mint was live on-chain`; test_C2 `MASK_PAUSED_V2|... V2 was paused on-chain`; NEW test_C3: after a full cutover, V1 unpaused, pauser set back to Pauser and re-registered, then `run()` -> `MASK_V1_RETIRE|preview run() PASSED although V1 was registered+unpaused on-chain`.",
+  "run32Observation": "run-32 extension (884ccf8): story 083 added three more `if (!done) do();` steps (V1 setPauser(OWNER), Pauser.unregister(V1), V1 pause). test_C3_previewMasksMissingV1Retirement: after a full cutover, V1 unpaused, pauser set back to Pauser and re-registered, then preview run() -> `MASK_V1_RETIRE|preview run() PASSED although V1 was registered+unpaused on-chain`. test_C / test_C2 still PASS (masking reproduced). Surface widened; same root cause.",
+  "reportRouting": [
+    "qa-report",
+    "spec-conformance (cross-listed, as in run-31)"
+  ],
+  "poc": {
+    "file": "phoenix-phase-2-staging/work/test/audit-run32/CutoverAuditRun32.t.sol",
+    "tests": [
+      "test_C_previewMasksMissingRevoke",
+      "test_C2_previewMasksPausedV2",
+      "test_C3_previewMasksMissingV1Retirement"
+    ],
+    "logs": [
+      "phoenix-phase-2-staging/reports/32/script-audits/stable-staker-v2-cutover/fork-logs/h32-test_C_previewMasksMissingRevoke.log",
+      "phoenix-phase-2-staging/reports/32/script-audits/stable-staker-v2-cutover/fork-logs/h32-test_C2_previewMasksPausedV2.log",
+      "phoenix-phase-2-staging/reports/32/script-audits/stable-staker-v2-cutover/fork-logs/h32-test_C3_previewMasksMissingV1Retirement.log"
+    ],
+    "status": "passing",
+    "kind": "fork evidence harness (mainnet fork @25978784); not re-run by finding-manager",
+    "lastRun": "2026-09-15"
+  },
+  "pocStatus": "passing",
+  "labelNote": "NO run-32 label minted. Keeps original label L-02 and issueId pps31l2 from phoenix-phase-2-staging-31; still-open re-observation, no second ledger entry.",
+  "ledgerEntry": {
+    "fingerprint": "2c82d65e65e163c9f986c669aaf0b56abcfc80ae9f91016dd3f84fc1fb6b7da7",
+    "issueId": "pps31l2",
+    "originalLabel": "L-02",
+    "originalRun": "phoenix-phase-2-staging-31",
+    "status": "open",
+    "statusInstruction": "Unchanged. lastSeenRun bumped to phoenix-phase-2-staging-32; run-32 note appended; status/severity/function/rootCauseClass/fingerprint untouched."
+  },
+  "carryover": {
+    "owed": true,
+    "source": "reports/31/findings/low/L-02-verification-pass-simulates-missing-steps.json",
+    "carriedForwardAs": "reports/32/submissions/carryover/qa-report-31.md (+ cross-listed in carryover/spec-conformance-31.md)"
+  },
+  "classificationOrigin": "CLASS-L-02",
+  "originalId": "SSV2C32-04",
+  "metadata": {
+    "createdAt": "2026-09-15T00:00:00Z",
+    "updatedAt": "2026-09-15T00:00:00Z",
+    "scanOrigin": "script-audit-32-stable-staker-v2-cutover (SSV2C32-04)",
+    "classificationOrigin": "CLASS-L-02",
+    "writtenBy": "finding-manager, run phoenix-phase-2-staging-32"
+  }
+}

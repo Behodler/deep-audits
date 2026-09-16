@@ -1,0 +1,122 @@
+{
+  "id": "L-01",
+  "issueId": "pps31l1",
+  "label": "L-01",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-31",
+  "status": "ready",
+  "severity": "low",
+  "title": "A 9-wei V1 DOLA stake makes the cutover's per-user loss post-condition revert: the fixed 2-wei slack is smaller than autoDOLA's round-trip rounding, so dust can stall the cutover the story says it cannot",
+  "contract": "lib/phoenix-phase-2-staging/script/helpers/StableStakerCutoverCore.sol",
+  "function": "_assertPoolPostMigration",
+  "line": 452,
+  "lineStart": 452,
+  "lineEnd": 455,
+  "rootCauseClass": "FixedWeiSlackBelowVaultRoundingLoss",
+  "entryPoint": "stable-staker-v2-cutover",
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "commit": "1c1608c0e56a55cbeb436926d139fa89ff7a3144",
+  "fingerprint": "e0d4df1ddb699c8f34e034209cf8a6311bffa3bfd79429662637976f527dd054",
+  "fingerprintBasis": "lib/phoenix-phase-2-staging/script/helpers/StableStakerCutoverCore.sol:_assertPoolPostMigration:FixedWeiSlackBelowVaultRoundingLoss:stable-staker-v2-cutover",
+  "fingerprintProvenance": "Copied verbatim from reports/31/script-audits/stable-staker-v2-cutover/classified-findings.json (not recomputed). finding-manager cross-check: sha256(fingerprintBasis) reproduces it byte-for-byte.",
+  "origin": "new",
+  "regression": false,
+  "faithfulness": true,
+  "faithfulnessType": null,
+  "specConformance": "cross-listed (story-082 Overview item 5 / DUST HANDLING)",
+  "footgun": false,
+  "plausibility": "plausible",
+  "verified": "verified",
+  "scannerProposedSeverity": "low",
+  "description": "Story 082 AC5 asks for \"invariants that ensure dust cannot grief (revert/stall) the cutover\". The dust predicate (`_depositWouldFail`) only asks whether the V2 deposit would REVERT. The per-user post-condition then applies a flat 2-wei absolute slack on top of the bps bound. `WEI_SLACK = 2` (CutoverStableStakerV2Mainnet.s.sol:109), and the ERC4626 bps term is `pre * 2 / 10_000`, which is 0 for any position under 5,000 wei. A small position goes through three floors: its V1 `stake` credit (`convertToAssets(previewDeposit)`), the exit credit (`amt*R/P`), and the V2 re-deposit credit (`convertToAssets(shares)`). On autoDOLA, where one share is worth about 1.19 DOLA-wei (totalAssets 55113967399722755135519 / totalSupply 46317440394398677974688), that round trip loses 3 wei. The planner classifies the position as MIGRATABLE, because the deposit does not revert. The post-condition then reverts. V1 is Active and unpaused until the run's own Phase 1, so anyone can plant such a position at any time for 9 wei of DOLA plus gas.",
+  "impact": "The whole cutover (preview AND the broadcast's local pass) reverts at `cutover-post: cutover lost more principal than the strategy can explain` on the first pool. It keeps reverting on every re-run for as long as the planted position exists. The position cannot be removed except by migrating it, and migrating it is exactly what trips the check. The only way forward is a code or constant change. No funds are at risk: the revert fires in forge's local pass before any transaction is sent. The harm is a permissionless, near-free stall of a mainnet operation, which the story explicitly promised could not happen.",
+  "attackPath": [
+    "1. Before the owner broadcasts, any address calls StableStakerV1.stake(DOLA, 9) (V1 is Active and unpaused until the cutover's own Phase 1).",
+    "2. V1 books 8 wei; _depositWouldFail returns false, so the planner classifies the position MIGRATABLE, not STRAGGLER.",
+    "3. The owner runs :preview (or the broadcast's local pass); after batch migration the 8->5 wei round trip on autoDOLA (share price ~1.19) loses 3 wei.",
+    "4. _assertPoolPostMigration requires loss <= 8*2/10000 + WEI_SLACK(2) = 2 and reverts 'cutover-post: cutover lost more principal than the strategy can explain'.",
+    "5. The run reverts on every retry while the position exists."
+  ],
+  "classification": {
+    "assetImpact": "None. No asset is lost or at risk: the revert fires in forge's local simulation pass before any transaction is signed or sent, so no partial on-chain state is produced. The impact is a delay of a one-shot attended operational script.",
+    "attackPath": [
+      "1. Before the owner broadcasts, any address calls StableStakerV1.stake(DOLA, 9) (V1 is Active and unpaused until the cutover's own Phase 1).",
+      "2. V1 books 8 wei; _depositWouldFail returns false, so the planner classifies the position MIGRATABLE, not STRAGGLER.",
+      "3. The owner runs :preview (or the broadcast's local pass); after batch migration the 8->5 wei round trip on autoDOLA (share price ~1.19) loses 3 wei.",
+      "4. _assertPoolPostMigration requires loss <= 8*2/10000 + WEI_SLACK(2) = 2 and reverts 'cutover-post: cutover lost more principal than the strategy can explain'.",
+      "5. The run reverts on every retry while the position exists."
+    ],
+    "likelihood": "medium - the grief is permissionless and costs 9 wei plus gas, but has no payoff for the attacker; organic occurrence is also possible (63/400 DOLA stake sizes in 1..400 wei exceed the bound, and live USDC dust users already sit exactly on the 2-wei boundary).",
+    "assumptions": "The owner has not yet paused V1 when the dust is planted; the run uses the current WEI_SLACK=2 / ERC4626_MAX_LOSS_BPS=2 constants.",
+    "externalRequirements": "autoDOLA share price > 1 asset-wei per share (true at fork block 25975869).",
+    "remediesEnumerated": [
+      "Owner cannot remove another user's V1 position: withdraw/claim/emergencyWithdraw/userMigrate are self-only; batchMigrate/initiateMigration are migrator-only and migrating the position is exactly what trips the check; there is no owner exit-on-behalf function in StableStakerV1.",
+      "Script-level remedy (no contract change): widen or derive WEI_SLACK in CutoverStableStakerV2Mainnet.s.sol, an attended one-constant edit that defeats the grief permanently (a derived slack cannot be re-griefed).",
+      "Operational remedy: once Phase 1 pause() lands, no new plants are possible, and a position migrated outside the script's leg plan is not re-checked by the per-leg loop.",
+      "Conclusion: the stall is NOT permanent; it costs the operator a script edit and a re-preview."
+    ]
+  },
+  "severityRationale": "Not Medium: C4 Medium requires protocol function/availability impact; here no protocol function degrades (V1 keeps working, users keep their funds), the affected artefact is a one-shot attended script that fails closed before broadcast, and the only remedy is a trivial script-constant edit, after which the grief cannot be repeated. It is, however, a direct contradiction of story-082 AC5, which promises dust cannot stall the cutover, so it is tagged faithfulness and cross-listed in spec-conformance at Low rather than dropped. It is a real pre-broadcast blocker worth fixing before the mainnet run, because the dust can also arise organically.",
+  "recommendation": "Derive the absolute slack from the destination vault, not a constant, e.g. `weiSlack = 2 + ceil(vault.convertToAssets(1)) + 1` (share-price rounding on both floors), or add the planner's own predicted loss (`amount - convertToAssets(previewDeposit(amount*R/P))`) to the bound for that user. Alternatively classify positions whose predicted round-trip loss exceeds the bound as allow-listed stragglers under the existing 1-cent cap. Add a regression to test/StableStakerCutoverDust.t.sol that plants a 9-wei DOLA-shaped position on a vault with share price > 1.",
+  "evidence": "Code (StableStakerCutoverCore.sol:452-455): `require(pre - post <= pre * maxLossBps / CUTOVER_MAX_BPS + weiSlack, \"cutover-post: cutover lost more principal than the strategy can explain\");` with `uint256 public constant WEI_SLACK = 2;` and `ERC4626_MAX_LOSS_BPS = 2`. Fork @25975869 (fork-logs/h-F.log): exhaustive search over stake inputs 1..400 wei -> `DUSTSEARCH|DOLA|worstStakeInput=9|worstLossWei=3|countAboveBound=63`, while autoUSDC gives `worstLossWei=2|countAboveBound=0`. Live PoC (fork-logs/h-G.log, test_G_plantedDolaDustStallsCutover): griefer `V1.stake(DOLA, 9)` -> `planted V1 DOLA principal (wei) 8` -> full `run()` in PREVIEW_MODE -> `PLANTED_DUST|cutover REVERTED| cutover-post: cutover lost more principal than the strategy can explain`. Also at mainnet state today: USDC dust users of 12/22/30/66/86/90 wei each lose exactly 2 wei, sitting on the slack boundary (fork-logs/h-A-users-events.log).",
+  "reportRouting": [
+    "qa-report",
+    "spec-conformance (cross-listed: story-082 AC5 'dust cannot grief the cutover')"
+  ],
+  "dedup": {
+    "status": "kept",
+    "consolidatedFrom": [
+      "SSV2C-01"
+    ],
+    "uniquenessVsSiblings": "Same function as SSV2C-04 (_assertPoolPostMigration), but a different line (452-455 vs 469-471) and the OPPOSITE failure direction. SSV2C-01 is a bound that is too TIGHT (false revert, stalls on dust). SSV2C-04 is a check that can NEVER fail. Fixing one leaves the other untouched. Unrelated to SSV2C-02 (verification-mode semantics).",
+    "relatedLedgerRows": [
+      {
+        "fingerprint": "5c9f1ceeada6",
+        "entryPoint": "migrate:ys-swap-leg2",
+        "status": "open",
+        "relation": "adjacent class. Both involve re-deposit rounding haircut against 1:1 intent. That entry is about the haircut existing; this one is about the slack constant being sized below it, which stalls the run. Different root cause."
+      }
+    ],
+    "crossRunDuplicateLikelihood": "low"
+  },
+  "sanitization": {
+    "status": "passed",
+    "origin": "new",
+    "kiCheck": "No match. Nearest candidates KI#9 'External vault/yield strategy behavior (out of scope)' and KI#6 'Decimal normalization to 18 decimals internally' do not cover it: the root cause is the script's own WEI_SLACK=2 constant sized below autoDOLA's round-trip rounding, not vault behaviour. KI#9 would at most cover the rounding itself, never the script's assertion bound.",
+    "ledgerNote": "No fingerprint collision. Cross-ref (not merged): 5c9f1ceeada6 (open, migrate:ys-swap-leg2) — the re-deposit haircut existing; this is the slack sizing stalling the run.",
+    "flags": []
+  },
+  "outOfSliceNote": null,
+  "manualReviewRef": null,
+  "story": "story-082 (~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/082-mainnet-stable-staker-v2-cutover-script.md, state folder auto-complete: machine approval, not human-reviewed)",
+  "poc": {
+    "file": "phoenix-phase-2-staging/work/test/audit-run31/CutoverAuditRun31.t.sol",
+    "tests": [
+      "test_G_plantedDolaDustStallsCutover",
+      "test_F_dustLossVsWeiSlack"
+    ],
+    "logs": [
+      "phoenix-phase-2-staging/reports/31/script-audits/stable-staker-v2-cutover/fork-logs/h-G.log",
+      "phoenix-phase-2-staging/reports/31/script-audits/stable-staker-v2-cutover/fork-logs/h-F.log"
+    ],
+    "status": "passing",
+    "kind": "fork evidence harness (mainnet fork @25975869); the [PASS] lines are the logged demonstrations. Not re-run by finding-manager. A coded PoC is not required at Low/QA.",
+    "lastRun": "2026-09-14"
+  },
+  "pocNote": null,
+  "flaggedForHumanReview": true,
+  "preBroadcastBlocker": true,
+  "classificationOrigin": "CLASS-L-01",
+  "originalId": "SSV2C-01",
+  "metadata": {
+    "createdAt": "2026-09-14T13:42:35Z",
+    "updatedAt": "2026-09-14T13:42:35Z",
+    "scanOrigin": "script-audit-31-stable-staker-v2-cutover (SSV2C-01)",
+    "classificationOrigin": "CLASS-L-01",
+    "writtenBy": "finding-manager, run phoenix-phase-2-staging-31"
+  },
+  "reportDir": "phoenix-phase-2-staging/reports/31"
+}

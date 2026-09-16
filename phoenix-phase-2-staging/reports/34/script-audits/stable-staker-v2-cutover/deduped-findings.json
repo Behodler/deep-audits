@@ -1,0 +1,119 @@
+{
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-34",
+  "entryPoint": "stable-staker-v2-cutover",
+  "sourceCommit": "84e2324",
+  "branch": "master",
+  "generatedBy": "deduplicator",
+  "generatedAt": "2026-09-16",
+  "inputs": [
+    "candidate-findings.json (1 candidate: NEW-01)",
+    "prior-findings-recheck.json (9 prior entries rechecked)",
+    "spot-reproduction.md",
+    "fork-logs/r34-gapfix-fullfile.log (19/19 PASS), r34-gapfix-halt5.log, r34-gapfix-new-tests.log",
+    "intent.md",
+    "orchestrator corrections 1-3 (independent validation)",
+    "ledger.json via jq projection only: 13 entries for entryPoint stable-staker-v2-cutover"
+  ],
+  "orchestratorCorrectionsApplied": [
+    "1: NEW-01 contract path corrected from lib/phoenix-phase-2-staging/script/... to script/CutoverStableStakerV2Mainnet.s.sol; lines L147-154 (constant L154, NatSpec L147-153); _maxLossBps at L1220-1223 (NatSpec L1214-1219; candidate said L1214-1230); consumers VerifyStableStakerV2Cutover.s.sol L251/L375/L430 and StableStakerCutoverCore.sol L467 added; evidence re-based on per-user loss tables at 25985945 and 25988932 (verified against r34-gapfix-fullfile.log DOLA_ROW lines); test list updated; test_B_previewRun_atStory087Block now non-vacuous (verified: fail() on pass, assertEq on exact revert reason).",
+    "2: Halt-5 QA candidate added as NEW-02 (distinct entry, cross-referenced to L-05; see dedupDecision).",
+    "3: run-33 harness bit-rot routed to manual-review.json (not a code finding, not for the ledger)."
+  ],
+  "keptFindings": [
+    {
+      "id": "NEW-01",
+      "originalIds": ["NEW-01"],
+      "title": "The Phase 6 per-user loss bound (ERC4626_MAX_LOSS_BPS = 2) sits inside autoDOLA's stepwise live spread, so :preview's go/no-go flips between blocks. The bound is enforced only in forge's local pass, so a regime step during the Ledger session lands a migration above 2 bps that only :verify's live-balance aggregate detects",
+      "severity": "low",
+      "contract": "script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "_maxLossBps",
+      "rootCauseClass": "LossBoundInsideLiveAutopoolSpread",
+      "entryPoint": "stable-staker-v2-cutover",
+      "branch": "master",
+      "category": "drift",
+      "lineStart": 147,
+      "lineEnd": 154,
+      "relatedLocations": [
+        "script/CutoverStableStakerV2Mainnet.s.sol L154 (ERC4626_MAX_LOSS_BPS = 2), L147-153 (justifying NatSpec)",
+        "script/CutoverStableStakerV2Mainnet.s.sol L1220-1223 (_maxLossBps; NatSpec L1214-1219)",
+        "script/CutoverStableStakerV2Mainnet.s.sol L642-686 (_phase6_migration)",
+        "script/helpers/StableStakerCutoverCore.sol L467 (_maxLossBps reference), L499-502 (per-user require)",
+        "script/VerifyStableStakerV2Cutover.s.sol L251, L375, L430 (_maxLossBps consumers); L368-407 (_checkPoolCredits); L412-446 (_requirePoolAggregateNetOfSelfExits)"
+      ],
+      "description": "`ERC4626_MAX_LOSS_BPS = 2` (script/CutoverStableStakerV2Mainnet.s.sol L154), returned by `_maxLossBps` (L1220-1223) for the autoDOLA and autoUSDC pools and also consumed by the verifier (VerifyStableStakerV2Cutover.s.sol L251/L375/L430), bounds each migrating user's full round trip (V1 exit plus V2 re-deposit). Its NatSpec (L147-153) justifies 2 bps as ~2.3x the worst observation from a single planning preview at block ~25975061 (autoDOLA ~0.034 bps, autoUSDC 0.86 bps round trip), 'loose enough not to trip on the autopools' own valuation spread'. The fork shows otherwise. autoDOLA's deposit/redeem spread is symmetric per leg and moves in discrete, state-driven steps: 0.017 bps per leg at 25981150, up at 25981232 to 1.035 bps per leg (2.07 bps round trip) for ~6,769 blocks (~22.5 h), then down at 25988001 to 0.474 bps per leg. At block 25985945 all 9 DOLA users breach the bound at a uniform ~2.07-2.09 bps (4 non-dust; the largest, ~1000 DOLA, loses ~0.207 DOLA against ~0.200 allowed) and the real preview reverts in Phase 6 with 'cutover-post: cutover lost more principal than the strategy can explain'. At 25988932 all 9 lose 0.948-0.959 bps, 0 breaches, and the same preview passes all phases and all nine GLOBAL_PAUSE stages. Story 087's FOR-THE-HUMAN note treats this as a static 'cannot broadcast today' condition; it is not static. The operator-visible consequence is non-obvious: every `require` in the script, including this bound, runs only in forge's local pass before any transaction is sent, so a green :preview or local pass bounds nothing about the Phase 6 transactions that land ~30 Ledger-signed transactions later. If a spread step lands in that window, the migration executes on chain above the stated 2 bps. Afterwards (a) a resume or preview re-run passes, because the per-user loop is empty on a resume leg and the exit-realization bound only sees the exit leg; (b) :verify's per-user credit->credited check and realization bound also pass; (c) only the per-pool aggregate on live `V2.totalStaked` reverts (by 0.008936 DOLA in the drift-landing test). Because that aggregate reads a live balance it stays red, and the `&& :preview` smoke tail never runs; by inspection (not fork-tested) ~0.009 DOLA of organic V2 stake would mask it. Story 087's Concerns claim that 'the per-user in-leg check and the verifier's per-user credit check still bound the total' does not hold for the verifier: its per-user check covers only the re-deposit leg.",
+      "impact": "Operational and spec drift (story 082/083 per-user bound <= 2 bps + 1000 wei). The preview-based go/no-go is non-deterministic across autopool regime steps: an operator who read story 087's 'cannot broadcast' note sees a green preview now and may later hit a fail-closed local-pass revert (zero transactions sent). By inspection (not executed; S L484/L516/L649 call `_writeProgress` during the local pass, as the //:broadcast RESUME note documents), that revert still leaves phantom addresses in progress.stable-staker-v2-cutover.1.json, which the next run refuses until trimmed. The rarer case is an in-session step that lands a >2 bps migration; its only detector is a live-balance aggregate that stays red until organic stake masks it. Value at stake is negligible at current pool sizes (2.09 bps of ~1,222 DOLA ~= 0.26 DOLA per full round trip; overshoot beyond spec ~0.009 DOLA). No asset theft, no non-resumable brick. Hence Low.",
+      "lawAnalysis": "Law 3: leaving the constant untuned is a KNOWING owner deferral recorded in story 087 and is not reported as such. In scope as a footgun: the go/no-go flips (not a static 'too tight'); a local-pass pass is not an on-chain bound; the stated NatSpec rationale is empirically false; the verifier's per-user check does not bound the total, contrary to the story's Concerns. Distinct from F-02 436848b0 (wont-fix, loss allocation): this is gate calibration and enforcement point. The recommendation deliberately proposes no top-up or per-client cap (F-02 triage).",
+      "evidence": "fork-logs/r34-gapfix-fullfile.log (CutoverAuditRun34.t.sol 19/19 PASS): test_B_previewRun_atStory087Block (asserts exact revert string at 25985945; fails if run() passes), test_B_previewRun_atCurrentBlockPasses (25988932), test_B_087Block_dolaPerUserLossTable (9/9 BREACH, 4 non-dust, loss 2.069-2.093 bps), test_B_liveBlock_dolaPerUserLossTable (0/9 breach, 0.948-0.959 bps), test_B_driftLanding_postBroadcastTools (resume-shape PASS; verifier REVERTED 'verify: aggregate: V2 booked total 1222474121170267702467 below the principal due net of self-exits (floor 1222483056933011775952) for DOLA'). fork-logs/preview-25988932.log (PASS, 9 stages). side-effects.json autoDolaSpreadRegime. Spot-reproduced by poc-validator (spot-reproduction.md items 1, 2, 5). Fork-confirmed.",
+      "recommendation": "1) Re-derive ERC4626_MAX_LOSS_BPS in its own story from a multi-day sample of autoDOLA/autoUSDC previewRedeem/previewDeposit versus convertToAssets covering at least one up-step (observed max 2.07 bps round trip), e.g. 2x observed max (~5 bps); rewrite the L147-153 NatSpec to cite that sample. 2) In `_initiatePool`, for ERC4626 pools, pre-quote the round trip before `initiateMigration` (as already done for the market strategy): exit = previewRedeem(convertToShares(P)), re-deposit = convertToAssets(previewDeposit(credit)); log `LOSS_HEADROOM|token|bps` in preview and STOP AND REPORT when it exceeds the bound. 3) Runbook (//:broadcast): state that the Phase 6 bound depends on the autopool regime, that :preview must be re-run immediately before signing, that a :verify aggregate red right after a green local pass means the regime moved mid-session (resume will not detect it), and what to do with a progress file left by a local-pass revert (delete it when no transaction was sent). 4) Correct story 087's Concerns claim about the verifier's per-user check bounding the total, or add a per-user total (pre -> credited) check to the verifier, reconstructing pre-migration principal from the MigratedOut credit as credit*P/min(R,P).",
+      "dedupDecision": {
+        "verdict": "KEEP as new entry",
+        "vsF01_dfed4279": "NOT a duplicate and NOT an incomplete fix. F-01's root cause (TautologicalPostCondition: a floor that compared two identically-booked numbers and could not fail) is fixed at 84e2324: the story-085 floor was replaced by the exit-realization bound, and test_F01_haircut5bps_failsClosedBothShapes plus the boundary sweep (1.92 PASS / 2.12 FAIL) show a real haircut fails closed on both shapes. NEW-01 does not claim any check is tautological; it claims a correctly-functioning bound is mis-calibrated against live spread and enforced only in the local pass. Different root cause, different mitigation (re-calibrate + pre-quote + runbook). Relationship: the recheck's F-01 residual note (re-deposit-leg loss on a resume leg is covered only by :verify's aggregate) is folded into NEW-01 recommendation 4 rather than held against F-01, because F-01's own claim is closed.",
+        "vsL06_cf4b531a": "NOT a duplicate and NOT an incomplete fix. L-06 (AggregateFloorCountsSelfExitAsLoss) was a FALSE alarm: a correct cutover failed :verify because permissionless self-exits were counted as loss. Fixed at 84e2324 (self-exit-net aggregate; test_SX_* pass, inverse haircut+self-exit still fails). In NEW-01 the aggregate red is a TRUE detection of a real >2 bps overshoot; the defect is that it is the only detector and is maskable, not that it misfires. Shared symptom (verifier stays red, smoke tail blocked) but opposite causality and separate mitigation. The L-06 recheck residual (USDe realization bound 61 bps on the exit leg alone) is acknowledged in story 087 Concerns and routed to manual-review.json for visibility, not merged here.",
+        "vsL01_e0d4df1d": "Closest cousin, NOT a duplicate: same per-user gate (StableStakerCutoverCore L499-502) and same fail-closed stall shape, but L-01's root cause was the fixed wei slack (2 wei) below dust rounding; it is fixed by WEI_SLACK = 1000. NEW-01 is the bps term, breached by non-dust users (4 non-dust breaches, largest ~1000 DOLA), which the wei-slack fix cannot address. Separate parameter, separate mitigation.",
+        "vsF02_436848b0": "Not a duplicate of the wont-fix (loss allocation). Not a re-file of an owner wont-fix; no disclosure required. Recommendation checked for conflict with F-02's triageReason (no top-up/per-client cap proposed).",
+        "vsQ02_1c859cde": "The runbook omission (Phase 6 regime dependence) was noted by the Q-02 recheck as 'folded into NEW-01'; it is a sub-recommendation here, not a Q-02 recurrence (Q-02 was stale end-state text, now fixed)."
+      },
+      "fingerprintNote": "All 13 prior ledger entries for this entryPoint store `contract` with the `lib/phoenix-phase-2-staging/` prefix. The orchestrator-directed repo-relative form `script/...` is used here. No collision risk (rootCauseClass is new), but finding-manager must pick ONE convention for this entryPoint and apply it consistently, or future runs will re-mint fingerprints for NEW-01/NEW-02 (see memory: fingerprint drift on rename / ledger fingerprint drift)."
+    },
+    {
+      "id": "NEW-02",
+      "originalIds": ["ORCH-CORRECTION-2"],
+      "title": "The cutover's //:broadcast key and Phase 7 NatSpec claim every Phase 7 halt point keeps the breaker live, but at halt 5 (after V2.unpause, before Pauser.register(V2)) a committed global Pauser.pause() does not reach StableStakerV2",
+      "severity": "qa",
+      "contract": "script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "_phase7_finalize",
+      "rootCauseClass": "BreakerLivenessDocOverclaimHalt5",
+      "entryPoint": "stable-staker-v2-cutover",
+      "branch": "master",
+      "category": "spec-conformance / documentation-overclaim",
+      "relatedLocations": [
+        "script/CutoverStableStakerV2Mainnet.s.sol L689-752 (_phase7_finalize: setPauser(PAUSER) -> unpause -> require(!paused) -> register(V2) -> AM.setPauser -> require(!antimatter.paused()) -> register(AM))",
+        "script/CutoverStableStakerV2Mainnet.s.sol cutover NatSpec ('Every other halt point, including every Phase 7 one, keeps the breaker live')",
+        "package.json //stable-staker-v2-cutover:broadcast doc key"
+      ],
+      "description": "L-05's fix reorders Phase 7 so V2 is unpaused before it is registered with the global Pauser. This removes the EnforcedPause brick, but it opens a one-transaction window. The //stable-staker-v2-cutover:broadcast doc key and the cutover NatSpec say that 'every other halt point, including every Phase 7 one, keeps the breaker live'. At halt 5 (V2.setPauser(PAUSER) and V2.unpause() landed, Pauser.register(V2) not yet), a committed Pauser.pause() succeeds but V2.paused() stays false, because V2 is not registered (registered=0). The breaker is live for the other registrants but cannot reach V2. The containment is real: all three pool strategies are Pauser-registered and get paused, so V2 stake, withdraw and autoAnnihilate revert EnforcedPause (0xd93c0665) and claim reverts 'claim disabled'. Zero user entry points succeed with V2 unreached. OWNER cannot call V2.pause() directly (onlyPauser). The working remedy is V2.setPauser(OWNER) then V2.pause() (2 txs, OWNER is an EOA). Registering V2 after the global pause and pausing again reverts EnforcedPause. A resume converges, and after it a committed global pause does reach V2.",
+      "impact": "Law-2 doc-vs-behaviour overclaim with a contained Law-1 surface. An operator relying on the documented guarantee during an emergency that coincides with a halt at step 5 would believe V2 is paused when it is not. Direct user-facing exposure is nil because the strategy pauses block every V2 value path (fork-proven). The window is one transaction and cannot be removed: register-while-paused is exactly the L-05 brick. QA.",
+      "lawAnalysis": "Law 3 footgun framing: a competent owner reading 'every Phase 7 halt keeps the breaker live' would be surprised that V2 specifically is unreachable at halt 5 and that the obvious direct V2.pause() reverts. Documentation-level; no code change required beyond an optional probe.",
+      "evidence": "fork-logs/r34-gapfix-halt5.log: test_P7_halt5_globalPauseCannotReachV2 PASS. HALT5 registered=0; committed Pauser.pause() OK with V2.paused()=false; per-pool strategyRegistered=1 strategyPaused=1; stake/withdraw/autoAnnihilate REVERTS 0xd93c0665, claim REVERTS 'claim disabled'; 'user entry points that SUCCEED with V2 unreached=0'; remedies R1 direct pause REVERTS onlyPauser, R2 setPauser(OWNER)+pause WORKS, R3 register+second global pause REVERTS; resume converged, global pause reaches V2. Also in r34-gapfix-fullfile.log (19/19). Spot-reproduction.md item 3, Caveat 1: the audit's own test_P7_everyHaltPoint reports k=5 as LIVE because it checks only registered contracts, which is how this gap escaped the first pass.",
+      "recommendation": "Correct the //stable-staker-v2-cutover:broadcast doc key and the cutover NatSpec to name the halt-5 window: V2 is unpaused but not yet registered for one tx. Record its containment (all three strategies registered, so V2 value paths revert under a global pause) and the OWNER remedy (V2.setPauser(OWNER) then V2.pause(); a direct V2.pause() reverts). Optionally extend the Phase-8/preview GLOBAL_PAUSE probe to assert that V2 (and Antimatter) are actually paused after the simulated pause, not only that Pauser.pause() did not revert.",
+      "dedupDecision": {
+        "verdict": "KEEP as a distinct QA entry, cross-referenced to L-05 (relationship: residualOf L-05 fc44ca36 / descendant-of-fix). NOT incompleteFixOf.",
+        "justification": "(1) Different defect and failure mode. L-05 (RegisteredWhilePausedWindowBricksGlobalPause) was a DEAD breaker: Pauser.pause() reverted for all 26 registrants for 3 txs, or indefinitely on halt. Halt 5 is a LIVE breaker that misses one contract for one tx, with strategy-level containment proven. The L-05 claim is genuinely fixed (all 9 halt points: pause() does not revert, resume converges, dead=0), so it should still close as fixed. (2) The root cause here is the documentation overclaim, not the ordering. The ordering is the correct and unavoidable trade-off that L-05 itself recommended, so the mitigation differs: fix the doc and strengthen the probe, not reorder the code. (3) Law-1 visibility: a note appended to L-05 would disappear from /open-issues once a human closes L-05 as fixed, or it would wrongly hold a correct fix open. A separate open QA entry keeps the doc correction tracked either way. (4) It is not a Q-02 recurrence. Q-02 (DocumentedIntentDivergesFromImplementation) concerns stale story-082 end-state text in the //StableStakerV2Cutover key. This one is a different key, a different claim and a different story (084/087). Analogy: L-04's single forced dead tx (V1.setPauser(OWNER) -> unregister) is explicitly documented, so documenting this window is consistent with existing practice. The classifier may still downgrade to informational. Do not silently drop."
+      },
+      "fingerprintNote": "Same path-prefix convention caveat as NEW-01."
+    }
+  ],
+  "mergedFindings": [],
+  "priorEntryReconciliation": {
+    "note": "No candidate re-detects a prior entry. Recheck proposals (human applies; nothing auto-flipped): L-01, L-02, L-03, F-01, L-04, L-05, L-06, L-07, Q-02 -> propose fixed. F-02, Q-01, F-03, Q-03 remain wont-fix (not rechecked, no re-file). NEW-02 is linked to L-05 as a residual; NEW-01 is linked to F-01, L-06 and L-01 as related-not-duplicate.",
+    "rechecked": [
+      {"label": "L-01", "fingerprint": "e0d4df1ddb69", "proposedStatus": "fixed"},
+      {"label": "L-02", "fingerprint": "2c82d65e65e1", "proposedStatus": "fixed"},
+      {"label": "L-03", "fingerprint": "0711215fcc17", "proposedStatus": "fixed"},
+      {"label": "F-01", "fingerprint": "dfed42790952", "proposedStatus": "fixed", "caveat": "re-deposit-leg residual folded into NEW-01 rec 4"},
+      {"label": "L-04", "fingerprint": "46c053534c58", "proposedStatus": "fixed"},
+      {"label": "L-05", "fingerprint": "fc44ca36bccc", "proposedStatus": "fixed", "caveat": "residual doc overclaim tracked as NEW-02"},
+      {"label": "L-06", "fingerprint": "cf4b531aee54", "proposedStatus": "fixed", "caveat": "USDe exit-leg-only realization bound -> manual-review MR-34-SSV2C-03"},
+      {"label": "L-07", "fingerprint": "d6896c6e843d", "proposedStatus": "fixed", "caveat": "OWNER ETH top-up owed -> manual-review MR-34-SSV2C-02"},
+      {"label": "Q-02", "fingerprint": "1c859cdebb64", "proposedStatus": "fixed"}
+    ],
+    "notRechecked": [
+      {"label": "F-02", "fingerprint": "436848b0e31b", "status": "wont-fix"},
+      {"label": "Q-01", "fingerprint": "ca095edfd77e", "status": "wont-fix"},
+      {"label": "F-03", "fingerprint": "103002cc2990", "status": "wont-fix"},
+      {"label": "Q-03", "fingerprint": "30510f331ea8", "status": "wont-fix"}
+    ]
+  },
+  "setAside": [
+    {"ref": "MR-34-SSV2C-01", "channel": "manual-review.json + review.md", "reason": "run-33 audit harness bit-rot: not a code finding (audit-authored file, not in git ls-tree 84e2324)"},
+    {"ref": "MR-34-SSV2C-02", "channel": "manual-review.json + review.md", "reason": "OWNER ETH shortfall: operational action owed; the L-07 fix is working as intended, so this is not a defect"},
+    {"ref": "MR-34-SSV2C-03", "channel": "manual-review.json", "reason": "USDe realization bound on the exit leg alone: a residual the owner acknowledged in story 087 Concerns (Law 3 knowing). It sits below the finding threshold but stays visible"},
+    {"ref": "MR-34-SSV2C-04", "channel": "manual-review.json", "reason": "Audit-method gap: the halt-point liveness probe checks only registered contracts, so it missed the NEW-02 window. It could hide similar windows in future runs"}
+  ],
+  "removedOutright": [],
+  "flaggedForReview": [
+    "NEW-01/NEW-02 contract-path prefix convention vs the 13 existing ledger entries (fingerprint stability).",
+    "NEW-02 severity: QA vs informational. The containment is fork-proven, but the doc overclaim sits on an emergency path."
+  ]
+}

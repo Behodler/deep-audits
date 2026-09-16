@@ -1,0 +1,151 @@
+{
+  "id": "L-02",
+  "issueId": "pps31l2",
+  "label": "L-02",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-31",
+  "status": "ready",
+  "severity": "low",
+  "title": "The post-broadcast `:preview` 'verification' re-executes any outstanding step under prank instead of asserting it is already done, so a partial or diverged mainnet cutover verifies green",
+  "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+  "function": "run / _phase1.._phase7 (idempotent skip-if-done gates) / _phase8_wiringAssertions",
+  "line": 143,
+  "lineStart": 143,
+  "lineEnd": 190,
+  "rootCauseClass": "VerificationPassSimulatesMissingSteps",
+  "entryPoint": "stable-staker-v2-cutover",
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "commit": "1c1608c0e56a55cbeb436926d139fa89ff7a3144",
+  "fingerprint": "2c82d65e65e163c9f986c669aaf0b56abcfc80ae9f91016dd3f84fc1fb6b7da7",
+  "fingerprintBasis": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol:run / _phase1.._phase7 (idempotent skip-if-done gates) / _phase8_wiringAssertions:VerificationPassSimulatesMissingSteps:stable-staker-v2-cutover",
+  "fingerprintProvenance": "Copied verbatim from reports/31/script-audits/stable-staker-v2-cutover/classified-findings.json (not recomputed). finding-manager cross-check: sha256(fingerprintBasis) reproduces it byte-for-byte.",
+  "origin": "new",
+  "regression": false,
+  "faithfulness": true,
+  "faithfulnessType": null,
+  "specConformance": "cross-listed (story-082 'Preview doubles as post-broadcast verification' + package.json doc key)",
+  "footgun": false,
+  "plausibility": "plausible",
+  "verified": "verified",
+  "scannerProposedSeverity": "low",
+  "description": "The package.json doc key and the story both claim that after a broadcast, `:preview` \"re-runs every assertion and smoke test against the live deployment\", with every phase detecting \"from on-chain state that it is done and skips\". In fact every phase is `if (!done) do();`. Preview impersonates OWNER, so any step that did NOT land on mainnet is silently performed inside the simulation, and Phase 8 then asserts the simulated state. Nothing in preview mode, not even with a progress file loaded, requires that zero mutations were needed. The per-user loss bound is also evaluated only over `plan.migratable` from the same leg, which is empty after a broadcast, so the on-chain credits are never re-checked. This is the run-22 `ForgeLocalPassPrecedesBroadcast` family: all planning and assertions run in forge's local pass, and the batches are frozen there, before the Ledger session sends ~47 transactions with `--slow --skip-simulation`. A V1 `stake` that lands after the local pass but before the Phase-1 `pause()` transaction (cf. ledger c04da307336c on promotion-ready) is absent from every batch. Phase 7 then revokes V1's phUSD mint anyway, which bricks that user's `userMigrate` while their frozen pending is non-zero. The chained preview then migrates them in simulation and reports success.",
+  "impact": "The operator's only automated outcome check can report a finished cutover while mainnet has V1 phUSD mint still live, V2 still paused, or a staker stranded on V1 behind a revoked mint. Remedies exist (owner re-grant plus re-run), but nothing surfaces the need for them. No direct loss is proven. Mainnet per-user loss stays bounded by the strategies' own minOut floors.",
+  "attackPath": [
+    "1. Broadcast: forge's local pass plans and freezes about 47 transactions, then the Ledger session sends them with --slow --skip-simulation.",
+    "2. Some step does not land, e.g. setMinter(V1,false) or v2.unpause(), or a V1 stake lands between the local pass and the Phase-1 pause tx and is absent from every frozen batch.",
+    "3. The operator runs :preview to verify; every phase is if(!done) do() under vm.startPrank(OWNER), so the missing step is performed in simulation.",
+    "4. Phase 8 asserts the simulated state and prints output byte-identical to a clean run (fork-verified: MASK_REVOKE and MASK_PAUSED_V2 both PASS)."
+  ],
+  "classification": {
+    "assetImpact": "No direct loss. A partial or diverged broadcast (V1 phUSD mint still live, V2 still paused, or a staker stranded on V1 behind a revoked mint) can be reported as a clean verification, so recoverable misconfigurations go unnoticed.",
+    "attackPath": [
+      "1. Broadcast: forge's local pass plans and freezes about 47 transactions, then the Ledger session sends them with --slow --skip-simulation.",
+      "2. Some step does not land, e.g. setMinter(V1,false) or v2.unpause(), or a V1 stake lands between the local pass and the Phase-1 pause tx and is absent from every frozen batch.",
+      "3. The operator runs :preview to verify; every phase is if(!done) do() under vm.startPrank(OWNER), so the missing step is performed in simulation.",
+      "4. Phase 8 asserts the simulated state and prints output byte-identical to a clean run (fork-verified: MASK_REVOKE and MASK_PAUSED_V2 both PASS)."
+    ],
+    "likelihood": "low-medium - requires a broadcast to partially fail or a stake to race the pre-pause window; both are realistic for a 47-tx Ledger session but not attacker-forced.",
+    "assumptions": "Operator relies on :preview as the post-broadcast outcome check, as the doc key instructs.",
+    "externalRequirements": "A dropped or failed broadcast transaction, or a staker racing the local-pass-to-pause window.",
+    "remediesEnumerated": [
+      "Every masked state is owner-recoverable in 1-2 transactions (re-revoke the mint, unpause V2, re-grant V1 mint so the stranded user can userMigrate, then revoke again), but nothing surfaces the need."
+    ]
+  },
+  "severityRationale": "Same class as fix-pending M-01 2c53e944caee (VerificationRunsAgainstSimulatedNotBroadcastState) on promotion-ready:broadcast. That entry stood at Medium because no verification existed at all; here a verification exists but self-heals, it degrades a compensating control, every masked state is owner-recoverable, and no asset loss is shown. That places it at Low, consistent with the run-22 L-level members of the ForgeLocalPassPrecedesBroadcast family. It is a class recurrence: the story-075 assert-only verifier pattern was not carried forward. Tagged faithfulness because the story and doc key claim a live-state re-verification that does not happen.",
+  "recommendation": "Add a separate assert-only verifier (mirroring story-075's standalone VerifyPromotionReady.s.sol) or an explicit VERIFY_ONLY env-flag mode that never calls vm.startPrank/vm.startBroadcast and never mutates. Gate it on ON-CHAIN state, not on the progress file: do NOT key verify-only mode off progress-file deploymentStatus == completed, because progress files can be stamped completed during forge's local pass (ledger 1e8cc0dc58ba). In that mode every phase must require(alreadyDone, 'verify: step X not on chain') and never perform it. Live asserts must include: V1 phUSD mint revoked, V2 and Antimatter unpaused, V1 stakerCount/totalStaked per pool <= the straggler allow-list, V2 pauser == Pauser, and the Antimatter minter set. Re-check the per-user loss bound from on-chain receipts (V1 MigratedOut / V2 DepositedFor events, or persisted pre-migration principals) against V2 userInfo rather than the empty same-leg plan. Separately, assert that the set of V1 stakers at the Phase-1 pause block equals the frozen planning set, and fail loudly if a staker raced the window.",
+  "evidence": "Code: Phase 7 `if (_canMintPhUSD(STABLE_STAKER_V1)) { IPhUSDOwner(PHUSD).setMinter(STABLE_STAKER_V1, false); ... }` and `if (v2.paused()) v2.unpause();`, both executed under `vm.startPrank(OWNER)` in preview. Per-user check loop `for (uint256 i = 0; i < plan.migratable.length; i++)` (Core:440). Fork @25975869, harness inheriting the unmodified script: (C) after a full cutover, `phUSD.setMinter(V1,true)` (revoke 'did not land') then `run()` in PREVIEW_MODE -> `[PASS] ... MASK_REVOKE|preview run() PASSED although V1 phUSD mint was live on-chain` (log shows 'REVOKED' again, fork-logs/h-test_C_previewMasksMissingRevoke.log). (C2) Pauser pauses V2 ('unpause did not land') then `run()` -> `MASK_PAUSED_V2|preview run() PASSED although V2 was paused on-chain`. The console output is byte-identical to a clean verification ('V1 pauser -> Pauser and V1 unpaused (inert); V2 + Antimatter registered with Pauser; V2 unpaused'), fork-logs/h-test_C2_previewMasksPausedV2.log.",
+  "reportRouting": [
+    "qa-report",
+    "spec-conformance (cross-listed: package.json doc key / story-082 claim that :preview re-verifies the live deployment)"
+  ],
+  "dedup": {
+    "status": "kept",
+    "consolidatedFrom": [
+      "SSV2C-02"
+    ],
+    "uniquenessVsSiblings": "Root cause: preview mode is do-if-not-done under OWNER prank instead of assert-done. Distinct from SSV2C-04 (one tautological require that catches nothing even in a clean run) and SSV2C-01 (slack sizing). The stranded-staker limb (a stake between the local pass and the Phase-1 pause tx) is an impact limb of this finding, not a separate candidate.",
+    "relatedLedgerRows": [
+      {
+        "fingerprint": "c04da307336c",
+        "label": "L-01",
+        "entryPoint": "promotion-ready:broadcast",
+        "status": "open",
+        "rootCauseClass": "FrozenUserListVersusLiveStakingWindow",
+        "relation": "LIKELY RELATED: the same mechanism on a sibling entry point (frozen user list vs the live staking window before pause). It matches only the SSV2C-02 stranded-staker limb and does not cover the masking-verification headline. Different entryPoint, so a different fingerprint. Sanitizer to decide whether to split that limb out or cross-reference it."
+      },
+      {
+        "fingerprint": "2c53e944caee",
+        "label": "M-01",
+        "entryPoint": "promotion-ready:broadcast",
+        "status": "fix-pending",
+        "rootCauseClass": "VerificationRunsAgainstSimulatedNotBroadcastState",
+        "relation": "CLOSEST FAMILY MEMBER. SSV2C-02 is the stable-staker-v2-cutover instance of this class: here a verification exists, but it simulates the missing steps. The row is fix-pending, so it is never suppressed. Sanitizer should cross-reference, not collapse."
+      },
+      {
+        "fingerprint": "b57dcb4bb594",
+        "label": "L-02",
+        "entryPoint": "promotion-ready:broadcast",
+        "status": "open",
+        "rootCauseClass": "ForgeLocalPassPrecedesBroadcast",
+        "relation": "run-22 local-pass family (a gate evaluated in the local pass)."
+      },
+      {
+        "fingerprint": "5c6d2c9e3b98",
+        "entryPoint": "promotion-ready:verify",
+        "status": "open",
+        "relation": "the verifier trusts a progress file stamped during the local pass."
+      },
+      {
+        "fingerprint": "1e8cc0dc58ba",
+        "label": "L-01",
+        "entryPoint": "dev",
+        "status": "open",
+        "rootCauseClass": "WriteBeforeBroadcast",
+        "relation": "RECOMMENDATION HAZARD. SSV2C-02 proposes keying verify-only mode on progress-file deploymentStatus == completed, but this row shows progress files can be stamped completed during the local pass. Report-writer should key verify-only mode on on-chain state instead. (Memory: this row carries a rootCauseClass mislabel trap; human fix only.)"
+      }
+    ],
+    "crossRunDuplicateLikelihood": "medium (a member of the family, not the same instance)"
+  },
+  "sanitization": {
+    "status": "passed",
+    "origin": "new",
+    "kiCheck": "No match against any of the 11 cached KIs.",
+    "ledgerNote": "No fingerprint collision. Cross-ref (not merged): 2c53e944caee M-01 (fix-pending, promotion-ready:broadcast, class VerificationRunsAgainstSimulatedNotBroadcastState) — closest family member, NOT suppressed and NOT an INCOMPLETE FIX of that entry: M-01's code is DeployMainnetPromotionReady.s.sol and its fix landed as a separate assert-only verifier (story-075, 6474c50, VerifyPromotionReady.s.sol). SSV2C-02 is a CLASS RECURRENCE on a new entry point: story-082 did not carry the story-075 lesson forward and reverted to a self-healing (do-if-not-done under OWNER prank) post-broadcast 'verification'. Also: c04da307336c L-01 (open) matches only the stranded-staker limb (frozen list vs live window before pause) — kept as an impact limb here, cross-referenced, not split; b57dcb4bb594 L-02 (open) local-pass gate family; 5c6d2c9e3b98 (open) verifier trusts local-pass progress file; 1e8cc0dc58ba L-01 (open, dev) RECOMMENDATION HAZARD — progress files can be stamped completed in the local pass, so verify-only mode must key on on-chain state, not deploymentStatus (row carries rootCauseClass mislabel trap; human fix only).",
+    "flags": [
+      "class-recurrence: family of fix-pending 2c53e944caee; the landed story-075 remediation pattern was not reused. Human should consider whether the M-01 fix-pending closure criteria should require the pattern be applied to all future cutover scripts."
+    ]
+  },
+  "outOfSliceNote": null,
+  "manualReviewRef": null,
+  "story": "story-082 (~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/082-mainnet-stable-staker-v2-cutover-script.md, state folder auto-complete: machine approval, not human-reviewed)",
+  "poc": {
+    "file": "phoenix-phase-2-staging/work/test/audit-run31/CutoverAuditRun31.t.sol",
+    "tests": [
+      "test_C_previewMasksMissingRevoke",
+      "test_C2_previewMasksPausedV2"
+    ],
+    "logs": [
+      "phoenix-phase-2-staging/reports/31/script-audits/stable-staker-v2-cutover/fork-logs/h-test_C_previewMasksMissingRevoke.log",
+      "phoenix-phase-2-staging/reports/31/script-audits/stable-staker-v2-cutover/fork-logs/h-test_C2_previewMasksPausedV2.log"
+    ],
+    "status": "passing",
+    "kind": "fork evidence harness (mainnet fork @25975869); the [PASS] lines are the logged demonstrations. Not re-run by finding-manager. A coded PoC is not required at Low/QA.",
+    "lastRun": "2026-09-14"
+  },
+  "pocNote": null,
+  "flaggedForHumanReview": false,
+  "preBroadcastBlocker": false,
+  "classificationOrigin": "CLASS-L-02",
+  "originalId": "SSV2C-02",
+  "metadata": {
+    "createdAt": "2026-09-14T13:42:35Z",
+    "updatedAt": "2026-09-14T13:42:35Z",
+    "scanOrigin": "script-audit-31-stable-staker-v2-cutover (SSV2C-02)",
+    "classificationOrigin": "CLASS-L-02",
+    "writtenBy": "finding-manager, run phoenix-phase-2-staging-31"
+  },
+  "reportDir": "phoenix-phase-2-staging/reports/31"
+}

@@ -1,0 +1,528 @@
+{
+  "classificationReport": {
+    "run": "phoenix-phase-2-staging-35",
+    "sourceCommit": "7ac6e70",
+    "branch": "master",
+    "input": "sanitized-findings.json",
+    "counts": {
+      "high": 0,
+      "medium": 0,
+      "low": 3,
+      "qa": 4,
+      "centralization": 0
+    },
+    "faithfulnessTagged": [
+      "F-L-09",
+      "F-L-10",
+      "F-Q-01@status",
+      "F-Q-01@initiate"
+    ],
+    "relabels": {
+      "stable-staker-v2-cutover": {
+        "Q-06": "L-11",
+        "Q-07": "Q-06"
+      }
+    },
+    "flaggedForHumanReview": [
+      "L-09 Low/Medium borderline",
+      "L-10 INCOMPLETE FIX of fixed L-07 d6896c6e843d",
+      "L-11 QA/Low borderline (raised from QA)",
+      "Q-06 (was Q-07) entryPoint attribution: possibly dev"
+    ],
+    "fingerprintsUnchanged": true,
+    "ledgerModified": false
+  },
+  "findings": [
+    {
+      "proposedLabel": "L-09",
+      "title": "Phase 6b re-seeds a DOLA amount baked from forge's local pass. When the mined minter execute delivers more, the excess collateral silently stays on the OWNER EOA and :verify passes. When it delivers less (e.g. an SYA claim mid-session), noMintDeposit reverts and the session halts with ~14.6k DOLA of phUSD collateral on the EOA and DOLA minting disabled",
+      "severity": "low",
+      "severityRationale": "Not Medium: no loss or theft; collateral sits on the trusted owner's EOA and the resume path (already documented, fork-proven) restores it in one attended leg; the revert is loud on an attended path (fail-loud precedent). The availability impact (DOLA minting off, V2 still paused) is a short, operator-bounded extension of a session in which both are already off by design. Not QA: a story-092 AC is demonstrably unenforced on chain, a NatSpec safety claim is false, and :verify cannot detect the silent-excess branch - the ForgeLocalPassPrecedesBroadcast verification-gap family (run-22 M-01 was Medium because NO outcome verification existed; here :verify exists and covers the load-bearing registration/principal, leaving only OWNER residual, so Low). Escalation trigger: re-rate Medium if it compounds with a late-window start (L-11 freeze) or if pools/claim frequency grow materially.",
+      "contract": "script/CutoverStableStakerV2Mainnet.s.sol",
+      "ledgerContract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "_minterReseedSdola",
+      "lineStart": 1116,
+      "lineEnd": 1145,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "ForgeLocalPassPrecedesBroadcast",
+      "category": "intent-mismatch",
+      "storyRefs": [
+        "story-092 (Technical Details step 5: 'Assert OWNER's DOLA balance is back to its level before execution, so no DOLA is left on OWNER'; Resume hazard)",
+        "story-092 Decision 5 (addresses resume only)",
+        "precedent: script/archives/MigrateSaga2Rescue.s.sol, MR-22 ForgeLocalPassPrecedesBroadcast"
+      ],
+      "description": "Under `--broadcast --skip-simulation --slow --ledger`, forge runs the whole script in a local EVM at session start and then signs the recorded calldata one tx at a time. In Phase 6b, `_minterExecuteWithdrawal` computes R = OWNER DOLA delta in that local pass. `_minterReseedSdola` then emits `DOLA.approve(minter, r)` (L1138) and `minter.noMintDeposit(sdolaStrategy, DOLA, r)` (L1139) with r as a literal. On chain, the execute (tx #43 of 67) redeems pro-rata of the LIVE autoDOLA shares at the LIVE price, minutes to hours later. The two post-checks `_doneMinterReseeded` and `balanceOf(OWNER) == ownerDolaBeforeExec` (L1142) run only in the local pass. The verifier's `_doneMinterReseeded` lower-bounds the minter's sDOLA principal against the recorded (local) R, and nothing re-checks OWNER's residual DOLA. The resume path re-derives R from chain correctly; the first uninterrupted run does not.",
+      "impact": "(a) R_mined > R_sim, the default: autoDOLA's price accretes continuously. Minter collateral that backs outstanding phUSD is left on the OWNER EOA instead of the sDOLA strategy. The AC is violated and :verify is green, so nobody is told. (b) R_mined < R_sim: an SYA.claim (permissionless for NFT holders; ~every 5 days, and made more attractive mid-session because Phase 6's V1 relinquish adds ~27 DOLA of skimmable surplus), a Tokemak valuation down-step, or anything else that removes minter surplus between session start and tx #43. noMintDeposit reverts. The operator is left with 14.59k DOLA of phUSD collateral on a hot Ledger EOA, DOLA minting disabled, and a dangling ~14.6k DOLA approval to the minter. They must re-run the session, which again requires the full 0.00792 ETH budget, while the 78h window and the V2 pause (Phase 7 not reached) keep running.",
+      "evidence": "Verified on anvil fork of 25990689 (side-effects.json UE-35-01/02). CLEAN broadcast: run-latest tx #47/#48 args carry 14633137717790185615971; the mined execute Transfer to OWNER = 14633140027218540037484; OWNER DOLA after = 2309428354421513 wei; :verify exit 0 (fork-logs/07-cutover-run-latest.json, 09-verify-clean.log). INJECTED run (fork-logs/inject-driver.sh; claim-equivalent skimSurplus mined in the same block as setStablecoinEnabled(false), 39.284 DOLA): tx #48 noMintDeposit status 0, 'SafeMath: subtraction underflow'. Halted: OWNER DOLA 14593854548308164103700, minter DOLA enabled=false, registration 0x1760, allowance 14633137717790185615971 (fork-logs/12-*). Resume: 'NOTE: recorded R differs ... re-seeding the live delta', converges; verify exit 0 (13-*, 14-*). Plausibility: fork-logs/sya-rewardscollected-30d.tsv (5 claims in 30 days); autoDOLA convertToAssets samples show continuous accretion plus a ~0.5 bps step.",
+      "recommendation": "Do not sign an amount derived from a state that an earlier signed tx changes. Either option below works:\n(1) End the first broadcast leg immediately after the execute: the script stops after `_minterExecuteWithdrawal` when not resuming, e.g. a `PHASE6B_EXECUTE_ONLY` gate or a deliberate `return` once `minterExecRecorded` was freshly set. The operator re-runs `:broadcast`, whose local pass then reads the mined R. This reuses the resume path that is already fork-proven.\n(2) Re-seed a deliberately conservative amount, then sweep the remainder in the resume/verify leg.\nIn both cases, add to `VerifyStableStakerV2Cutover._verifyPhase6b_minterMove`:\n- `DOLA.balanceOf(OWNER) == minterMove.ownerDolaBeforeExec`\n- a check of the minter's sDOLA principal against the actual `WithdrawalExecuted` / DOLA Transfer amount read from logs, not against the recorded local-pass R.\nCorrect the halt-point (b) NatSpec (L167), which currently asserts the first-run path cannot strand DOLA.",
+      "verified": true,
+      "mapperRef": "OBS-35-01",
+      "dedupId": "DEDUP-35-01",
+      "dedupAction": "kept",
+      "originalIds": [
+        "OBS-35-01"
+      ],
+      "relationships": [
+        {
+          "ref": "Q-06 (this run)",
+          "type": "compounding",
+          "note": "L-09(b) revert halt is one trigger for the Q-06 window-lapse freeze"
+        },
+        {
+          "ref": "L-10 (this run)",
+          "type": "compounding",
+          "note": "either halt can land mid-Phase 6 inside the minter window"
+        },
+        {
+          "ref": "ledger promotion-ready:broadcast L-02 b57dcb4bb594",
+          "type": "same-rootCauseClass-different-code",
+          "note": "ForgeLocalPassPrecedesBroadcast precedent (MR-22); different script/entryPoint, not a duplicate"
+        }
+      ],
+      "fingerprint": "78cb5942d4834f366ab7d5600a449c73bb8d43833dd8b822e25801d623e39cc6",
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "sanitizeNote": "No ledger fingerprint match. Same rootCauseClass as promotion-ready:broadcast L-02 b57dcb4bb594 (open) but different script/entryPoint: not a duplicate.",
+      "label": "L-09",
+      "classifiedFinding": {
+        "id": "CLASS-35-01",
+        "originalId": "DEDUP-35-01",
+        "severity": "low",
+        "c4Category": "Low",
+        "plausibility": "plausible (revert branch: low likelihood; excess branch: near-certain but dust)",
+        "regression": false,
+        "faithfulness": true,
+        "fTag": "F-L-09",
+        "storyAcceptanceViolated": "story-092 Technical Details step 5 / AC line 180: 'assert OWNER DOLA back to its level before execution, so no DOLA is left on OWNER' - the assert exists but binds only forge's local pass; on the uninterrupted broadcast path the mined state is not checked, and :verify only lower-bounds minter principal against the local R. Also the script's own halt-point (b) NatSpec claim ('a local-pass R that differs from the mined one cannot strand or over-deposit') is false outside the resume path.",
+        "classification": {
+          "assetImpact": "No asset loss. Excess branch: dust-to-~1 DOLA of minter collateral left on the trusted OWNER EOA, undetected. Revert branch: ~14.59k DOLA of phUSD collateral parked on the OWNER Ledger EOA, DOLA minting disabled, V2 still paused (Phase 7 not reached), until an attended resume, which re-derives R on chain and converges (fork-proven 13-*/14-*). The dangling OWNER->minter approval is inert: every PhusdStableMinter safeTransferFrom pulls from msg.sender (noMintDeposit onlyOwner L162-167, mint L226).",
+          "attackPath": [
+            "1. Operator starts :broadcast; forge's local pass computes R from simulated totalWithdrawal and bakes approve(R)/noMintDeposit(R) calldata (L1138-1139).",
+            "2. Between session start and tx #42/#43 mining (tens of minutes under --slow --ledger), minter surplus on autoDOLA 0x1760 is removed. Realistic trigger: StableYieldAccumulator.claim (L560) - permissionless to any holder of the claim NFT (burns one unit), loops every listed strategy and calls skimSurplus (onlyAuthorizedWithdrawer; SYA is the withdrawer) on 0x1760, which stays SYA-listed until tx #52. Alternative trigger: a Tokemak valuation down-step larger than accretion since session start (~0.011 DOLA/h).",
+            "3. Mined execute delivers R_mined < R_local; OWNER holds ~0 DOLA of its own, so noMintDeposit(R_local) reverts 'SafeMath: subtraction underflow' (tx #48).",
+            "4. Session halts in Phase 6b state (b)/(c); operator resumes, R re-derived live, converges."
+          ],
+          "likelihood": "low for the revert branch: SYA claims observed 5 in 30 days (~1 per 6 days) against a pre-execute exposure of well under an hour, so roughly <1% per session from claims, plus an unquantified Tokemak down-step probability; the Phase 6 V1 relinquish adds ~27 DOLA of skimmable surplus mid-session, a mild incentive. Excess branch: default (continuous accretion), but value is dust. DOLA mints before setStablecoinEnabled(false): none observed in 30 days.",
+          "assumptions": "Injected demonstration impersonated SYA calling skimSurplus(DOLA, claimer) - byte-identical to the per-strategy call inside SYA.claim, and mined after the local pass and before the execute, so the PoC matches the headline trigger ordering (checked per passing-poc-narrower-claim). OWNER holds no pre-existing DOLA buffer. Operator attends the session.",
+          "externalRequirements": "A third-party claim (or valuation down-step) landing inside the session window; no attacker profit - griefing/coincidence only."
+        },
+        "justification": "Not Medium: no loss or theft; collateral sits on the trusted owner's EOA and the resume path (already documented, fork-proven) restores it in one attended leg; the revert is loud on an attended path (fail-loud precedent). The availability impact (DOLA minting off, V2 still paused) is a short, operator-bounded extension of a session in which both are already off by design. Not QA: a story-092 AC is demonstrably unenforced on chain, a NatSpec safety claim is false, and :verify cannot detect the silent-excess branch - the ForgeLocalPassPrecedesBroadcast verification-gap family (run-22 M-01 was Medium because NO outcome verification existed; here :verify exists and covers the load-bearing registration/principal, leaving only OWNER residual, so Low). Escalation trigger: re-rate Medium if it compounds with a late-window start (L-11 freeze) or if pools/claim frequency grow materially.",
+        "borderline": "Low vs Medium - flagged for human review; kept Low."
+      }
+    },
+    {
+      "proposedLabel": "L-10",
+      "title": "CUTOVER_GAS_BUDGET is still the 46-tx story-087 value (22M), but the story-091/092 session is 67 txs using 22.98M gas; its own sizing rule now needs 25.16M, so the 20% preflight margin is 95% consumed and ~2 additional USDe stakers before broadcast would halt the run mid-Phase 6 with the preflight having said OK",
+      "severity": "low",
+      "severityRationale": "Footgun (Law 3): the preflight is the owner's own safety control and it reports OK against a stale 46-tx derivation whose sizing rule now requires 25.16M > 22M; a competent owner trusting ETH_BUDGET|OK would be surprised by a mid-Phase-6 halt. Fail-loud before any tx only protects the under-funded-vs-stated-budget case, not the stated-budget-is-too-low case. Not Medium: nothing lost, resumable, and needs a further condition to trigger. INCOMPLETE FIX signal of fixed L-07 d6896c6e843d (preflight mechanism landed, constant not re-derived after 091/092) - surface prominently; human decides reopen-L-07 vs keep separate.",
+      "contract": "script/CutoverStableStakerV2Mainnet.s.sol",
+      "ledgerContract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "_preflightOwnerEth",
+      "lineStart": 410,
+      "lineEnd": 421,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "StaleOperationalBudget",
+      "category": "drift",
+      "storyRefs": [
+        "story-087 (ETH preflight AC, 46-tx derivation)",
+        "story-091",
+        "story-092 (adds txs without re-deriving the budget)"
+      ],
+      "description": "`CUTOVER_GAS_BUDGET = 22_000_000` (L421) is documented as 18,317,077 used + 3,383,096 largest late gas limit (#37 USDe migrate), from the audit-33 46-tx rehearsal. The package.json `//stable-staker-v2-cutover:broadcast` comment repeats '46 transactions'. At 7ac6e70 the session is 67 transactions: Phase 3b adds a 3,106,997-gas CREATE plus 3 txs, and Phase 6b adds 17 txs including the 559,036-gas execute. `_requiredOwnerEth` = 22M x price x 1.2 = 26.4M gas-equivalent.",
+      "impact": "An anvil broadcast with OWNER funded to exactly the required 0.00792 ETH @ 0.3 gwei completed, but:\n- total gasUsed was 22,982,701, already above the 'budget'\n- the binding upfront check, cumulative-used-before + signed limit, peaks at 25,163,101 on tx #41 (USDe migrate, signed limit 6,706,846), leaving 1,236,899 gas (4.7%) of the 20% margin\n- each extra USDe staker adds roughly 0.38M used / 0.77M limit to tx #41, so about two new V1 USDe stakers (V1 stays open until Phase 1), or limit variance, make the node reject tx #41 or #42+ with -32003 insufficient funds\nThe run then halts mid-Phase 6 with V1 and V2 both paused, possibly with some pools migrated, inside the minter window. The operator trusted ETH_BUDGET|OK. The resume also demands the full 0.00792 ETH again.",
+      "evidence": "fork-logs/07-gas-analysis.txt (per-tx used + limits from `cast tx <hash> gas` on anvil), 07-cutover-broadcast-budgetExact.log (OWNER 7920000000000000 -> 1025437594769664), 06-cutover-broadcast-actualEth.log (preflight refusal at live balance, 0 txs sent), 05-cutover-preview-executable.log (ETH_BUDGET|SHORTFALL 1524805707318410). Verified.",
+      "recommendation": "Re-derive the budget from the 67-tx session: max over txs of (cumulative gasUsed before the tx + its signed limit) = 25.16M at 0.3 gwei on 25990689. Round up to e.g. 27M, keep the 1.2x factor, and state the assumed staker counts (DOLA 9 / USDC 13 / USDe 7). Better: have preview compute it, by summing simulated gas per recorded tx x 2 (the estimate multiplier) and taking the running max, and print ETH_BUDGET from that figure instead of a constant. Update the '46 transactions' text in the :broadcast comment and the NatSpec.",
+      "verified": true,
+      "incompleteFixOf": "L-07 d6896c6e843d",
+      "mapperRef": "OBS-35-02",
+      "dedupId": "DEDUP-35-02",
+      "dedupAction": "kept",
+      "originalIds": [
+        "OBS-35-02"
+      ],
+      "relationships": [
+        {
+          "ref": "ledger L-07 d6896c6e843d (fixed 84e2324)",
+          "type": "incompleteFixOf",
+          "note": "preflight mechanism landed but constant not re-derived after stories 091/092; keep L-07 fixed, do not reopen or merge"
+        },
+        {
+          "ref": "Q-06 (this run)",
+          "type": "compounding",
+          "note": "mid-Phase-6 halt feeds window lapse"
+        }
+      ],
+      "fingerprint": "72e528c8715f0fb1e6c4fb3a7b98844c7f5cf0cc2211cb376a20cd2f3356dbc1",
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "sanitizeNote": "No fingerprint match. INCOMPLETE-FIX signal against FIXED entry L-07 d6896c6e843d (MissingGasBudgetPreflight, _phase0_preconditions, fixed at 84e2324). Different function+rootCauseClass so fingerprint differs; not a regression of the same code, it is a stale constant in the fix. Auditor proposes keeping L-07 fixed and filing L-10 separately; human may alternatively reopen L-07. Flag prominently.",
+      "label": "L-10",
+      "classifiedFinding": {
+        "id": "CLASS-35-02",
+        "originalId": "DEDUP-35-02",
+        "severity": "low",
+        "c4Category": "Low",
+        "plausibility": "plausible but conditional",
+        "regression": false,
+        "faithfulness": true,
+        "fTag": "F-L-10",
+        "storyAcceptanceViolated": "story-087 AC (L183-187): budget derived to cover the session so the operator is not halted mid-run on -32003; story-092/091 added 21 txs without re-deriving it. Intent of the story-087 control is no longer met at its stated margin.",
+        "classification": {
+          "assetImpact": "No loss. Mid-Phase 6 halt (V1 and V2 paused, pools partially migrated, inside the minter window) until the owner tops up ETH and resumes; resume requires the full 0.00792 ETH again.",
+          "attackPath": [
+            "1. Operator reads ETH_BUDGET|OK / the :broadcast doc key and funds OWNER to the stated 22M*price*1.2 (0.00792 ETH at 0.3 gwei).",
+            "2. With --legacy --with-gas-price the price is fixed at CUTOVER_GAS_PRICE_WEI, so the only variable is gas: the node's upfront balance >= limit*price check peaks at cumulative-used + signed limit = 25,163,101 on tx #41 (USDe migrate, limit 6,706,846) vs 26.4M funded (4.7% slack).",
+            "3. ~2 extra V1 USDe stakers before Phase 1 (each ~+0.77M limit on tx #41) or estimate variance pushes the peak past 26.4M.",
+            "4. Node rejects tx #41/#42+ with -32003; forge aborts mid-session."
+          ],
+          "likelihood": "low-moderate: fork run at the exact budget completed; failure needs staker growth or limit variance >4.7%. Operators topping up usually round up, which further lowers it.",
+          "assumptions": "Gas price fixed by --legacy at CUTOVER_GAS_PRICE_WEI (preflight and signing share the env var, so price is not a source of drift; raising it scales budget and requirement proportionally). OWNER funded close to the stated minimum.",
+          "externalRequirements": "V1 staker growth or gas-limit estimate variance before broadcast."
+        },
+        "justification": "Footgun (Law 3): the preflight is the owner's own safety control and it reports OK against a stale 46-tx derivation whose sizing rule now requires 25.16M > 22M; a competent owner trusting ETH_BUDGET|OK would be surprised by a mid-Phase-6 halt. Fail-loud before any tx only protects the under-funded-vs-stated-budget case, not the stated-budget-is-too-low case. Not Medium: nothing lost, resumable, and needs a further condition to trigger. INCOMPLETE FIX signal of fixed L-07 d6896c6e843d (preflight mechanism landed, constant not re-derived after 091/092) - surface prominently; human decides reopen-L-07 vs keep separate.",
+        "incompleteFixFlag": "INCOMPLETE FIX of L-07 d6896c6e843d (fixed 84e2324)"
+      }
+    },
+    {
+      "proposedLabel": "Q-05",
+      "title": "The //stable-staker-v2-cutover:broadcast comment still says the global breaker is live all session 'EXCEPT the one forced tx' around V1 and that the session is 46 transactions; story 092 added a second dead window (autoDOLA setPauser(OWNER) -> Pauser.unregister, halt g) and 21 transactions",
+      "severity": "qa",
+      "severityRationale": "The second dead window and its remedy are documented in the //StableStakerV2Cutover key and script halt (g) NatSpec, and preview probes it; the stale key is a comment defect. QA, fix together with fix-pending Q-04 a62956952abd (same text, distinct defect - neither suppresses the other).",
+      "contract": "package.json",
+      "ledgerContract": "lib/phoenix-phase-2-staging/package.json",
+      "function": "//stable-staker-v2-cutover:broadcast",
+      "lineStart": 52,
+      "lineEnd": 52,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "StaleOperatorRunbook",
+      "category": "drift",
+      "storyRefs": [
+        "story-092 Decision 2 (second dead window)",
+        "story-084/087 (single-window claim)"
+      ],
+      "description": "package.json L52: 'The breaker is live for the whole session EXCEPT the one forced tx between V1.setPauser(OWNER) and Pauser.unregister(V1) ... Every other halt point, including every Phase 7 one, keeps the breaker live and converges on resume.' Story 092 retires 0x1760 with the same forced ordering. A halt between tx #56 (setPauser(OWNER)) and #57 (unregister) leaves Pauser.pause() reverting until OWNER calls Pauser.unregister(0x1760). The same comment still carries the Q-04 overclaim about Phase 7, and says '46 transactions'.",
+      "impact": "An operator reading only the :broadcast comment after a halt at tx #56 believes the breaker is live and may walk away, leaving the protocol-wide permissionless pause dead.",
+      "evidence": "Static. entry-manifest variantComments.broadcast; script NatSpec halt (g) L200-206; the clean anvil run shows tx #56 setPauser(address) on 0x1760 and #57 unregister on Pauser (fork-logs/07-gas-analysis.txt).",
+      "recommendation": "Rewrite the :broadcast breaker paragraph to name both dead windows (V1 tx #1->#2; autoDOLA tx #56->#57, remedy OWNER Pauser.unregister(0x1760...)) and the two Phase 7 coverage gaps (fixes Q-04 in the same edit), and replace '46 transactions' with the current count.",
+      "verified": "static (tx indices from fork run)",
+      "relatedPrior": "Q-04 a62956952abd (fix-pending, same comment still live)",
+      "mapperRef": "OBS-35-03",
+      "dedupId": "DEDUP-35-03",
+      "dedupAction": "kept",
+      "originalIds": [
+        "OBS-35-03"
+      ],
+      "relationships": [
+        {
+          "ref": "ledger Q-04 a62956952abd (fix-pending)",
+          "type": "related-same-text-different-defect",
+          "note": "same //:broadcast comment, but Q-04 is the Phase 7 halt-5 breaker overclaim (_phase7_finalize); Q-05 is the story-092 second dead window (autoDOLA setPauser/unregister, halt g) + stale 46-tx count. Distinct defect and distinct rootCauseClass; fix together, file separately"
+        }
+      ],
+      "fingerprint": "df5f14bae8a75c93f0c162bd3d4b842c21215bd12656531f51b356ec7dd75bc6",
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "sanitizeNote": "No fingerprint match. Related to FIX-PENDING Q-04 a62956952abd (same //:broadcast comment, different defect). Q-04 is fix-pending and is NOT suppressed; Q-05 is not suppressed by it either. Not a regression of fixed Q-02 1c859cde (that was the //StableStakerV2Cutover key, DocumentedIntentDivergesFromImplementation).",
+      "label": "Q-05",
+      "classifiedFinding": {
+        "id": "CLASS-35-03",
+        "originalId": "DEDUP-35-03",
+        "severity": "qa",
+        "c4Category": "QA/NC",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": false,
+        "classification": {
+          "assetImpact": "None directly; operator-facing runbook omits the second global-pause dead window (tx #56->#57) and the tx count.",
+          "attackPath": [
+            "n/a - documentation drift"
+          ],
+          "likelihood": "n/a",
+          "assumptions": "Operator reads only the :broadcast key after a halt at tx #56.",
+          "externalRequirements": "none"
+        },
+        "justification": "The second dead window and its remedy are documented in the //StableStakerV2Cutover key and script halt (g) NatSpec, and preview probes it; the stale key is a comment defect. QA, fix together with fix-pending Q-04 a62956952abd (same text, distinct defect - neither suppresses the other)."
+      }
+    },
+    {
+      "proposedLabel": "Q-06",
+      "title": "A Phase 6b stall that outlives the minter window freezes every migrated staker: resume reverts in Phase 0 'window EXPIRED' before Phase 7 can unpause V2, and the only exit is re-initiate plus another 6h wait; the runbook documents the re-initiate path but not that V1+V2 stay paused throughout",
+      "severity": "low",
+      "severityRationale": "Raised from sanitizer's QA to Low as a non-obvious operational footgun (Law 3): the RE-INITIATE PATH runbook presents lapse as 'rerun step 1, wait 6h, resume - every completed step skips' and never says that V2 stakers remain frozen throughout, because the Phase 0 window gate is coupled ahead of the Phase 7 unpause; a competent owner would plausibly expect a lapsed minter step to not block unpausing already-migrated users. Concrete user-fund availability impact keeps it above QA; the compound low-likelihood precondition, bounded duration and full recoverability keep it below Medium. Relabelled from proposed Q-06 because the severity changed.",
+      "contract": "script/CutoverStableStakerV2Mainnet.s.sol",
+      "ledgerContract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "_phase0_minterWithdrawalWindow",
+      "lineStart": 597,
+      "lineEnd": 645,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "PhaseCouplingBlocksUnpause",
+      "category": "cluster-interaction",
+      "storyRefs": [
+        "story-092 (RE-INITIATE PATH)",
+        "story-090 Concerns (timing)"
+      ],
+      "description": "Phase 0 runs the window preflight on every resume until the minter execute has landed. If the session halts after Phase 6 (all V1 stakers migrated into a V2 that Phase 3 paused) and the halt outlives initiatedAt+78h, every resume reverts in Phase 0. Phase 7, which unpauses V2, is unreachable without a script edit.",
+      "impact": "Migrated stakers cannot withdraw from V2 for the halt duration plus at least 6h after re-initiation, plus operator latency. DOLA minting stays disabled if the halt was after 6b step (a).",
+      "evidence": "work/test/audit-run35/CutoverAuditRun35.t.sol::test_R35_OBS04_windowLapseAfterPhase6_resumeBlocked_stakersFrozen PASS on fork 25990689 (fork-logs/16-R35-OBS04-test.log). Sequence: initiate (090 script) -> age 6h -> Phases 0..6 -> age to 78h+1 -> harnessPhase0 reverts exact 'Phase0: minter DOLA withdrawal window EXPIRED - ...' -> V2 DOLA staker withdraw reverts (paused) -> initiate re-runs OK -> Phase 0 reverts again (waiting period). Time moved by ageing initiatedAt, as the sponsor tests do.",
+      "recommendation": "State the blast radius in the runbook's RE-INITIATE PATH: all V2 stakers stay paused until the re-initiated window opens. Alternatively, let a resume past Phase 6 whose window has lapsed run Phase 7 (unpause/register V2) while leaving Phase 6b pending. V2's DOLA autoAnnihilate would then mint into 0x1760 until 6b runs, so keep DOLA minting disabled (6b step a) in that branch.",
+      "verified": true,
+      "mapperRef": "OBS-35-04",
+      "dedupId": "DEDUP-35-04",
+      "dedupAction": "kept",
+      "originalIds": [
+        "OBS-35-04"
+      ],
+      "relationships": [
+        {
+          "ref": "L-09, L-10 (this run)",
+          "type": "triggered-by",
+          "note": "consequence of any Phase 6b halt outliving the window; independent root cause (Phase 0 window gate blocks Phase 7 unpause)"
+        }
+      ],
+      "fingerprint": "e6e1f293bbad543573c8e564c9ee1f70a0139dc107fca28b629117292b79cfde",
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "sanitizeNote": "No fingerprint match. Distinct from fixed L-04 46c05353 / L-05 fc44ca36 (global-pause brick windows); this is Phase 0 window expiry blocking the Phase 7 unpause.",
+      "label": "L-11",
+      "classifiedFinding": {
+        "id": "CLASS-35-04",
+        "originalId": "DEDUP-35-04",
+        "severity": "low",
+        "c4Category": "Low",
+        "plausibility": "implausible-to-low (compound condition)",
+        "regression": false,
+        "faithfulness": false,
+        "classification": {
+          "assetImpact": "Temporary freeze of every migrated V2 staker's principal (V1 paused, V2 paused since Phase 3) for halt duration + re-initiate + >=6h waiting period + operator latency; DOLA minting also off if halted after 6b step (a). No loss.",
+          "attackPath": [
+            "1. Operator starts the cutover late in the permitted range (Phase 0 accepts up to expiresAt - 6h).",
+            "2. Session halts after Phase 6 migrates stakers but before the 6b execute (e.g. L-10 ETH exhaustion, L-09 revert, RPC/Ledger failure, or a global pause - totalWithdrawal is whenNotPaused).",
+            "3. Operator cannot resume before initiatedAt+78h; every resume then reverts in _phase0_minterWithdrawalWindow ('window EXPIRED').",
+            "4. Phase 7 (V2 unpause) is unreachable without a script edit; stakers stay frozen until re-initiate + 6h (fork-proven test_R35_OBS04)."
+          ],
+          "likelihood": "low: needs a halt plus operator latency exceeding the remaining window (>=6h if started at the latest permitted time, up to ~66h if started early).",
+          "assumptions": "Non-malicious attended operator; halt from an operational cause.",
+          "externalRequirements": "A Phase 6/6b halt outliving the window, or a global pause spanning its end."
+        },
+        "justification": "Raised from sanitizer's QA to Low as a non-obvious operational footgun (Law 3): the RE-INITIATE PATH runbook presents lapse as 'rerun step 1, wait 6h, resume - every completed step skips' and never says that V2 stakers remain frozen throughout, because the Phase 0 window gate is coupled ahead of the Phase 7 unpause; a competent owner would plausibly expect a lapsed minter step to not block unpausing already-migrated users. Concrete user-fund availability impact keeps it above QA; the compound low-likelihood precondition, bounded duration and full recoverability keep it below Medium. Relabelled from proposed Q-06 because the severity changed.",
+        "borderline": "QA vs Low - flagged for human review; kept Low.",
+        "proposedLabelWas": "Q-06"
+      }
+    },
+    {
+      "proposedLabel": "Q-07",
+      "title": "Merge commit 7ac6e70 ('deploy') committed unresolved conflict markers in server/deployments/addresses.ts and local.json; local.json no longer parses, so the dev API server's loadExtractedAddresses() returns null",
+      "severity": "qa",
+      "severityRationale": "Repo hygiene defect off the mainnet path; QA. Relabelled from proposed Q-07 to keep QA labels sequential after Q-06 was reclassified to L-11. Attribution flag: arguably belongs to entryPoint dev (open L-07 98e72721) - human may re-home; fingerprint left as sanitized.",
+      "contract": "server/deployments/local.json",
+      "ledgerContract": "lib/phoenix-phase-2-staging/server/deployments/local.json",
+      "function": "loadExtractedAddresses (server/index.js)",
+      "lineStart": 5,
+      "lineEnd": 410,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "CommittedMergeConflictMarkers",
+      "category": "drift",
+      "storyRefs": [
+        "story-089 (address keys, local deployment)"
+      ],
+      "description": "`<<<<<<< HEAD / ======= / >>>>>>> sprint/stable-staker-v2` blocks are committed at addresses.ts L1-5 (header comment) and local.json L5-9, L120-124, L408+. `JSON.parse(local.json)` throws 'Unexpected token <'. server/index.js catches it and returns null. addresses.ts is described as 'copied directly into UI projects' and will not compile there.",
+      "impact": "The dev stack's /contracts endpoint loses the extracted addresses. UI consumers copying addresses.ts get a TS syntax error. The mainnet patch is unaffected.",
+      "evidence": "node -e JSON.parse(...) fails at line 5; grep of the markers; fork-logs/08-patch.log (patch unaffected). Verified.",
+      "recommendation": "Resolve the conflicts (keep one generated header; regenerate local.json from the latest dev deploy), and add a CI/pre-commit check (`git diff --check` or grep for conflict markers plus a JSON parse of server/deployments/*.json).",
+      "verified": true,
+      "mapperRef": "OBS-35-07",
+      "dedupId": "DEDUP-35-05",
+      "dedupAction": "kept",
+      "originalIds": [
+        "OBS-35-07"
+      ],
+      "relationships": [],
+      "fingerprint": "9c4e21bb9fd79d8bc0f09ed0089b2cd63d94bfdbcdd1e44728b1ef4b324ab08c",
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "sanitizeNote": "No fingerprint match. Law-3/scope check: kept. Committed in the audited delta (7ac6e70 merge), verified 6 conflict-marker lines in local.json at HEAD; security-irrelevant but a real repo defect, QA only. Not a rehearsal-fidelity claim, so DeployMocks-is-UI-mock ruling does not apply. Review note: arguably belongs to entryPoint dev (dev toolchain), where open L-07 98e72721 (local.json de-tracked) sits. local.json is tracked again at 7ac6e70, so dev L-07 may be moot; propose /recheck of dev L-07, no status change. Function field names a file other than contract (server/index.js); fingerprint recorded verbatim as given.",
+      "label": "Q-06",
+      "classifiedFinding": {
+        "id": "CLASS-35-05",
+        "originalId": "DEDUP-35-05",
+        "severity": "qa",
+        "c4Category": "QA/NC",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": false,
+        "classification": {
+          "assetImpact": "None; dev API server address load returns null and addresses.ts would not compile in UI consumers. Mainnet patch unaffected (fork-verified).",
+          "attackPath": [
+            "n/a - committed merge-conflict markers"
+          ],
+          "likelihood": "certain for dev/UI consumers",
+          "assumptions": "none",
+          "externalRequirements": "none"
+        },
+        "justification": "Repo hygiene defect off the mainnet path; QA. Relabelled from proposed Q-07 to keep QA labels sequential after Q-06 was reclassified to L-11. Attribution flag: arguably belongs to entryPoint dev (open L-07 98e72721) - human may re-home; fingerprint left as sanitized.",
+        "proposedLabelWas": "Q-07"
+      }
+    },
+    {
+      "proposedLabel": "Q-01",
+      "title": "dola-ys-withdrawal:status prints 'EXECUTABLE - cutover may broadcast now' for the entire [initiatedAt+6h, initiatedAt+78h] window and while the strategy is paused, but the cutover refuses to start in the last 6h (WINDOW_SAFETY_MARGIN) and its execute is whenNotPaused; story 092's runbook uses this line as the go signal",
+      "severity": "qa",
+      "severityRationale": "Incorrect operator signal against the consumer's gate, but the consumer fails closed before signing. QA with faithfulness tag.",
+      "contract": "script/DolaStrategyWithdrawalStatus.s.sol",
+      "ledgerContract": "lib/phoenix-phase-2-staging/script/DolaStrategyWithdrawalStatus.s.sol",
+      "function": "run",
+      "lineStart": 53,
+      "lineEnd": 60,
+      "entryPoint": "dola-ys-withdrawal:status",
+      "rootCauseClass": "StatusIgnoresConsumerGate",
+      "category": "intent-mismatch",
+      "storyRefs": [
+        "story-092 runbook step 2 ('dola-ys-withdrawal:status must say EXECUTABLE')",
+        "story-092 WINDOW_SAFETY_MARGIN",
+        "story-090 (status reporter)"
+      ],
+      "description": "The status script's EXECUTABLE branch (`nowTs <= expiresAt`) mirrors the strategy's own window. It does not mirror the cutover's start gate, `block.timestamp + WINDOW_SAFETY_MARGIN < closesAt`. It also does not qualify EXECUTABLE by `strategy.paused()`.",
+      "impact": "Operator told 'cutover may broadcast now' when `:preview`/`:broadcast` will refuse.",
+      "evidence": "Anvil fork 25990689, initiatedAt aged 75h: status 'EXECUTABLE - cutover may broadcast now; seconds until expiry: 10783' (fork-logs/04-status-last6h.log). The cutover :preview on the same state reverts 'Phase0: fewer than WINDOW_SAFETY_MARGIN seconds left...' (fork-logs/04-cutover-preview-last6h.log). Verified.",
+      "recommendation": "Split the phase into 'EXECUTABLE, cutover may START (>6h left)' and 'EXECUTABLE but too late to START a cutover (<6h left): wait for expiry, re-initiate'. Print a 'strategy PAUSED - execute will revert' override when paused. Import WINDOW_SAFETY_MARGIN from a shared constant rather than duplicating it.",
+      "verified": true,
+      "mapperRef": "OBS-35-S1 (chainId part refuted)",
+      "dedupId": "DEDUP-35-06",
+      "dedupAction": "kept",
+      "originalIds": [
+        "OBS-35-S1 (chainId part refuted)"
+      ],
+      "relationships": [
+        {
+          "ref": "Q-01@initiate-dola-ys-withdrawal (this run)",
+          "type": "related-cross-entryPoint",
+          "note": "both operator signals omit story-092 WINDOW_SAFETY_MARGIN, but different scripts, code, and fixes; status also ignores the paused flag"
+        }
+      ],
+      "fingerprint": "8633815e4b2b833011046cf0ded65501329f76f0bf6fee6a79840d6b0e845a7f",
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "sanitizeNote": "No fingerprint match; no prior ledger entries for this entryPoint.",
+      "label": "Q-01",
+      "classifiedFinding": {
+        "id": "CLASS-35-06",
+        "originalId": "DEDUP-35-06",
+        "severity": "qa",
+        "c4Category": "QA/NC",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": true,
+        "fTag": "F-Q-01@status",
+        "storyAcceptanceViolated": "story-092 runbook step 2 ('npm run dola-ys-withdrawal:status must say EXECUTABLE' as the go signal) combined with story-092 Phase 0 AC (initiatedAt+6h <= now < initiatedAt+78h - WINDOW_SAFETY_MARGIN): status prints 'cutover may broadcast now' in the last 6h and while the strategy is paused, when the cutover will refuse / the execute will revert.",
+        "classification": {
+          "assetImpact": "None; fail-safe (Phase 0 reverts before any tx, with guidance).",
+          "attackPath": [
+            "1. Operator checks status inside initiatedAt+72h..78h (or while strategy paused).",
+            "2. Status says EXECUTABLE - cutover may broadcast now.",
+            "3. :preview/:broadcast refuse in Phase 0 - wasted attempt."
+          ],
+          "likelihood": "moderate for the message mismatch; zero for asset impact",
+          "assumptions": "none",
+          "externalRequirements": "none"
+        },
+        "justification": "Incorrect operator signal against the consumer's gate, but the consumer fails closed before signing. QA with faithfulness tag."
+      }
+    },
+    {
+      "proposedLabel": "Q-01",
+      "title": "initiate-dola-ys-withdrawal tells the operator to 'broadcast the cutover between executableAt and expiresAt' (story 090 wording), contradicting story 092's 6h WINDOW_SAFETY_MARGIN start gate; the printed timestamps are from forge's local pass, not the mined block",
+      "severity": "qa",
+      "severityRationale": "Cross-story spec conflict in operator output with fail-safe consumer; QA with faithfulness tag (story conflict, not an unsafe story).",
+      "contract": "script/InitiateDolaStrategyWithdrawal.s.sol",
+      "ledgerContract": "lib/phoenix-phase-2-staging/script/InitiateDolaStrategyWithdrawal.s.sol",
+      "function": "run",
+      "lineStart": 181,
+      "lineEnd": 196,
+      "entryPoint": "initiate-dola-ys-withdrawal",
+      "rootCauseClass": "StoryConflictOperatorTiming",
+      "category": "intent-mismatch",
+      "storyRefs": [
+        "story-090 (log instruction AC, read-back AC initiatedAt == block.timestamp)",
+        "story-092 (WINDOW_SAFETY_MARGIN)"
+      ],
+      "description": "The readback and the printed initiatedAt/executableAt/expiresAt run after `vm.stopBroadcast()` inside forge's local EVM. With `--skip-simulation --ledger` the mined initiatedAt is later by the confirmation latency. The instruction line omits the 6h safety margin that the consumer (cutover Phase 0) enforces. The 'READBACK OK' line therefore asserts a local-pass state.",
+      "impact": "The operator plans the cutover against an expiry up to 6h (+ signing latency) later than the real start deadline. Fail-safe.",
+      "evidence": "Anvil: printed initiatedAt 1789569551 (local) vs WithdrawalInitiated event / storage 1789569586 (mined) (fork-logs/02-initiate-broadcast-anvil.log, 02-initiate-statediff.json). Verified.",
+      "recommendation": "Print 'start the cutover between executableAt and expiresAt - 6h (WINDOW_SAFETY_MARGIN)'. Label the timestamps as local-pass estimates and point the operator to `npm run dola-ys-withdrawal:status` for the mined values. Reflect the margin in story 090's AC text.",
+      "verified": true,
+      "mapperRef": "story-090 pre/post-condition review",
+      "dedupId": "DEDUP-35-07",
+      "dedupAction": "kept",
+      "originalIds": [
+        "story-090 pre/post-condition review"
+      ],
+      "relationships": [
+        {
+          "ref": "Q-01@dola-ys-withdrawal:status (this run)",
+          "type": "related-cross-entryPoint",
+          "note": "same 6h-margin theme, different script; root cause here is the 090-vs-092 story conflict plus local-pass timestamps"
+        },
+        {
+          "ref": "L-09 (this run)",
+          "type": "same-theme",
+          "note": "printed timestamps are forge local-pass values (ForgeLocalPassPrecedesBroadcast family)"
+        }
+      ],
+      "fingerprint": "4cdafc61037cb255ee4422487b88a8f0654718b6fbef5c6bb658c66d9b6a879e",
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "knownIssueMatch": null,
+      "sanitizeNote": "No fingerprint match; no prior ledger entries for this entryPoint. Ledger migrate:ss-initiate-mainnet entries (3f4ce2fd, 54a00d2b, 198bb924) concern InitiateYieldStrategyWithdrawal.s.sol, a different script: unrelated.",
+      "label": "Q-01",
+      "classifiedFinding": {
+        "id": "CLASS-35-07",
+        "originalId": "DEDUP-35-07",
+        "severity": "qa",
+        "c4Category": "QA/NC",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": true,
+        "fTag": "F-Q-01@initiate",
+        "storyAcceptanceViolated": "Faithful to story-090 AC (L73/L124: log 'broadcast the cutover between executableAt and expiresAt') but that story text conflicts with story-092's WINDOW_SAFETY_MARGIN start gate; story 090 was not updated. Readback/timestamps are forge local-pass values, not mined (story-090 read-back AC initiatedAt == block.timestamp holds only locally).",
+        "classification": {
+          "assetImpact": "None; operator may plan against a deadline up to 6h+latency too late; cutover fails closed.",
+          "attackPath": [
+            "1. Operator follows the printed instruction and starts near expiresAt.",
+            "2. Phase 0 reverts (too late) - re-initiate + 6h wait."
+          ],
+          "likelihood": "low",
+          "assumptions": "none",
+          "externalRequirements": "none"
+        },
+        "justification": "Cross-story spec conflict in operator output with fail-safe consumer; QA with faithfulness tag (story conflict, not an unsafe story)."
+      }
+    }
+  ]
+}

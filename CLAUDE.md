@@ -30,11 +30,12 @@ Every audit decision — what to scan, what to report, how to rank, what to supp
 **Stories are external, and must always be retrieved (Law 2).** The `[story-NNN]` prefix on a commit subject (e.g. `[story-073] Seed phUSD/Kendu nudge streams…`) is a **pointer**, not the story. The authoritative story documents live in the read-only tree `~/code/product-owner/stories/`, laid out as:
 
 ```
-~/code/product-owner/stories/<storyDir>/<complete|incomplete|review|archive>/<sprint>/<NNN>-<slug>.md
+~/code/product-owner/stories/<storyDir>/<complete|auto-complete|incomplete|review|archive>/<sprint>/<NNN>-<slug>.md
 ```
 
 - **Story numbers are unique project-wide** — across every state folder and every sprint/worktree folder. Decimal insertions exist (`045.5-...`). Resolve a tag by globbing the *whole* project tree, never one sprint or one state:
   `find ~/code/product-owner/stories/<storyDir> -type f -name '<NNN>-*.md' -o -type f -name '<NNN>.*-*.md'`
+- **`auto-complete` is a final state, equivalent to `complete`.** product-owner's story-batch workflow moves a story there once agent review passes; no formal human review has happened, and a satisfied human may simply leave it there (an unsatisfied one sends it back). Never flag it as an unknown state.
 - **The state folder is metadata, not a filter.** `incomplete` / `review` stories are still in scope (code frequently lands before the story is closed out), and `archive` still explains shipped behaviour. Note which state a story came from — a landed feature whose story sits in `incomplete` is itself worth flagging.
 - **The directory name is not the project name** (`reflax-yield-vault` → `vault-RM`, `phoenix-phase-2-staging` → `phStaging2`). Never guess it. Use the project's `storyDir` field in `registered-projects.json` — a verified cache of the **authoritative** mapping in `~/code/product-owner/registered-project-list.md`, which lists `<storyDir>:<path under ~/code/>` per line and resolves mechanically via `git -C ~/code/<path> remote get-url origin` (the remote's basename is the audit project name). If a lookup misses or a project is added, re-derive from that file and refresh `storyDir`.
 - **Read-only, like every `<project>/src/`.** Never write to the stories tree.

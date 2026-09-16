@@ -1,0 +1,81 @@
+{
+  "id": "L-09",
+  "label": "L-09",
+  "issueId": "pps35l9",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-35",
+  "reportDir": "phoenix-phase-2-staging/reports/35",
+  "commit": "7ac6e7077b3f1bddbb7d7c98b15ff4502df92963",
+  "status": "ready",
+  "severity": "low",
+  "title": "Phase 6b re-seeds a DOLA amount baked from forge's local pass. When the mined minter execute delivers more, the excess collateral silently stays on the OWNER EOA and :verify passes. When it delivers less (e.g. an SYA claim mid-session), noMintDeposit reverts and the session halts with ~14.6k DOLA of phUSD collateral on the EOA and DOLA minting disabled",
+  "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+  "sourcePath": "script/CutoverStableStakerV2Mainnet.s.sol",
+  "function": "_minterReseedSdola",
+  "line": 1116,
+  "lineStart": 1116,
+  "lineEnd": 1145,
+  "rootCauseClass": "ForgeLocalPassPrecedesBroadcast",
+  "entryPoint": "stable-staker-v2-cutover",
+  "category": "intent-mismatch",
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "78cb5942d4834f366ab7d5600a449c73bb8d43833dd8b822e25801d623e39cc6",
+  "fingerprintBasis": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol:_minterReseedSdola:ForgeLocalPassPrecedesBroadcast:stable-staker-v2-cutover",
+  "fingerprintProvenance": "Copied verbatim from reports/35/script-audits/classified-findings.json (not recomputed); finding-manager cross-check sha256(fingerprintBasis) reproduces.",
+  "origin": "new",
+  "regression": false,
+  "firstSeenRun": "phoenix-phase-2-staging-35",
+  "lastSeenRun": "phoenix-phase-2-staging-35",
+  "firstSeenCommit": "7ac6e70",
+  "lastSeenCommit": "7ac6e70",
+  "faithfulness": true,
+  "fTag": "F-L-09",
+  "storyAcceptanceViolated": "story-092 Technical Details step 5 / AC line 180: 'assert OWNER DOLA back to its level before execution, so no DOLA is left on OWNER' - the assert exists but binds only forge's local pass; on the uninterrupted broadcast path the mined state is not checked, and :verify only lower-bounds minter principal against the local R. Also the script's own halt-point (b) NatSpec claim ('a local-pass R that differs from the mined one cannot strand or over-deposit') is false outside the resume path.",
+  "storyRefs": [
+    "story-092 (Technical Details step 5: 'Assert OWNER's DOLA balance is back to its level before execution, so no DOLA is left on OWNER'; Resume hazard)",
+    "story-092 Decision 5 (addresses resume only)",
+    "precedent: script/archives/MigrateSaga2Rescue.s.sol, MR-22 ForgeLocalPassPrecedesBroadcast"
+  ],
+  "borderline": "Low vs Medium - flagged for human review; kept Low.",
+  "proposedLabelWas": null,
+  "incompleteFixOf": null,
+  "relatedFindings": [
+    "relatedTo precedent promotion-ready:broadcast L-02 b57dcb4bb594 (same rootCauseClass ForgeLocalPassPrecedesBroadcast, different script/entryPoint; not a duplicate)",
+    "compounding: L-11 e6e1f293bbad (pps35l11) window-lapse freeze; L-10 72e528c8715f (pps35l10)"
+  ],
+  "description": "Under `--broadcast --skip-simulation --slow --ledger`, forge runs the whole script in a local EVM at session start and then signs the recorded calldata one tx at a time. In Phase 6b, `_minterExecuteWithdrawal` computes R = OWNER DOLA delta in that local pass. `_minterReseedSdola` then emits `DOLA.approve(minter, r)` (L1138) and `minter.noMintDeposit(sdolaStrategy, DOLA, r)` (L1139) with r as a literal. On chain, the execute (tx #43 of 67) redeems pro-rata of the LIVE autoDOLA shares at the LIVE price, minutes to hours later. The two post-checks `_doneMinterReseeded` and `balanceOf(OWNER) == ownerDolaBeforeExec` (L1142) run only in the local pass. The verifier's `_doneMinterReseeded` lower-bounds the minter's sDOLA principal against the recorded (local) R, and nothing re-checks OWNER's residual DOLA. The resume path re-derives R from chain correctly; the first uninterrupted run does not.",
+  "impact": "(a) R_mined > R_sim, the default: autoDOLA's price accretes continuously. Minter collateral that backs outstanding phUSD is left on the OWNER EOA instead of the sDOLA strategy. The AC is violated and :verify is green, so nobody is told. (b) R_mined < R_sim: an SYA.claim (permissionless for NFT holders; ~every 5 days, and made more attractive mid-session because Phase 6's V1 relinquish adds ~27 DOLA of skimmable surplus), a Tokemak valuation down-step, or anything else that removes minter surplus between session start and tx #43. noMintDeposit reverts. The operator is left with 14.59k DOLA of phUSD collateral on a hot Ledger EOA, DOLA minting disabled, and a dangling ~14.6k DOLA approval to the minter. They must re-run the session, which again requires the full 0.00792 ETH budget, while the 78h window and the V2 pause (Phase 7 not reached) keep running.",
+  "attackPath": [
+    "1. Operator starts :broadcast; forge's local pass computes R from simulated totalWithdrawal and bakes approve(R)/noMintDeposit(R) calldata (L1138-1139).",
+    "2. Between session start and tx #42/#43 mining (tens of minutes under --slow --ledger), minter surplus on autoDOLA 0x1760 is removed. Realistic trigger: StableYieldAccumulator.claim (L560) - permissionless to any holder of the claim NFT (burns one unit), loops every listed strategy and calls skimSurplus (onlyAuthorizedWithdrawer; SYA is the withdrawer) on 0x1760, which stays SYA-listed until tx #52. Alternative trigger: a Tokemak valuation down-step larger than accretion since session start (~0.011 DOLA/h).",
+    "3. Mined execute delivers R_mined < R_local; OWNER holds ~0 DOLA of its own, so noMintDeposit(R_local) reverts 'SafeMath: subtraction underflow' (tx #48).",
+    "4. Session halts in Phase 6b state (b)/(c); operator resumes, R re-derived live, converges."
+  ],
+  "classification": {
+    "assetImpact": "No asset loss. Excess branch: dust-to-~1 DOLA of minter collateral left on the trusted OWNER EOA, undetected. Revert branch: ~14.59k DOLA of phUSD collateral parked on the OWNER Ledger EOA, DOLA minting disabled, V2 still paused (Phase 7 not reached), until an attended resume, which re-derives R on chain and converges (fork-proven 13-*/14-*). The dangling OWNER->minter approval is inert: every PhusdStableMinter safeTransferFrom pulls from msg.sender (noMintDeposit onlyOwner L162-167, mint L226).",
+    "attackPath": [
+      "1. Operator starts :broadcast; forge's local pass computes R from simulated totalWithdrawal and bakes approve(R)/noMintDeposit(R) calldata (L1138-1139).",
+      "2. Between session start and tx #42/#43 mining (tens of minutes under --slow --ledger), minter surplus on autoDOLA 0x1760 is removed. Realistic trigger: StableYieldAccumulator.claim (L560) - permissionless to any holder of the claim NFT (burns one unit), loops every listed strategy and calls skimSurplus (onlyAuthorizedWithdrawer; SYA is the withdrawer) on 0x1760, which stays SYA-listed until tx #52. Alternative trigger: a Tokemak valuation down-step larger than accretion since session start (~0.011 DOLA/h).",
+      "3. Mined execute delivers R_mined < R_local; OWNER holds ~0 DOLA of its own, so noMintDeposit(R_local) reverts 'SafeMath: subtraction underflow' (tx #48).",
+      "4. Session halts in Phase 6b state (b)/(c); operator resumes, R re-derived live, converges."
+    ],
+    "likelihood": "low for the revert branch: SYA claims observed 5 in 30 days (~1 per 6 days) against a pre-execute exposure of well under an hour, so roughly <1% per session from claims, plus an unquantified Tokemak down-step probability; the Phase 6 V1 relinquish adds ~27 DOLA of skimmable surplus mid-session, a mild incentive. Excess branch: default (continuous accretion), but value is dust. DOLA mints before setStablecoinEnabled(false): none observed in 30 days.",
+    "assumptions": "Injected demonstration impersonated SYA calling skimSurplus(DOLA, claimer) - byte-identical to the per-strategy call inside SYA.claim, and mined after the local pass and before the execute, so the PoC matches the headline trigger ordering (checked per passing-poc-narrower-claim). OWNER holds no pre-existing DOLA buffer. Operator attends the session.",
+    "externalRequirements": "A third-party claim (or valuation down-step) landing inside the session window; no attacker profit - griefing/coincidence only."
+  },
+  "severityRationale": "Not Medium: no loss or theft; collateral sits on the trusted owner's EOA and the resume path (already documented, fork-proven) restores it in one attended leg; the revert is loud on an attended path (fail-loud precedent). The availability impact (DOLA minting off, V2 still paused) is a short, operator-bounded extension of a session in which both are already off by design. Not QA: a story-092 AC is demonstrably unenforced on chain, a NatSpec safety claim is false, and :verify cannot detect the silent-excess branch - the ForgeLocalPassPrecedesBroadcast verification-gap family (run-22 M-01 was Medium because NO outcome verification existed; here :verify exists and covers the load-bearing registration/principal, leaving only OWNER residual, so Low). Escalation trigger: re-rate Medium if it compounds with a late-window start (L-11 freeze) or if pools/claim frequency grow materially.",
+  "evidence": "Verified on anvil fork of 25990689 (side-effects.json UE-35-01/02). CLEAN broadcast: run-latest tx #47/#48 args carry 14633137717790185615971; the mined execute Transfer to OWNER = 14633140027218540037484; OWNER DOLA after = 2309428354421513 wei; :verify exit 0 (fork-logs/07-cutover-run-latest.json, 09-verify-clean.log). INJECTED run (fork-logs/inject-driver.sh; claim-equivalent skimSurplus mined in the same block as setStablecoinEnabled(false), 39.284 DOLA): tx #48 noMintDeposit status 0, 'SafeMath: subtraction underflow'. Halted: OWNER DOLA 14593854548308164103700, minter DOLA enabled=false, registration 0x1760, allowance 14633137717790185615971 (fork-logs/12-*). Resume: 'NOTE: recorded R differs ... re-seeding the live delta', converges; verify exit 0 (13-*, 14-*). Plausibility: fork-logs/sya-rewardscollected-30d.tsv (5 claims in 30 days); autoDOLA convertToAssets samples show continuous accretion plus a ~0.5 bps step.",
+  "verified": true,
+  "recommendation": "Do not sign an amount derived from a state that an earlier signed tx changes. Either option below works:\n(1) End the first broadcast leg immediately after the execute: the script stops after `_minterExecuteWithdrawal` when not resuming, e.g. a `PHASE6B_EXECUTE_ONLY` gate or a deliberate `return` once `minterExecRecorded` was freshly set. The operator re-runs `:broadcast`, whose local pass then reads the mined R. This reuses the resume path that is already fork-proven.\n(2) Re-seed a deliberately conservative amount, then sweep the remainder in the resume/verify leg.\nIn both cases, add to `VerifyStableStakerV2Cutover._verifyPhase6b_minterMove`:\n- `DOLA.balanceOf(OWNER) == minterMove.ownerDolaBeforeExec`\n- a check of the minter's sDOLA principal against the actual `WithdrawalExecuted` / DOLA Transfer amount read from logs, not against the recorded local-pass R.\nCorrect the halt-point (b) NatSpec (L167), which currently asserts the first-run path cannot strand DOLA.",
+  "poc": null,
+  "metadata": {
+    "createdAt": "2026-09-16T16:02:15Z",
+    "updatedAt": "2026-09-16T16:02:15Z",
+    "scanOrigin": "OBS-35-01",
+    "dedupOrigin": "DEDUP-35-01",
+    "classificationOrigin": "CLASS-35-01"
+  }
+}

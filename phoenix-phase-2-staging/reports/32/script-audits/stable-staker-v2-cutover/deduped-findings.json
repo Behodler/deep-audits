@@ -1,0 +1,218 @@
+{
+  "project": "phoenix-phase-2-staging",
+  "run": 32,
+  "entryPoint": "stable-staker-v2-cutover",
+  "story": "story-083 (delta; 082/080/067/062 supporting)",
+  "sourceCommit": "884ccf8",
+  "generatedBy": "deduplicator",
+  "generatedAt": "2026-09-15",
+  "input": "reports/32/script-audits/stable-staker-v2-cutover/candidate-findings.json",
+  "summary": {
+    "inputCount": 6,
+    "outputCount": 6,
+    "consolidated": 0,
+    "removed": 0,
+    "routedToManualReview": 0,
+    "note": "All six candidates survive unmerged. No two share a root cause AND a fix. Nothing was quality-filtered: 1 Low + 2 QA are new with fork evidence or a Law-2/operator-hazard impact, and 3 are ledger re-observations whose reconciliation belongs to the sanitizer. No manual-review.json entry was needed because nothing was set aside."
+  },
+  "method": {
+    "phase1_exactMatch": "No duplicate contract:function:line tuples. 04 and 01 both cite CutoverStableStakerV2Mainnet.s.sol and overlapping ranges (04 spans L146-643 as a whole-run pattern), but their rootCauseClass values and mechanisms differ. 03 and 06 share DeployMocks.s.sol at disjoint functions and lines (L2053-2095 vs L1897-1906).",
+    "phase2_rootCause": "All 6 rootCauseClass values are distinct. Candidate pairs checked by hand: 01 vs ledger L-03, 02 vs 03, 03 vs 06 (Q-01), 02 vs Q-01, 04 vs 01, 05 vs ledger L-01. See uniquenessVsSiblings on each finding.",
+    "phase3_pattern": "Systemic pattern (not consolidated): 'DeployMocks rehearsal drifts from the mainnet script it claims to mirror', with instances SSV2C32-03 (story 083), SSV2C32-06/Q-01 (story 082 Phase 5), and dev entries eda17642828a (fix-pending), 6af1ae30ed82, 12bcca3b617c. Each has its own missing step and its own fix. A pattern-level remedy (shared constants and a shared retirement/wiring helper imported by both scripts) would reduce recurrence and could be noted in review.md, but merging the findings would destroy per-fix closure tracking.",
+    "phase4_priorityFilter": "No candidate is tool noise, style-only or pure informational. The two QA drift items each carry a concrete operator or coverage consequence tied to story 083. Nothing was removed or routed.",
+    "ledgerAccess": "jq projections only (entries for this entryPoint + rootCauseClass pattern select). ledger.json was never read whole."
+  },
+  "findings": [
+    {
+      "id": "SSV2C32-01",
+      "originalIds": [
+        "candidate[0]"
+      ],
+      "title": "From Phase 1 until Phase 7's `Pauser.unregister(V1)`, V1 is still registered with the Pauser but paused with pauser OWNER, so the permissionless global `Pauser.pause()` reverts for all 26 registrants for the whole cutover, or indefinitely if the run halts",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "_phase1_pauseV1 / _phase7_finalize",
+      "lineStart": 272,
+      "lineEnd": 564,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "RegisteredPausableRepauserWindowBricksGlobalPause",
+      "category": "unintended-side-effect",
+      "branch": "master",
+      "description": "`Pauser.pause()` (lib/pauser/src/Pauser.sol L56-66) is the protocol's permissionless emergency breaker: anyone burning 1000 EYE can trigger it. It loops `IPausable(c).pause()` over every registrant with no try/catch. Phase 1 (L282-285) moves V1's pauser to OWNER and pauses V1, but V1 is only removed from the registry in Phase 7 (L558-560), about 40 transactions later. Throughout that window the loop reaches V1 (index 18) and reverts `StableStaker: only pauser`, so the whole call reverts and no registrant is paused. The registrants include the live yield strategies that custody every staker's principal, PhlimboV3 and the hooks. OWNER is the direct pauser of only 1 of the 26 registrants during the window (V1 itself), so an owner who notices an incident cannot pause the rest either without first unregistering V1. The window lasts the whole `--slow` Ledger session. Phase 6 also carries several `STOP AND REPORT` reverts, as do the resume procedure and the halt-and-trim runbook, so a halt anywhere between Phase 1 and Phase 7 leaves the breaker dead until someone resumes the run. Story 083's rationale ('once V1 is unregistered, that risk is gone') addresses only the END state. The window predates 083: 082 also paused V1 in Phase 1 while it stayed registered. In run-31 the window was masked because the Pauser was already bricked by two pre-paused registrants, which the owner has since removed. The window is therefore now the only thing that breaks the breaker, and a competent owner who has just cleared the registry would not expect the cutover to re-break it.",
+      "impact": "The protocol-wide emergency pause is unavailable to everyone (EYE holders and the owner-through-Pauser) for the cutover duration, or indefinitely after a halted run. An exploit on any registered contract during that window cannot be stopped through the designated mechanism. No direct loss is caused by the script itself; this is an availability hazard for the incident-response path during a planned operation. It is recoverable by the owner in one transaction (`Pauser.unregister(V1)`) once someone notices.",
+      "evidence": "Fork @25978784, audit harness test_W_windowBricksGlobalPause (fork-logs/h32-test_W_windowBricksGlobalPause.log): `WINDOW_AFTER_P1|V1.paused=true|V1.pauser==OWNER=true|V1.registered=true`; EYE-funded `Pauser.pause()` -> `GLOBAL_PAUSE|window-after-phase1|REVERTED|...StableStaker: only pauser`; after the real Phase 6 -> `GLOBAL_PAUSE|window-after-phase6|REVERTED|...only pauser`; `WINDOW_OWNER_DIRECT_PAUSERS|1of26`. Baseline on live state: `GLOBAL_PAUSE|pre-cutover(live state)|SUCCEEDED|registered=26|pausedAfter=26`. Post-finalize: `SUCCEEDED|registered=27|pausedAfter=27` (test_B). Remedy proof: `Pauser.unregister(V1)` during the window -> `GLOBAL_PAUSE|window-after-early-unregister|SUCCEEDED|registered=25`, and the UNMODIFIED `run()` then completes (`WINDOW_REMEDY|...PASSED (Phase 7 gate skipped)`); from fresh state test_W2 (setPauser(OWNER) + unregister + pause before run()) -> global pause SUCCEEDED and run() PASSED.",
+      "recommendation": "Move V1's retirement to the start of the window. In `_phase1_pauseV1`, immediately after `setPauser(OWNER)`, call `Pauser.unregister(V1)` (gated on `isRegistered`) BEFORE `pause()`, and require `!isRegistered(V1)`. Keep the Phase 7 block as the idempotent backstop it already is. This is fork-proven compatible: the unmodified Phase 7 gates skip, and the resume paths still converge. Also add a preview-only check that simulates the full `Pauser.pause()` (deal EYE, approve, call inside `snapshotState/revertToState`) in Phase 0 and again after Phase 1 and in Phase 8, so 'registered' is proven to mean 'actually pausable' at every stage. Document in the runbook that a halted run must be resumed, or V1 unregistered, before the operator walks away.",
+      "reconciliationHint": "NEW. Not a duplicate of ledger L-03 0711215fcc17 (EmergencyPauseLoopUnverified).",
+      "uniquenessVsSiblings": "L-03 is the END-STATE breaker: after finalize, V2/Antimatter are handed to a Pauser whose loop already reverted on two pre-paused registrants, and Phase 8 asserts registration rather than a working breaker. This finding is a TRANSIENT MID-RUN window (Phase 1 -> Phase 7) created by the script's own ordering: V1 paused + pauser OWNER + still registered. Root cause is different (step ordering vs pre-existing registry state / unverified end state), the trigger is different (every run, including a clean registry, vs pre-paused third-party registrants), and the primary fix is different (unregister V1 inside Phase 1 vs removing pre-paused registrants / verifying the end state). test_B shows the end state now succeeds 27/27 while test_W shows the window still reverts, so one can be fixed while the other is live. That is the decisive proof they are separate.",
+      "sharedRemediationNote": "One recommendation component overlaps with L-03: a preview-only simulated `Pauser.pause()` (Phase 0 / after Phase 1 / Phase 8). src 884ccf8 Phase 8 (L636-639) still asserts only `isRegistered`, with no simulated pause. The sanitizer should therefore NOT propose L-03 `fixed` on the strength of test_B alone. L-03's 'Phase 8 asserts registration, not a working breaker' half is still unimplemented, even though its triggering registry state was cleared by the owner."
+    },
+    {
+      "id": "SSV2C32-02",
+      "originalIds": [
+        "candidate[1]"
+      ],
+      "title": "The package.json `//StableStakerV2Cutover` operator comment still describes the superseded 082 end state ('2 bps + 2 wei', 'V1 pauser back to Pauser and V1 UNPAUSED'), the opposite of what story 083 made the script do",
+      "severity": "qa",
+      "contract": "lib/phoenix-phase-2-staging/package.json",
+      "function": "//StableStakerV2Cutover",
+      "lineStart": 49,
+      "lineEnd": 49,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "DocumentedIntentDivergesFromImplementation",
+      "category": "drift",
+      "branch": "master",
+      "description": "The doc key is the text the operator is told to read before signing ('Run :preview first, read it, then :broadcast'). Story 083 changed the script but not this key (package.json is unchanged 1c1608c..884ccf8). The key still says per-user loss is bounded by '2 bps + 2 wei', whereas `WEI_SLACK` is now 1000. It also still says 'V1 pauser back to Pauser and V1 UNPAUSED (inert ... a paused registered contract would make the global Pauser.pause() loop revert)', whereas Phase 7 now sets the V1 pauser to OWNER, unregisters V1 and leaves it PAUSED, and Phase 8 asserts exactly that. An operator reconciling the preview log against the documented intent sees 'V1 pauser -> OWNER, unregistered from Pauser, left paused' contradicted by the doc key. The key also omits the new `Pauser.unregister` transaction from its description of what the Ledger will sign.",
+      "impact": "Operator confusion at the signing step of a ~47-transaction mainnet Ledger session. A careful operator may abort a correct run, or 'fix' V1 back to unpaused and re-registered after broadcast, which would recreate the Pauser-loop hazard the story removed. No direct on-chain effect.",
+      "evidence": "package.json L49 (entry-manifest.json `intentComment`, `intentCommentStale.stale=true`, `packageJsonChangedSince1c1608c=false`) vs CutoverStableStakerV2Mainnet.s.sol L112 `WEI_SLACK = 1000`, L554-568 and L635-637. Preview log fork-logs/preview-25978784.log: 'V1 pauser -> OWNER, unregistered from Pauser, left paused'.",
+      "recommendation": "Update the `//StableStakerV2Cutover` key to match story 083: per-user loss <= 2 bps + 1000 wei on the ERC4626 autopools, and 61 bps + 1000 wei on USDe; finalize sets V1 pauser -> OWNER, `Pauser.unregister(V1)`, V1 LEFT PAUSED (retired; `userMigrate` is not pause-gated). Add a transaction-count note for the extra unregister. If the first finding is fixed by moving unregister into Phase 1, describe it there.",
+      "reconciliationHint": "NEW.",
+      "uniquenessVsSiblings": "Kept separate from SSV2C32-03 and Q-01. Different artefact (package.json operator doc key), different audience (the Ledger signer reading intent at broadcast time) and a different hazard (operator aborts a correct run or 'restores' V1 to unpaused and registered). The fix is a one-line doc edit that closes nothing else. It is not a rehearsal-fidelity issue: it concerns mainnet signing intent, not local coverage. Nearest ledger class: dev L-04 dcce8f512418 (StaleMisleadingComment, a different file and entry point), which is an annotation only."
+    },
+    {
+      "id": "SSV2C32-03",
+      "originalIds": [
+        "candidate[2]"
+      ],
+      "title": "The story-080 DeployMocks cutover rehearsal still asserts a 2-wei per-user slack and leaves the dev V1 unpaused and registered with the Pauser, so it no longer rehearses the story-083 mainnet end state or its forced setPauser -> unregister -> pause ordering",
+      "severity": "qa",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "_rehearseStableStakerCutover / _assertStableStakerCutover",
+      "lineStart": 2053,
+      "lineEnd": 2095,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "RehearsalDivergesFromMainnetEndState",
+      "category": "cluster-interaction",
+      "branch": "master",
+      "description": "The mainnet script's NatSpec (L25-28) names DeployMocks `_deployAntimatterAndStableStakerV2` + `_rehearseStableStakerCutover` as the Anvil rehearsal it mirrors, and story 082 calls it 'THE TEMPLATE'. Commit 884ccf8 synced the Antimatter phUSD grant, but the rest of story 083 was not carried over. (1) `_assertStableStakerCutover` still uses `pre - post <= pre*maxLossBps/10_000 + 2` (L2090), with 0 bps on the 1:1 pools, 500x tighter than mainnet's 1000 wei. (2) The rehearsal registers V1 with the Pauser (L1320-1323) and never runs the story-083 retirement sequence. After the rehearsal ends, dev V1 is unpaused, its pauser is the Pauser, and it is still registered, the exact 082 Decision-9 end state that 083 superseded. The one new mainnet on-chain call (`Pauser.unregister`) and its forced ordering (unregister reverts while `pauser()==Pauser`) are therefore exercised only by the mainnet preview against live state, never by the local end-to-end rehearsal that story 080 exists to provide. Story 083's own Auto-Completed section carries this forward as a non-blocking [low]. It was disclosed, not fixed.",
+      "impact": "The local rehearsal cannot catch a regression in the Phase 7 retirement ordering, and it models a different final Pauser registry than mainnet (27 vs a local registry still containing V1). Frontends or scripts developed against the dev chain see V1 as live-pausable, not retired. No mainnet effect.",
+      "evidence": "src 884ccf8: script/DeployMocks.s.sol L2088-2092 `// 2-wei absolute floor ...` + `pre - post <= (pre * maxLossBps) / 10_000 + 2`; L1320 `stableStaker.setPauser(address(pauser));` L1323 `pauser.register(address(stableStaker));`. There is no `unregister(address(stableStaker))` or `stableStaker.pause()` anywhere in the file (grep). The console text at L1589 reads 'StableStakerV1 (retired), StableStakerV2 and Antimatter registered with Pauser'. The mainnet end state, by contrast, is fork-verified in test_A: `PAUSER_REG_AFTER|count=27|V1registered=false`, `V1STATE|paused=true|pauser=OWNER`. Story 083 'Non-blocking findings carried forward' [low].",
+      "recommendation": "In `_rehearseStableStakerCutover`, after the V1 phUSD revoke, add the same gated sequence the mainnet Phase 7 runs: `stableStaker.setPauser(deployer)`, `pauser.unregister(address(stableStaker))` and `stableStaker.pause()`, each with a read-back require. Add the Phase 8 triple as asserts. Change the slack to a named constant equal to the mainnet `WEI_SLACK` (1000), or import it, so the two cannot drift again. If DeployMocks `run()` stack depth is the blocker the story cites, put the retirement in its own internal function called from the rehearsal.",
+      "reconciliationHint": "NEW. Same rehearsal-drift family as Q-01 ca095edfd77e and dev entries eda17642828a / 6af1ae30ed82 / 12bcca3b617c, but not a duplicate of any of them.",
+      "uniquenessVsSiblings": "Not merged into Q-01. (a) Different missing content: story-083 V1 retirement triple (setPauser -> unregister -> pause) + WEI_SLACK 1000, whereas Q-01 covers the story-082 Phase 5 Antimatter phUSD grant + the verifier never calling autoAnnihilate. (b) Different function (`_rehearseStableStakerCutover` / `_assertStableStakerCutover` vs `_deployAntimatterAndStableStakerV2` + verify-stable-staker.sh / ClaimWithdrawStableStaker.s.sol). (c) Independent fixes and independent closure criteria. Q-01 is an INCOMPLETE-FIX tracker whose remaining half is closed by adding autoAnnihilate to the verifier. Folding 083 drift into it would block Q-01's `fixed` proposal on unrelated work, or let the 083 drift close with it. (d) Different story authority (083 vs 082/080). The shared theme is 'DeployMocks is not kept in sync with the mainnet script', a systemic pattern rather than a single root cause; recorded under phase3_pattern.",
+      "relatedLedgerNote": "The 2-wei rehearsal slack is the un-ported counterpart of the fix for ledger L-01 e0d4df1ddb69 (FixedWeiSlackBelowVaultRoundingLoss). It is annotated here rather than merged: L-01's root cause was the MAINNET slack, which is now 1000 and fork-proven (L1/L2 PASS)."
+    },
+    {
+      "id": "SSV2C32-04",
+      "originalIds": [
+        "candidate[3]"
+      ],
+      "title": "The post-broadcast `:preview` 'verification' re-executes any outstanding step under prank instead of asserting it is already done, so a partial or diverged mainnet cutover verifies green",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/CutoverStableStakerV2Mainnet.s.sol",
+      "function": "run / _phase1.._phase7 (idempotent skip-if-done gates) / _phase8_wiringAssertions",
+      "lineStart": 146,
+      "lineEnd": 643,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "VerificationPassSimulatesMissingSteps",
+      "category": "intent-mismatch",
+      "branch": "master",
+      "reconciliation": "RE-OBSERVED (ledger L-02 2c82d65e65e1, still-live at 884ccf8; surface GREW with story 083)",
+      "description": "Unchanged since run-31. Every phase is `if (!done) do();`, and preview impersonates OWNER, so a step that did not land on mainnet is performed inside the simulation and Phase 8 asserts the simulated state. Story 083 added three more such steps (V1 setPauser(OWNER), Pauser.unregister(V1), V1 pause) with the same pattern. A broadcast that crashed after the Phase 7 revoke but before the V1 retirement therefore 'verifies' green, even though V1 is still registered and unpaused on chain.",
+      "impact": "The chained `&& npm run stable-staker-v2-cutover:preview` tail cannot detect a diverged mainnet end state, now including a missing V1 retirement (V1 left registered with the Pauser).",
+      "evidence": "Fork @25978784 (fork-logs/h32-test_C*.log): test_C `MASK_REVOKE|preview run() PASSED although V1 phUSD mint was live on-chain`; test_C2 `MASK_PAUSED_V2|... V2 was paused on-chain`; NEW test_C3: after a full cutover, V1 unpaused, pauser set back to Pauser and re-registered, then `run()` -> `MASK_V1_RETIRE|preview run() PASSED although V1 was registered+unpaused on-chain`.",
+      "recommendation": "Unchanged from run-31, extended. When `isPreview` and the progress file has `deploymentStatus == completed`, run a verify-only pass BEFORE `vm.startPrank` that requires every phase's done-condition, including the V1 retirement triple (pauser==OWNER, !isRegistered, paused), instead of performing it. Revert `verify: step X not on chain` on any gap, and only then run the smoke tests.",
+      "reconciliationHint": "RE-OBSERVATION of ledger L-02 2c82d65e65e1 (same contract/function/rootCauseClass/entryPoint, so the fingerprint should reproduce). Surface grew with story 083 (test_C3). Keep as a single entry; do not mint a new finding for the C3 extension.",
+      "uniquenessVsSiblings": "Not merged with SSV2C32-01. C3 masks a missing V1 retirement in the post-broadcast preview. SSV2C32-01 is the live breaker outage during a correct run. Different root cause and fix."
+    },
+    {
+      "id": "SSV2C32-05",
+      "originalIds": [
+        "candidate[4]"
+      ],
+      "title": "The '067 floor' post-condition compares two numbers that are booked identically, so it cannot fail; story-067's zero-haircut anchor on the pre-migration booked total is not implemented",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/helpers/StableStakerCutoverCore.sol",
+      "function": "_assertPoolPostMigration",
+      "lineStart": 469,
+      "lineEnd": 471,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "TautologicalPostCondition",
+      "category": "intent-mismatch",
+      "branch": "master",
+      "reconciliation": "RE-OBSERVED (ledger F-01 dfed42790952, still-live; code unchanged 1c1608c..884ccf8)",
+      "description": "Unchanged. `principalOf(token, V2) >= V2.totalStaked` holds with equality by construction, because both sides are credited with the same `credited` value in each `depositFor`. Story 083 loosened the per-user bound (WEI_SLACK 2 -> 1000), which makes the absence of a real aggregate floor anchored on the pre-migration booked total slightly more relevant. The per-user bound is the only loss gate.",
+      "impact": "No aggregate haircut gate. The only protection is the per-user bound (2 bps + 1000 wei / 61 bps + 1000 wei).",
+      "evidence": "Fork @25978784 test_A POSTPOOL: DOLA `v2Staked=1222723447469613917497|principalOfV2=1222723447469613917497`, USDC `1968305934|1968305934`, USDe `2557834010080189682235|2557834010080189682235`, all exactly equal.",
+      "recommendation": "Unchanged from run-31: require `V2.totalStaked_after >= P * (MAX_BPS - maxLossBps) / MAX_BPS - n * WEI_SLACK` with P = `V1.migrationInfo(token).principalSnapshot`, or rename the check so it no longer claims to be the story-067 floor and record the relaxation as a human-accepted deviation.",
+      "reconciliationHint": "RE-OBSERVATION of ledger F-01 dfed42790952 (code unchanged). Keep as-is.",
+      "uniquenessVsSiblings": "Distinct from L-01 e0d4df1ddb69, which shares `_assertPoolPostMigration`. F-01 is the tautological aggregate floor; L-01 was the per-user wei slack being too tight. Different predicates."
+    },
+    {
+      "id": "SSV2C32-06",
+      "originalIds": [
+        "candidate[5]"
+      ],
+      "title": "The story-080 DeployMocks rehearsal omits the Antimatter phUSD mint grant that the mainnet script proves load-bearing, and the local verifier never calls autoAnnihilate, so the rehearsal cannot exercise V2's only reward path",
+      "severity": "qa",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "_deployAntimatterAndStableStakerV2",
+      "lineStart": 1897,
+      "lineEnd": 1906,
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "RehearsalDivergesFromMainnetWiring",
+      "category": "cluster-interaction",
+      "branch": "master",
+      "reconciliation": "RE-OBSERVED as INCOMPLETE-FIX (ledger Q-01 ca095edfd77e): the grant half is fixed in 884ccf8, but the verifier half is unchanged",
+      "description": "884ccf8 (untagged) adds `phUSD.setMinter(address(antimatter), true)` plus `_requireLiveMinter(antimatter)` as DeployMocks step 7 and in the end-state ACL sweep, mirroring mainnet Phase 5. The half of the finding that makes the anvil reward path revert is therefore fixed. The second half stays unfixed. verify-stable-staker.sh and script/interactions/ClaimWithdrawStableStaker.s.sol are unchanged 1c1608c..884ccf8. They assert `claimEnabled == false` and withdraw, and no local script or test ever calls `autoAnnihilate` (grep over DeployMocks, script/interactions and test/). A future regression of the grant would again go unnoticed locally.",
+      "impact": "The rehearsal's wiring now matches mainnet, but nothing local proves the reward path works. Coverage of autoAnnihilate exists only in the mainnet preview smoke test (DOLA only).",
+      "evidence": "git diff 1c1608c 884ccf8 -- script/DeployMocks.s.sol (L1897-1906 grant added, L1790 ACL assert added); `git diff --stat` shows verify-stable-staker.sh and script/interactions/ unchanged; `grep autoAnnihilate` in ClaimWithdrawStableStaker.s.sol only hits comments/log text (L24, L106).",
+      "recommendation": "Keep the 884ccf8 grant. Extend verify-stable-staker.sh / ClaimWithdrawStableStaker.s.sol with stake -> `evm_increaseTime` (short) -> `autoAnnihilate(token)` on every pool, asserting phUSD received > 0 and Antimatter owed consumed. Once that lands, Q-01 can be proposed `fixed`.",
+      "reconciliationHint": "RE-OBSERVATION of ledger Q-01 ca095edfd77e as an INCOMPLETE FIX. The grant half was fixed in 884ccf8; the verifier/autoAnnihilate half is still live. Fingerprint inputs are unchanged. Title/description now overstate the grant half; the finding-manager should update the narrative only (not rootCauseClass/function) so the fingerprint does not drift.",
+      "uniquenessVsSiblings": "See SSV2C32-03."
+    }
+  ],
+  "consolidated": [],
+  "removed": [],
+  "flaggedForReview": [
+    {
+      "subject": "ledger L-03 0711215fcc17 (not among candidates)",
+      "reason": "It was not re-observed as a candidate. test_B shows post-finalize Pauser.pause() now SUCCEEDS 27/27 after the owner cleared the pre-paused registrants, but Phase 8 at 884ccf8 still asserts only registration (L636-639), which is L-03's second clause. Sanitizer: do not treat the absence as silent closure. Propose `fixed` only if a human accepts that the registry-state trigger is gone; otherwise carry it over, since the verification gap remains. It must not be merged with SSV2C32-01."
+    },
+    {
+      "subject": "ledger L-01 e0d4df1ddb69 (not among candidates)",
+      "reason": "WEI_SLACK is now 1000 and fork harness L1 (planted 9-wei DOLA -> run PASSES) + L2 (exhaustive 1..2000 wei, 0 above bound) show the stall is gone. This is a candidate for a human-applied `fixed` proposal. Residual: the DeployMocks rehearsal still uses +2 wei (tracked in SSV2C32-03, annotation only)."
+    },
+    {
+      "subject": "output filename",
+      "reason": "Written as deduped-findings.json per the orchestrator's instruction. Run-31 used deduplicated-findings.json; confirm the sanitizer step reads the right name."
+    }
+  ],
+  "dedupLog": [
+    {
+      "candidate": 0,
+      "id": "SSV2C32-01",
+      "decision": "KEEP (new, Low)",
+      "reason": "Mid-run Phase1->Phase7 window root cause is distinct from the L-03 end-state breaker; test_B/test_W diverge. The shared simulated-pause remedy is annotated."
+    },
+    {
+      "candidate": 1,
+      "id": "SSV2C32-02",
+      "decision": "KEEP (new, QA), not merged",
+      "reason": "Operator signing-intent doc drift in package.json. It has a different artefact, audience and fix from the rehearsal drift (03) and from Q-01."
+    },
+    {
+      "candidate": 2,
+      "id": "SSV2C32-03",
+      "decision": "KEEP (new, QA), not merged into Q-01",
+      "reason": "Story-083 retirement + slack drift in _rehearseStableStakerCutover. Its fix and closure criterion are independent of Q-01's autoAnnihilate verifier gap. It shares a theme with Q-01, not a root cause."
+    },
+    {
+      "candidate": 3,
+      "id": "SSV2C32-04",
+      "decision": "KEEP (re-observation L-02 2c82d65e65e1)",
+      "reason": "Same fingerprint inputs. The C3 extension stays inside the existing entry."
+    },
+    {
+      "candidate": 4,
+      "id": "SSV2C32-05",
+      "decision": "KEEP (re-observation F-01 dfed42790952)",
+      "reason": "Code unchanged. It is distinct from L-01 despite sharing a function."
+    },
+    {
+      "candidate": 5,
+      "id": "SSV2C32-06",
+      "decision": "KEEP (re-observation Q-01 ca095edfd77e, INCOMPLETE FIX)",
+      "reason": "The grant half is fixed and the verifier half is live. Update the narrative only, keeping fingerprint inputs stable."
+    }
+  ]
+}
