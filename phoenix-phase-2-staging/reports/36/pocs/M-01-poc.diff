@@ -1,0 +1,415 @@
+diff --git a/foundry.toml b/foundry.toml
+index 635078b..7e9080e 100644
+--- a/foundry.toml
++++ b/foundry.toml
+@@ -162,3 +162,7 @@ lint_on_build = false
+ 
+ [etherscan]
+ mainnet = { key = "${ETHERSCAN_API_KEY}", chain = 1 }
++
++# run-36 audit PoC (M-01 / pps36m1) ONLY: ffi for test/audit-run36 (node patch tail). Inherits every default key.
++[profile.audit36]
++ffi = true
+diff --git a/test/audit-run36/M01PendingTailPoC.t.sol b/test/audit-run36/M01PendingTailPoC.t.sol
+new file mode 100644
+index 0000000..5af7b4c
+--- /dev/null
++++ b/test/audit-run36/M01PendingTailPoC.t.sol
+@@ -0,0 +1,314 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.20;
++
++import "forge-std/Test.sol";
++import {StableStakerV2} from "stable-staker/StableStakerV2.sol";
++import {VerifyStableStakerV2Cutover} from "../../script/VerifyStableStakerV2Cutover.s.sol";
++import {IPauserRegistry} from "../../script/CutoverStableStakerV2Mainnet.s.sol";
++import {CutoverPhasesHarness, IWithdrawalStatesLike} from "../VerifyStableStakerV2CutoverGuards.t.sol";
++import {InitiateDolaStrategyWithdrawalHarness} from "../InitiateDolaStrategyWithdrawal.fork.t.sol";
++
++/// @dev The sponsor's phase harness (preview-pinned, OWNER prank) plus ONE seam: persist the progress file exactly as the
++///      tail of `run()` does in BROADCAST mode (script/CutoverStableStakerV2Mainnet.s.sol L449-462):
++///      `minterMovePending ? _writeProgress(AWAITING_MINTER_WINDOW) : _writeProgress("completed")`. The same
++///      `_writeProgress` serialiser runs; only its `isPreview` early-return is bypassed, so the REAL
++///      server/deployments/progress.stable-staker-v2-cutover.1.json is written for the node patcher and the verifier.
++contract M01PersistingPhasesHarness is CutoverPhasesHarness {
++    function persistLikeBroadcast() external {
++        isPreview = false;
++        if (minterMovePending) _writeProgress(PROGRESS_STATUS_AWAITING_MINTER_WINDOW);
++        else _writeProgress("completed");
++        isPreview = true;
++    }
++}
++
++/// @dev The REAL verifier hydrating from the REAL progress file (`_loadProgressFile`, incl. the sticky
++///      `minterMove.v2LiveBeforeMinterMove`). Only the log transport is replaced (a fork RPC cannot return logs of locally
++///      executed txs), same as the sponsor's VerifyStableStakerV2CutoverHarness.
++contract M01ProgressFileVerifier is VerifyStableStakerV2Cutover {
++    struct Row {
++        address emitter;
++        bytes32 t0;
++        bytes32 t1;
++        bytes32 t2;
++        bytes data;
++    }
++
++    Row[] internal rows;
++    bool internal clearMarker;
++
++    function _previewModeFromEnv() internal pure override returns (bool) {
++        return false;
++    }
++
++    function addLog(address e, bytes32 t0, bytes32 t1, bytes32 t2, bytes memory d) external {
++        rows.push(Row(e, t0, t1, t2, d));
++    }
++
++    /// Control only: behave as if the progress file lacked the sticky marker.
++    function clearMarkerAfterLoad() external {
++        clearMarker = true;
++    }
++
++    function _hydrateDeployment() internal override {
++        _loadProgressFile();
++        if (clearMarker) v2LiveBeforeMinterMove = false;
++    }
++
++    function markerLoaded() external view returns (bool) {
++        return v2LiveBeforeMinterMove;
++    }
++
++    function _fetchLogs(address emitter, bytes32 topic0) internal view override returns (CutoverLog[] memory) {
++        bytes32[] memory t = new bytes32[](1);
++        t[0] = topic0;
++        return _match(emitter, t);
++    }
++
++    function _fetchTopicLogs(address emitter, bytes32[] memory topics) internal view override returns (CutoverLog[] memory) {
++        return _match(emitter, topics);
++    }
++
++    function _match(address emitter, bytes32[] memory topics) internal view returns (CutoverLog[] memory out) {
++        uint256 n;
++        for (uint256 i = 0; i < rows.length; i++) {
++            if (_ok(rows[i], emitter, topics)) n++;
++        }
++        out = new CutoverLog[](n);
++        uint256 k;
++        for (uint256 i = 0; i < rows.length; i++) {
++            if (!_ok(rows[i], emitter, topics)) continue;
++            bytes32[] memory t = new bytes32[](3);
++            (t[0], t[1], t[2]) = (rows[i].t0, rows[i].t1, rows[i].t2);
++            out[k++] = CutoverLog({emitter: emitter, topics: t, data: rows[i].data});
++        }
++    }
++
++    function _ok(Row storage r, address emitter, bytes32[] memory topics) internal view returns (bool) {
++        if (r.emitter != emitter) return false;
++        if (topics.length > 0 && r.t0 != topics[0]) return false;
++        if (topics.length > 1 && r.t1 != topics[1]) return false;
++        if (topics.length > 2 && r.t2 != topics[2]) return false;
++        return true;
++    }
++}
++
++/**
++ * @title M-01 (pps36m1) PoC: on story 096's lapsed-window resume the `:broadcast` tail stops at the address patcher
++ *        (exit 2), not at `:verify`; V2 is live but absent from mainnet-addresses.ts; the only run of the live V2
++ *        balance checks never happens, and the post-completion verify skips them via the sticky marker.
++ * @dev   Vulnerable code: scripts/patch-mainnet-addresses-stable-staker-v2.js#L79-L86 (loadProgress),
++ *        package.json L53 (`... -vvv && node scripts/patch-mainnet-addresses-stable-staker-v2.js && npm run
++ *        stable-staker-v2-cutover:verify && ...`), script/CutoverStableStakerV2Mainnet.s.sol#L2251-L2263
++ *        ("EXPECTED to stop at :verify"), script/VerifyStableStakerV2Cutover.s.sol#L490,L564,L601.
++ *        Fork: RPC_MAINNET @ 25_978_784 (the sponsor's cutover fork block). Time is moved by ageing `initiatedAt` in
++ *        storage (a 6h+ warp freezes Tokemak's Chainlink feeds: InvalidDataReturned).
++ *        Corroborated by a real two-leg anvil broadcast: reports/36/script-audits/fork-logs/pending-path/P6..P8.
++ *        Run: test/audit-run36/run-poc.sh (restores every file it touches).
++ */
++contract M01PoCTest is Test {
++    uint256 constant FORK_BLOCK = 25_978_784;
++    string constant PROGRESS = "server/deployments/progress.stable-staker-v2-cutover.1.json";
++    string constant ADDRESSES = "server/deployments/mainnet-addresses.ts";
++
++    address constant DOLA = 0x865377367054516e17014CcdED1e7d814EDC9ce4;
++    address constant YS_DOLA_SRC = 0x1760E05356Ec1FBBA159C730781dCfB9920524e2;
++    address constant MINTER = 0x94855ACA13952D81507C92D3CdBb2e25D3bbE60C;
++    bytes32 constant MIGRATED_OUT = keccak256("MigratedOut(address,address,uint256,uint256)");
++    bytes32 constant USER_MIGRATED = keccak256("UserMigrated(address,address,uint256)");
++    bytes32 constant DEPOSITED_FOR = keccak256("DepositedFor(address,address,uint256)");
++    bytes32 constant ERC20_TRANSFER = keccak256("Transfer(address,address,uint256)");
++
++    M01PersistingPhasesHarness ph;
++    address OWNER;
++    address V1;
++
++    function test_M01_lapsedWindowTailStopsAtPatcher_verifyNeverRuns_liveChecksLost() public {
++        string memory rpc = vm.envOr("RPC_MAINNET", string(""));
++        require(bytes(rpc).length > 0, "RPC_MAINNET required (source .envrc)");
++        require(!vm.exists(PROGRESS), "refusing to clobber an existing progress file in work/");
++        vm.createSelectFork(rpc, FORK_BLOCK);
++        ph = new M01PersistingPhasesHarness();
++        OWNER = ph.OWNER();
++        V1 = ph.STABLE_STAKER_V1();
++
++        // ---- setup: story 092 initiate + 6h, Phases 0-6 land (V2 still paused), then the halt outlives the window ----
++        new InitiateDolaStrategyWithdrawalHarness().run();
++        _ageMinterWithdrawalTo(6 hours + 60);
++        vm.recordLogs();
++        ph.throughPhase5();
++        ph.phase6All();
++        assertTrue(ph.v2().paused(), "setup: halted after Phase 6 with V2 paused");
++        _ageMinterWithdrawalTo(78 hours + 1);
++
++        // ---- story 096 lapsed-window resume (every phase run() executes, same order), persisted as broadcast does ----
++        ph.resumeAllPhases();
++        ph.persistLikeBroadcast();
++        StableStakerV2 v2 = ph.v2();
++
++        // ===== (a) progress file says awaiting_minter_window AND V2 is live on chain =====
++        string memory pj = vm.readFile(PROGRESS);
++        assertEq(vm.parseJsonString(pj, ".deploymentStatus"), "awaiting_minter_window", "(a) progress file status");
++        assertEq(vm.parseJsonAddress(pj, ".contracts.StableStakerV2.address"), address(v2), "(a) file names the live V2");
++        assertEq(vm.parseJsonString(pj, ".minterMove.v2LiveBeforeMinterMove"), "true", "(a) sticky marker persisted");
++        assertFalse(v2.paused(), "(a) StableStakerV2.paused() == false: V2 is LIVE");
++        assertTrue(IPauserRegistry(ph.PAUSER()).isRegistered(address(v2)), "(a) V2 registered (Phase 7 ran)");
++        console.log("(a) PASS status=awaiting_minter_window, V2 live (paused=false) at", address(v2));
++
++        // ===== (b) the EXACT npm :broadcast tail after forge exits 2 at the patcher; :verify never runs =====
++        Vm.FfiResult memory r = vm.tryFfi(_argv("node", "test/audit-run36/run-broadcast-tail.js"));
++        assertEq(r.exitCode, 0, "(b) tail driver itself ran");
++        string memory out = string(r.stdout);
++        string memory tail = vm.parseJsonString(out, ".tail");
++        assertEq(
++            tail,
++            "node scripts/patch-mainnet-addresses-stable-staker-v2.js && npm run stable-staker-v2-cutover:verify && npm run stable-staker-v2-cutover:preview",
++            "(b) tail read verbatim from package.json"
++        );
++        assertEq(vm.parseJsonUint(out, ".exitCode"), 2, "(b) chained tail exits with code 2");
++        assertEq(
++            vm.parseJsonString(out, ".stderr"),
++            "ERROR (2): deploymentStatus is \"awaiting_minter_window\", expected \"completed\" (broadcast not finished, or a resume leg is outstanding)",
++            "(b) exact patcher message"
++        );
++        assertEq(vm.parseJsonString(out, ".npmCalls"), "", "(b) `npm run stable-staker-v2-cutover:verify` never invoked");
++        console.log("(b) PASS tail exit=2, stderr:", vm.parseJsonString(out, ".stderr"));
++        console.log("(b)      npm calls recorded by shim: <none>");
++
++        // ===== (c) mainnet-addresses.ts still holds 0x0 for StableStakerV2 while V2 is live =====
++        string memory addrs = vm.readFile(ADDRESSES);
++        assertEq(vm.parseJsonString(out, ".addressesUnchanged"), "true", "(c) tail left mainnet-addresses.ts byte-identical");
++        assertTrue(
++            _contains(addrs, "StableStakerV2: \"0x0000000000000000000000000000000000000000\""),
++            "(c) mainnet-addresses.ts StableStakerV2 is the zero placeholder"
++        );
++        assertFalse(_contains(addrs, vm.toString(address(v2))), "(c) live V2 address absent from mainnet-addresses.ts");
++        assertFalse(v2.paused(), "(c) ...while V2 is live on chain");
++        console.log("(c) PASS mainnet-addresses.ts StableStakerV2 = 0x0 while V2 live");
++
++        // ===== (d1) the pending-state :verify, run MANUALLY, is the one that checks live per-user state =====
++        Vm.Log[] memory logs1 = vm.getRecordedLogs();
++        Vm.Log[] memory none = new Vm.Log[](0);
++        string memory reason = _verifyRevertReason(_verifierFrom(logs1, none, false));
++        assertTrue(_contains(reason, "verify: Phase6b: PENDING"), string.concat("(d1) pending verify: ", reason));
++        assertTrue(_contains(reason, "per-user credits (incl. live V2 balances) verified"), "(d1) live checks ran");
++        assertFalse(_contains(reason, " and 0 per-user credits"), "(d1) per-user re-check not vacuous");
++        console.log("(d1) PASS manual pending :verify reverts:", reason);
++
++        // A migrated DOLA staker withdraws while 6b is pending (V2 live). The pending-state verify CATCHES it...
++        address[] memory stakers = v2.getStakers(DOLA);
++        address staker;
++        for (uint256 i = 0; i < stakers.length && staker == address(0); i++) {
++            if (stakers[i] != OWNER) staker = stakers[i]; // a real third-party staker, not the operator
++        }
++        require(staker != address(0), "setup: no non-OWNER migrated DOLA staker");
++        (uint256 principal,) = v2.userInfo(DOLA, staker);
++        assertGt(principal, 0, "setup: migrated staker holds principal");
++        vm.prank(staker);
++        v2.withdraw(DOLA, principal);
++        (uint256 held,) = v2.userInfo(DOLA, staker);
++        assertLt(held, principal, "setup: live V2 userInfo now below the migrated credit");
++        string memory perUser = string.concat("verify: per-user: V2 userInfo for ", vm.toString(staker));
++        reason = _verifyRevertReason(_verifierFrom(logs1, none, false));
++        assertTrue(_contains(reason, perUser), string.concat("(d1) pending verify catches live per-user drop: ", reason));
++        console.log("(d1) PASS pending :verify enforces live V2 userInfo:", reason);
++
++        // ===== (d2) re-initiate, 6h, 6b completes; the completed :verify SKIPS the live checks (sticky marker) =====
++        new InitiateDolaStrategyWithdrawalHarness().run();
++        _ageMinterWithdrawalTo(6 hours + 60);
++        ph.resumeAllPhases();
++        assertFalse(ph.minterMovePending(), "setup: 6b completed");
++        ph.persistLikeBroadcast();
++        pj = vm.readFile(PROGRESS);
++        assertEq(vm.parseJsonString(pj, ".deploymentStatus"), "completed", "setup: progress completed");
++        assertEq(vm.parseJsonString(pj, ".minterMove.v2LiveBeforeMinterMove"), "true", "(d2) marker sticky in the file");
++        Vm.Log[] memory logs2 = vm.getRecordedLogs();
++
++        M01ProgressFileVerifier vf = _verifierFrom(logs1, logs2, false);
++        vf.run(); // PASSES although live V2 userInfo(staker) < credited
++        assertTrue(vf.markerLoaded(), "(d2) verifier loaded v2LiveBeforeMinterMove=true from the file");
++        assertFalse(vf.minterMovePending(), "(d2) !minterMovePending -> branch `v2LiveBeforeMinterMove && !minterMovePending`");
++        assertGt(vf.verifiedUserCount(), 0, "(d2) event-based per-user checks ran");
++        console.log("(d2) PASS completed :verify passed with staker userInfo < credited; users re-checked:", vf.verifiedUserCount());
++
++        // Control: identical chain state, marker cleared -> the live per-user check fires. The skip branch is what hid it.
++        reason = _verifyRevertReason(_verifierFrom(logs1, logs2, true));
++        assertTrue(_contains(reason, perUser), string.concat("(d2) control without marker: ", reason));
++        console.log("(d2) PASS control (marker cleared) reverts:", reason);
++
++        vm.removeFile(PROGRESS); // teardown (run-poc.sh also restores on failure)
++    }
++
++    // ---------------------------------------------------------------- helpers
++
++    function _verifierFrom(Vm.Log[] memory a, Vm.Log[] memory b, bool clear) internal returns (M01ProgressFileVerifier v) {
++        v = new M01ProgressFileVerifier();
++        if (clear) v.clearMarkerAfterLoad();
++        _feed(v, a);
++        _feed(v, b);
++    }
++
++    function _feed(M01ProgressFileVerifier v, Vm.Log[] memory logs) internal {
++        address v2 = address(ph.v2());
++        for (uint256 i = 0; i < logs.length; i++) {
++            Vm.Log memory l = logs[i];
++            if (l.topics.length < 3) continue;
++            bool v1Evt = l.emitter == V1 && (l.topics[0] == MIGRATED_OUT || l.topics[0] == USER_MIGRATED);
++            bool v2Evt = l.emitter == v2 && l.topics[0] == DEPOSITED_FOR;
++            bool minedR = l.emitter == DOLA && l.topics[0] == ERC20_TRANSFER
++                && l.topics[1] == bytes32(uint256(uint160(YS_DOLA_SRC))) && l.topics[2] == bytes32(uint256(uint160(OWNER)));
++            if (!v1Evt && !v2Evt && !minedR) continue;
++            v.addLog(l.emitter, l.topics[0], l.topics[1], l.topics[2], l.data);
++        }
++    }
++
++    function _verifyRevertReason(M01ProgressFileVerifier v) internal returns (string memory) {
++        try v.run() {
++            revert("verifier unexpectedly passed");
++        } catch (bytes memory ret) {
++            if (ret.length < 68) return "";
++            bytes memory body = new bytes(ret.length - 4);
++            for (uint256 i = 0; i < body.length; i++) {
++                body[i] = ret[i + 4];
++            }
++            return abi.decode(body, (string));
++        }
++    }
++
++    function _ageMinterWithdrawalTo(uint256 secondsAgo) internal {
++        (uint256 at,,) = IWithdrawalStatesLike(YS_DOLA_SRC).withdrawalStates(DOLA, MINTER);
++        vm.record();
++        IWithdrawalStatesLike(YS_DOLA_SRC).withdrawalStates(DOLA, MINTER);
++        (bytes32[] memory reads,) = vm.accesses(YS_DOLA_SRC);
++        uint256 target = block.timestamp - secondsAgo;
++        bool done;
++        for (uint256 i = 0; i < reads.length && !done; i++) {
++            if (uint256(vm.load(YS_DOLA_SRC, reads[i])) != at) continue;
++            vm.store(YS_DOLA_SRC, reads[i], bytes32(target));
++            (uint256 now_,,) = IWithdrawalStatesLike(YS_DOLA_SRC).withdrawalStates(DOLA, MINTER);
++            if (now_ == target) done = true;
++            else vm.store(YS_DOLA_SRC, reads[i], bytes32(at));
++        }
++        require(done, "setup: initiatedAt slot not found");
++    }
++
++    function _argv(string memory a, string memory b) internal pure returns (string[] memory v) {
++        v = new string[](2);
++        (v[0], v[1]) = (a, b);
++    }
++
++    function _contains(string memory h, string memory n) internal pure returns (bool) {
++        bytes memory hb = bytes(h);
++        bytes memory nb = bytes(n);
++        if (nb.length == 0) return true;
++        if (nb.length > hb.length) return false;
++        for (uint256 i = 0; i <= hb.length - nb.length; i++) {
++            bool m = true;
++            for (uint256 j = 0; j < nb.length && m; j++) {
++                if (hb[i + j] != nb[j]) m = false;
++            }
++            if (m) return true;
++        }
++        return false;
++    }
++}
+diff --git a/test/audit-run36/run-broadcast-tail.js b/test/audit-run36/run-broadcast-tail.js
+new file mode 100644
+index 0000000..0e51e32
+--- /dev/null
++++ b/test/audit-run36/run-broadcast-tail.js
+@@ -0,0 +1,47 @@
++#!/usr/bin/env node
++// run-36 audit PoC helper (NOT sponsor code) for M-01 / pps36m1.
++// Replays the EXACT `&&` tail that `npm run stable-staker-v2-cutover:broadcast` runs after its forge step,
++// read verbatim from package.json (never retyped), against whatever progress file is on disk.
++// `npm` is shadowed by a PATH shim that only records its argv and exits 0, so if the chain ever reached
++// `npm run stable-staker-v2-cutover:verify` / `:preview` it is recorded and nothing touches an RPC.
++// Prints one JSON object on stdout for the forge test (vm.tryFfi) to parse.
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const crypto = require('crypto');
++const { spawnSync } = require('child_process');
++
++const ROOT = process.cwd();
++const KEY = 'stable-staker-v2-cutover:broadcast';
++const FORGE = 'forge script script/CutoverStableStakerV2Mainnet.s.sol:CutoverStableStakerV2Mainnet';
++const ADDR = path.join(ROOT, 'server', 'deployments', 'mainnet-addresses.ts');
++
++const full = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).scripts[KEY];
++const f = full.indexOf(FORGE);
++if (f < 0) throw new Error('forge step not found in ' + KEY);
++const sep = full.indexOf(' && ', f);
++const tail = full.slice(sep + 4); // everything the shell runs only if forge exited 0
++
++const sha = () => crypto.createHash('sha256').update(fs.readFileSync(ADDR)).digest('hex');
++const shaBefore = sha();
++
++const shim = fs.mkdtempSync(path.join(os.tmpdir(), 'poc36-npm-'));
++const sentinel = path.join(shim, 'npm-calls.log');
++fs.writeFileSync(path.join(shim, 'npm'), `#!/usr/bin/env bash\necho "npm $*" >> "${sentinel}"\nexit 0\n`, { mode: 0o755 });
++
++const r = spawnSync('bash', ['-c', tail], {
++    cwd: ROOT,
++    encoding: 'utf8',
++    env: { ...process.env, PATH: `${shim}:${process.env.PATH}` },
++});
++const npmCalls = fs.existsSync(sentinel) ? fs.readFileSync(sentinel, 'utf8').trim() : '';
++fs.rmSync(shim, { recursive: true, force: true });
++
++process.stdout.write(JSON.stringify({
++    tail,
++    exitCode: r.status === null ? 255 : r.status,
++    stdout: r.stdout.trim(),
++    stderr: r.stderr.trim(),
++    npmCalls,
++    addressesUnchanged: sha() === shaBefore ? 'true' : 'false',
++}));
+diff --git a/test/audit-run36/run-poc.sh b/test/audit-run36/run-poc.sh
+new file mode 100755
+index 0000000..249cdb7
+--- /dev/null
++++ b/test/audit-run36/run-poc.sh
+@@ -0,0 +1,24 @@
++#!/usr/bin/env bash
++# run-36 audit PoC runner (NOT sponsor code) for M-01 / pps36m1. Fork test only: no anvil, no broadcast.
++# Snapshots and restores every file the PoC can touch, even on failure.
++set -u
++W="$(cd "$(dirname "$0")/../.." && pwd)"
++cd "$W"
++set -a; . /home/justin/code/audits/.envrc >/dev/null 2>&1; set +a
++[ -n "${RPC_MAINNET:-}" ] || { echo "RPC_MAINNET unset (check /home/justin/code/audits/.envrc)"; exit 1; }
++if ! cast block-number --rpc-url "$RPC_MAINNET" >/dev/null 2>&1; then
++  echo "ALERT: RPC_MAINNET liveness probe failed - key may be expired"; exit 1
++fi
++PROG=server/deployments/progress.stable-staker-v2-cutover.1.json
++ADDR=server/deployments/mainnet-addresses.ts
++SNAP="$(mktemp -d)"
++cp "$ADDR" "$SNAP/addr.ts"
++[ -e "$PROG" ] && { echo "refusing: $PROG already exists"; exit 1; }
++restore() {
++  cp "$SNAP/addr.ts" "$ADDR"
++  rm -f "$PROG"
++  rm -rf "$SNAP"
++}
++trap restore EXIT
++FOUNDRY_PROFILE=audit36 forge test --skip 'test/audit-run3[1-5]*' \
++  --match-path test/audit-run36/M01PendingTailPoC.t.sol -vv "$@"

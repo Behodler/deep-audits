@@ -1,0 +1,317 @@
+{
+  "run": "phoenix-phase-2-staging-36",
+  "sourceCommit": "91ed727",
+  "chainReadBlock": 25994766,
+  "chainReadTimestamp": 1789618691,
+  "entryPoints": [
+    {
+      "entryPoint": "initiate-dola-ys-withdrawal",
+      "dir": "initiate-dola-ys-withdrawal",
+      "packageJsonLines": "56-58",
+      "mutates": true
+    },
+    {
+      "entryPoint": "dola-ys-withdrawal:status",
+      "dir": "dola-ys-withdrawal-status",
+      "packageJsonLines": "59",
+      "mutates": false
+    },
+    {
+      "entryPoint": "stable-staker-v2-cutover (:preview/:broadcast/:verify)",
+      "dir": "stable-staker-v2-cutover",
+      "packageJsonLines": "49-55",
+      "mutates": true
+    }
+  ],
+  "orderingAndTiming": {
+    "runbook": [
+      "1. initiate-dola-ys-withdrawal:preview then :broadcast (printed times are LOCAL-PASS ESTIMATES)",
+      "2. wait >= 6h; dola-ys-withdrawal:status must say 'EXECUTABLE - cutover may START (>6h left)' (not too late, not PAUSED)",
+      "3. stable-staker-v2-cutover:preview; top up OWNER (ETH_BUDGET 27M*price*1.2); :broadcast LEG 1 (ends after minter execute, status awaiting_reseed, patch tail exits 2)",
+      "4. after execute mines: :preview + :broadcast LEG 2 (re-seed mined R ... -> patch -> :verify -> :preview)",
+      "5. dola-ys-withdrawal:status post-cutover: none pending",
+      "ALT (story 096): halt after Phase 6 + lapsed/short window -> resume immediately -> awaiting_minter_window (V2 live, DOLA minting off) -> wait expiry -> step 1 -> 6h -> legs 1+2 -> :verify passes with live-balance checks skipped (v2LiveBeforeMinterMove)"
+    ],
+    "cutoverStartGate": "Phase 0 (local pass, session start): status in {Initiated, Executable} && T0+6h <= now && now <= T0+78h && now + 6h < T0+78h  => session may START in [T0+6h, T0+72h) ; story 096: NOT applied (deferral instead) when _resumePastPhase6()",
+    "executeGate": "Phase 6b (mined ~tx 50+): same predicate with margin 0 => execute must MINE in [T0+6h, T0+78h] and while YS_DOLA unpaused (whenNotPaused)",
+    "skipCondition": "window gate skipped once YS_DOLA.principalOf(DOLA, minter) == 0 (resume past execute, verifier, post-cutover preview)",
+    "internalOrder": "Phase 6 (V1 drains YS_DOLA; requires principalOf(DOLA,V1)==0) strictly before Phase 6b execute, because _totalWithdraw redeems totalShares*clientBalance/totalDeposited",
+    "lapseRemedy": "wait until T0+78h (lazy expiry), re-run initiate-dola-ys-withdrawal:broadcast (preflight accepts stored Initiated past 78h), wait 6h, resume cutover",
+    "initiateRefusesWhenPending": "initiate reverts while T0 <= now <= T0+78h (it would execute)",
+    "liveStateAtForkBlock": "status None (0) at 25994766: initiate NOT broadcast; cutover :preview would revert in Phase 0 (fresh session); OWNER ETH shortfall vs 27M budget"
+  },
+  "sharedOnChainTargets": [
+    {
+      "address": "0x1760E05356Ec1FBBA159C730781dCfB9920524e2",
+      "name": "YieldStrategyDola (autoDOLA ERC4626YieldStrategy)",
+      "initiate": "mutated (totalWithdrawal 1st call)",
+      "status": "read",
+      "cutover": "mutated: execute (2nd call), SYA withdrawer revoke, clients revoke, setPauser(OWNER), unregister, pause",
+      "sourcePath": "lib/vault/src/AYieldStrategy.sol + concreteYieldStrategies/ERC4626YieldStrategy.sol"
+    },
+    {
+      "address": "0x94855ACA13952D81507C92D3CdBb2e25D3bbE60C",
+      "name": "PhusdStableMinter",
+      "initiate": "referenced (client)",
+      "status": "read (stablecoinConfigs)",
+      "cutover": "mutated (disable, approveYS, noMintDeposit, registerStablecoin, setMaxMintPerDay, enable)",
+      "sourcePath": "lib/phUSD-stable-minter/src/PhusdStableMinter.sol"
+    },
+    {
+      "address": "0x865377367054516e17014CcdED1e7d814EDC9ce4",
+      "name": "DOLA",
+      "initiate": "referenced",
+      "status": "referenced",
+      "cutover": "OWNER approve; R lands on OWNER"
+    },
+    {
+      "address": "0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6",
+      "name": "OWNER EOA / Ledger m/44'/60'/46'/0/0",
+      "initiate": "signer",
+      "status": "-",
+      "cutover": "signer + transient DOLA custodian"
+    },
+    {
+      "address": "0xbce8ABC09BaEDCabE93419bF875f6186e182079A",
+      "name": "StableStaker V1",
+      "initiate": "negative assertion",
+      "status": "-",
+      "cutover": "mutated"
+    },
+    {
+      "address": "0x0cD353bfda674D04823B2826ffafB83B560D21B6",
+      "name": "StableYieldAccumulator",
+      "initiate": "-",
+      "status": "-",
+      "cutover": "mutated (strategy list repoint)"
+    },
+    {
+      "address": "0x7c5A8EeF1d836450C019FB036453ac6eC97885a3",
+      "name": "Pauser",
+      "initiate": "indirect (YS_DOLA pause blocks initiate/execute)",
+      "status": "-",
+      "cutover": "mutated"
+    }
+  ],
+  "sharedOffChainState": [
+    {
+      "file": "(on-chain) withdrawalStates[DOLA][PhusdStableMinter]",
+      "writer": "initiate-dola-ys-withdrawal (T0), cutover Phase 6b (reset to None on execute)",
+      "readers": [
+        "dola-ys-withdrawal:status",
+        "cutover Phase 0 / 6b / 8",
+        "verify"
+      ]
+    },
+    {
+      "file": "server/deployments/progress.stable-staker-v2-cutover.1.json",
+      "writer": "cutover broadcast (local pass)",
+      "readers": [
+        "cutover preview/broadcast/verify",
+        "patch-mainnet-addresses-stable-staker-v2.js"
+      ],
+      "note": "initiate/status do not use it"
+    },
+    {
+      "file": "server/deployments/mainnet-addresses.ts",
+      "writer": "cutover :broadcast tail (patch script: YieldStrategyDola overwrite, YieldStrategyDolaLegacy fill)",
+      "readers": [
+        "backup-mainnet-addresses.js",
+        "UI/server consumers"
+      ],
+      "note": "initiate/status constants cite this file's YieldStrategyDola key, which the cutover rewrites to the sDOLA strategy; the Solidity constants are hard-coded so they are unaffected"
+    }
+  ],
+  "storyDocs": [
+    {
+      "tag": "story-082",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/082-mainnet-stable-staker-v2-cutover-script.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover"
+      ]
+    },
+    {
+      "tag": "story-083",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/083-cutover-wei-slack-and-v1-pauser-unregister.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover"
+      ]
+    },
+    {
+      "tag": "story-084",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/084-cutover-close-global-pause-window.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover"
+      ]
+    },
+    {
+      "tag": "story-085",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/085-cutover-aggregate-principal-floor.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover"
+      ]
+    },
+    {
+      "tag": "story-086",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/086-cutover-readonly-post-broadcast-verifier.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover"
+      ]
+    },
+    {
+      "tag": "story-087",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/087-cutover-audit33-breaker-window-selfexit-gate-eth-preflight.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover"
+      ]
+    },
+    {
+      "tag": "story-088",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/088-cutover-max-loss-5bps-and-phase7-halt-pause-docs.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover"
+      ]
+    },
+    {
+      "tag": "story-089",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/089-deploymocks-sdola-mock-and-v2-dola-destination.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover (address-book keys)",
+        "DeployMocks sibling"
+      ]
+    },
+    {
+      "tag": "story-090",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/090-initiate-dola-strategy-minter-withdrawal.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "initiate-dola-ys-withdrawal",
+        "dola-ys-withdrawal:status"
+      ]
+    },
+    {
+      "tag": "story-091",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/091-cutover-sdola-strategy-source-destination-split.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover"
+      ]
+    },
+    {
+      "tag": "story-092",
+      "path": "~/code/product-owner/stories/phStaging2/auto-complete/phStaging2-stable-staker-v2/092-cutover-minter-sya-repoint-and-retire-autodola-strategy.md",
+      "state": "auto-complete",
+      "entryPoints": [
+        "stable-staker-v2-cutover",
+        "dola-ys-withdrawal:status",
+        "initiate-dola-ys-withdrawal (runtime dependency)"
+      ]
+    }
+  ],
+  "storyDocsNote": "Each tag globbed across the whole ~/code/product-owner/stories/phStaging2 tree (all state + sprint folders): exactly one hit each, no ambiguity. 'auto-complete' is not in registered-projects.json storyPolicy's state list - recorded as metadata; 090 is marked machine-approved, not human-reviewed.",
+  "cluster": [
+    {
+      "rank": 1,
+      "script": "test/CutoverStableStakerV2Mainnet.fork.t.sol + test/InitiateDolaStrategyWithdrawal.fork.t.sol",
+      "relation": "evidence",
+      "link": "exercise initiate -> warp -> full cutover, window negatives, 6b resume, story-092 cases a-c; fork tests warp so they cannot reproduce the multi-hour baked-calldata drift (OBS-35-01)",
+      "sharedAddresses": [
+        "YS_DOLA",
+        "PHUSD_STABLE_MINTER",
+        "SYA",
+        "PAUSER",
+        "V1"
+      ],
+      "storyTag": "story-090/091/092"
+    },
+    {
+      "rank": 2,
+      "script": "script/archives/MigrateSaga2Migrate.s.sol (+ MigrateSaga2Rescue.s.sol)",
+      "relation": "predecessor / evidence",
+      "link": "direct precedent for the minter totalWithdrawal execute + balance-delta R + noMintDeposit re-seed (cited by story 092); Rescue documents that a forge-baked amount diverged from the live balance a few wei and reverted - same shape as Phase 6b's baked r",
+      "sharedAddresses": [
+        "PHUSD_STABLE_MINTER (V1-era minter)",
+        "OWNER",
+        "DOLA"
+      ],
+      "note": "archived, excluded from build"
+    },
+    {
+      "rank": 3,
+      "script": "script/interactions/Temp.s.sol (Temp:preview / Temp:broadcast)",
+      "relation": "sibling-config (uncontrolled OWNER path)",
+      "link": "same Ledger key; skip-worktree'd so local content is invisible to review; during the 72h window any OWNER totalWithdrawal(DOLA, minter) from it executes the withdrawal out of order (OBS-35-I2)",
+      "sharedAddresses": [
+        "OWNER"
+      ]
+    },
+    {
+      "rank": 4,
+      "script": "script/DeployMocks.s.sol + src/mocks/MockSDOLA.sol (deploy:local:forge / dev)",
+      "relation": "sibling-config",
+      "link": "story 089 local mirror: MockSDOLA + sDOLA destination strategy, defines YieldStrategyDola/YieldStrategyDolaLegacy/SDOLA key semantics the cutover patch applies to mainnet. Per prior triage DeployMocks is a UI mock, not a rehearsal - rehearsal-fidelity gaps are out of scope",
+      "storyTag": "story-089"
+    },
+    {
+      "rank": 5,
+      "script": "script/archives/InitiateYieldStrategyWithdrawal.s.sol",
+      "relation": "predecessor (template)",
+      "link": "initiate template for story 090; hard-codes stale 24h WAITING_PERIOD; archived/non-compiling",
+      "sharedAddresses": [
+        "totalWithdrawal pattern"
+      ]
+    },
+    {
+      "rank": 6,
+      "script": "script/archives/MigrateSaga2Deploy.s.sol + MigrateSaga2Rewire.s.sol + DecommissionOldStrategies.s.sol",
+      "relation": "predecessor",
+      "link": "Deploy created 0x1760 (6h/72h verified from its run-latest.json per story 090); Rewire precedent for SYA add/remove; Decommission precedent for retire-by-pause of old strategies (E7aE/8b4A/Fc62 still Pauser registrants)",
+      "sharedAddresses": [
+        "YS_DOLA",
+        "SYA",
+        "PAUSER"
+      ]
+    },
+    {
+      "rank": 7,
+      "script": "scripts/patch-mainnet-addresses-saga2-deploy.js, scripts/patch-mainnet-addresses-stable-staker.js",
+      "relation": "sibling-config (shared off-chain state)",
+      "link": "both OVERWRITE the YieldStrategyDola key of mainnet-addresses.ts; no package.json key invokes them any more (orphaned). The v2 patch header warns the stable-staker.js one is stale",
+      "sharedFiles": [
+        "server/deployments/mainnet-addresses.ts"
+      ]
+    },
+    {
+      "rank": 8,
+      "script": "run-34 cutover cluster (VerifyPromotionReady precedent, saga2 set, verify-stable-staker.sh, story-055 migration)",
+      "relation": "carried",
+      "link": "see reports/34/script-audits/stable-staker-v2-cutover/closure-manifest.json cluster; unchanged by delta"
+    }
+  ],
+  "crossEntryObservations": [
+    "OBS-35-01 (baked r in Phase 6b)",
+    "OBS-35-02 (stale gas budget / OWNER ETH shortfall)",
+    "OBS-35-04 (window-lapse lockout)",
+    "OBS-35-08 (preview blocked until initiate+6h)",
+    "OBS-35-I2 (any OWNER call executes during window)",
+    "OBS-35-I3 (global pause blocks execute)"
+  ],
+  "unresolved": [
+    "Etherscan-unverified bytecode for YS_DOLA / PhusdStableMinter / SYA / V1 (selector + getter corroboration only)",
+    "sDOLA strategy address unknown until Phase 3b broadcast (no progress file)"
+  ],
+  "priorRun": {
+    "run": 35,
+    "sourceCommit": "7ac6e70"
+  },
+  "regressionRange": "7ac6e70..91ed727 (2420920, feb89a8 [story-093]; 0622ec9 [story-094]; 0f00562, 0433062 [story-095]; d0722f6, a2b9d75, bff40f3 [story-096]; 91ed727 [story-097])",
+  "delta": "7ac6e70..91ed727 adds no new sibling entry points or shared addresses; coupling tightened: status/initiate now mirror cutover WINDOW_SAFETY_MARGIN (copied constant + drift test) and story-096 makes initiate+status part of the lapsed-window recovery loop"
+}

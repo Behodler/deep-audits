@@ -1,0 +1,284 @@
+{
+  "sanitizationReport": {
+    "timestamp": "2026-09-17T05:18:19Z",
+    "project": "phoenix-phase-2-staging",
+    "run": 36,
+    "srcCommit": "91ed727",
+    "cluster": [
+      "stable-staker-v2-cutover",
+      "initiate-dola-ys-withdrawal",
+      "dola-ys-withdrawal:status"
+    ],
+    "currentBranch": "master",
+    "inputFindings": 1,
+    "removedFindings": 0,
+    "passedFindings": 1,
+    "flaggedForReview": 0,
+    "knownIssuesCheck": {
+      "source": "registered-projects.json knownIssues (11 cached; declared source src/known-issues.md does NOT exist at 91ed727)",
+      "result": "no match",
+      "reasoning": "None of the 11 cached entries covers the JS address patcher, the awaiting_minter_window status, or the :broadcast && tail. Closest are #10 (admin trust / operational risk) and #3 (architecture) - both generic and non-matching. Per project memory the phStaging KI cache is unfalsifiable (source file absent), so it carries no suppression authority regardless."
+    },
+    "removals": [],
+    "flagged": []
+  },
+  "findings": [
+    {
+      "proposedLabel": "L-12",
+      "title": "On story 096's lapsed-window path, the :broadcast tail stops at the address patcher (exit 2), not at :verify as the runbook and script output promise. The pending-state :verify, the only run of the live V2 per-user/per-pool balance checks the post-completion verifier later skips, never runs automatically, and V2 goes live without being written to mainnet-addresses.ts",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/scripts/patch-mainnet-addresses-stable-staker-v2.js",
+      "contractLink": "scripts/patch-mainnet-addresses-stable-staker-v2.js",
+      "function": "loadProgress",
+      "lineStart": 79,
+      "lineEnd": 86,
+      "relatedLocations": [
+        "script/CutoverStableStakerV2Mainnet.s.sol L2251-2263 (_printMinterMovePending: 'EXPECTED to stop at :verify')",
+        "script/VerifyStableStakerV2Cutover.s.sol L490, L564, L601 (live checks skipped once v2LiveBeforeMinterMove && !minterMovePending)",
+        "package.json L49 //StableStakerV2Cutover STORY 096 paragraph; L53 stable-staker-v2-cutover:broadcast"
+      ],
+      "entryPoint": "stable-staker-v2-cutover",
+      "rootCauseClass": "PendingStatusTailNeverReachesVerify",
+      "category": "intent-mismatch",
+      "story": "096 (auto-complete). Decision 5: 'The :broadcast tail therefore stops at :verify by design.' Revision Decision 2: the live checks 'ran instead on the pending-state :verify that the lapsed-window :broadcast tail chains immediately after V2 went live.'",
+      "description": "`stable-staker-v2-cutover:broadcast` is `forge script ... && node scripts/patch-mainnet-addresses-stable-staker-v2.js && npm run stable-staker-v2-cutover:verify && npm run stable-staker-v2-cutover:preview`. Story 094 gave the patcher a dedicated `awaiting_reseed` branch, but story 096 added a second non-completed status, `awaiting_minter_window`, with no branch. `loadProgress` therefore hits the generic `deploymentStatus !== 'completed'` check and exits 2 with 'broadcast not finished, or a resume leg is outstanding'. `&&` then skips `:verify` and `:preview`. Story 096 (Decision 5, Revision Decision 2), the package.json runbook ('the :broadcast tail stops at :verify by design: that :verify is the one that checks the per-user credits against LIVE V2 balances'), the verifier NatSpec ('this run is the one chained immediately after V2 went live') and the script's own final console line ('EXPECTED to stop at :verify (verify: Phase6b: PENDING)') all depend on that chained :verify running. Once 6b completes, the verifier reads the sticky `v2LiveBeforeMinterMove` and skips `V2 userInfo >= credited` and `V2 totalStaked >= floor`, citing that earlier run as its justification. On the real chain that earlier run never happens unless the operator knows to start it by hand, before any migrated staker withdraws.",
+      "impact": "No funds are at risk. The verification the story explicitly relocated, rather than dropped, is silently skipped: the completed-cutover `:verify` passes without ever having compared live V2 balances to migrated credits, which leaves only the event-based checks. The operator is told to expect a 'verify: Phase6b: PENDING' message and instead sees a generic patcher error that reads like a failure. For the whole pending period (at least 6h: expiry, re-initiate, 6h wait), `mainnet-addresses.ts` still has `StableStakerV2: 0x0` and `Antimatter: 0x0` although V2 is live and unpaused. The address book is what server/UI consumers read, and the purpose of story 096 is to let stakers reach their funds (the UI impact is unverified: no UI was run). The runbook's CAVEAT about a 'LATER pending-state :verify chained after a second pending resume' describes a run that never occurs either. A competent operator following the runbook would be surprised.",
+      "evidence": "Empirical, real broadcasts on an anvil mainnet fork at block 25994908 (fork-logs/pending-path/). Leg 1 was halted at the execute (P3, forge exit 1) and the window lapsed by storage. The documented resume `:preview` (exit 0) and `:broadcast` with the exact && tail (P6/P7) gave: forge exit 0, progress `awaiting_minter_window` with `v2LiveBeforeMinterMove: true`, V2 `paused=false`, patcher `ERROR (2): deploymentStatus is \"awaiting_minter_window\", expected \"completed\"`, chain exit 2, ':verify NOT reached by the chain', `mainnet-addresses.ts` StableStakerV2 still 0x0. A manual :verify (P8) then reverts `verify: Phase6b: PENDING ... 29 per-user credits (incl. live V2 balances) verified`, which proves the check works when run and is simply not chained. Node-only replay: fork-logs/02-c03-patch-tail-awaiting_minter_window.log. The sponsor test `test_fork_096_pendingWithdrawThenCompleted_verifierPasses` calls the verifier directly and never exercises the npm chain.",
+      "recommendation": "Make the chain do what story 096 says. Add an `awaiting_minter_window` branch to `loadProgress` in the patcher. That branch should fill only `StableStakerV2` and `Antimatter` (FILL-once, idempotent), leave `YieldStrategyDola` / `YieldStrategyDolaLegacy` untouched because the source is not retired yet, and exit 0 so `:verify` runs and produces the intended `Phase6b: PENDING` stop. The later completing leg then performs the DOLA-key patch, and it already treats SAME as success. If the owner prefers a non-zero exit, make the branch print the exact instruction 'V2 IS LIVE: run npm run stable-staker-v2-cutover:verify NOW, before stakers withdraw; expect verify: Phase6b: PENDING'. Then correct the runbook, the `_printMinterMovePending` line and the verifier NatSpec to match. Add a guard test that runs the patcher against an `awaiting_minter_window` progress file and asserts the chosen exit code and output, beside the existing `test_broadcastChainsVerifyBeforePreview`.",
+      "verifiedEmpirically": true,
+      "dedupId": "DEDUP-001",
+      "originalIds": [
+        "L-12"
+      ],
+      "dedupStatus": "unique-new",
+      "provisionalFingerprint": "cf684d5dc289b0f07a863e7682c6725f40e0ee943ad0aeca4d8f7f410b8b37ad",
+      "provisionalFingerprintNote": "sha256(contract:function:rootCauseClass:entryPoint) as computed by dedup; finding-manager is authoritative. No collision with any ledger entry.",
+      "relations": {
+        "introducedBy": "story-096",
+        "relatedTo": [
+          "L-11 e6e1f293 (pps35l11, wont-fix)"
+        ],
+        "incompleteFixOf": null,
+        "duplicateOf": null
+      },
+      "dedupReasoning": "Not a duplicate of L-11 (e6e1f293, PhaseCouplingBlocksUnpause, wont-fix): L-11 was Phase-0 window-expiry blocking V2 unpause; story 096 fixed that (verified on real broadcast: V2 unpaused on lapsed resume). L-12 is a new defect introduced by that fix in a different artefact (JS patcher loadProgress lacks an awaiting_minter_window branch). Different root cause, contract, function and mitigation; collapsing into the wont-fix entry would suppress it (Law 1). Not incompleteFixOf L-11: the L-11 hazard (frozen stakers) is resolved. Not a duplicate of L-02 (2c82d65e, VerificationPassSimulatesMissingSteps, fixed): L-02 was :preview re-executing missing steps under prank; L-12 is :verify never being chained. Not a regression of L-02. Not a duplicate of L-09 awaiting_reseed tail exit-2 (that exit is intended and instructive; story 094 gave awaiting_reseed its own branch). Cross-entry-point patcher findings (migrate:ys-swap-reset PREVIEW_MODE leak 691e85a6, promotion-ready Q-03 55cbd7d0, migrate:ss-execute-mainnet 3ff56248) are different scripts and root causes. Q-05 df5f14ba (StaleOperatorRunbook, open) is a different runbook-staleness defect (breaker windows/tx counts); L-12 recommendation touches runbook text but the root cause is the patcher branch — keep separate.",
+      "fingerprint": "cf684d5dc289b0f07a863e7682c6725f40e0ee943ad0aeca4d8f7f410b8b37ad",
+      "fingerprintPreimage": "lib/phoenix-phase-2-staging/scripts/patch-mainnet-addresses-stable-staker-v2.js:loadProgress:PendingStatusTailNeverReachesVerify:stable-staker-v2-cutover",
+      "fingerprintVerified": true,
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "sanitizerReasoning": "No ledger entry with this fingerprint, rootCauseClass, or patcher contract. Not suppressed by L-11 e6e1f293 (wont-fix): different rootCauseClass (PhaseCouplingBlocksUnpause vs PendingStatusTailNeverReachesVerify), different artefact/function, and L-12 is introduced by the story-096 response to L-11. A wont-fix disposes of L-11 only; suppressing its successor would hide a new defect (Law 1). Not an owner-malice/obvious-misconfig case: a runbook-following operator would be surprised (Law 3 footgun) - stays in scope."
+    }
+  ],
+  "reconciliation": {
+    "new": [
+      "L-12 cf684d5d"
+    ],
+    "regression": [],
+    "stillOpenReRaised": [],
+    "suppressed": [],
+    "fixPendingOutcomes": [
+      {
+        "label": "L-09",
+        "fingerprint": "78cb5942d4834f366ab7d5600a449c73bb8d43833dd8b822e25801d623e39cc6",
+        "heading": "no longer flagged, code changed -> propose fixed (human confirms)"
+      },
+      {
+        "label": "L-10",
+        "fingerprint": "72e528c8715f0fb1e6c4fb3a7b98844c7f5cf0cc2211cb376a20cd2f3356dbc1",
+        "heading": "no longer flagged, code changed -> propose fixed (human confirms)"
+      },
+      {
+        "label": "Q-04",
+        "fingerprint": "a62956952abd4fe22391f1fbff9f5e219961d003367a3c8a1dc4162529b9ea86",
+        "heading": "no longer flagged, code changed -> propose fixed (human confirms)"
+      }
+    ],
+    "incompleteFixWarnings": [],
+    "notReEscalated": [
+      {
+        "label": "L-11",
+        "fingerprint": "e6e1f293bbad543573c8e564c9ee1f70a0139dc107fca28b629117292b79cfde",
+        "status": "wont-fix",
+        "note": "Human disposal stands; not carried over. Hazard resolved by story 096 (verified on real anvil broadcast). Spawned L-12, which is tracked separately."
+      }
+    ],
+    "uncoveredOpenEntries": [],
+    "otherEntriesOnEntryPoints": "L-01,L-02,L-03,L-04,L-05,L-06,L-07,L-08,Q-02 fixed; F-02,F-03,Q-01(ca095edf),Q-03 wont-fix - no action, not re-raised."
+  },
+  "proposedStatusChanges": [
+    {
+      "label": "L-09",
+      "fingerprint": "78cb5942d4834f366ab7d5600a449c73bb8d43833dd8b822e25801d623e39cc6",
+      "entryPoint": "stable-staker-v2-cutover",
+      "from": "fix-pending",
+      "proposed": "fixed",
+      "applied": false,
+      "evidence": "cluster-analysis.md: real two-leg anvil broadcast; mined R re-seeded, OWNER DOLA 0, :verify residual 0 (story 094)"
+    },
+    {
+      "label": "L-10",
+      "fingerprint": "72e528c8715f0fb1e6c4fb3a7b98844c7f5cf0cc2211cb376a20cd2f3356dbc1",
+      "entryPoint": "stable-staker-v2-cutover",
+      "from": "fix-pending",
+      "proposed": "fixed",
+      "applied": false,
+      "evidence": "27M budget vs 25.17M leg-1 peak, 7.26% headroom re-measured at 25994908"
+    },
+    {
+      "label": "Q-04",
+      "fingerprint": "a62956952abd4fe22391f1fbff9f5e219961d003367a3c8a1dc4162529b9ea86",
+      "entryPoint": "stable-staker-v2-cutover",
+      "from": "fix-pending",
+      "proposed": "fixed",
+      "applied": false,
+      "evidence": "halt-5 overclaim corrected in //:broadcast key and NatSpec (story 095)"
+    },
+    {
+      "label": "Q-05",
+      "fingerprint": "df5f14bae8a75c93f0c162bd3d4b842c21215bd12656531f51b356ec7dd75bc6",
+      "entryPoint": "stable-staker-v2-cutover",
+      "from": "open",
+      "proposed": "fixed",
+      "applied": false,
+      "evidence": "breaker paragraph names both dead windows; tx counts match anvil run"
+    },
+    {
+      "label": "Q-06",
+      "fingerprint": "9c4e21bb9fd79d8bc0f09ed0089b2cd63d94bfdbcdd1e44728b1ef4b324ab08c",
+      "entryPoint": "stable-staker-v2-cutover",
+      "from": "open",
+      "proposed": "fixed",
+      "applied": false,
+      "evidence": "no conflict markers at 91ed727; deployments JSON parses; CI guard added"
+    },
+    {
+      "label": "Q-01",
+      "fingerprint": "8633815e4b2b833011046cf0ded65501329f76f0bf6fee6a79840d6b0e845a7f",
+      "entryPoint": "dola-ys-withdrawal:status",
+      "from": "open",
+      "proposed": "fixed",
+      "applied": false,
+      "evidence": "status phases agree with cutover gate at every anvil stage (story 097)",
+      "note": "issueId missing - ledger task"
+    },
+    {
+      "label": "Q-01",
+      "fingerprint": "4cdafc61037cb255ee4422487b88a8f0654718b6fbef5c6bb658c66d9b6a879e",
+      "entryPoint": "initiate-dola-ys-withdrawal",
+      "from": "open",
+      "proposed": "fixed",
+      "applied": false,
+      "evidence": "margin line, deadline, LOCAL-PASS ESTIMATE labels and status pointer printed",
+      "note": "issueId missing - ledger task; story-090 AC text edit is a PO task"
+    }
+  ],
+  "carryover": [
+    {
+      "label": "L-09",
+      "fingerprint": "78cb5942d4834f366ab7d5600a449c73bb8d43833dd8b822e25801d623e39cc6",
+      "entryPoint": "stable-staker-v2-cutover",
+      "ledgerStatus": "fix-pending",
+      "severity": "low",
+      "reportPath": "reports/35/findings/low/stable-staker-v2-cutover__L-09.json",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "origin": "still-open",
+      "carryoverReason": "Status still fix-pending in ledger; script-auditor proposes fixed but only a human applies it, so the report is copied forward in full until triaged (fix-pending/open never dropped)."
+    },
+    {
+      "label": "L-10",
+      "fingerprint": "72e528c8715f0fb1e6c4fb3a7b98844c7f5cf0cc2211cb376a20cd2f3356dbc1",
+      "entryPoint": "stable-staker-v2-cutover",
+      "ledgerStatus": "fix-pending",
+      "severity": "low",
+      "reportPath": "reports/35/findings/low/stable-staker-v2-cutover__L-10.json",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "origin": "still-open",
+      "carryoverReason": "Status still fix-pending in ledger; script-auditor proposes fixed but only a human applies it, so the report is copied forward in full until triaged (fix-pending/open never dropped)."
+    },
+    {
+      "label": "Q-04",
+      "fingerprint": "a62956952abd4fe22391f1fbff9f5e219961d003367a3c8a1dc4162529b9ea86",
+      "entryPoint": "stable-staker-v2-cutover",
+      "ledgerStatus": "fix-pending",
+      "severity": "qa",
+      "reportPath": "reports/34/findings/qa/Q-04-breaker-liveness-doc-overclaim-halt5.json",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "origin": "still-open",
+      "carryoverReason": "Status still fix-pending in ledger; script-auditor proposes fixed but only a human applies it, so the report is copied forward in full until triaged (fix-pending/open never dropped)."
+    },
+    {
+      "label": "Q-05",
+      "fingerprint": "df5f14bae8a75c93f0c162bd3d4b842c21215bd12656531f51b356ec7dd75bc6",
+      "entryPoint": "stable-staker-v2-cutover",
+      "ledgerStatus": "open",
+      "severity": "qa",
+      "reportPath": "reports/35/findings/qa/stable-staker-v2-cutover__Q-05.json",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "origin": "still-open",
+      "carryoverReason": "Status still open in ledger; script-auditor proposes fixed but only a human applies it, so the report is copied forward in full until triaged (fix-pending/open never dropped)."
+    },
+    {
+      "label": "Q-06",
+      "fingerprint": "9c4e21bb9fd79d8bc0f09ed0089b2cd63d94bfdbcdd1e44728b1ef4b324ab08c",
+      "entryPoint": "stable-staker-v2-cutover",
+      "ledgerStatus": "open",
+      "severity": "qa",
+      "reportPath": "reports/35/findings/qa/stable-staker-v2-cutover__Q-06.json",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "origin": "still-open",
+      "carryoverReason": "Status still open in ledger; script-auditor proposes fixed but only a human applies it, so the report is copied forward in full until triaged (fix-pending/open never dropped)."
+    },
+    {
+      "label": "Q-01",
+      "fingerprint": "8633815e4b2b833011046cf0ded65501329f76f0bf6fee6a79840d6b0e845a7f",
+      "entryPoint": "dola-ys-withdrawal:status",
+      "ledgerStatus": "open",
+      "severity": "qa",
+      "reportPath": "reports/35/findings/qa/dola-ys-withdrawal-status__Q-01.json",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "origin": "still-open",
+      "carryoverReason": "Status still open in ledger; script-auditor proposes fixed but only a human applies it, so the report is copied forward in full until triaged (fix-pending/open never dropped)."
+    },
+    {
+      "label": "Q-01",
+      "fingerprint": "4cdafc61037cb255ee4422487b88a8f0654718b6fbef5c6bb658c66d9b6a879e",
+      "entryPoint": "initiate-dola-ys-withdrawal",
+      "ledgerStatus": "open",
+      "severity": "qa",
+      "reportPath": "reports/35/findings/qa/initiate-dola-ys-withdrawal__Q-01.json",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "origin": "still-open",
+      "carryoverReason": "Status still open in ledger; script-auditor proposes fixed but only a human applies it, so the report is copied forward in full until triaged (fix-pending/open never dropped)."
+    }
+  ],
+  "notes": [
+    "Ledger not written.",
+    "Carryover entries include those with proposed-fixed verdicts: they remain open/fix-pending in the ledger until a human applies /ledger fixed, so their reports must not vanish from submissions/. finding-manager: add firstSeenRun from ledger (all phoenix-phase-2-staging-35 except Q-04 = -34).",
+    "Known-issues source file src/known-issues.md is absent at 91ed727; KI cache unverifiable."
+  ]
+}
