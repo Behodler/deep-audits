@@ -1,0 +1,127 @@
+{
+  "contract": "src/dispatchers/PromotionUniV2_Eth.sol",
+  "commit": "2bfa090",
+  "scanMode": "regression (changed in a4d80f4/2bfa090, story-049); full re-profile, run-19 profile superseded for Leg A only",
+  "profileTimestamp": "2026-10-01T00:00:00Z",
+  "solidityVersion": "^0.8.20 (checked arithmetic; no via_ir)",
+  "deployed": false,
+  "story": {
+    "tag": "story-049",
+    "doc": "~/code/product-owner/stories/yield-claim-nft/auto-complete/yield-claim-nft-Balancexit/049-promotion-univ2-eth-leg-a-uniswap-v2.md",
+    "state": "auto-complete",
+    "declaredIntent": [
+      "Leg A: replace the Balancer V3 unlock/swap/settle/sendTo swap with Router02 swapExactTokensForTokens along [sUSDS, phUSD] on the new phUSD/sUSDS V2 pair; keep min phUSD floor; add a loud revert on a zero floor.",
+      "Use the router the contract already holds (UNIV2_ROUTER constant).",
+      "Remove BALANCER_VAULT, BALANCER_POOL, unlockCallback, IUnlockCallback; no balancer imports.",
+      "Do not change Legs other than A.",
+      "Contract is not deployed - ABI/storage changes are free. Must not be deployed before this audit passes."
+    ]
+  },
+
+  "diffSummary": {
+    "changed": [
+      "Removed IUnlockCallback inheritance, Balancer imports, BALANCER_VAULT/BALANCER_POOL constants, unlockCallback (and its double-abi.decode unwrap).",
+      "_swapSusdsForPhusd (529-539): forceApprove(UNIV2_ROUTER, sharesIn) -> swapExactTokensForTokens(sharesIn, minPhusdOut, [sUSDS, phUSD], this, block.timestamp) -> forceApprove(UNIV2_ROUTER, 0) -> return amounts[last].",
+      "pool() (428): require(minPhusdOut > 0, \"PromotionUniV2_Eth: zero phUSD floor\") placed after the amountIn checks.",
+      "NatSpec/comment rewording only elsewhere."
+    ],
+    "unchangedVerified": ["_dispatch", "_legB", "_legC", "_addPhusdPromoLiquidity", "burn step", "all setters", "rescueERC20/rescueETH/withdrawWBTC", "receive()", "constructor"],
+    "storyConformance": "Faithful: grep for balancer|unlockCallback in the file returns nothing; Legs B/C byte-identical; floor is caller-supplied and zero now reverts."
+  },
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {"value": true, "confidence": "verified", "note": "only owner-set path arrays passed to router (bounded by owner)"},
+    "checkedArithmetic": {"value": true, "confidence": "verified"},
+    "reentrancyGuarded": {"value": ["pool", "dispatch (base)"], "confidence": "verified"},
+    "accessControlled": {"value": ["setPool", "setEthToPromotionPath", "setUsdcToWbtcPath", "setInsurer", "setPSM", "setMaxTin", "setDonationSplit", "setBatchMinter", "setNudgeStreamer", "setAuthorizedPooler", "incrementAuthVersion", "rescueERC20", "rescueETH", "withdrawWBTC(onlyInsurer)", "pool(onlyAuthorizedPooler)"], "confidence": "verified"},
+    "initializerProtected": {"value": "n/a"},
+    "weakRandomness": {"value": "none", "confidence": "verified"},
+    "inboundCallbacks": {"value": "receive() payable accepts ETH from anyone (Leg B unwrap) - see ledger L-13 (wont-fix); no ERC721/1155 hooks; no ERC777", "confidence": "verified"},
+    "legAApprovalHygiene": {"value": true, "confidence": "verified", "note": "exact sharesIn approval, reset to 0 after swap; a revert rolls back. Router pulls exactly sharesIn (swapExactTokensForTokens)."},
+    "legAFloor": {"value": "minPhusdOut > 0 enforced in pool(); router enforces INSUFFICIENT_OUTPUT_AMOUNT. Floor applies to the gross pre-burn phUSD output of a deterministic input (sharesIn derives from PSM sellGem + sUSDS deposit of 60% of amountIn).", "confidence": "verified"},
+    "legAReturnValue": {"value": "amounts[amounts.length-1] = phUSD out for the 2-hop path; correct (path length 2, index 1)", "confidence": "verified"},
+    "legsBCInteraction": {"value": "unchanged. Legs execute sequentially A -> B -> C on independent pairs (sUSDS/phUSD, USDC/WETH + WETH/promotion, USDC/WBTC). The only cross-leg coupling is downstream: _addPhusdPromoLiquidity sweeps the WHOLE phUSD and promotion balances (ledger L-20 open: burns against Leg A output but pools whole balance) and _legB swaps the WHOLE ETH balance (ledger L-13 / F-01-044 wont-fix). Leg A's change does not alter either coupling.", "confidence": "verified"},
+    "residualAllowances": {"value": "streamer forceApprove in _dispatch is unpaired (consumed by collectNudge; ledger Q-18 class). Constructor sets infinite phUSD self-allowance (self only; needed for allowance-based burn).", "confidence": "verified"}
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-PR-001",
+      "type": "nominal-floor / inconsistent configuration-safety",
+      "severity": "local-info",
+      "function": "pool",
+      "line": 428,
+      "description": "The new zero-floor guard is nominal: minPhusdOut = 1 passes (the story's own updated tests pass 1). The other four floors (minEthOut, minPromoOut, minWbtcOut, minLP) still accept 0, so Configuration Safety is asymmetric across legs. This sits inside the owner-accepted L-15 (e64f73d629, wont-fix 2026-07-19: pool() relies solely on pooler-supplied floors) - recorded for Tier 2 so it is not re-filed as new; Leg A's venue is now a much shallower ~$34k/side V2 pair than the Balancer pool L-15 was triaged against, which Tier 2 should weigh when deciding whether the L-15 acceptance still covers Leg A.",
+      "recommendation": "Informational; if L-15's acceptance is re-examined, consider requiring non-zero floors on all legs (story-049 scoped the guard to Leg A only, so this is not a faithfulness defect)."
+    },
+    {
+      "id": "LOCAL-PR-002",
+      "type": "ledger-hygiene (obsolete finding)",
+      "severity": "local-info",
+      "function": "unlockCallback (removed)",
+      "line": null,
+      "description": "Ledger Q-14 (e5d7aff2ea, qa-bundled: unchecked Balancer settle return in unlockCallback) targets code that no longer exists at 2bfa090. Candidate for a proposed status change (fixed/obsolete) - human-applied only.",
+      "recommendation": "Propose /ledger fixed for Q-14 citing a4d80f4."
+    }
+  ],
+
+  "carriedLedgerWatches": [
+    "L-13 ac8eadefd1 wont-fix / F-01-044 3e638eb926 wont-fix: whole-ETH-balance sweep in _legB + open receive() - unchanged.",
+    "L-15 e64f73d629 wont-fix: pooler-floor-only MEV protection - Leg A venue changed (see LOCAL-PR-001).",
+    "L-20 1c1e00017b open: burn vs whole-balance pool drift - unchanged.",
+    "Q-12 (block.timestamp deadlines) now also applies to the new Leg A router call.",
+    "Q-16, Q-17, F-01-045 unchanged."
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "dispatch(address,uint256,bytes)", "source": "base", "accessControl": "onlyMinter", "pausable": true, "reentrancyGuard": true, "stateChanges": ["USDC balance"], "externalCalls": ["USDC.forceApprove(nudgeStreamer)", "nudgeStreamer.collectNudge(batchMinter, USDC, donationAmount)", "hook.onDispatch"], "notes": "no try/catch: streamer revert bricks mint when donation live"},
+      {"function": "pool(uint256 amountIn, uint256 minPhusdOut, uint256 minEthOut, uint256 minPromoOut, uint256 minWbtcOut, uint256 minLP)", "accessControl": "onlyAuthorizedPooler", "pausable": true, "reentrancyGuard": true, "stateChanges": ["token balances (USDC, USDS, sUSDS, phUSD, ETH, promotion, WBTC, LP)", "phUSD supply (burn)"], "externalCalls": ["psm.tin()", "psm.sellGem(this, usdcA)", "sUSDS.deposit(usdsOut, this)", "UNIV2_ROUTER.swapExactTokensForTokens(sUSDS->phUSD)  [NEW Leg A]", "UNIV2_ROUTER.swapExactTokensForETH(USDC->WETH)", "UNIV2_ROUTER.swapExactETHForTokens{value: address(this).balance}(ethToPromotionPath)", "UNIV2_ROUTER.swapExactTokensForTokens(usdcToWbtcPath)", "phUSD.burn(this, phusdAcquired/2)", "UNIV2_ROUTER.addLiquidity(phUSD, promotion, wholeBal, wholeBal, 0, 0, this, now)"]},
+      {"function": "rescueERC20(token,to,amount)", "accessControl": "onlyOwner", "notes": "WBTC excluded; LP exit"},
+      {"function": "rescueETH(to,amount)", "accessControl": "onlyOwner"},
+      {"function": "withdrawWBTC(to,amount)", "accessControl": "onlyInsurer (insurer starts 0 => locked)"},
+      {"function": "receive()", "accessControl": "none", "notes": "accepts arbitrary ETH"},
+      {"function": "setters: setPool, setEthToPromotionPath, setUsdcToWbtcPath, setInsurer, setPSM, setMaxTin, setDonationSplit, setBatchMinter, setNudgeStreamer, setAuthorizedPooler, incrementAuthVersion, base setMinter/setHook/setMetadata", "accessControl": "onlyOwner"},
+      {"function": "pause/unpause", "source": "base", "accessControl": "onlyMinter"}
+    ],
+    "externalCalls": [
+      {"target": "UNIV2_ROUTER 0x7a25...488D (constant)", "methods": ["swapExactTokensForTokens", "swapExactTokensForETH", "swapExactETHForTokens", "addLiquidity"], "trustLevel": "trusted-external"},
+      {"target": "phUSD/sUSDS Uniswap V2 pair (implicit via router factory; not stored)", "methods": ["(via router)"], "trustLevel": "semi-trusted: spot price, permissionless", "notes": "NEW Leg A venue; same pair UniPoolerV2 targets; pair must exist and be seeded or Leg A reverts in router"},
+      {"target": "Sky PSM (owner-settable, default 0xA188...f98c)", "methods": ["tin", "sellGem"], "trustLevel": "trusted-external"},
+      {"target": "sUSDS (constant)", "methods": ["deposit"], "trustLevel": "trusted-external"},
+      {"target": "phUSD (constant)", "methods": ["burn(this, amt) allowance-based", "balanceOf", "forceApprove"], "trustLevel": "protocol token"},
+      {"target": "promotionToken (immutable, per partner)", "methods": ["balanceOf", "forceApprove"], "trustLevel": "untrusted/partner token: arbitrary ERC20 behaviour possible"},
+      {"target": "nudgeStreamer (owner-settable)", "methods": ["collectNudge"], "trustLevel": "protocol"},
+      {"target": "rescueETH `to`", "methods": ["call{value}"], "trustLevel": "owner-chosen"}
+    ],
+    "stateVariables": [
+      {"name": "psm", "mutators": ["setPSM"], "readers": ["_legA"]},
+      {"name": "maxTin", "mutators": ["setMaxTin"], "readers": ["_legA"]},
+      {"name": "promotionToken", "type": "immutable"},
+      {"name": "_targetPair", "mutators": ["constructor", "setPool"], "readers": ["targetPool"], "notes": "stored for validation/view only; addLiquidity resolves the pair via router factory"},
+      {"name": "_ethToPromotionPath/_usdcToWbtcPath", "mutators": ["setters"], "readers": ["_legB/_legC"]},
+      {"name": "insurer", "mutators": ["setInsurer"], "readers": ["onlyInsurer"]},
+      {"name": "batchMinter/donationSplit/nudgeStreamer", "mutators": ["setters"], "readers": ["_dispatch"]},
+      {"name": "authVersion/poolerAuthVersion", "mutators": ["constructor/incrementAuthVersion/setAuthorizedPooler"], "readers": ["onlyAuthorizedPooler"]}
+    ],
+    "events": ["PoolerAuthorized", "PoolerDeauthorized", "AuthVersionIncremented", "Pooled", "PoolSet", "DonationSplitSet", "BatchMinterSet", "NudgeStreamerUpdated", "PSMSet", "MaxTinSet", "EthToPromotionPathSet", "UsdcToWbtcPathSet", "InsurerSet", "WBTCWithdrawn"],
+    "modifiers": ["onlyAuthorizedPooler", "onlyInsurer", "onlyOwner", "whenNotPaused", "nonReentrant", "onlyMinter(base)"]
+  },
+
+  "trustAssumptions": [
+    "The canonical phUSD/sUSDS Uniswap V2 pair exists and is seeded before pool() is called (Leg A reverts in the router otherwise - fail-loud).",
+    "Authorized poolers supply meaningful floors (non-zero enforced only for minPhusdOut, and only nominally).",
+    "phUSD burn is allowance-based and the constructor's infinite self-allowance is honoured (OZ max-allowance no-decrement).",
+    "sUSDS/USDS/USDC/WBTC/WETH are standard; promotionToken is partner-chosen and may be non-standard (Leg B / addLiquidity).",
+    "Owner trusted for rescue paths; insurer trusted for WBTC (Law 3)."
+  ],
+
+  "interactionNotesForTier2": [
+    "Leg A and UniPoolerV2.pool() both buy phUSD on the same shallow phUSD/sUSDS V2 pair; Leg A's swap is a plain buy (price-raising, no LP return) whereas UniPoolerV2 recycles via addLiquidity.",
+    "Leg A's phUSD buy can push phUSD above $1 on a shallow pair; story-048 intends this for UniPoolerV2, story-049 is silent on it for Leg A.",
+    "lib bump d75229d->5015f1b changed BatchNFTMinterMultiToken (budget-tracked refund; paymentToken-as-nudge-token now permitted) - run-19 OBS-PE-3 (whitelist-collision wiring hazard) should be re-checked against the new lib."
+  ],
+
+  "inheritanceChain": ["ATokenDispatcherV2", "ITokenDispatcherV2", "Pausable", "Ownable", "ReentrancyGuard"],
+  "complexity": {"loc": 564, "functions": 26, "externalCalls": 20, "stateVariables": 13}
+}

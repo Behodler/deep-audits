@@ -1,0 +1,119 @@
+{
+  "id": "L-01",
+  "issueId": "pps38l1",
+  "label": "L-01",
+  "project": "phoenix-phase-2-staging",
+  "status": "open",
+  "severity": "low",
+  "title": "Holding-pattern verifier and the story-103 step-0 precondition only check four hardcoded addresses; a later re-authorization of any other pooler stays green (and the proposed authVersion()>1 hardening does not catch it)",
+  "contract": "script/VerifyBalancerHolding.s.sol",
+  "function": "run",
+  "line": 17,
+  "lineStart": 17,
+  "lineEnd": 31,
+  "relatedLocations": [
+    "script/RevokeBalancerPoolersHoldingPattern.s.sol L65-86 (poolers(), _isAuthorized, _countAuthorized)",
+    "script/RevokeBalancerPoolersHoldingPattern.s.sol L116-119 (idempotence early-return keyed on the four only)",
+    "lib/yield-claim-nft/src/dispatchers/BalancerPoolerV2.sol L190-199 (setAuthorizedPooler stores CURRENT authVersion)",
+    "story-103 step 0 / story-100 precondition: 'check the four poolers as onlyAuthorizedPooler does'"
+  ],
+  "entryPoint": "balancer-holding",
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "59527bfa84786a87002d80b9bf678c5e798c4d9b2905609ac0f786bd46737632",
+  "fingerprintInput": "script/VerifyBalancerHolding.s.sol:run:IncompletePostconditionCoverage:balancer-holding",
+  "rootCauseClass": "IncompletePostconditionCoverage",
+  "origin": "new",
+  "category": "cluster-interaction",
+  "faithfulness": false,
+  "footgun": true,
+  "reportChannel": "qa",
+  "specConformanceLabel": null,
+  "verified": null,
+  "description": "`VerifyBalancerHolding.run()` proves the holding pattern by requiring `poolerAuthVersion[p] != authVersion` for exactly four hardcoded addresses. `BalancerPoolerV2.setAuthorizedPooler(x, true)` writes the CURRENT `authVersion`, so any authorization granted after the bump, for an address outside the four, is fully live. The verifier cannot see it, and neither can `authVersion() > 1`, the hardening suggested in the story-099 review, because the version stays at 2. Stories 100/103 specify the cutover's step-0 'authorized-pooler set revoked' precondition with the same four-address predicate, so `:verify`, the `holding-broadcast` gate (a tx hash) and step 0 would all be green. A related idempotence edge exists: if the four were ever individually deauthorized while another address held the current version, `run()` would send nothing. That edge is unreachable today, because on-chain history shows exactly 4 grants and 0 deauths.",
+  "impact": "Failure scenario: after the 099 broadcast, the owner re-authorizes some address X for an ad-hoc `pool()`, for example a new automation key or a UI wallet, not one of the four. Every holding-pattern check stays green, so the 103 cutover proceeds. During its multi-tx `--slow` broadcast, X (or automation behind it) calls `pool()` between step 2 (`withdrawBPT(OWNER, all)`) and step 9 (`rescueERC20(sUSDS)`). Parked sUSDS then goes into the paused-soon Balancer pool as fresh BPT on the old pooler, after the BPT drain. That BPT is not exited by step 3 and needs extra owner recovery. Before 30 Oct this also re-exposes the zero-floor sandwichable `pool()` the holding pattern exists to prevent. Value stays recoverable by the owner (`withdrawBPT`), and the trigger is a knowing owner grant. The issue is that the safety signals are silent about it, which is a footgun and not a loss.",
+  "attackPath": [
+    "1. Owner broadcasts balancer-holding (authVersion 1 -> 2) and :verify passes.",
+    "2. Owner, knowingly, calls setAuthorizedPooler(X, true) for some X outside the four (new automation key, UI wallet). X is stamped with the current version 2 and is fully live.",
+    "3. VerifyBalancerHolding, the authVersion()>1 hardening from the 099 review, and the story-100/103 step-0 predicate ('check the four poolers as onlyAuthorizedPooler does') all stay green (test_r38_08).",
+    "4. X, or automation behind it, calls pool() before 30 Oct with a loose minBPT and gets sandwiched (L-06 surface), or calls it mid-cutover between step 2 (withdrawBPT) and step 9 (rescueERC20), leaving fresh BPT on the old pooler.",
+    "Latent variant (test_r38_09): if the four were deauthorized individually while X held the current version, the revoke script would skip the bump entirely. This is unreachable on current chain history."
+  ],
+  "classification": {
+    "assetImpact": "No direct asset loss. If the owner later grants a non-listed address, that address can call pool(), which deposits parked sUSDS into the dying Balancer pool. The BPT goes to the pooler itself and stays owner-recoverable via withdrawBPT. Before 30 Oct this re-opens the sandwichable zero-floor pool() surface (yield-claim-nft L-06, a Low). During a story-103 multi-tx broadcast it can strand fresh BPT on the old pooler after step 2's drain, which then needs extra owner recovery. Story 103's own verify would catch the leftover after the fact.",
+    "attackPath": [
+      "1. Owner broadcasts balancer-holding (authVersion 1 -> 2) and :verify passes.",
+      "2. Owner, knowingly, calls setAuthorizedPooler(X, true) for some X outside the four (new automation key, UI wallet). X is stamped with the current version 2 and is fully live.",
+      "3. VerifyBalancerHolding, the authVersion()>1 hardening from the 099 review, and the story-100/103 step-0 predicate ('check the four poolers as onlyAuthorizedPooler does') all stay green (test_r38_08).",
+      "4. X, or automation behind it, calls pool() before 30 Oct with a loose minBPT and gets sandwiched (L-06 surface), or calls it mid-cutover between step 2 (withdrawBPT) and step 9 (rescueERC20), leaving fresh BPT on the old pooler.",
+      "Latent variant (test_r38_09): if the four were deauthorized individually while X held the current version, the revoke script would skip the bump entirely. This is unreachable on current chain history."
+    ],
+    "likelihood": "low. It needs a knowing owner grant to a fifth address between the 099 broadcast and the 103 run (a window that closes for pool() on 30 Oct), plus X actually pooling. No external attacker can trigger it; the sandwich leg needs X to use a loose minBPT.",
+    "assumptions": "The owner is non-malicious (Law 3). The 103 side is unverified because the script does not exist yet; the precondition text is quoted from story 100 L49 and story 103 L59/L148.",
+    "externalRequirements": "An owner grant to an address outside the four; pool() not yet paused (before 30 Oct) or a 103 broadcast in progress."
+  },
+  "justification": "This is a Law-3 footgun, so it stays in scope rather than being suppressed. A competent owner knows that granting X lets X pool(). What they would not expect is that every holding-pattern safety signal (099 :verify, the authVersion()>1 hardening the 099 reviewer proposed, and the step-0 require in 100/103) remains green and hides the grant. The rating is Low, not Medium, because the consequence it unlocks is bounded. No value leaves protocol custody (BPT is minted to the pooler, owner-recoverable). The sandwich leg re-exposes an existing Low (L-06) and does not create a new loss class. Availability is not affected, because index-4 mints keep working. The trigger also needs a knowing owner action. The story 099 verifier is faithful to its own spec ('all four poolers'), so the gap is a design gap in the gate the stories rely on, not an implementation deviation, and it gets no F tag. The test_r38_09 idempotence edge is folded in as latent supporting evidence. It shares the root cause (four-address predicate) and is unreachable today, so it does not raise severity.",
+  "storyEvidence": {
+    "099": {
+      "path": "review/phStaging2-Balancexit/099-revoke-balancer-poolers-holding-pattern.md",
+      "state": "review (ISSUES_FOUND)",
+      "quotes": [
+        "`balancer-holding:verify` = a read-only `forge script` against `$RPC_MAINNET` that asserts all four poolers are unauthorized.",
+        "This revocation is a REQUIRED precondition of the mainnet cutover script (story 103, step 0): the cutover `require`s that the authorized-pooler set is revoked on-chain."
+      ]
+    },
+    "100": {
+      "path": "incomplete/phStaging2-Balancexit/100-pin-bump-balancer-mock-exits-unipooler-cutover-core.md",
+      "state": "incomplete",
+      "quotes": [
+        "the authorized-pooler set is revoked (story 099's `incrementAuthVersion`; check the four poolers as `onlyAuthorizedPooler` does)"
+      ]
+    },
+    "103": {
+      "path": "incomplete/phStaging2-Balancexit/103-mainnet-unipooler-cutover-script-stage2.md",
+      "state": "incomplete",
+      "quotes": [
+        "the script itself `require`s the revocation on-chain (all four poolers unauthorized on `0x7f68`)"
+      ]
+    }
+  },
+  "evidence": "fork-verified on the 099 side: test/audit-run38/BalancerHoldingAudit.fork.t.sol test_r38_08 (after the bump, owner grants a fifth address; VerifyBalancerHolding.run() passes; authVersion()==2>1; the fifth address pool(0) succeeds and mints BPT; re-auth of 0x186c IS detected) and test_r38_09 (idempotence-guard edge: script skips the bump, verify passes, unknown pooler still authorized). Story-103 side unverified (script not yet written); its precondition text is quoted from stories 100/103. Additional reproduced edge (test_r38_09, folded into this finding, not filed separately): if the four named poolers are individually deauthorized while a fifth address holds the current authVersion, RevokeBalancerPoolersHoldingPattern.run()'s idempotence guard (L116-119) SKIPS the incrementAuthVersion() bump, logs success, and VerifyBalancerHolding passes with the fifth still able to pool(). Latent: unreachable at block 26,094,450+ because on-chain history on 0x7f68 shows exactly 4 PoolerAuthorized events and 0 deauthorizations. Contained hazard: yield-claim-nft L-06 (342075df..., open), the pool() sandwich via off-chain minBPT; test_r38_06 shows the pre-revocation 0x186c EIP-7702 account can pool(0) with a zero floor.",
+  "recommendation": "In story 103 (and the story-100 core), do not reuse the four-address predicate as the revocation proof. Record the revoke tx's block and new `authVersion` as gate evidence, then at step 0 require `authVersion() == recordedVersion`, AND fail if any `PoolerAuthorized` event was emitted by 0x7f68 after the revoke block. Do this off-chain via `cast logs` feeding an env var the script `require`s, as 103 already does for `minAmountsOut`. Alternatively, make step 0 itself call `incrementAuthVersion()` immediately before `withdrawBPT`, which revokes everything regardless of who was granted since. In `VerifyBalancerHolding`, log `authVersion()` and add the same post-revoke `PoolerAuthorized` log check, or at minimum state in its NatSpec that it cannot detect grants outside the four. Note that `authVersion() > 1` alone is insufficient.",
+  "crossReferences": [
+    {
+      "project": "yield-claim-nft",
+      "label": "L-06",
+      "fingerprint": "342075dfba3c8ec7c3bae1ae18c357591c5ea255bf649ee943c6c71f3ddd4c2e",
+      "status": "open",
+      "relation": "Contract-level hazard the holding pattern exists to contain (BalancerPoolerV2.pool single-sided LP add relies solely on off-chain minBPT, sandwichable). DEDUP-001 impact re-exposes it via an unseen 5th pooler. Not a duplicate: different root cause (script postcondition coverage vs. pool() price reference), different project, separate mitigation."
+    },
+    {
+      "project": "yield-claim-nft",
+      "label": "L-03",
+      "fingerprint": "e29ae08ed9997d73fe3878b83be1a3bc45c304b5548b68da7932118994c3626e",
+      "status": "fixed",
+      "relation": "Related pool() floor history (limitRaw=0 donation swap). Context only."
+    },
+    {
+      "project": "phoenix-phase-2-staging",
+      "fingerprint": "d32e99aa64bb082b2a761fabc74a6ad999f7a83db3a82a938214be7a1b2410f1",
+      "entryPoint": "dispatcher-replace-sky-pooler",
+      "status": "open",
+      "relation": "Sibling minBPT-staleness concern on an earlier Balancer pooler script. Different entry point, root cause and contract; context only."
+    }
+  ],
+  "poc": null,
+  "firstSeenRun": "phoenix-phase-2-staging-38",
+  "lastSeenRun": "phoenix-phase-2-staging-38",
+  "firstSeenCommit": "a309040",
+  "lastSeenCommit": "a309040",
+  "forkBlock": 26094450,
+  "metadata": {
+    "createdAt": "2026-10-01T02:36:08Z",
+    "updatedAt": "2026-10-01T02:36:08Z",
+    "scanOrigin": "DEDUP-001",
+    "classificationOrigin": "reports/38/script-audits/balancer-holding/classified-findings.json"
+  }
+}

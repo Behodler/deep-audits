@@ -1,0 +1,75 @@
+{
+  "project": "yield-claim-nft",
+  "run": 20,
+  "scanTimestamp": "2026-10-01T12:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "range": "d4cc563..2bfa090 (master)",
+  "contractsScanned": 9,
+  "focus": ["src/dispatchers/UniPoolerV2.sol", "src/dispatchers/PromotionUniV2_Eth.sol", "src/dispatchers/NudgeRatchetDelayRelease.sol", "lib/phoenix-nft-staking@5015f1b src/BatchNFTMinterMultiToken.sol (read for interaction claims)"],
+  "findings": [
+    {
+      "id": "CODE-001",
+      "type": "access-control-chain / fail-open hook wiring (M-04 class)",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "_dispatch (hook invoked by ATokenDispatcherV2.dispatch:125); cutover chain NFTMinterV2.replaceDispatcher(4) -> UniPoolerV2.setHook -> BalancerPoolerMintDebtHook.setDispatcher",
+      "line": 290,
+      "lineStart": 290,
+      "lineEnd": 320,
+      "description": "Cross-contract confirmation of LOCAL-UP-001. The index-4 debt-accrual chain needs three independent owner writes on three contracts (UniPoolerV2.setHook(hook), hook.setDispatcher(UniPoolerV2), UniPoolerV2.setMinter(NFTMinterV2)) plus NFTMinterV2.replaceDispatcher(4, UniPoolerV2). Each omission fails LOUD except one: if setHook is skipped, ATokenDispatcherV2's constructor-deployed DefaultDispatchHook (onDispatch is an empty body) stays wired and every index-4 mint succeeds while accruing zero phUSD mint-debt to NFTStaker. UniPoolerV2 copies _dispatch verbatim, so it has no hookTypeId / non-default-hook guard (BalancerPoolerMintDebtHook exposes no hookTypeId). Secondary, fail-loud: the planned order (hook.setDispatcher at step 6, replaceDispatcher at step 8, separate Ledger txs) makes every index-4 mint through the still-registered BalancerPoolerV2 revert OnlyDispatcher in between; if BatchNFTMinterMultiToken's dispatcherIndex is 4, batchMint reverts in that window too. No funds lost, only a mint outage.",
+      "codeSnippet": "hook = new DefaultDispatchHook();            // ATokenDispatcherV2 ctor\nfunction onDispatch(address, uint256, bytes calldata) external {}   // DefaultDispatchHook",
+      "attackVector": "No attacker needed (Law-3 footgun). A cutover that runs replaceDispatcher/setMinter but drops or reorders setHook (crash mid-broadcast; progress file poisoned per plan) leaves index 4 minting with silent zero debt. Only the plan's post-hoc step-11 'forked test mint accrues debt' check catches it, and only if it is run.",
+      "relatedLedger": "Q-08 96c60b723f (wont-fix), L-09 563df2e64a (open), M-04 c91bef813d (fixed, NudgeRatchet only)",
+      "wontFixDisclosure": "This re-raises the class of Q-08 (owner wont-fix 2026-06-17). Q-08 triage reason, verbatim: 'Owner REJECTED — intentional: BalancerPoolerV2 is LIVE and will not be retrofitted with the hookTypeId guard. The guard asymmetry vs NudgeRatchet is an accepted operational state on a deployed contract (Law-3 owner-trusted).' That rationale does not carry over. UniPoolerV2 is undeployed, and story-048 says it may not deploy before this audit passes, so adding a guard costs no retrofit. Q-08 itself stays closed for BalancerPoolerV2. This is a new instance on a different contract, not a reopen.",
+      "recommendation": "Concrete-only guard in UniPoolerV2._dispatch: store the default hook address at construction and require(address(hook) != defaultHook) (base untouched), or add a hookTypeId() to the pooler hook. Law-2 note: story-048 requires a verbatim _dispatch, and Law 1 outranks it. In the cutover, do setHook in the same tx as replaceDispatcher (or before it), and do hook.setDispatcher last or in the same tx, so neither the silent nor the bricked window opens.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-002",
+      "type": "call-sequence / shared-venue floor staleness (single-block double sandwich)",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/UniPoolerV2.sol + src/dispatchers/PromotionUniV2_Eth.sol",
+      "function": "UniPoolerV2.pool / PromotionUniV2_Eth.pool -> _legA -> _swapSusdsForPhusd",
+      "line": 406,
+      "lineStart": 386,
+      "lineEnd": 421,
+      "description": "Since a4d80f4, Leg A buys phUSD with sUSDS on the same phUSD/sUSDS V2 pair that UniPoolerV2.pool zaps into, and in which UniPoolerV2 holds the protocol's LP. Both callers set floors from spot quotes (quotePool or a router quote), with no on-chain reference. At the seeded reserves the plan cites (~33.8k sUSDS / 34.8k phUSD), each call moves the other's quote. Modelled: a 1,000-sUSDS UniPoolerV2 zap cuts a ~570-share Leg A's phUSD out by 2.83%, and that Leg A cuts the zap's phusdOut by 3.26%. When both authorized calls land in one block (the same keeper cron, or two of the four authorized poolers), either the second call reverts (tolerance below ~3%, a self-DoS) or the keeper widens tolerance to about 3.5% or more. In the second case one searcher front-run before the pair of calls takes both tolerances, and the back-run sells phUSD into the pair whose LP is the protocol's. The shallow venue also cuts the capital a searcher needs, compared with the Balancer pool L-15 was triaged against.",
+      "attackVector": "Searcher sees two pending pool() txs touching the pair: buy phUSD ahead, let Leg A and the zap both buy at their floors, sell phUSD after. Per-call loss stays bounded by each caller's own tolerance, but the two calls together stack it, and the cross-contract price impact forces wider tolerances.",
+      "relatedLedger": "L-11 531916f458 (open; same in-batch staleness class on MultiPooler), L-06 342075dfba (open; BalancerPoolerV2 sandwich, of which UniPoolerV2.pool is the successor instance), L-15 e64f73d629 (wont-fix)",
+      "wontFixDisclosure": "Leg A sits under L-15 (owner wont-fix 2026-07-19). Triage reason, verbatim: 'On-chain-priceless LP-add MEV on PromotionUniV2_Eth Legs A/B is keeper-floor-bounded (all 5 min-out floors + minLP present), POL-only, no user funds; residual sandwich exposure on the thin ETH->promotion hop accepted as keeper-hygiene responsibility. Sibling of L-06.' The per-call reasoning still holds: floors bound each call, and the loss falls only on protocol-owned liquidity. What changed is the facts it was based on. The acceptance named the ETH->promotion hop as the thin venue. Leg A then traded on the Balancer pool and now trades on a ~$34k-per-side V2 pair shared with a second protocol caller, and that coupling did not exist at triage. This is filed for the cross-contract sequencing, not as a re-file of Leg A's standalone sandwich. Only the owner can decide whether L-15 also covers the shared-venue case. If it does, record that on L-15 and close this as a duplicate.",
+      "recommendation": "Operational, no code change: never batch UniPoolerV2.pool and PromotionUniV2_Eth.pool in the same block; quote the second call only after the first is mined; submit both privately (Flashbots or a private RPC). Optional code change: one entry point that does Leg A and the zap with sizes derived from live reserves, or a block-level 'last pool block' guard shared through an off-chain scheduler.",
+      "confidence": "medium"
+    },
+    {
+      "id": "CODE-003",
+      "type": "cross-contract deploy-sequence hazard (permissionless pair creation vs immutable _pair)",
+      "severity": "informational",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "constructor / cutover seeding (external DeployMainnetUniPoolerCutover, phStaging2:100/103)",
+      "line": 159,
+      "lineStart": 159,
+      "lineEnd": 179,
+      "description": "UniPoolerV2._pair is immutable and must be the router-factory's CREATE2 pair, because Leg A and the router's addLiquidity resolve the pair through the factory. That pair can be created by anyone. The design ('pair may be empty at construction') leaves an interval between pool deployment and the atomic seed in which a third party can createPair and mint a few wei of liquidity at an arbitrary ratio. Uniswap V2's MINIMUM_LIQUIDITY lock means reserves can never return to (0,0), so the cutover's precondition 0 ('pair doesn't exist or reserves are (0,0)') can be failed permanently for the price of gas. If an operator then relaxes that precondition, the planned router addLiquidity seeds at the griefer's ratio with zero mins, and the griefer arbitrages the protocol's seed. No code path in this repo loses funds today. The cost is a stuck cutover, with the unsafe workaround the obvious one to reach for.",
+      "attackVector": "Griefer front-runs the cutover: factory.createPair(sUSDS, phUSD), then a skewed dust addLiquidity. The cutover precondition reverts. Recovery is safe only by transferring the seed directly to the pair and calling pair.mint (the protocol then holds about 100% of LP and reserves take the protocol's ratio), or by arbitraging the price to the carried-over Balancer price before a router add.",
+      "relatedLedger": "LOCAL-UP-002 (pair not checked against router factory). No prior ledger entry.",
+      "recommendation": "Defer to /audit-script on the cutover. Document a fallback for a non-empty dust pair: direct transfer + pair.mint, or a pre-arbitrage to the target ratio with a reserve-ratio assertion. Optionally have the UniPoolerV2 constructor require factory.getPair(sUSDS, phUSD) == pair_, so both callers provably share one venue.",
+      "confidence": "medium"
+    }
+  ],
+  "carryoverInstances": [
+    {"note": "UniPoolerV2 copies BalancerPoolerV2's _dispatch/_psmDonate/setters verbatim, so these open BalancerPoolerV2 findings now have a second, undeployed instance. These are carryovers, not new root causes. The finding-manager should attach UniPoolerV2 as an additional location (or file new-fingerprint siblings) rather than drop them silently.",
+     "entries": ["L-05 e527a71211 (batchDonationSize/ratio coupling; cutover step 7 copies batchDonationSize live)", "L-17 79a2cd4a79 (donation disable strands parked USDS; live psm.gem())", "L-18 482cefc33e / F-01-047 5d6538f76f (DonationSkipped dust doc)", "Q-18 11d8b8656f (streamer forceApprove)", "Q-05 13fe448d0e (nonReentrant not first modifier; ADERYN-013)", "L-06 342075dfba (sandwich; see CODE-002)"]}
+  ],
+  "clearedChecks": [
+    "Classic/cross-function reentrancy (UniPoolerV2, PromotionUniV2_Eth): pool() and dispatch() share the contract-wide OZ ReentrancyGuard. _psmDonate is gated to self and only reachable inside dispatch's lock. Router02 is canonical, and sUSDS/phUSD/USDC/USDS have no transfer hooks. Cleared.",
+    "Cross-contract A->B->A: dispatch -> NudgeStreamer.collectNudge -> transfer to batchMinter, with no callback into the dispatcher. batchMint(nonReentrant) -> NFTMinterV2.mint -> dispatch -> collectNudge -> settle transfer into batchMinter: inbound ERC20 only, no re-entry. Cleared.",
+    "Read-only reentrancy: quotePool is off-chain or UI only. No on-chain integrator reads the phUSD/sUSDS pair or quotePool as an oracle, and no transient inconsistent window exists because pool() is atomic. Cleared.",
+    "ERC721/1155/777 hooks: none in the UniPoolerV2/PromotionUniV2_Eth paths. NFTMinterV2's ERC1155 mint callback is unchanged and was previously scanned. Cleared.",
+    "Mid-zap manipulation: swap and addLiquidity run in one tx with no external callback between them, so the router's 0/0 addLiquidity mins cannot be exploited mid-call. An unsynced pair surplus only leaves residual tokens on the pooler (LOCAL-UP-004). Cleared.",
+    "L-07 stale per-index price on replaceDispatcher(4): BalancerPoolerV2 and UniPoolerV2 both have USDS (18dp) as primeToken, so there is no re-denomination. Cleared for this cutover.",
+    "lib/phoenix-nft-staking@5015f1b: batchMint measures budget = min(pull delta, paymentAmount) and refunds from budget only. Direct USDC lumps from NudgeRatchetDelayRelease.release() and streamer settles during the mint loop land in pot P or this batch's donations D, which the refund cannot reach. The H-01 d06e3191 fix holds for these donor sources. Winner-take-all payout timing is unchanged, so the M-05 e6fbf0d6 back-run premise and its reopen triggers (a)-(d) are unaffected by the bump; the bump neither revives nor disposes of M-05.",
+    "MultiPooler authorization (cutover step 7): MultiPooler calls the 4-arg IUniboostPooler.pool, while UniPoolerV2.pool is 3-arg, so the call can never reach it. Authorizing MultiPooler is inert, not a privilege path.",
+    "Pause authority: ATokenDispatcherV2.pause is onlyMinter (NFTMinterV2.setDispatcherActive). The plan's 'Register with the Pauser' step cannot pause UniPoolerV2, which is a plan/story divergence already logged in story-intents and left to story-faithfulness. The emergency stop for pool() remains NFTMinterV2.setDispatcherActive or incrementAuthVersion."
+  ]
+}

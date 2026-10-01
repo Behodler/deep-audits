@@ -1,0 +1,101 @@
+{
+  "entryPoint": "balancer-holding",
+  "mode": "fork-preview",
+  "forkBlock": 26094450,
+  "forkBlockNote": "State-diff/event capture and all run-38 checks pinned at 26,094,450 (test/audit-run38/BalancerHoldingAudit.fork.t.sol). The literal npm-equivalent preview ran against live RPC_MAINNET head (head read immediately before = 26,094,444; forge script does not log the block). No auth-relevant events occurred between these blocks (live authVersion still 1 at 26,094,460).",
+  "commandsRun": [
+    "PREVIEW_MODE=true forge script script/RevokeBalancerPoolersHoldingPattern.s.sol:RevokeBalancerPoolersHoldingPattern --rpc-url $RPC_MAINNET --sender 0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6 --slow -vvvv   (from work/, no --broadcast) -> test/audit-run38/preview.log",
+    "forge script script/VerifyBalancerHolding.s.sol:VerifyBalancerHolding --rpc-url $RPC_MAINNET -vvv   (live, read-only) -> test/audit-run38/verify-live.log, forge exit 1 (expected)",
+    "forge test --match-path test/RevokeBalancerPoolers.fork.t.sol -vvv (with and without RPC_MAINNET) -> test/audit-run38/upstream-fork-test.log",
+    "forge test --match-path 'test/audit-run38/*' -vvv -> test/audit-run38/audit-fork-tests.log (9/9 PASS)"
+  ],
+  "executed": { "variant": "preview", "reverted": false, "revertReason": null, "output": "Script ran successfully; authVersion 1 -> 2; all four unauthorized; 'PREVIEW: nothing broadcast'" },
+  "preconditionResults": [
+    { "check": "block.chainid == 1", "passed": true },
+    { "check": "BalancerPoolerV2 0x7f68 has code", "passed": true },
+    { "check": "BalancerPoolerV2.owner() == OWNER 0xCad1…D0B6", "passed": true },
+    { "check": "_countAuthorized() > 0 (four hardcoded poolers all at poolerAuthVersion 1 == authVersion 1)", "passed": true, "detail": "4/4 authorized -> the broadcast WILL send exactly one tx (not the idempotent no-op path)" }
+  ],
+  "stateWrites": [
+    { "contract": "BalancerPoolerV2", "address": "0x7f6874332c4629429d70D15f685A8230323F11F1", "slot": 7, "slotDesc": "authVersion", "from": "1", "to": "2", "intended": true, "evidence": "vm.startStateDiffRecording over script.run(): exactly ONE changed storage slot across ALL accounts (test_r38_01)" }
+  ],
+  "stateWritesCompleteness": "Full state diff (vm.startStateDiffRecording / stopAndReturnStateDiff), not a targeted getter read: no other account or slot changed value. poolerAuthVersion[p] for the four is untouched (still 1); revocation is purely by version mismatch.",
+  "events": [
+    { "emitter": "0x7f6874332c4629429d70D15f685A8230323F11F1", "event": "AuthVersionIncremented(uint256 newAuthVersion)", "args": { "newAuthVersion": 2 }, "intended": true, "evidence": "vm.recordLogs: exactly one log in the whole run (test_r38_01)" }
+  ],
+  "externalCalls": [
+    { "target": "BalancerPoolerV2 0x7f68", "fn": "incrementAuthVersion()", "caller": "OWNER (prank in preview / Ledger in broadcast)", "reverted": false, "gasUsedInner": 4967 },
+    { "target": "BalancerPoolerV2 0x7f68", "fn": "owner(), authVersion(), poolerAuthVersion(address) x4 (before/after)", "reverted": false, "note": "static reads only" }
+  ],
+  "unintendedEffects": [],
+  "postconditionResults": [
+    { "check": "authVersion == before + 1 (1 -> 2)", "passed": true },
+    { "check": "OWNER 0xCad1 unauthorized (1 != 2)", "passed": true },
+    { "check": "MultiPooler 0xd1E5 unauthorized", "passed": true },
+    { "check": "0x186c (EIP-7702) unauthorized", "passed": true },
+    { "check": "0x6309 unauthorized", "passed": true }
+  ],
+  "postBroadcastWorld": {
+    "method": "Fork, vm.prank(OWNER) pooler.incrementAuthVersion() (the exact broadcast payload, not via the script), then VerifyBalancerHolding.run()",
+    "verifyBefore": "reverts 'verify: pooler still authorized' (also live today: forge exit 1, all four STILL AUTHORIZED)",
+    "verifyAfter": "passes",
+    "evidence": "test_r38_02 PASS"
+  },
+  "idempotence": {
+    "secondRunStateChanges": 0,
+    "secondRunEvents": 0,
+    "authVersionAfterSecondRun": 2,
+    "evidence": "test_r38_03 PASS (full state diff) + upstream test_fork_rerun_is_noop PASS"
+  },
+  "upstreamForkTest": {
+    "file": "test/RevokeBalancerPoolers.fork.t.sol",
+    "withRpc": "4 passed / 0 failed (FORK_BLOCK 26_094_200)",
+    "withoutRpc": "4 skipped / 0 failed",
+    "caveat": "test_fork_mint_dispatch_unaffected_after_revocation pranks NFTMinter and calls dispatch() directly with deal()t USDS; it does not run NFTMinterV2.mint (story permits this). Run-38 test_r38_04 closes the gap with a real mint."
+  },
+  "holdingPatternChecks": {
+    "a_valueFlowIntoPooler": {
+      "nftMinterConfigs4": { "dispatcher": "0x7f6874332c4629429d70D15f685A8230323F11F1", "price": "17881508289857303998", "growthBps": 1, "disabled": false },
+      "nftMinterPaused": false,
+      "realMintAfterRevocation": "SUCCEEDS (test_r38_04): user pays 17.881508 USDS -> NFTMinterV2 transfers to 0x7f68 -> dispatch wraps all of it -> 16.090698 sUSDS parked on 0x7f68; raw USDS unchanged (donation disabled, batchDonationSize 0); BPT unchanged; no Pooled event; NFT id 4 minted",
+      "mintDebtHook": "BalancerPoolerMintDebtHook 0x4A26…8bD7 (dispatcher == 0x7f68, ratio 50, mintDebt 0, recipient NFTStaker 0xc851…a13b): onDispatch accrues price*50/100 = 8.940754 phUSD debt per mint; does not revert, does not pool, is not auth-gated. Realised later by pull() (story-103 step 5).",
+      "batchDonationSizeZero": "donationEnabled == false -> full amount wrapped, _psmDonate never called, no DonationSkipped",
+      "intendedPerStory": "YES. Plan §4: 'A mint sends USDS to BalancerPoolerV2, which wraps it into sUSDS and keeps it … after that date the sUSDS simply accumulates.' Story 099 overview + AC: 'the mint path is unaffected'. Story 103 'Minimum viable fallback: Mints keep accruing sUSDS on BalancerPoolerV2' and step 9 rescueERC20(sUSDS, UniPoolerV2, balance) 'for sUSDS accrued since the holding pattern began'. Disabling index 4 is NOT part of the plan. Idle accumulation is accepted by design.",
+      "parkedFundsExits": "owner-only rescueERC20 / withdrawBPT (unaffected by revocation)"
+    },
+    "a_permissionlessSurface": {
+      "pool(uint256)": "reverts 'caller not authorized pooler' for any non-authorized caller (test_r38_05)",
+      "unlockCallback": "reverts 'caller is not vault' for direct callers; the V3 Vault only calls back the account that called unlock(), and pool() is the only path that calls Vault.unlock with the pooler as unlocker -> unreachable once pool() is gated (direct-call revert fork-verified; Vault callback-target semantics: static reasoning, unverified)",
+      "_psmDonate": "reverts 'only self' (fork-verified)",
+      "dispatch / pause / unpause": "revert 'caller is not minter' (fork-verified)",
+      "getIdealBPT": "non-view but writes NO pooler storage (state diff, test_r38_05); reverted when called by an EOA in a normal tx (Balancer V3 router queries are static-call/query-mode only) — harmless",
+      "heldBPT_20401.81": "unchanged by everything above; pooler has zero BPT and sUSDS allowance to Router 0x5C6f…9FDd, Vault 0xbA13…9bA9, Permit2 (fork-verified) -> only owner withdrawBPT can move it",
+      "verdict": "No permissionless path moves or manipulates the parked sUSDS or the held BPT during the holding pattern."
+    },
+    "b_poolerGatedCapabilities": {
+      "onlyAuthorizedPoolerUses": ["pool(uint256) — the ONLY function (BalancerPoolerV2.sol L136-139, L356)"],
+      "multiPooler": "Its authorization was never exercisable: MultiPooler.pool forwards pool(uint256,uint256,uint256,uint256) and 0x7f68 reverts on that selector (test_r38_07, trace shows 0x7f68::pool(1,0,0,0) -> Revert). Revoking it removes no live capability.",
+      "olderPooler_0x26F8": "NFTMinterV2.dispatcherToIndex(0x26F8…b38A) == 0 (registered at no index; indices 1-7 point elsewhere), holds 0 sUSDS / 0 USDS / 0 BPT. It receives no dispatched funds; its stale authorizations (OWNER/0x186c/0x6309) are irrelevant to the wind-down. (live reads at head)"
+    },
+    "c_verifierBlindSpots": {
+      "fifthAddressAfterRevocation": "owner setAuthorizedPooler(X,true) after the bump -> X stored at version 2 == authVersion -> X can pool() (BPT minted) while VerifyBalancerHolding still PASSES; authVersion()>1 also holds (=2), so the review's suggested hardening does NOT detect it (test_r38_08)",
+      "reauthOfNamedFour": "detected: verify reverts (test_r38_08)",
+      "idempotenceGuardEdge": "if the four were individually deauthorized while an unknown address held the current version, run() sends nothing and verify passes with that address still live (test_r38_09). NOT reachable at this block: Etherscan full-range log scan = exactly 4 PoolerAuthorized (all v1), 0 PoolerDeauthorized, 0 AuthVersionIncremented — so the live broadcast bumps the version and revokes every grant ever made.",
+      "story103Step0": "Story 103 / story 100 specify step 0 as 'check the four poolers as onlyAuthorizedPooler does' — the identical four-address predicate. A re-authorization of any other address between 099's broadcast and 103 would pass 103's precondition unnoticed (same mechanism as test_r38_08; 103 not yet written, so the 103 side is unverified)."
+    },
+    "d_broadcastErgonomics": {
+      "gasPriceDefault": "300000000 wei (0.3 gwei), --legacy",
+      "liveBaseFee": "0.1365 gwei at head 26,094,444; last 1,025 blocks: min 0.0586 / p50 0.0926 / p90 0.1240 / p99 0.1494 / max 0.1628 gwei; 0 blocks above 0.3 gwei",
+      "verdict": "Not underpriced at current conditions: ~2x headroom over the max base fee of the last ~3.4 h, implied tip ~0.15-0.2 gwei. Would stick only if base fee more than doubles before signing; BALANCER_HOLDING_GAS_PRICE_WEI override exists.",
+      "skipSimulation": "--skip-simulation skips only the on-chain re-simulation; the script's post-requires run in forge's local execution before signing, so a wrong local result aborts before broadcast.",
+      "verifyChaining": "VerifyBalancerHolding exits 1 on failure (verified); forge --broadcast waits for the receipt (default --timeout). If the receipt times out forge exits non-zero and :verify is not run; a re-run is safe: if mined, _countAuthorized()==0 -> no tx; if a second bump were somehow sent it only moves 2->3 (still all revoked).",
+      "ledgerPath": "m/44'/60'/46'/0/0 — identical across all 4 Ledger-signing keys in package.json, all with --sender 0xCad1…D0B6; matches story 099/103 'Shared phStaging2 facts'."
+    },
+    "e_protectiveRationale": {
+      "preRevocation": "With sUSDS parked by a mint, 0x186c (EIP-7702 delegated to EIP7702StatelessDeleGator, nonce 495, last Pooled at block 26,086,089) calls pool(0) and the contract accepts minBPT = 0 — all parked sUSDS pushed into the Balancer pool, BPT minted to the pooler (test_r38_06).",
+      "postRevocation": "Same call reverts with the auth error (test_r38_06).",
+      "verdict": "Rationale holds: until 30 Oct the four (notably an automated/delegated 0x186c) can add sUSDS to the dying pool with no enforced slippage floor; revocation removes that. Value-preserving (BPT stays on pooler), so the protection is against exit friction/sandwich loss, not theft. Off-chain consequence: any bot/UI still calling pool() on 0x7f68 will burn gas on reverts after the broadcast."
+    },
+    "f_natspec": "RevokeBalancerPoolersHoldingPattern.s.sol L14-15 say 0x186c/0x6309 are 'WhitelistPoolersV2'; on chain their 0x7f68 grants are OWNER Temp.s.sol txs (blocks 25,792,038/9). Does not affect execution."
+  }
+}

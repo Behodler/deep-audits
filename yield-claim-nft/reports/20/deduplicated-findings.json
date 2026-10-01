@@ -1,0 +1,785 @@
+{
+  "project": "yield-claim-nft",
+  "run": 20,
+  "reportDir": "/home/justin/code/audits/yield-claim-nft/reports/20",
+  "commit": "2bfa090",
+  "range": "d4cc563..2bfa090",
+  "branch": "master",
+  "mode": "regression",
+  "scanType": "deduplication",
+  "dedupTimestamp": "2026-10-01T16:40:00Z",
+  "counts": {
+    "rawIn": {
+      "LOCAL (profiles)": 6,
+      "SA (static-analysis-findings)": 49,
+      "PATTERN findings": 3,
+      "PATTERN manualReview": 6,
+      "CODE": 3,
+      "ECON": 2,
+      "F (faithfulness)": 3,
+      "TIER3 invariant failures": 1,
+      "SYMBOLIC manualReview hand arguments": 4,
+      "total": 77
+    },
+    "consolidatedOut": 9,
+    "manualReview": 10,
+    "toolNoiseForQA_items": 16,
+    "toolNoiseForQA_rawIds": 31,
+    "droppedOutright": 10,
+    "ledgerHousekeeping": 1,
+    "accounting": "77 = 23 merged into findings + 6 pattern MR + 4 symbolic + 2 static (SLITHER-002/003) into manual-review + 1 housekeeping + 31 static bucketed QA + 10 dropped",
+    "notCountedAsInputs": "profiles localObservations OBS-BP-*/OBS-NR-*/OBS-UB-* are reused verbatim from run-19 profiles (files byte-unchanged in range) and already map to ledger entries; NudgeRatchetDelayRelease and IUniswapV2Pair profiles report zero local findings. econ reweigh.L-15 folded into DEDUP-20-03; code/econ clearedChecks are clean verdicts, not findings."
+  },
+  "findings": [
+    {
+      "id": "DEDUP-20-01",
+      "class": "security (Law-3 footgun)",
+      "rank": 1,
+      "title": "UniPoolerV2._dispatch (verbatim copy) has no non-default-hook guard: an index-4 cutover that skips or reorders setHook leaves the no-op DefaultDispatchHook wired, so every index-4 mint succeeds while accruing zero phUSD mint-debt",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "_dispatch",
+      "lines": [
+        290,
+        320
+      ],
+      "suggestedRootCauseClass": "fail-open-hook-wiring",
+      "originalIds": [
+        "LOCAL-UP-001",
+        "CODE-001",
+        "FAITH-003 (F-03-048)"
+      ],
+      "sources": [
+        "profiles/UniPoolerV2.json:LOCAL-UP-001",
+        "code-findings.json:CODE-001",
+        "faithfulness-findings.json:FAITH-003"
+      ],
+      "primaryWriteUp": "CODE-001 (cross-contract chain: three owner writes on three contracts plus replaceDispatcher(4); only the setHook omission fails open). LOCAL-UP-001 adds the BalancerPoolerMintDebtHook-has-no-hookTypeId detail. FAITH-003 is the story-side annotation and is folded in, not filed separately.",
+      "secondaryFacet": "Fail-LOUD mint outage window: with hook.setDispatcher (plan step 6) and replaceDispatcher (step 8) in separate Ledger txs, index-4 mints through the still-registered BalancerPoolerV2 revert OnlyDispatcher in between; batchMint too if BatchNFTMinterMultiToken.dispatcherIndex == 4. No funds lost. Same mitigation (atomic ordering), so kept inside this finding.",
+      "law2Annotation": "story-048 mandates a verbatim _dispatch. FAITH-003: the code is faithful; the story is NOT unsafe (owner-omission footgun, not an exploit). A concrete-only guard (constructor-supplied hook, or stored defaultHook compared in _dispatch) is Law-1-sanctioned; if the owner adopts the in-_dispatch guard, record a waiver on the verbatim clause so later Law-2 scans do not flag it.",
+      "wontFixDisclosure": "Same class as Q-08 96c60b723f (owner wont-fix 2026-06-17). Q-08 triageReason verbatim: 'Owner REJECTED — intentional: BalancerPoolerV2 is LIVE and will not be retrofitted with the hookTypeId guard. The guard asymmetry vs NudgeRatchet is an accepted operational state on a deployed contract (Law-3 owner-trusted).' That rationale (live, no retrofit) does not transfer: UniPoolerV2 is undeployed and story-048 gates its deployment on this audit. New instance on a new contract, not a reopen of Q-08. Sibling open: L-09 563df2e64a (Uniboost). Fixed precedent: M-04 c91bef813d (NudgeRatchet).",
+      "recommendation": "Concrete-only guard on UniPoolerV2 (store default hook, require(address(hook) != defaultHook)) or add hookTypeId() to the pooler hook. Cutover: setHook before or atomically with replaceDispatcher(4); hook.setDispatcher last or same tx.",
+      "tentativeSeverity": "Low",
+      "severityRationale": "Footgun (non-obvious fail-open, competent owner would be surprised), misallocated mint-debt, no third-party trigger or profit. Matches L-09 precedent.",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-20-02",
+      "class": "security (MEV, POL-only)",
+      "rank": 2,
+      "title": "UniPoolerV2.pool zap relies solely on keeper-supplied spot-derived floors (minPhusdOut/minLP) with addLiquidity mins 0/0: tolerance-bounded sandwich of protocol-owned liquidity on every call (successor instance of L-06)",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "pool",
+      "lines": [
+        386,
+        421
+      ],
+      "suggestedRootCauseClass": "amm-sandwich-floor-only",
+      "originalIds": [
+        "LOCAL-UP-003",
+        "PATTERN-001",
+        "ECON-001"
+      ],
+      "crossRefs": [
+        "MR-006 (quotePool spot view; future on-chain integrator caveat; parked verbatim in manual-review.json)"
+      ],
+      "sources": [
+        "profiles/UniPoolerV2.json:LOCAL-UP-003",
+        "pattern-matches.json:PATTERN-001",
+        "econ-findings.json:ECON-001"
+      ],
+      "primaryWriteUp": "ECON-001 (quantified: extraction ~0.44*t*Delta, e.g. $1,000 zap -> $2.21/$4.43/$8.87/$13.34 at t=0.5/1/2/3%; front-run capital $54-$338; gas ~$0.08; protocol owns ~100% of LP so searcher profit == protocol loss). LOCAL-UP-003 contributes: non-zero check is nominal (1 passes), minPhusdOut is the binding floor under adverse front-run. PATTERN-001 contributes the signature evidence.",
+      "docDefect": "ECON-001: plan BalancerWinddownPlan §5 cites 'sandwich exposure' as a donation-only weakness; zap and donation both end at (X+Delta, Y) and the zap's floors are the same mitigation. Docs correction only.",
+      "ledgerRelation": "Sibling location of L-06 342075dfba (open, BalancerPoolerV2.pool) — same root cause; new contract so it will not reconcile by fingerprint. Finding-manager: attach as successor/second location of L-06 OR file new-fingerprint sibling; BalancerPoolerV2 is slated for deletion in story-050 so L-06 must not close as code-removed while this lives.",
+      "recommendation": "Operational: tolerance <= 0.5% (quotePool exact under synced reserves — P5 PASS), private submission, chunk zaps. Optional caller-supplied deadline (see DEDUP-20-06).",
+      "tentativeSeverity": "Low",
+      "severityRationale": "Each event bounded by keeper tolerance, POL-only, no user funds; consistent with L-06 (Low, open).",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-20-03",
+      "class": "security (MEV / keeper sequencing) + L-15 re-weigh",
+      "rank": 3,
+      "title": "PromotionUniV2_Eth Leg A now trades on the same shallow phUSD/sUSDS V2 pair UniPoolerV2.pool zaps into: cross-call quote interference forces self-DoS or widened tolerances that a single searcher can stack across both calls (L-15 premise re-weigh)",
+      "contract": "src/dispatchers/PromotionUniV2_Eth.sol + src/dispatchers/UniPoolerV2.sol",
+      "function": "PromotionUniV2_Eth.pool -> _legA -> _swapSusdsForPhusd / UniPoolerV2.pool",
+      "lines": [
+        386,
+        421
+      ],
+      "suggestedRootCauseClass": "shared-venue-floor-staleness",
+      "originalIds": [
+        "CODE-002",
+        "PATTERN-003",
+        "LOCAL-PR-001"
+      ],
+      "sources": [
+        "code-findings.json:CODE-002",
+        "pattern-matches.json:PATTERN-003",
+        "profiles/PromotionUniV2_Eth.json:LOCAL-PR-001",
+        "econ-findings.json:reweigh.L-15"
+      ],
+      "primaryWriteUp": "CODE-002 (1,000-sUSDS zap cuts a ~570-share Leg A out by 2.83%; Leg A cuts the zap by 3.26%; same-block batching -> revert below ~3% tolerance or widening to >=3.5% that one front-run harvests twice). PATTERN-003: venue change warrants re-confirming L-15 rather than silent inheritance. LOCAL-PR-001: Leg A zero-floor guard is nominal (1 passes) and the other four floors (minEthOut/minPromoOut/minWbtcOut/minLP) still accept 0 — inside L-15's acceptance, recorded so it is not re-filed separately.",
+      "econReweigh": "econ-findings.json reweigh.L-15 verdict: NO ESCALATION of L-15 on its own terms (Leg A extraction ~t*A, nearly depth-independent; new venue strengthens the POL-only premise; only external leak is the live V2 fee switch, 0.05% of Leg A volume). Venue depth premise corrected: ~$21.3k/side, not $34k (see DEDUP-20-09). The one genuinely new fact — shared-venue coupling — is this finding.",
+      "wontFixDisclosure": "L-15 e64f73d629 owner wont-fix 2026-07-19, triageReason verbatim: 'Owner-accepted wont-fix (2026-07-19): user understands the tradeoffs. On-chain-priceless LP-add MEV on PromotionUniV2_Eth Legs A/B is keeper-floor-bounded (all 5 min-out floors + minLP present), POL-only, no user funds; residual sandwich exposure on the thin ETH->promotion hop accepted as keeper-hygiene responsibility. Sibling of L-06.' Filed only for the cross-contract coupling that did not exist at triage. Owner decides whether L-15 also covers it; if so, record on L-15 and close this as duplicate. Note: the triageReason's 'all 5 min-out floors ... present' is literally true only as parameters — four of them accept 0 (LOCAL-PR-001).",
+      "flaggedForReview": "Ambiguous duplicate vs L-15 (wont-fix): human decides at /ledger.",
+      "recommendation": "Never batch UniPoolerV2.pool and PromotionUniV2_Eth.pool in one block; quote the second after the first is mined; private submission. Optional: single entry point sizing both from live reserves.",
+      "tentativeSeverity": "Low",
+      "confidence": "medium"
+    },
+    {
+      "id": "DEDUP-20-04",
+      "class": "security (deploy-time / cutover footgun)",
+      "rank": 4,
+      "title": "UniPoolerV2 constructor validates only the pair's token set, not pair_ == router.factory().getPair(sUSDS, phUSD); combined with a permissionless, possibly-empty factory pair, the cutover can be decoupled (non-canonical pair) or permanently griefed (dust pre-seed at an arbitrary ratio, MINIMUM_LIQUIDITY lock)",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "constructor",
+      "lines": [
+        159,
+        179
+      ],
+      "suggestedRootCauseClass": "pair-not-bound-to-router-factory",
+      "originalIds": [
+        "LOCAL-UP-002",
+        "CODE-003"
+      ],
+      "crossRefs": [
+        "MR-002 (same as LOCAL-UP-002; parked verbatim)",
+        "MR-004 (empty-pair seeding window; same as CODE-003; parked verbatim)"
+      ],
+      "sources": [
+        "profiles/UniPoolerV2.json:LOCAL-UP-002",
+        "code-findings.json:CODE-003",
+        "pattern-matches.json:manualReview.MR-002",
+        "pattern-matches.json:manualReview.MR-004"
+      ],
+      "facets": [
+        {
+          "facet": "A — non-canonical pair decoupling (LOCAL-UP-002/MR-002)",
+          "impact": "pool()/quotePool size s and read reserves from _pair while router executes on factory pair: mis-sized s, wrong quote, LP minted is a different token than pair() reports (rescuable). Floors bound loss.",
+          "mitigation": "constructor require(factory.getPair(sUSDS, phUSD) == pair_) or cutover-script assertion"
+        },
+        {
+          "facet": "B — permissionless pre-seed grief (CODE-003/MR-004)",
+          "impact": "Third party createPair + dust mint at skewed ratio before the atomic seed; cutover precondition 0 ('reserves (0,0)') fails forever. Unsafe workaround (relaxing precondition, router add with zero mins) lets griefer arbitrage the protocol seed. No in-repo fund loss today.",
+          "mitigation": "documented fallback (direct transfer + pair.mint, or pre-arbitrage to target ratio with reserve-ratio assertion); route to /audit-script on the cutover"
+        }
+      ],
+      "consolidationNote": "Consolidated per orchestrator instruction (shared root: the pooler binds to an unvalidated, externally-creatable pair and the cutover seeds it). The two facets have different attack vectors and only partly overlapping mitigations; flagged for review in case severity-classifier prefers to split.",
+      "flaggedForReview": "Consolidation of two facets with distinct mitigations — confirm one finding vs two.",
+      "law3": "Facet A on its own is an obvious-misconfiguration (story-faithfulness suppressed it under Law 3); facet B is non-obvious (MINIMUM_LIQUIDITY permanence) -> footgun, in scope.",
+      "tentativeSeverity": "Low (Informational if facet A alone)",
+      "confidence": "medium"
+    },
+    {
+      "id": "DEDUP-20-05",
+      "class": "security (griefing / DoS) + spec claim falsified",
+      "rank": 5,
+      "title": "UniPoolerV2.pool/quotePool size the zap from getReserves() without sync(): an unsynced token donation to the pair is absorbed in swap(), stranding non-dust phUSD on the pooler (229 phUSD on a 100k zap after a 0.5% donation) or reverting pending pool() with InsufficientLP, with the donation recoverable via skim() for gas only",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "pool / quotePool / _reserves",
+      "lines": [
+        386,
+        458
+      ],
+      "suggestedRootCauseClass": "unsynced-reserve-sizing",
+      "originalIds": [
+        "T3-R20-01",
+        "LOCAL-UP-004"
+      ],
+      "crossRefs": [
+        "MR-001 (same root cause; parked verbatim in manual-review.json per orchestrator rule; subsumed here)"
+      ],
+      "sources": [
+        "invariant-results.json:T3-R20-01",
+        "profiles/UniPoolerV2.json:LOCAL-UP-004",
+        "pattern-matches.json:manualReview.MR-001"
+      ],
+      "evidence": {
+        "brokenInvariants": [
+          "P1_leftoverIsWeiDust",
+          "P4_quoteLPIsValidFloor",
+          "P8_frontRunNeverStrands"
+        ],
+        "engines": "forge (suites C,D) + medusa (MedusaUniPoolerDonate), independent; tripwires 13/13 fire",
+        "deterministicRepro": "yield-claim-nft/work/test/run20/DonationStrand.t.sol (reproduced by orchestrator)",
+        "strand": "1M sUSDS / 1.06M phUSD pool; 5,105.88 sUSDS (0.5%) transferred to pair; pool(100,000, quote*0.99) succeeds, leaves 229.398 phUSD on pooler (dust bound: tens of wei); phUSD only moves via owner rescueERC20",
+        "dos": "2% donation -> pool(a, quoteOut*0.99, quoteLP*0.99) reverts UniPoolerV2__InsufficientLP(48746147894859096248178, 49179748976765704050059); attacker skim()s the donation back -> repeatable for gas",
+        "control": "phUSD donation leaves re-poolable sUSDS (not stranded); trade-only front-runs PASS P1/P4/P8"
+      },
+      "specDefect": "Falsifies the NatSpec / story-048 claims that a front-run 'never [changes] the leftover' and that the quote 'remains a valid floor' (true only for swap-style front-runs). story-048 is auto-complete (not human-reviewed).",
+      "symbolicNote": "symbolic-results.json dust/quote models assume SYNCED reserves; they neither cover nor refute this case (and all timed out anyway).",
+      "recommendation": "IUniswapV2Pair(pair).sync() (or skim to self) at top of pool() and read reserves after; same in quotePool's documentation for keepers. Correct NatSpec.",
+      "tentativeSeverity": "Low",
+      "severityRationale": "Tool-severity potential-high (failing invariant); agent assessment Low/QA — griefing where attacker cost >= harm for stranding, gas-only DoS of a keeper call with permissionless recovery, no value loss. Defer to severity-classifier.",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-20-06",
+      "class": "QA",
+      "rank": 6,
+      "title": "Router calls pass deadline = block.timestamp (no effective expiry) in UniPoolerV2.pool and the new PromotionUniV2_Eth Leg A swap",
+      "contract": "src/dispatchers/UniPoolerV2.sol (+ PromotionUniV2_Eth.sol)",
+      "function": "pool",
+      "lines": [
+        386,
+        406,
+        415
+      ],
+      "suggestedRootCauseClass": "ineffective-deadline",
+      "originalIds": [
+        "PATTERN-002",
+        "SLITHER-027",
+        "SLITHER-028",
+        "ADERYN-007",
+        "ADERYN-008",
+        "ADERYN-009",
+        "SLITHER-026"
+      ],
+      "sources": [
+        "pattern-matches.json:PATTERN-002",
+        "static-analysis-findings.json:SLITHER-027,SLITHER-028,ADERYN-007,ADERYN-008,ADERYN-009,SLITHER-026"
+      ],
+      "instances": [
+        {
+          "contract": "src/dispatchers/UniPoolerV2.sol",
+          "function": "pool",
+          "lines": [
+            406,
+            415
+          ],
+          "ids": [
+            "PATTERN-002",
+            "SLITHER-027"
+          ],
+          "ledger": "NEW (new contract)"
+        },
+        {
+          "contract": "src/dispatchers/PromotionUniV2_Eth.sol",
+          "function": "_swapSusdsForPhusd (Leg A, new call site)",
+          "line": 534,
+          "ids": [
+            "PATTERN-002",
+            "ADERYN-009"
+          ],
+          "ledger": "Q-12 69f9f9ca67 (qa-bundled) — inside the same pool(); reconcile"
+        },
+        {
+          "contract": "src/dispatchers/PromotionUniV2_Eth.sol",
+          "function": "_addPhusdPromoLiquidity / _legB / _legC",
+          "lines": [
+            459,
+            500,
+            519
+          ],
+          "ids": [
+            "SLITHER-028",
+            "ADERYN-007",
+            "ADERYN-008"
+          ],
+          "ledger": "Q-12 (qa-bundled); reconcile"
+        },
+        {
+          "contract": "src/dispatchers/Uniboost.sol",
+          "function": "pool",
+          "lines": [
+            266,
+            276,
+            289
+          ],
+          "ids": [
+            "SLITHER-026"
+          ],
+          "ledger": "unchanged file; run-19 QA-bundled under Q-12 class; reconcile"
+        }
+      ],
+      "recommendation": "Caller-supplied deadline parameter.",
+      "tentativeSeverity": "QA (Low/NC)",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-20-07",
+      "class": "faithfulness (spec conflict)",
+      "rank": 7,
+      "proposedLabel": "F-02-048",
+      "title": "BalancerWinddownPlan Stage 2 steps 7/10 (register/unregister with Pauser; 'dispatch works while pooler paused') conflict with story-048 (no pauser(), pause() is onlyMinter and blocks dispatch); the pool-only kill switch incrementAuthVersion() is named by neither",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "(contract surface) pause / Pauser registration",
+      "lines": [
+        68
+      ],
+      "originalIds": [
+        "FAITH-002"
+      ],
+      "sources": [
+        "faithfulness-findings.json:FAITH-002",
+        "code-findings.json:clearedChecks[Pause authority] (corroborating)"
+      ],
+      "note": "Code follows the authoritative story; no code deviation. Downstream risk in the phStaging2:100/103 cutover script written from the plan — route to script-auditor (unipooler-cutover).",
+      "tentativeSeverity": "Informational (spec-conformance)",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-20-08",
+      "class": "faithfulness (copied doc defect)",
+      "rank": 8,
+      "proposedLabel": "F-01-048",
+      "title": "UniPoolerV2 inherits F-01-047 verbatim: DonationSkipped / _dispatch NatSpec still lists 'dust', but the gemAmt == 0 branch is a silent no-op; the new contract-level NatSpec omits dust, so the contract contradicts itself",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "DonationSkipped (event NatSpec) / _dispatch NatSpec",
+      "lines": [
+        129,
+        131,
+        284,
+        286
+      ],
+      "originalIds": [
+        "FAITH-001"
+      ],
+      "sources": [
+        "faithfulness-findings.json:FAITH-001",
+        "code-findings.json:carryoverInstances (L-18/F-01-047)",
+        "pattern-matches.json:manualReview.MR-005 (L-18 element)"
+      ],
+      "ledgerRelation": "UniPoolerV2 instance of F-01-047 5d6538f76f (open) / L-18 482cefc33e (open). Kept as its own entry because story-050 deletes BalancerPoolerV2 and F-01-047 would otherwise close as code-removed while the defect lives on.",
+      "recommendation": "Drop 'dust' from both NatSpec blocks (comment-only; does not breach the verbatim-code clause).",
+      "tentativeSeverity": "Informational (spec-conformance)",
+      "confidence": "high"
+    },
+    {
+      "id": "DEDUP-20-09",
+      "class": "economic premise / operational footgun",
+      "rank": 9,
+      "title": "Plan §5 sizes the zap against the full Balancer pool (~33.8k/34.8k) but the cutover seeds the V2 pair with only the protocol's 62.9% of BPT (~19.1k sUSDS / 21.9k phUSD per side, ~1.59x shallower): phUSD crosses $1 at a ~$636 zap, not ~$1k, so the intended no-ceiling arb skim on POL is larger than the plan states",
+      "contract": "src/dispatchers/UniPoolerV2.sol + src/dispatchers/PromotionUniV2_Eth.sol",
+      "function": "pool / quotePool (keeper sizing); cutover seed",
+      "lines": [
+        386,
+        451
+      ],
+      "originalIds": [
+        "ECON-002"
+      ],
+      "sources": [
+        "econ-findings.json:ECON-002",
+        "faithfulness-findings.json:evaluatedNotEscalated[story-048/plan §5]"
+      ],
+      "note": "Not story-unsafe (deliberate design cost; arbitrageur posts $1 collateral per phUSD — per project memory this is closer to accepted design cost than loss). Surfaced because the depth premise is wrong. Depends on the open question whether EOA 0xc65f...e8db (37.1% BPT) migrates. Also corrects the depth premise used in DEDUP-20-03.",
+      "recommendation": "Redo plan §5 at 62.9% depth or resolve the EOA question before Stage 2; keeper chunks pool() so post-zap spot <= $1.",
+      "tentativeSeverity": "Informational",
+      "confidence": "high"
+    }
+  ],
+  "carryoverInstances": {
+    "note": "UniPoolerV2 copies BalancerPoolerV2's _dispatch/_psmDonate/setters verbatim (story-048). These ledger entries now have a second, undeployed location. They are carryovers, NOT new root causes in this run. Sanitizer/finding-manager: attach UniPoolerV2 as a second location (or file new-fingerprint siblings). Do not drop silently; BalancerPoolerV2 is deleted by story-050 (still incomplete) and these must not close as code-removed while the copy lives.",
+    "sources": [
+      "code-findings.json:carryoverInstances",
+      "pattern-matches.json:manualReview.MR-005",
+      "econ-findings.json:clearedChecks (L-05/L-17)"
+    ],
+    "entries": [
+      {
+        "label": "L-05",
+        "fingerprint": "e527a71211",
+        "status": "open",
+        "secondLocation": "src/dispatchers/UniPoolerV2.sol:setBatchDonationSize / _dispatch",
+        "note": "batchDonationSize not coupled to hook ratio; cutover step 7 copies batchDonationSize live"
+      },
+      {
+        "label": "L-17",
+        "fingerprint": "79a2cd4a79",
+        "status": "open",
+        "secondLocation": "src/dispatchers/UniPoolerV2.sol:_dispatch",
+        "note": "disabling donation drops parked USDS from retry loop; psm.gem() read live"
+      },
+      {
+        "label": "L-18",
+        "fingerprint": "482cefc33e",
+        "status": "open",
+        "secondLocation": "src/dispatchers/UniPoolerV2.sol:_psmDonate",
+        "note": "gemAmt==0 dust branch event-silent; doc side filed as DEDUP-20-08"
+      },
+      {
+        "label": "F-01-047",
+        "fingerprint": "5d6538f76f",
+        "status": "open",
+        "secondLocation": "src/dispatchers/UniPoolerV2.sol:DonationSkipped NatSpec",
+        "note": "SATISFIED by DEDUP-20-08 (F-01-048) as an explicit new-contract instance; link, do not double-file"
+      },
+      {
+        "label": "Q-18",
+        "fingerprint": "11d8b8656f",
+        "status": "open",
+        "secondLocation": "src/dispatchers/UniPoolerV2.sol:_psmDonate",
+        "note": "unpaired streamer forceApprove"
+      },
+      {
+        "label": "Q-05",
+        "fingerprint": "13fe448d0e",
+        "status": "open",
+        "secondLocation": "src/dispatchers/UniPoolerV2.sol:pool (line 390)",
+        "staticIds": [
+          "ADERYN-013"
+        ],
+        "note": "nonReentrant not first modifier"
+      },
+      {
+        "label": "Q-02",
+        "fingerprint": "261859a435",
+        "status": "qa-bundled",
+        "secondLocation": "src/dispatchers/UniPoolerV2.sol:_dispatch (lines 290,306)",
+        "staticIds": [
+          "SLITHER-005"
+        ],
+        "note": "IERC4626.deposit return ignored"
+      },
+      {
+        "label": "Q-08",
+        "fingerprint": "96c60b723f",
+        "status": "wont-fix",
+        "secondLocation": "NONE — DO NOT ATTACH",
+        "note": "LAW-1 WARNING: attaching UniPoolerV2 to wont-fix Q-08 would suppress it. The UniPoolerV2 instance is filed as DEDUP-20-01 with the expired-rationale disclosure (Q-08's 'live, will not be retrofitted' does not apply to an undeployed contract)."
+      },
+      {
+        "label": "L-06",
+        "fingerprint": "342075dfba",
+        "status": "open",
+        "secondLocation": "src/dispatchers/UniPoolerV2.sol:pool",
+        "note": "successor instance filed as DEDUP-20-02; link as sibling"
+      }
+    ],
+    "unledgeredClone": {
+      "staticIds": [
+        "SLITHER-010",
+        "SLITHER-009"
+      ],
+      "note": "ISkyPSM.buyGem return ignored in _psmDonate (UniPoolerV2:359 clone of BalancerPoolerV2:335). No ledger entry; bucketed QA below."
+    }
+  },
+  "ledgerHousekeeping": [
+    {
+      "originalId": "LOCAL-PR-002",
+      "ledger": "Q-14 e5d7aff2ea (qa-bundled)",
+      "proposal": "/ledger fixed (code removed in a4d80f4: PromotionUniV2_Eth.unlockCallback deleted)",
+      "humanOnly": true
+    }
+  ],
+  "toolNoiseForQA": {
+    "note": "Bucketed for QA/4naly3er, NOT dropped. Ledger-matched items are reconcile-only.",
+    "items": [
+      {
+        "ids": [
+          "SLITHER-005"
+        ],
+        "item": "IERC4626.deposit return ignored, UniPoolerV2._dispatch:290/306",
+        "ledgerEntry": "Q-02 (qa-bundled) carryover",
+        "action": "attach as Q-02 second location"
+      },
+      {
+        "ids": [
+          "SLITHER-015"
+        ],
+        "item": "Same, BalancerPoolerV2._dispatch:266/282 (unchanged)",
+        "ledgerEntry": "Q-02",
+        "action": "existing entry, reconcile (exact duplicate)"
+      },
+      {
+        "ids": [
+          "SLITHER-010",
+          "SLITHER-009"
+        ],
+        "item": "ISkyPSM.buyGem return ignored, UniPoolerV2._psmDonate:359 (new, verbatim copy) / BalancerPoolerV2._psmDonate:335 (unchanged)",
+        "action": "QA bundle; spent amount is computed independently and approval is exact (symbolic hand argument psm_flooring, unverified)"
+      },
+      {
+        "ids": [
+          "SLITHER-014"
+        ],
+        "item": "addLiquidity amountA/amountB ignored, UniPoolerV2.pool:386 (liquidity IS checked vs minLP)",
+        "action": "QA bundle; residuals are the subject of DEDUP-20-05 / P1 (trade-only PASS)"
+      },
+      {
+        "ids": [
+          "SLITHER-008"
+        ],
+        "item": "addLiquidity amounts ignored, PromotionUniV2_Eth._addPhusdPromoLiquidity:459",
+        "ledgerEntry": "Q-15 (qa-bundled)",
+        "action": "existing entry, reconcile"
+      },
+      {
+        "ids": [
+          "SLITHER-011"
+        ],
+        "item": "router swap returns ignored, PromotionUniV2_Eth._legB:495/500",
+        "ledgerEntry": "Q-13 (qa-bundled)",
+        "action": "existing entry, reconcile"
+      },
+      {
+        "ids": [
+          "SLITHER-013"
+        ],
+        "item": "router returns ignored x5, Uniboost.pool:266/276/289 (unchanged; floors present)",
+        "action": "QA bundle (run-19 SA-014)"
+      },
+      {
+        "ids": [
+          "SLITHER-006",
+          "SLITHER-007"
+        ],
+        "item": "Balancer vault unlock/settle returns ignored, BalancerPoolerV2.pool:356/361, unlockCallback:365/395 (unchanged; contract deleted by story-050)",
+        "action": "QA bundle (run-19 SA-003/SA-004)"
+      },
+      {
+        "ids": [
+          "SLITHER-004"
+        ],
+        "item": "strict equality sUSDSAmount == 0 in BalancerPoolerV2.getIdealBPT:405 (unchanged; non-view query; zero-guard, not a balance equality)",
+        "action": "QA bundle / informational"
+      },
+      {
+        "ids": [
+          "ADERYN-013",
+          "ADERYN-012",
+          "ADERYN-010",
+          "ADERYN-011",
+          "ADERYN-014",
+          "ADERYN-015",
+          "ADERYN-016",
+          "ADERYN-017"
+        ],
+        "item": "nonReentrant not the first modifier: UniPoolerV2.pool:390 (new), PromotionUniV2_Eth.pool:424 (changed file), BalancerPoolerV2.pool:356, NudgeRatchetDelayRelease.release:108, Uniboost.pool:270, Balancer/NudgeRatchet/UniboostMintDebtHook.pull:120/136/141 (unchanged)",
+        "ledgerEntry": "Q-05 (open)",
+        "action": "pattern duplicate; existing entry, reconcile; UniPoolerV2 attached via carryover list"
+      },
+      {
+        "ids": [
+          "SLITHER-018",
+          "SLITHER-019",
+          "SLITHER-020",
+          "SLITHER-022",
+          "SLITHER-023",
+          "SLITHER-024",
+          "SLITHER-025"
+        ],
+        "item": "reentrancy-events (event after external call): UniPoolerV2._psmDonate:333 (new copy), BalancerPoolerV2._psmDonate:309 / unlockCallback:365, NFTMinterV2.burn:341 / setDispatcherActive:309 / mintFor:206, MultiPooler.pool:60",
+        "action": "QA bundle; event ordering only, no reentrancy vector (code-scanner cleared reentrancy for UniPoolerV2/Promotion; nonReentrant/self-gated paths)"
+      },
+      {
+        "ids": [
+          "SLITHER-021"
+        ],
+        "item": "reentrancy-events NFTMinterV2._executeMint:170 (unchanged)",
+        "ledgerEntry": "L-01 a25137b12f (qa-bundled)",
+        "action": "existing entry, reconcile"
+      },
+      {
+        "ids": [
+          "SLITHER-017"
+        ],
+        "item": "external call in loop, MultiPooler.pool:60 (unchanged)",
+        "action": "QA bundle; bounded pooler-supplied batch, onlyAuthorizedPooler; batch staleness is L-11"
+      },
+      {
+        "ids": [
+          "SLITHER-016"
+        ],
+        "item": "ATokenDispatcherV2.setMinter emits no event (unchanged)",
+        "ledgerEntry": "Q-04 daada310d0 (qa-bundled)",
+        "action": "exact duplicate of ledger entry; reconcile, do not re-file"
+      },
+      {
+        "ids": [
+          "ADERYN-001"
+        ],
+        "item": "abi.encodePacked in NFTMinterV2.uri:263 (unchanged)",
+        "ledgerEntry": "Q-03 162f28d564 (qa-bundled)",
+        "action": "exact duplicate; no hash consumer (refuted as collision class in run-19 R-07)"
+      },
+      {
+        "ids": [
+          "SLITHER-029"
+        ],
+        "item": "low-level .call{value} in PromotionUniV2_Eth.rescueETH:556 (owner-only rescue; checked ok)",
+        "action": "QA bundle (run-19 SA-019, value-transfer carve-out)"
+      }
+    ]
+  },
+  "dropped": {
+    "note": "The only outright removals. Each logged with reason. Merges are traceable via originalIds.",
+    "items": [
+      {
+        "ids": [
+          "ADERYN-005",
+          "ADERYN-002",
+          "ADERYN-003",
+          "ADERYN-004",
+          "ADERYN-006"
+        ],
+        "reason": "tool-noise: aderyn reentrancy-state-change in CONSTRUCTORS (UniPoolerV2:167/168/173, BalancerPoolerV2:152, NudgeRatchet:84, NudgeRatchetDelayRelease:75, UniboostMintDebtHook:85). A constructor cannot be re-entered (no code at address, deployer-controlled). False positive; removed per orchestrator instruction. Run-19 had retained the four unchanged ones as low-confidence QA; this run removes them outright with this logged reason."
+      },
+      {
+        "ids": [
+          "SLITHER-001"
+        ],
+        "reason": "tool-noise: divide-before-multiply in UniPoolerV2.quotePool:438/447, an external VIEW. Expressions mirror UniswapV2Library.getAmountOut and Router quote integer math exactly (Halmos PASS check_L2_quoteOutEqGetAmountOut is an identity; invariant P5_quotePhusdOutExact PASS both engines). The quote's real defect (unsynced reserves) is DEDUP-20-05, unrelated to operation order."
+      },
+      {
+        "ids": [
+          "SLITHER-012"
+        ],
+        "reason": "tool-noise: UniPoolerV2._reserves ignores getReserves()'s blockTimestampLast. Benign: only reserves are needed; no TWAP use."
+      },
+      {
+        "ids": [
+          "ADERYN-018",
+          "ADERYN-019",
+          "ADERYN-020"
+        ],
+        "reason": "pure informational noise: state change without event in unchanged files (BurnRecorder.setBurner:42, BurnRecorder.registerToken:65, BalancerPoolerV2.setPool:182). Owner setters, no security or spec impact; outside regression delta."
+      }
+    ]
+  },
+  "dedupDecisionLog": [
+    {
+      "decision": "MERGE",
+      "ids": [
+        "LOCAL-UP-001",
+        "CODE-001",
+        "FAITH-003"
+      ],
+      "into": "DEDUP-20-01",
+      "basis": "Same contract:function (UniPoolerV2._dispatch), same root cause (verbatim _dispatch, no non-default-hook guard), same mitigation. FAITH-003 declares dedupWith CODE-001 and is the story-side annotation. CODE-001's fail-loud ordering window kept as a secondary facet (same fix: atomic cutover ordering)."
+    },
+    {
+      "decision": "MERGE",
+      "ids": [
+        "LOCAL-UP-003",
+        "PATTERN-001",
+        "ECON-001"
+      ],
+      "into": "DEDUP-20-02",
+      "basis": "Same contract:function (UniPoolerV2.pool), same root cause (spot-derived keeper floors only, addLiquidity 0/0 mins). ECON-001 quantification is primary."
+    },
+    {
+      "decision": "MERGE",
+      "ids": [
+        "LOCAL-PR-001",
+        "PATTERN-003",
+        "CODE-002",
+        "econ reweigh L-15"
+      ],
+      "into": "DEDUP-20-03",
+      "basis": "All re-weigh L-15 after Leg A moved to the shared V2 pair. CODE-002's cross-call coupling is the only new fact; LOCAL-PR-001 (nominal floors) and the econ L-15 verdict (no escalation on its own terms) are folded as context."
+    },
+    {
+      "decision": "KEEP BOTH",
+      "ids": [
+        "DEDUP-20-02",
+        "DEDUP-20-03"
+      ],
+      "basis": "Same MEV family, different root cause and mitigation: 02 is a single-call sandwich on UniPoolerV2 (L-06 successor, open); 03 is two-contract same-block quote coupling under a wont-fix (L-15). Merging would risk 02 being suppressed under L-15's wont-fix."
+    },
+    {
+      "decision": "MERGE",
+      "ids": [
+        "LOCAL-UP-002",
+        "CODE-003",
+        "MR-002 (xref)",
+        "MR-004 (xref)"
+      ],
+      "into": "DEDUP-20-04",
+      "basis": "Per orchestrator: shared root of an unvalidated, externally-creatable pair. MR-004 added because it is the same pre-seed window as CODE-003. Two facets with partly distinct mitigations; flagged for review."
+    },
+    {
+      "decision": "MERGE",
+      "ids": [
+        "T3-R20-01",
+        "LOCAL-UP-004",
+        "MR-001 (xref)"
+      ],
+      "into": "DEDUP-20-05",
+      "basis": "Identical root cause (reserves read without sync, swap() absorbs surplus). T3-R20-01 is reproduced, two independent engines, with numbers; it subsumes LOCAL-UP-004 and MR-001 (which both under-rated impact as dust/info). MR-001 still parked verbatim in manual-review.json per the pattern-matcher manualReview rule."
+    },
+    {
+      "decision": "MERGE",
+      "ids": [
+        "PATTERN-002",
+        "SLITHER-027",
+        "SLITHER-028",
+        "ADERYN-007",
+        "ADERYN-008",
+        "ADERYN-009",
+        "SLITHER-026"
+      ],
+      "into": "DEDUP-20-06",
+      "basis": "Pattern duplicate: block.timestamp deadline across router calls; one fix (caller-supplied deadline). Promotion and Uniboost instances reconcile to Q-12 class; UniPoolerV2 is new."
+    },
+    {
+      "decision": "KEEP",
+      "ids": [
+        "FAITH-002"
+      ],
+      "into": "DEDUP-20-07",
+      "basis": "Unique Law-2 spec conflict; corroborated by code-scanner cleared check (Pause authority) — that cleared check is not a separate finding."
+    },
+    {
+      "decision": "KEEP (not merged into carryover)",
+      "ids": [
+        "FAITH-001"
+      ],
+      "into": "DEDUP-20-08",
+      "basis": "Is the UniPoolerV2 instance of F-01-047 but must survive story-050's deletion of BalancerPoolerV2; carryover pointer for F-01-047 marked satisfied by this entry."
+    },
+    {
+      "decision": "KEEP",
+      "ids": [
+        "ECON-002"
+      ],
+      "into": "DEDUP-20-09",
+      "basis": "Unique plan-premise error; faithfulness agent deliberately did not file a separate F entry to avoid duplication."
+    },
+    {
+      "decision": "ROUTE",
+      "ids": [
+        "LOCAL-PR-002"
+      ],
+      "into": "ledgerHousekeeping",
+      "basis": "Not a finding: Q-14 e5d7aff2ea targets PromotionUniV2_Eth.unlockCallback, deleted in a4d80f4. Propose /ledger fixed (code removed) — human-applied only. Corroborated by faithfulness notes."
+    },
+    {
+      "decision": "ROUTE",
+      "ids": [
+        "SLITHER-003",
+        "SLITHER-002"
+      ],
+      "into": "manual-review.json (SYM-MR-04)",
+      "basis": "divide-before-multiply in _psmDonate is NOT view-only and the symbolic proof of its safety TIMED OUT. Hand argument + 50k forge fuzz suggest intended flooring, but nothing is machine-verified, so it is parked rather than dropped."
+    },
+    {
+      "decision": "DO NOT ATTACH",
+      "ids": [
+        "Q-08 carryover pointer"
+      ],
+      "basis": "Q-08 is wont-fix; attaching UniPoolerV2 to it would suppress a live footgun on an undeployed contract. Superseded by DEDUP-20-01."
+    }
+  ],
+  "flaggedForReview": [
+    {
+      "id": "DEDUP-20-03",
+      "why": "possible duplicate of wont-fix L-15; owner decides coverage of shared-venue coupling"
+    },
+    {
+      "id": "DEDUP-20-04",
+      "why": "two facets with distinct mitigations consolidated per instruction; classifier may split"
+    },
+    {
+      "id": "DEDUP-20-05",
+      "why": "tool severity potential-high (failing invariant) vs agent Low/QA; severity-classifier to decide"
+    },
+    {
+      "id": "carryover Q-08",
+      "why": "must NOT be attached to wont-fix Q-08 (suppression); DEDUP-20-01 is the live instance"
+    }
+  ],
+  "manualReviewFile": "/home/justin/code/audits/yield-claim-nft/reports/20/manual-review.json",
+  "semgrepNote": "Semgrep produced only INFO gas/style hits (213), zero security rules; Solidity security coverage rests on Slither + Aderyn."
+}

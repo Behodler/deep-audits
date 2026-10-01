@@ -1,0 +1,54 @@
+{
+  "kind": "lightweight interface-abstraction profile (dependencies of the run-20 targets; no local findings adjudicated)",
+  "commit": "2bfa090",
+  "profileTimestamp": "2026-10-01T00:00:00Z",
+  "contracts": {
+    "src/dispatchers/ATokenDispatcherV2.sol": {
+      "changedInRange": false,
+      "role": "abstract base of UniPoolerV2, PromotionUniV2_Eth, NudgeRatchetDelayRelease, NudgeRatchet, BalancerPoolerV2, Uniboost",
+      "entryPoints": {
+        "dispatch(minter, amount, extraData)": "external nonReentrant onlyMinter whenNotPaused; calls _dispatch then hook.onDispatch(minter, amount, extraData) (hook call is NOT failure-isolated)",
+        "pause()/unpause()": "onlyMinter (owner cannot pause directly)",
+        "setMinter(address)": "onlyOwner, no zero check",
+        "setHook(IDispatchHook)": "onlyOwner, non-zero",
+        "setMetadata": "onlyOwner"
+      },
+      "state": ["_minter", "hook (default: DefaultDispatchHook deployed in ctor - a no-op)", "_name/_image/_description", "Pausable._paused", "Ownable._owner", "ReentrancyGuard status"],
+      "keyFact": "Default hook is a no-op: any concrete dispatcher without a hook-type guard fails OPEN (zero debt) if setHook is forgotten (M-04 class)."
+    },
+    "src/NFTMinterV2.sol (dispatch path only)": {
+      "changedInRange": false,
+      "_executeMint(index, recipient, extraData)": [
+        "require(!paused) (own pauser-controlled flag)",
+        "token = dispatcher.primeToken()",
+        "safeTransferFrom(msg.sender -> dispatcher, price) with balance-delta measurement -> actualReceived",
+        "price grows by growthBasisPoints BEFORE dispatch (CEI)",
+        "dispatcher.dispatch(address(this), actualReceived, extraData)",
+        "_mint(recipient, index, 1, \"\") - ERC1155 mint => onERC1155Received callback to attacker-controllable recipient AFTER payment, price update and dispatch are final (inbound-callback site for Tier 2)"
+      ],
+      "adminPaths": ["registerDispatcher(dispatcher, price, growth) onlyOwner", "replaceDispatcher(index, newDispatcher) onlyOwner - the index-4 BalancerPoolerV2 -> UniPoolerV2 cutover path", "setDispatcherActive(dispatcher, bool) onlyOwner -> dispatcher.pause/unpause", "setDispatcherDisabled", "setPrice/setGrowthFactor", "emergencyWithdraw(token) (minter's own balance)", "mintFor (authorized minters, no payment/dispatch)"],
+      "trustNotes": "dispatch amount = actualReceived (FOT-adjusted); replaceDispatcher does not touch hooks - hook rewiring is a separate owner step on the dispatcher and on the hook."
+    },
+    "src/hooks/BalancerPoolerMintDebtHook.sol": {
+      "changedInRange": false,
+      "role": "mint-debt hook expected at index 4 (BalancerPoolerV2 today; UniPoolerV2 after cutover)",
+      "onDispatch": "require(msg.sender == dispatcher) else revert OnlyDispatcher; mintDebt += amount*ratio/100 (ratio <= MAX_RATIO 50, default 50); amount is 18dp USDS for poolers",
+      "pull()": "onlyOwnerOrRecipient nonReentrant; mints full mintDebt phUSD to recipient",
+      "setDispatcher(address)": "onlyOwner, non-zero - MUST be repointed to UniPoolerV2 at cutover (or a fresh hook deployed)",
+      "hookTypeId": "ABSENT - so UniPoolerV2 cannot use a NudgeRatchet-style type guard without a hook change (see UniPoolerV2 LOCAL-UP-001)",
+      "cutoverFailureModes": {"setHook forgotten on UniPoolerV2": "fail-OPEN: mints succeed, zero debt accrues", "hook.setDispatcher not repointed": "fail-LOUD: every index-4 mint reverts OnlyDispatcher"}
+    },
+    "src/hooks/NudgeRatchetMintDebtHook.sol": {
+      "changedInRange": false,
+      "role": "mint-debt hook for NudgeRatchet and NudgeRatchetDelayRelease (separate instances)",
+      "onDispatch": "dispatcher-gated; accrues scaled debt (M-03 decimal fix in place - scale for 6dp USDC); returns early on zero",
+      "pull()": "onlyOwnerOrRecipient nonReentrant; mints phUSD",
+      "hookTypeId()": "keccak256('NudgeRatchetMintDebtHook.v1') - consumed by NudgeRatchet/NudgeRatchetDelayRelease guards"
+    },
+    "lib/phoenix-nft-staking (pin bump d75229d -> 5015f1b, story-029 nft-staking)": {
+      "changed": ["src/BatchNFTMinterMultiToken.sol (budget-tracked refund; paymentToken-as-nudge-token collision now permitted)"],
+      "unchanged": ["NudgeStreamer.sol", "INudgeStreamer.sol"],
+      "relevance": "BatchNFTMinterMultiToken is the batchMinter sink for all donors (incl. NudgeRatchetDelayRelease.release raw transfers). Its nudge pot is the payment/reward token balanceOf at snapshot, so raw transfers are instantly claimable by the next qualifying batch. Run-19 OBS-PE-3 (whitelist-collision) and ycn19h1 (d06e3191..., fix-pending) should be re-evaluated against 5015f1b in Tier 2. Out of local scope (src/lib)."
+    }
+  }
+}

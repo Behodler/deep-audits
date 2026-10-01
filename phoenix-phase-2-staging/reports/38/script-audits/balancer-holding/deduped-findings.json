@@ -1,0 +1,78 @@
+[
+  {
+    "title": "Holding-pattern verifier and the story-103 step-0 precondition only check four hardcoded addresses; a later re-authorization of any other pooler stays green (and the proposed authVersion()>1 hardening does not catch it)",
+    "severity": "low",
+    "contract": "script/VerifyBalancerHolding.s.sol",
+    "function": "run",
+    "lineStart": 17,
+    "lineEnd": 31,
+    "relatedLocations": [
+      "script/RevokeBalancerPoolersHoldingPattern.s.sol L65-86 (poolers(), _isAuthorized, _countAuthorized)",
+      "script/RevokeBalancerPoolersHoldingPattern.s.sol L116-119 (idempotence early-return keyed on the four only)",
+      "lib/yield-claim-nft/src/dispatchers/BalancerPoolerV2.sol L190-199 (setAuthorizedPooler stores CURRENT authVersion)",
+      "story-103 step 0 / story-100 precondition: 'check the four poolers as onlyAuthorizedPooler does'"
+    ],
+    "entryPoint": "balancer-holding",
+    "rootCauseClass": "IncompletePostconditionCoverage",
+    "category": "cluster-interaction",
+    "description": "`VerifyBalancerHolding.run()` proves the holding pattern by requiring `poolerAuthVersion[p] != authVersion` for exactly four hardcoded addresses. `BalancerPoolerV2.setAuthorizedPooler(x, true)` writes the CURRENT `authVersion`, so any authorization granted after the bump, for an address outside the four, is fully live. The verifier cannot see it, and neither can `authVersion() > 1`, the hardening suggested in the story-099 review, because the version stays at 2. Stories 100/103 specify the cutover's step-0 'authorized-pooler set revoked' precondition with the same four-address predicate, so `:verify`, the `holding-broadcast` gate (a tx hash) and step 0 would all be green. A related idempotence edge exists: if the four were ever individually deauthorized while another address held the current version, `run()` would send nothing. That edge is unreachable today, because on-chain history shows exactly 4 grants and 0 deauths.",
+    "impact": "Failure scenario: after the 099 broadcast, the owner re-authorizes some address X for an ad-hoc `pool()`, for example a new automation key or a UI wallet, not one of the four. Every holding-pattern check stays green, so the 103 cutover proceeds. During its multi-tx `--slow` broadcast, X (or automation behind it) calls `pool()` between step 2 (`withdrawBPT(OWNER, all)`) and step 9 (`rescueERC20(sUSDS)`). Parked sUSDS then goes into the paused-soon Balancer pool as fresh BPT on the old pooler, after the BPT drain. That BPT is not exited by step 3 and needs extra owner recovery. Before 30 Oct this also re-exposes the zero-floor sandwichable `pool()` the holding pattern exists to prevent. Value stays recoverable by the owner (`withdrawBPT`), and the trigger is a knowing owner grant. The issue is that the safety signals are silent about it, which is a footgun and not a loss.",
+    "evidence": "fork-verified on the 099 side: test/audit-run38/BalancerHoldingAudit.fork.t.sol test_r38_08 (after the bump, owner grants a fifth address; VerifyBalancerHolding.run() passes; authVersion()==2>1; the fifth address pool(0) succeeds and mints BPT; re-auth of 0x186c IS detected) and test_r38_09 (idempotence-guard edge: script skips the bump, verify passes, unknown pooler still authorized). Story-103 side unverified (script not yet written); its precondition text is quoted from stories 100/103.",
+    "recommendation": "In story 103 (and the story-100 core), do not reuse the four-address predicate as the revocation proof. Record the revoke tx's block and new `authVersion` as gate evidence, then at step 0 require `authVersion() == recordedVersion`, AND fail if any `PoolerAuthorized` event was emitted by 0x7f68 after the revoke block. Do this off-chain via `cast logs` feeding an env var the script `require`s, as 103 already does for `minAmountsOut`. Alternatively, make step 0 itself call `incrementAuthVersion()` immediately before `withdrawBPT`, which revokes everything regardless of who was granted since. In `VerifyBalancerHolding`, log `authVersion()` and add the same post-revoke `PoolerAuthorized` log check, or at minimum state in its NatSpec that it cannot detect grants outside the four. Note that `authVersion() > 1` alone is insufficient.",
+    "dedupId": "DEDUP-001",
+    "originalIds": [
+      "candidate[0]"
+    ],
+    "dedupAction": "kept",
+    "ledgerDuplicateOf": null,
+    "crossReferences": [
+      {
+        "project": "yield-claim-nft",
+        "label": "L-06",
+        "fingerprint": "342075dfba3c8ec7c3bae1ae18c357591c5ea255bf649ee943c6c71f3ddd4c2e",
+        "status": "open",
+        "relation": "Contract-level hazard the holding pattern exists to contain (BalancerPoolerV2.pool single-sided LP add relies solely on off-chain minBPT, sandwichable). DEDUP-001 impact re-exposes it via an unseen 5th pooler. Not a duplicate: different root cause (script postcondition coverage vs. pool() price reference), different project, separate mitigation."
+      },
+      {
+        "project": "yield-claim-nft",
+        "label": "L-03",
+        "fingerprint": "e29ae08ed9997d73fe3878b83be1a3bc45c304b5548b68da7932118994c3626e",
+        "status": "fixed",
+        "relation": "Related pool() floor history (limitRaw=0 donation swap). Context only."
+      },
+      {
+        "project": "phoenix-phase-2-staging",
+        "fingerprint": "d32e99aa64bb082b2a761fabc74a6ad999f7a83db3a82a938214be7a1b2410f1",
+        "entryPoint": "dispatcher-replace-sky-pooler",
+        "status": "open",
+        "relation": "Sibling minBPT-staleness concern on an earlier Balancer pooler script. Different entry point, root cause and contract; context only."
+      }
+    ]
+  },
+  {
+    "title": "Script NatSpec misattributes the 0x186c/0x6309 pooler grants to WhitelistPoolersV2 (actual source: OWNER Temp.s.sol txs); WhitelistPoolersV2 also whitelisted a different set",
+    "severity": "low",
+    "contract": "script/RevokeBalancerPoolersHoldingPattern.s.sol",
+    "function": "(contract NatSpec)",
+    "lineStart": 14,
+    "lineEnd": 15,
+    "entryPoint": "balancer-holding",
+    "rootCauseClass": "MisleadingDocumentation",
+    "category": "intent-mismatch",
+    "description": "The header NatSpec labels `0x186c77B80Bbfd21b01C7D7FA44bA27031322a77F` and `0x630966B668b321Cc6441754f96519a55F72Cd476` as 'WhitelistPoolersV2' poolers, as does plan §4's table. On chain, their grants on 0x7f68 came from OWNER `Temp.s.sol` transactions (`0xcb56e196…` block 25,792,038; `0xbf66c239…` block 25,792,039). `script/archives/WhitelistPoolersV2.s.sol` targeted the older pooler `0x26F8…b38A` and also whitelisted `0x3E90…Eb28`, which is not authorized on 0x7f68. Story 099 itself records the correct provenance, so the code comment contradicts its own story.",
+    "impact": "Informational. Execution is unaffected, because the hardcoded list matches the complete on-chain grant set. An operator who re-derives the pooler set from WhitelistPoolersV2 would get the wrong list, for example when executing story-103 step 7 ('setAuthorizedPooler for the same four') or auditing who could pool. They would include 0x3E90 and miss the Temp.s.sol provenance, which is untracked (skip-worktree, broadcast logs absent from the repo).",
+    "evidence": "static + on-chain logs (closure-manifest authEventHistory: exactly 4 PoolerAuthorized on 0x7f68, all v1, txs listed); story 099 'Pooler history (exploration)'.",
+    "recommendation": "Change L14-15 to cite the authorizing txs (OWNER via `script/interactions/Temp.s.sol`, txs cb56e196…/bf66c239…) instead of WhitelistPoolersV2. Apply the same correction to the `docs/BalancerWinddownPlan.md` §4 table so story 103's step-7 re-authorization list is sourced from chain logs rather than the archived script.",
+    "dedupId": "DEDUP-002",
+    "originalIds": [
+      "candidate[1]"
+    ],
+    "dedupAction": "kept",
+    "ledgerDuplicateOf": null,
+    "crossReferences": [
+      {
+        "note": "No ledger entry (phoenix-phase-2-staging or yield-claim-nft) on pooler-grant provenance or WhitelistPoolersV2. Thematically adjacent to DEDUP-001 (both concern the authorized-pooler set that story-103 step 7 re-derives) but a distinct root cause (MisleadingDocumentation vs IncompletePostconditionCoverage), a different file, and a separate fix, so the two are kept apart."
+      }
+    ]
+  }
+]

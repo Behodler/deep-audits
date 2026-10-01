@@ -1,0 +1,86 @@
+{
+  "project": "yield-claim-nft",
+  "run": 20,
+  "scanTimestamp": "2026-10-01T12:30:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "range": "d4cc563..2bfa090 (master)",
+  "contractsScanned": 5,
+  "focus": ["src/dispatchers/UniPoolerV2.sol", "src/dispatchers/PromotionUniV2_Eth.sol (Leg A)", "src/dispatchers/NudgeRatchetDelayRelease.sol", "BalancerPoolerMintDebtHook (live, interaction only)", "Balancer phUSD/sUSDS pool + UniV2 factory (live chain reads)"],
+  "chainEvidence": {
+    "rpc": "RPC_MAINNET live, block 26096718 (liveness probe passed)",
+    "v2PairExists": "NO. UniswapV2Factory(0x5C69...aA6f).getPair(sUSDS, phUSD) == address(0). All MEV numbers below are modelled with exact V2 math, not observed.",
+    "v2FeeSwitch": "LIVE. factory.feeTo() = 0xf38521f130fcCF29dB1961597bc5d2B60F995f85, so 1/6 of LP fee growth goes to Uniswap",
+    "balancerPool": "0x642BB6860b4776CC10b26B8f361Fd139E7f0db04: 'phUSD / sUSDS - 50/50' WeightedPool v2, weights 0.5/0.5, both tokens STANDARD with no rate provider, not paused. Balances: 30,418.866 sUSDS / 34,816.797 phUSD. BPT supply 32,438.77",
+    "bptHolders": "BalancerPoolerV2 0x7f68...11F1 holds 20,401.81 (62.9%); EOA 0xc65f...e8db (no code, nonce 177) holds 12,036.97 (37.1%); 1e-12 at address(0). The plan lists the EOA as an open question.",
+    "sUSDSRate": "1.111328795 USDS/share",
+    "spot": "phUSD = 30418.866*1.1113/34816.797 = $0.9709",
+    "hook": "BalancerPoolerMintDebtHook 0x4A26...8bD7: ratio 50, mintDebt 0, dispatcher = BalancerPoolerV2; live pooler batchDonationSize 0, holds 0 sUSDS",
+    "gas": "0.12 gwei, ETH $2,690 (Chainlink). A two-swap sandwich costs ~$0.08 plus the builder tip"
+  },
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "mev-sandwich (tolerance-bounded) + design-rationale mismatch",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "pool",
+      "line": 397,
+      "lineStart": 386,
+      "lineEnd": 421,
+      "description": "This is the successor instance of L-06 (BalancerPoolerV2.pool sandwich) on the new venue, now quantified. The floors are the only price reference. The keeper derives minPhusdOut and minLP from quotePool at spot, and nothing on-chain anchors the price. After the cutover the protocol owns about 100% of the V2 LP: it seeds from its own 62.9% of the BPT, and the pair has no other LPs. A sandwich's profit is therefore exactly the protocol's loss. Attack: front-run buy a, zap, back-run sell b. The pair ends with the same phUSD and (c-a) less sUSDS than the unattacked baseline. The plan's design rationale is also wrong here. BalancerWinddownPlan §5 lists 'Sandwich exposure' as a reason to choose the zap over a donation, yet its own table shows the zap and a donation both end at reserves (X+Δ, Y). The zap's floors play the same role as the 'reserve-ratio pre-check' the plan offers as the donation mitigation. The zap's real advantages are LP ownership and a smaller fee-switch leak, not MEV resistance.",
+      "codeSnippet": "(uint256 rS,) = _reserves();\nuint256 s = _swapAmount(rS, sUSDSIn);\n... swapExactTokensForTokens(s, minPhusdOut, path, address(this), block.timestamp);\n... addLiquidity(_sUSDS, _phUSD, sUSDSRemaining, phusdOut, 0, 0, address(this), block.timestamp);\nif (liquidity < minLP) revert ...",
+      "documentationQuote": "BalancerWinddownPlan §5, 'Why not donate': 'Sandwich exposure: a searcher buys phUSD first, lets the donation lift the price, and sells into it. They capture about Δ·a/(X+a)...'",
+      "economicImpact": "Modelled at the actual seed depth (19,130 sUSDS = $21,260 / 21,896 phUSD). The max-extraction front-run that still passes both floors at tolerance t takes about 0.44·t·Δ. Zap $500: $0.93 / $1.87 / $3.75 / $5.64 at t = 0.5 / 1 / 2 / 3%. Zap $1,000: $2.21 / $4.43 / $8.87 / $13.34. Zap $2,000: $4.82 / $9.65 / $19.35 / $29.10. The front-run capital needed is only ~$54 to $338. Gas is ~$0.08, so the sandwich is profitable at every practical size. Each event is bounded, but the loss repeats on every pool() call.",
+      "attackScenario": "1. Keeper calls quotePool(Δ) and submits pool(Δ, phusdOut·(1-t), LP·(1-t)) to the public mempool.\n2. Searcher buys phUSD with ~t·X/2 sUSDS, as much as both floors still allow.\n3. pool() buys at the raised price and adds liquidity at a higher ratio. Both floors pass.\n4. Searcher sells the phUSD back into the raised price. Profit ≈ 0.44·t·Δ, taken from protocol-owned liquidity.",
+      "profitability": "Always profitable after gas (0.12 gwei → ~$0.08) whenever t·Δ exceeds ~$0.2. With tight keeper tolerance (≤0.5%) and private submission it shrinks to cents to a few dollars per call.",
+      "affectedParties": "Protocol (POL on UniPoolerV2). No user funds.",
+      "relatedLedger": "L-06 342075dfba (open; same root cause on BalancerPoolerV2.pool; attach UniPoolerV2 as a sibling location rather than a new root cause). See CODE-002 for the cross-call double-sandwich, which is not duplicated here.",
+      "recommendation": "Operational: tolerance ≤0.5% (quotePool is exact, verified against Router02 math, so tight floors do not self-DoS without adversarial or cross-call interference); submit privately (Flashbots Protect); keep each zap ≤ ~$636 so it does not also cross $1 (see ECON-002). Docs: correct plan §5 so it does not cite sandwich exposure as a donation-only weakness.",
+      "confidence": "high (closed-form V2 model; pair not yet on mainnet)"
+    },
+    {
+      "id": "ECON-002",
+      "type": "intent-premise mismatch (pool depth) / operational footgun on 'no price ceiling'",
+      "severity": "informational",
+      "contract": "src/dispatchers/UniPoolerV2.sol + src/dispatchers/PromotionUniV2_Eth.sol",
+      "function": "pool / quotePool (keeper sizing); cutover seed (plan Stage 2 step 4)",
+      "line": 386,
+      "lineStart": 386,
+      "lineEnd": 451,
+      "description": "Plan §5 prices the zap against the whole Balancer pool ('X ≈ 33,804, Y ≈ 34,817'), and this run's brief says Leg A moves to a '~$34k/side pair'. On chain, the cutover can seed the V2 pair only with the protocol's 62.9% of the BPT (Stage 2 step 2 withdraws BalancerPoolerV2's balance only). That is ≈19,130 sUSDS ($21.26k) + 21,896 phUSD per side, about 1.59x shallower, unless the 37.1% EOA 0xc65f…e8db also migrates (plan: open question). The design deliberately has no price ceiling: arbitrageurs mint phUSD at $1 and sell into the pair when price exceeds $1. At the real depth that threshold arrives much sooner than the plan's numbers suggest. The skim is intended, but it comes out of protocol-owned sUSDS and grows quadratically with overshoot.",
+      "documentationQuote": "Plan §5 worked example: Δ=1,000 → price 0.9996. Plan Stage 1a: 'Deliberately no price ceiling. Pooling that pushes phUSD above the $1 mint price is intended.'",
+      "economicImpact": "Price after one zap at real seed depth versus the plan's figure: $250 → 0.9824 (plan 0.978); $500 → 0.9938 (0.985); $1,000 → 1.0166 (0.9996); $2,000 → 1.0623. The largest zap that keeps phUSD ≤ $1 is ~$636. The mint-and-sell arb skim taken from POL: $1,000 zap → $1.00 (0.10%); $1,500 → $7.12 (0.47%); $2,000 → $18.63 (0.93%); $3,000 → $56.53 (1.88%). The arb deposits $1 of collateral per phUSD it mints, so per project memory this is closer to an accepted design cost than a loss. It is surfaced because the plan's depth premise understates it. Leg A (pure buy) on the same pair crosses $1 at about half the size of a zap.",
+      "attackScenario": "No adversary needed. A keeper sizes pool() against the plan's depth table → phUSD overshoots $1 → arbitrageurs mint at $1 via PhusdStableMinter and sell into the pair, draining sUSDS from POL by the skim above.",
+      "profitability": "The arb is risk-free whenever post-zap price > $1 + 0.3% fee + mint cost.",
+      "affectedParties": "Protocol POL (an intended trade-off; magnitude underestimated).",
+      "relatedLedger": "None. Not a re-file of any wont-fix.",
+      "recommendation": "Redo plan §5 at 62.9% depth, or resolve the EOA open question before Stage 2. Have the keeper chunk pool() so the post-zap spot (computable from quotePool) stays ≤ $1, or accept the overshoot knowingly. No code change required.",
+      "confidence": "high (on-chain BPT holdings + exact V2 model)"
+    }
+  ],
+  "reweigh": {
+    "L-15": {
+      "fingerprint": "e64f73d62919639e89b9fab577664dd3b60979a498cc62b2163d21e27cf46fc1",
+      "status": "wont-fix (owner, 2026-07-19)",
+      "disclosure": "Re-weighed at caller request because Leg A moved venue (a4d80f4). This is not a re-file. triageReason verbatim: 'Owner-accepted wont-fix (2026-07-19): user understands the tradeoffs. On-chain-priceless LP-add MEV on PromotionUniV2_Eth Legs A/B is keeper-floor-bounded (all 5 min-out floors + minLP present), POL-only, no user funds; residual sandwich exposure on the thin ETH->promotion hop accepted as keeper-hygiene responsibility. Sibling of L-06.'",
+      "finding": "Correction to the premise: the venue is ~$21.3k per side, not $34k (see ECON-002). Leg A's tolerance-bounded sandwich extraction is ≈ t·A and nearly independent of depth. A=$600: $2.74 / $5.48 / $10.96 / $16.43 at t = 0.5 / 1 / 2 / 3% on the V2 seed, versus $2.52 / $5.04 / $10.08 / $15.11 at full Balancer depth. A=$3,000: $16.66 / $33.29 / $66.49 / $99.60. Every element of the triage reason still holds: all floors are present and non-zero (minPhusdOut==0 now reverts), losses fall only on POL, and no user funds are at risk. The new venue actually strengthens the POL-only premise. Leg A now buys from a pair the protocol owns ~100% of, so its own price impact is recaptured by the protocol's LP, where on Balancer 37.1% went to the third-party EOA. The only external leak is the live V2 fee switch: 1/6 × 0.3% = 0.05% of Leg A volume ($0.30 on A=$600).",
+      "verdict": "NO ESCALATION. L-15 stays wont-fix on its own terms. The one genuinely new fact, shared-venue coupling with UniPoolerV2.pool, is already filed as CODE-002. Whether L-15 also covers that coupling is the owner's call, as CODE-002 says."
+    }
+  },
+  "clearedChecks": [
+    "Intent (plan economic goals). Peg support: the zap ends at reserves (X+Δ, Y), the same price lift as the old single-sided add (verified by model). POL accumulation: LP is minted to UniPoolerV2 and Leg A's phUSD/promo LP stays on PromotionUniV2_Eth. Mint-debt backing: _dispatch is verbatim (profile, verified-by-diff), primeToken stays USDS 18dp, so the hook accrues the same gross-USDS debt and the M-03 decimal class is not re-triggered. Goals met, apart from the depth premise in ECON-002.",
+    "Seed price carry-over: the Balancer pool is a 50/50 WeightedPool with no rate provider, so its spot is the raw balance ratio. Seeding V2 with the proportional-exit amounts reproduces $0.9709 exactly; a stable-pool or rate-provider mismatch was ruled out on chain.",
+    "Unbacked phUSD: UniPoolerV2 mints no phUSD, and PromotionUniV2_Eth only burns. The hook's 50% debt on the gross dispatched USDS backs phUSD with POL sUSDS exactly as before. No new path; DEDUP-001 070fdf420a (suppressed, external backing model) is unchanged. L-05 e527a71211 (ratio + donation coupling) carries over through the verbatim copy, already listed by code-scanner.",
+    "USDS→sUSDS wrap and PSM donation via NudgeStreamer: verbatim. Mint-debt accrues on gross, including the donated share; the L-05 / L-17 carryovers stand and nothing new crosses contracts.",
+    "Oracle / spot surface: grep shows getReserves/quotePool are used only inside UniPoolerV2. No on-chain consumer treats the pair or quotePool as an oracle, so there is no flash-loan oracle path. Donate-without-sync: input-token surplus becomes reserves (a gift to ~100%-protocol LP); output-token surplus leaves re-poolable sUSDS or rescue-only phUSD dust on the pooler (LOCAL-UP-004). It costs the griefer the donation and is unprofitable.",
+    "LP custody via rescueERC20: no on-chain accounting tracks LP or sUSDS (pool() reads balanceOf live), so moving LP out cannot desync anything. Owner-trusted exit (Law 3). Only wei-level phUSD dust strands until rescue (profile: 2 wei at 34k/34k, a=1000).",
+    "quotePool minLP with the fee switch live: _mintFee raises totalSupply before our mint, so the LP count ≥ quote and the floor stays valid. Value dilution per zap ≈ 1/6 of accrued fees, cents.",
+    "NudgeRatchetDelayRelease: release() pays batchMinter directly, bypassing NudgeStreamer. Already on the ledger as M-05 e6fbf0d61c (wont-fix; the ledger carries no triageReason to quote), F-03-046 38151cebd7 (open) and L-12 d9d8e16a04 (open). The lib/phoenix-nft-staking bump to 5015f1b does not change the winner-take-all timing (code-scanner concurs). Not re-filed."
+  ],
+  "assumptions": [
+    "The V2 pair is seeded only from the protocol's BPT (Stage 2 step 2) and the EOA does not join. If it does, depth rises to ~$33.8k per side and the plan's §5 numbers apply. Leg A and zap price impact then partly accrue to a third-party LP.",
+    "PhusdStableMinter mints at exactly $1 with no fee (it is outside this repo). A mint fee raises the overshoot threshold.",
+    "Leg A and zap sizes are illustrative ($250 to $3,000). The live pooler holds 0 sUSDS and index-4 mint volume was not measured."
+  ]
+}
