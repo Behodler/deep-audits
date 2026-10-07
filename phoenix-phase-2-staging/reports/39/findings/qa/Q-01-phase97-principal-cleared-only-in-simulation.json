@@ -1,0 +1,88 @@
+{
+  "id": "Q-01",
+  "label": "Q-01",
+  "issueId": "pps39q1",
+  "candidateId": "DEV39-02",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-39",
+  "reportDir": "reports/39",
+  "commit": "dfbf2f97643688aacee2f6f32281288e83cb0cac",
+  "baseline": "e6eded024108929b62424951f1df0c801b48d2ee (entryPointBaselines.dev, run 30)",
+  "status": "ready",
+  "severity": "qa",
+  "originalSeverity": "low",
+  "title": "Phase 9.7's 'minter principal cleared from the legacy strategy' post-condition holds only in forge's simulation; on the broadcast chain 1.2e13 wei of minter principal stays on the de-registered legacy DOLA strategy",
+  "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+  "function": "_repointDolaMinterAndSya",
+  "line": 2504,
+  "lineStart": 2504,
+  "lineEnd": 2513,
+  "entryPoint": "dev",
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "9fa8eee3010ec38a3aa38c93bdc8141dd42eb6a2a469648865c02f5ca2f84787",
+  "fingerprintInput": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol:_repointDolaMinterAndSya:ForgeLocalPassPrecedesBroadcast:dev",
+  "fingerprintVerified": "re-derived by finding-manager as sha256(contract:function:rootCauseClass:entryPoint); matches verbatim",
+  "rootCauseClass": "ForgeLocalPassPrecedesBroadcast",
+  "category": "intent-mismatch",
+  "origin": "new",
+  "isNewLedgerEntry": true,
+  "faithfulness": false,
+  "reportChannel": "qa-report",
+  "description": "Story 089 requires the minter's DOLA collateral to move off the legacy (MockAutoDOLA) strategy. Phase 9.7 reads principalOf(minter) and passes that number to withdrawAsOwner, then require()s principalOf == 0. forge evaluates both during the simulation pass, where the whole run shares one timestamp, and bakes the amount (5000e18) into calldata. On the broadcast chain (anvil --block-time 2), MockAutoDOLA's time-based _updateYield runs between blocks, so ERC4626YieldStrategy._acquireShares (convertToAssets) credits 5000.000011999712006910e18 at the block-434 minter.mint. The block-436 withdrawAsOwner(5000e18) leaves 11,999,712,006,910 wei behind. The require never runs on chain.",
+  "impact": "The local end state differs from what dev asserts and logs ('Phase 9.7 end state asserted'). The minter stays the sole principal holder on a strategy that SYA no longer lists and cannot withdraw from, so legacy totalBalanceOf(minter) = 3,299.64 DOLA (all mock yield, including simulate-yield's 2,300) accrues to an unreachable bucket. More broadly, it is a concrete instance where a simulation-time self-assert passes over time-dependent state while the chain diverges.",
+  "evidence": "side-effects.json stateWrites (YieldStrategyDolaLegacy principal: block 435 = 5000.000011999712006910e18, block 436+ = 11999712006910) and postconditionResults; broadcast txs 433-436 (approve, PhusdStableMinter.mint 5000e18, MockDola.mint, withdrawAsOwner(minter, deployer, 5000e18)); dev-run.filtered.log line for Phase 9.7 shows principal 5000e18 in simulation.",
+  "attackPath": [
+    "1. npm run dev broadcasts DeployMocks on anvil --block-time 2.",
+    "2. In simulation, Phase 9.7 reads principalOf(minter)=5000e18 and bakes it into withdrawAsOwner calldata. The require(principalOf==0) passes against simulated state.",
+    "3. On chain, MockAutoDOLA's time-based yield accrues between blocks 434 and 436, so the minter's principal is 5000.000012e18 and the withdrawal leaves 1.2e13 wei.",
+    "4. The require never runs on chain."
+  ],
+  "classification": {
+    "assetImpact": "None of real value. On the local anvil chain, 11,999,712,006,910 wei (about 1.2e-5 DOLA) of mock minter principal stays on the de-registered legacy MockAutoDOLA strategy, and Phase 9.7 logs 'end state asserted' for a state the chain does not have. The 3,299.64 DOLA of legacy mock yield is stranded either way (story 089 already discloses the legacy yield seed as stranded locally).",
+    "attackPath": [
+      "1. npm run dev broadcasts DeployMocks on anvil --block-time 2.",
+      "2. In simulation, Phase 9.7 reads principalOf(minter)=5000e18 and bakes it into withdrawAsOwner calldata. The require(principalOf==0) passes against simulated state.",
+      "3. On chain, MockAutoDOLA's time-based yield accrues between blocks 434 and 436, so the minter's principal is 5000.000012e18 and the withdrawal leaves 1.2e13 wei.",
+      "4. The require never runs on chain."
+    ],
+    "likelihood": "certain on every dev run, but the effect is dust on a local mock",
+    "assumptions": "Local dev chain only. This is a separate entry point from any mainnet script, and the mainnet siblings of this pattern are tracked separately (78cb5942 fixed, 2c53e944 fix-pending).",
+    "externalRequirements": "none"
+  },
+  "justification": "QA. The impact is dust on a local mock chain, with no mainnet path and no user funds. It is kept and not dropped, because it is one more instance of the ForgeLocalPassPrecedesBroadcast class (a script self-assert certifies simulated, time-dependent state that the broadcast chain does not reproduce), and that class has caused real issues on mainnet entry points. It is not a faithfulness deviation: story 089's review records the collateral move as going beyond the literal spec (Autonomous Decisions 3/4), so no story-stated behaviour is broken. The 2026-09-15 UI-mock ruling does not apply, because the problem is dev's own post-condition being false on chain, not a mock-vs-mainnet fidelity gap.",
+  "recommendation": "Withdraw against the on-chain principal rather than a simulation-time number. Pass type(uint256).max (withdrawAsOwner caps to the available principal in AYieldStrategy._withdrawInternal), or principal plus a margin, and re-seed the deployer's actual DOLA delta. Alternatively, accept and log residual dust explicitly instead of asserting principalOf == 0.",
+  "humanReviewFlag": false,
+  "storyEvidence": null,
+  "dedup": {
+    "disposition": "keep",
+    "reason": "New instance of an established pattern. Same mechanism as stable-staker-v2-cutover L-09 78cb5942d4834f366ab7d5600a449c73bb8d43833dd8b822e25801d623e39cc6 (Phase 6b re-seeds a DOLA amount baked from forge local pass; status fixed) and promotion-ready M-01 2c53e944 (verification runs on simulated state; fix-pending). Different script/function and separate mitigation, so kept as its own finding, not merged. rootCauseClass normalized from candidate SimulationBakedAmountOverTimeDependentState to the ledger taxonomy class ForgeLocalPassPrecedesBroadcast (used by L-09 78cb5942) so the pattern groups. Not within the 2026-09-15 DeployMocks UI-mock ruling: it concerns dev violating its own Phase 9.7 self-assert on chain, not mock-vs-mainnet fidelity.",
+    "relatedLedger": [
+      "78cb5942d4834f366ab7d5600a449c73bb8d43833dd8b822e25801d623e39cc6",
+      "2c53e944caee2e74a1a351c9b30b9e92cd8feac28203e8d5c1c9b7d9e8b4102f",
+      "88af91804ec23988388adb33bf17ec90f86825dc6ec017a5b31bc142f415d4bb"
+    ],
+    "originalRootCauseClass": "SimulationBakedAmountOverTimeDependentState",
+    "fingerprintIfOriginalClassKept": "abb5b706aa801767c4160fb2faeb7a6b0a9c8c98b4917c506039350daec0e4b9",
+    "reviewFlag": "Severity likely QA (1.2e13 wei on a mock chain); the classifier decides. Shares the symptom (3,299.64 DOLA stuck on legacy MockAutoDOLA) with DEV39-03 but the root cause and fix are different, so the two are not merged."
+  },
+  "sanitizer": {
+    "decision": "pass",
+    "knownIssueMatch": null,
+    "ownerRulingApplied": false,
+    "note": "Not covered by the ruling: the violated check is dev's OWN story-089 post-condition (require(principalOf==0)) that is false on the broadcast chain, independent of mainnet parity (cluster rank 4 says the same). Same rootCauseClass as promotion-ready MR-22-01 but different entryPoint => different fingerprint by design; related-but-distinct from dev 1e8cc0dc58ba/88af91804ec2 (artifact written in simulation vs post-condition evaluated in simulation). Class rename to ForgeLocalPassPrecedesBroadcast accepted."
+  },
+  "poc": null,
+  "pocStatus": "not-owed (0 High / 0 Medium this run; C4 requires a coded PoC for High/Medium only)",
+  "labelNote": "Label is RUN-SCOPED to phoenix-phase-2-staging-39 (sequential per entry point). Entry point `dev` already carries same-letter labels from runs 21-30 under different fingerprints; disambiguate by issueId or fingerprint, never by label.",
+  "metadata": {
+    "createdAt": "2026-10-03T05:38:46Z",
+    "updatedAt": "2026-10-03T05:38:46Z",
+    "scanOrigin": "DEV39-02",
+    "classificationOrigin": "CLASS-002",
+    "writtenBy": "finding-manager"
+  },
+  "severityNote": "Dust-sized on a mock chain; may classify as QA. Filed because the script's own require certifies a state the chain does not have."
+}

@@ -1,0 +1,378 @@
+{
+  "classificationReport": {
+    "project": "phoenix-phase-2-staging",
+    "run": "phoenix-phase-2-staging-39",
+    "entryPoint": "dev",
+    "srcHead": "dfbf2f9",
+    "classifier": "severity-classifier",
+    "inputFindings": 4,
+    "counts": {
+      "high": 0,
+      "medium": 0,
+      "low": 1,
+      "qa": 2,
+      "faithfulness": 1,
+      "regressions": 0
+    },
+    "labelsAssigned": true,
+    "labelNote": "Labels are scoped to the run-39 directory and numbered sequentially per entry point: L-01 (pps39l1), Q-01 (pps39q1), Q-02 (pps39q2), F-01 (pps39f1). Fingerprints are copied verbatim from sanitized-findings.json. All four were re-derived as sha256(contract:function:rootCauseClass:entryPoint) and match.",
+    "humanReviewFlags": [
+      "L-01 (DEV39-01): Low vs Medium. The sanitizer argued for Medium; the classifier rated Low (delay-only, fail-loud pre-broadcast, script-level fix, already accepted non-blocking in the story-108 review). Re-weigh triggers are stated in the justification.",
+      "Q-02 (DEV39-04): borderline under the 2026-09-15 UI-mock ruling; human decides between QA and wont-fix-by-ruling."
+    ],
+    "story103Propagation": "L-01 9a694ae01fe1... lives in the shared UniPoolerCutoverCore and must be fixed before the story-103 mainnet broadcast. When the 103 entry point is audited, reconcile against this fingerprint and do not re-file it.",
+    "storyQuotesVerified": "089, 103 and 108 quotes grep-confirmed against ~/code/product-owner/stories/phStaging2. The DEV39-04 AC paraphrase is from the sanitizer and was not re-quoted."
+  },
+  "findings": [
+    {
+      "id": "DEV39-01",
+      "title": "Shared UniPoolerCutoverCore step 2 has no recovery branch: a 2-wei donate+sync on the permissionless canonical sUSDS/phUSD pair makes the mainnet cutover core revert for good",
+      "severity": "low",
+      "contract": "lib/phoenix-phase-2-staging/script/helpers/UniPoolerCutoverCore.sol",
+      "function": "_step2EnsurePairEmpty",
+      "lineStart": 336,
+      "lineEnd": 349,
+      "entryPoint": "dev",
+      "rootCauseClass": "UnrecoverablePreconditionOnPermissionlessState",
+      "category": "cluster-interaction",
+      "description": "Core step 2 requires the canonical pair's reserves to be (0,0) both before and after an optional skim, and there is no other branch. Uniswap V2 reserves set by sync() can never return to (0,0) once LP totalSupply is 0: skim() does not touch reserves and burn() needs LP. yield-claim-nft:051's constructor check (UniPoolerV2__PairNotCanonical) binds UniPoolerV2 to factory.getPair(sUSDS, phUSD), so the pooler cannot be pointed at a different pair. Any third party can therefore createPair today (mainnet getPair == 0 at block 26109485), transfer 1 wei of each token and call sync(). After that, every run of the shared core reverts at step 2. The core is inherited by the dev rehearsal (story 101) and by the future mainnet cutover script and fork test (story 103), so this defect propagates to the mainnet operation. docs/BalancerWinddownPlan.md \u00a74 (lines 410-414) discusses only in-window griefing between steps 1 and 6, and points to a recovery helper (transfer + pair.mint(UniPoolerV2) with a price check) that does not exist in the core. Pre-emptive poisoning before the run starts is not addressed.",
+      "impact": "Availability of the Balancexit index-4 cutover, not funds. The revert happens in forge's simulation, before any broadcast, so nothing is half-done. But the 103 script as built on this core cannot run at all until someone writes, reviews and broadcasts a bespoke seeding path under the Balancer wind-down timeline. The griefer's cost is 2 wei plus gas. A recovery exists outside the core (send the recovered tokens to the pair, then pair.mint(newPooler): with LP totalSupply 0 the first minter takes all LP and the griefer's dust is absorbed), which caps severity at Low.",
+      "evidence": "side-effects.json mainnetForkProbe.tests[1] (test_B_dustSyncedPairPermanentlyBlocksCoreStep2 PASS at block 26109485: reserves (1,1) after sync, pair totalSupply 0, unchanged after skim, core reverts 'UniPoolerCutoverCore: pair reserves not empty'); live read getPair(sUSDS, phUSD) == 0x0. Test A (same file) shows the core otherwise completes on live state.",
+      "propagation": "Law-1 relevant beyond dev: same code is the planned mainnet cutover (story 103, incomplete).",
+      "recommendation": "Add a pre-poisoned-pair branch to the core instead of relaxing the router path. When reserves != 0 AND pair.totalSupply() == 0, do NOT seed through Router02, because it would quote against griefer-set reserves. Instead, from ONE transaction via a small reviewed helper contract (never two owner txs, since anyone can call pair.mint(to) after a bare transfer and take all the LP), transfer all recovered sUSDS/phUSD to the pair, call pair.mint(newPooler), and then require: (a) the post-mint reserve ratio is within seedToleranceBps of the Balancer exit ratio (sAmt:pAmt), (b) the pre-existing reserves are below an explicit dust bound, and (c) newPooler holds totalSupply - MINIMUM_LIQUIDITY. Keep the strict (0,0) path when totalSupply == 0 and reserves == 0. Revert, as today, when totalSupply > 0 or the reserves exceed the dust bound. Better still, do createPair-if-missing, the skim check and the transfer+mint seed atomically in the helper, which also closes the step-2-to-6 window. Add a core unit test that pre-syncs (1,1) and expects the branch to succeed with the ratio check enforced, plus a test where a large skewed pre-sync fails the ratio check. Land it in the shared core before the story-103 broadcast.",
+      "fingerprint": "9a694ae01fe1c054801295c02e0995c82599a051ffe54881c407d1b9b4ab5add",
+      "originalIds": [
+        "DEV39-01"
+      ],
+      "dedup": {
+        "disposition": "keep",
+        "reason": "New. Closest ledger entry is run-38 balancer-holding L-01 59527bfa84786a87002d80b9bf678c5e798c4d9b2905609ac0f786bd46737632 (verifier checks only 4 hardcoded addresses; story-103 step-0 precondition). Different contract (VerifyBalancerHolding vs UniPoolerCutoverCore), different defect (authorization coverage vs pre-poisoned canonical pair) and different mitigation, so not a duplicate. No other UniPoolerCutoverCore / _step2EnsurePairEmpty / pair-griefing entry exists. Same griefing family as batch-minter-replace 22fc436d (USDC dust balance guard on ReplaceBatchNFTMinter._retireOld) but a separate script and root cause; not merged.",
+        "relatedLedger": [
+          "59527bfa84786a87002d80b9bf678c5e798c4d9b2905609ac0f786bd46737632",
+          "22fc436d9483c95c1462e3775839e6da2ac3757ffd86155d587ad9a0d96791fe"
+        ],
+        "reviewFlag": "Root cause lives in the shared mainnet core (story 103, incomplete). Filed under entryPoint dev per this run; when the story-103 cutover entry point is audited, the same contract:function under that entryPoint will mint a different fingerprint. Reconcile by referencing this fingerprint rather than re-filing. Severity-classifier should weigh whether pre-broadcast simulation revert + out-of-core recovery keeps it at Low."
+      },
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "sanitizer": {
+        "decision": "pass",
+        "knownIssueMatch": null,
+        "ownerRulingApplied": false,
+        "note": "Not covered by any KI (none have authority) nor by the 2026-09-15 ruling: UniPoolerCutoverCore is the shared core inherited by the story-103 MAINNET cutover; fork test B demonstrates the grief on live state and mainnet getPair(sUSDS,phUSD)==0 today, so the window is open now. FLAG for severity-classifier: permanent DoS of a mainnet-bound migration core for 2 wei + gas is a Law-1 availability argument for Medium; Low as filed needs justification (e.g. recovery outside the core / redeploy of core).",
+        "flag": true
+      },
+      "originalSeverity": "low",
+      "label": "L-01",
+      "issueId": "pps39l1",
+      "classifiedFinding": {
+        "id": "CLASS-001",
+        "originalId": "DEV39-01",
+        "label": "L-01",
+        "issueId": "pps39l1",
+        "severity": "low",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": false,
+        "reportChannel": "qa-report",
+        "labelClass": "L",
+        "footgun": false,
+        "humanReviewFlag": true,
+        "classification": {
+          "assetImpact": "No assets are at risk. The revert happens in forge's local simulation of core step 2, before any broadcast, so nothing is half-executed and the recovered sUSDS/phUSD never leave the Balancer position. The impact is availability of an operational migration: the story-103 cutover, as built on this core, cannot run once the canonical pair has been dust-synced. Meanwhile index-4 keeps working on BalancerPoolerV2 (configs(4) is unchanged and unpaused). After 30 Oct pool() reverts and accrued sUSDS just sits idle. After 30 Nov the proportional recovery exit still works (BalancerWinddownPlan.md L16-38, L250). The pair is not unusable. With reserves (1,1) and totalSupply 0, UniswapV2Pair.mint still credits amount = balance - reserve and grants the first minter sqrt(a0*a1) - MINIMUM_LIQUIDITY, so an atomic transfer+mint absorbs the dust at our ratio. Only the core's strict reserves==0 require blocks.",
+          "attackPath": [
+            "1. Today, mainnet getPair(sUSDS, phUSD) == 0 (block 26109485).",
+            "2. Griefer calls factory.createPair(sUSDS, phUSD), transfers 1 wei of each token to the pair, then calls pair.sync(). Reserves become (1,1) and LP totalSupply stays 0.",
+            "3. skim() does not change reserves and burn() needs LP, so reserves can never return to (0,0). UniPoolerV2's constructor (UniPoolerV2__PairNotCanonical) rules out using any other pair.",
+            "4. Every run of UniPoolerCutoverCore reverts at _step2EnsurePairEmpty with 'UniPoolerCutoverCore: pair reserves not empty' in forge's simulation (work/test/audit-run39/UniPoolerCoreMainnetFork.t.sol::test_B_dustSyncedPairPermanentlyBlocksCoreStep2 PASS on a mainnet fork; reproduced by the orchestrator).",
+            "5. The owner has to write, review and broadcast a different seeding path before the 103 cutover can run. That delays the migration, but no value is lost."
+          ],
+          "likelihood": "medium. The action is permissionless, costs 2 wei plus gas, and the window is open today. A griefer gains nothing except the delay.",
+          "assumptions": "Index-4 stays functional on BalancerPoolerV2 while the cutover is delayed (confirmed: configs(4) unchanged and unpaused). Balancer's proportional recovery exit stays available after the 30 Oct and 30 Nov pauses (BIP-928, BalancerWinddownPlan.md L38). The fix is a script change, with no redeploy of any protocol contract.",
+          "externalRequirements": "A third party pre-creates and dust-syncs the canonical pair before the 103 run."
+        },
+        "justification": "Rated Low, not Medium. It is flagged for human review because the sanitizer argued for Medium. The case for Medium is a cheap, permissionless and permanent DoS of a mainnet-bound migration core, which is a fair Law-1 availability argument, and nothing here dismisses it. It still falls short of C4 Medium for four reasons. (1) No asset is at risk, and protocol function is not impaired: index-4 mints keep working on BalancerPoolerV2, and the Balancer exit stays open through recovery mode after both BIP-928 deadlines, so the delay costs at most idle sUSDS (opportunity cost), not principal. (2) The revert is fail-loud in simulation before any broadcast, so nothing is half-wired. (3) 'Permanent' applies only to the strict require in this script core, not to the pair. An atomic transfer+mint seed absorbs the dust, and once LP totalSupply > 0 further dust-syncs cannot block a mint-based seed, so the grief cannot be repeated against the fix. (4) The workaround is a script-level change, and the wind-down plan already describes it (for the post-step-2 case). The gap was also already raised in story 108's own review as a [Low-Medium, doc] finding and accepted non-blocking by the human. This is disclosed for transparency; that review is not a ledger disposition, so it does not suppress this finding, and the finding stays open because the core still has no branch for it. Re-weigh to Medium if index-4 or the Balancer exit stops working while the cutover is blocked, or if the deadline pressure becomes a value loss rather than a delay. The check itself is load-bearing: Router02.addLiquidity quotes against existing reserves, so any relaxation that seeds through the router would let the griefer choose the opening price. The recommendation keeps that protection.",
+        "recommendation": "Add a pre-poisoned-pair branch to the core instead of relaxing the router path. When reserves != 0 AND pair.totalSupply() == 0, do NOT seed through Router02, because it would quote against griefer-set reserves. Instead, from ONE transaction via a small reviewed helper contract (never two owner txs, since anyone can call pair.mint(to) after a bare transfer and take all the LP), transfer all recovered sUSDS/phUSD to the pair, call pair.mint(newPooler), and then require: (a) the post-mint reserve ratio is within seedToleranceBps of the Balancer exit ratio (sAmt:pAmt), (b) the pre-existing reserves are below an explicit dust bound, and (c) newPooler holds totalSupply - MINIMUM_LIQUIDITY. Keep the strict (0,0) path when totalSupply == 0 and reserves == 0. Revert, as today, when totalSupply > 0 or the reserves exceed the dust bound. Better still, do createPair-if-missing, the skim check and the transfer+mint seed atomically in the helper, which also closes the step-2-to-6 window. Add a core unit test that pre-syncs (1,1) and expects the branch to succeed with the ratio check enforced, plus a test where a large skewed pre-sync fails the ratio check. Land it in the shared core before the story-103 broadcast.",
+        "storyEvidence": {
+          "103": {
+            "path": "incomplete/phStaging2-Balancexit/103-mainnet-unipooler-cutover-script-stage2.md",
+            "state": "incomplete",
+            "quotes": [
+              "Preconditions `require`d: authorized-pooler set revoked (story 099); pair absent or reserves (0,0)",
+              "createPair is permissionless, so a griefer can donate+sync between creation and seeding to break the (0,0) precondition \u2014 follow the mitigation phStaging2:108 documents."
+            ]
+          },
+          "108": {
+            "path": "complete/phStaging2-Balancexit/108-balancer-winddown-plan-audit-corrections.md",
+            "state": "complete",
+            "quotes": [
+              "**[Low-Medium, doc] No recovery path if the step 2 empty-pair `require` fails.** A donation plus `sync()` before step 2 leaves the canonical pair permanently non-empty",
+              "The human accepted all findings as non-blocking, including the Medium finding (unsynced one-sided donation between Stage 2 steps 2 and 6 is not harmless) and the Low-Medium finding (no recovery path if the step 2 empty-pair require fails)."
+            ]
+          }
+        },
+        "propagation": {
+          "story103": true,
+          "note": "PROPAGATES TO MAINNET. The root cause is in the shared UniPoolerCutoverCore, which the future story-103 mainnet cutover (incomplete) inherits as well as the dev rehearsal (story 101). When the story-103 entry point is audited, the same contract:function will get a different fingerprint because entryPoint is folded into the hash. Reconcile it against 9a694ae01fe1c054801295c02e0995c82599a051ffe54881c407d1b9b4ab5add rather than re-filing it as new. The fix has to land in the core (or in a 103-only seeding branch) before the 103 broadcast.",
+          "stories": {
+            "101": "auto-complete/phStaging2-Balancexit/101-deploymocks-unipooler-cutover-rehearsal.md",
+            "103": "incomplete/phStaging2-Balancexit/103-mainnet-unipooler-cutover-script-stage2.md"
+          }
+        }
+      },
+      "faithfulness": false,
+      "fingerprintInput": "lib/phoenix-phase-2-staging/script/helpers/UniPoolerCutoverCore.sol:_step2EnsurePairEmpty:UnrecoverablePreconditionOnPermissionlessState:dev",
+      "propagatesTo": [
+        "story-103 mainnet UniPoolerCutover (shared UniPoolerCutoverCore)"
+      ]
+    },
+    {
+      "id": "DEV39-02",
+      "title": "Phase 9.7's 'minter principal cleared from the legacy strategy' post-condition holds only in forge's simulation; on the broadcast chain 1.2e13 wei of minter principal stays on the de-registered legacy DOLA strategy",
+      "severity": "qa",
+      "severityNote": "Dust-sized on a mock chain; may classify as QA. Filed because the script's own require certifies a state the chain does not have.",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "_repointDolaMinterAndSya",
+      "lineStart": 2504,
+      "lineEnd": 2513,
+      "entryPoint": "dev",
+      "rootCauseClass": "ForgeLocalPassPrecedesBroadcast",
+      "category": "intent-mismatch",
+      "description": "Story 089 requires the minter's DOLA collateral to move off the legacy (MockAutoDOLA) strategy. Phase 9.7 reads principalOf(minter) and passes that number to withdrawAsOwner, then require()s principalOf == 0. forge evaluates both during the simulation pass, where the whole run shares one timestamp, and bakes the amount (5000e18) into calldata. On the broadcast chain (anvil --block-time 2), MockAutoDOLA's time-based _updateYield runs between blocks, so ERC4626YieldStrategy._acquireShares (convertToAssets) credits 5000.000011999712006910e18 at the block-434 minter.mint. The block-436 withdrawAsOwner(5000e18) leaves 11,999,712,006,910 wei behind. The require never runs on chain.",
+      "impact": "The local end state differs from what dev asserts and logs ('Phase 9.7 end state asserted'). The minter stays the sole principal holder on a strategy that SYA no longer lists and cannot withdraw from, so legacy totalBalanceOf(minter) = 3,299.64 DOLA (all mock yield, including simulate-yield's 2,300) accrues to an unreachable bucket. More broadly, it is a concrete instance where a simulation-time self-assert passes over time-dependent state while the chain diverges.",
+      "evidence": "side-effects.json stateWrites (YieldStrategyDolaLegacy principal: block 435 = 5000.000011999712006910e18, block 436+ = 11999712006910) and postconditionResults; broadcast txs 433-436 (approve, PhusdStableMinter.mint 5000e18, MockDola.mint, withdrawAsOwner(minter, deployer, 5000e18)); dev-run.filtered.log line for Phase 9.7 shows principal 5000e18 in simulation.",
+      "recommendation": "Withdraw against the on-chain principal rather than a simulation-time number. Pass type(uint256).max (withdrawAsOwner caps to the available principal in AYieldStrategy._withdrawInternal), or principal plus a margin, and re-seed the deployer's actual DOLA delta. Alternatively, accept and log residual dust explicitly instead of asserting principalOf == 0.",
+      "fingerprint": "9fa8eee3010ec38a3aa38c93bdc8141dd42eb6a2a469648865c02f5ca2f84787",
+      "originalIds": [
+        "DEV39-02"
+      ],
+      "dedup": {
+        "disposition": "keep",
+        "reason": "New instance of an established pattern. Same mechanism as stable-staker-v2-cutover L-09 78cb5942d4834f366ab7d5600a449c73bb8d43833dd8b822e25801d623e39cc6 (Phase 6b re-seeds a DOLA amount baked from forge local pass; status fixed) and promotion-ready M-01 2c53e944 (verification runs on simulated state; fix-pending). Different script/function and separate mitigation, so kept as its own finding, not merged. rootCauseClass normalized from candidate SimulationBakedAmountOverTimeDependentState to the ledger taxonomy class ForgeLocalPassPrecedesBroadcast (used by L-09 78cb5942) so the pattern groups. Not within the 2026-09-15 DeployMocks UI-mock ruling: it concerns dev violating its own Phase 9.7 self-assert on chain, not mock-vs-mainnet fidelity.",
+        "relatedLedger": [
+          "78cb5942d4834f366ab7d5600a449c73bb8d43833dd8b822e25801d623e39cc6",
+          "2c53e944caee2e74a1a351c9b30b9e92cd8feac28203e8d5c1c9b7d9e8b4102f",
+          "88af91804ec23988388adb33bf17ec90f86825dc6ec017a5b31bc142f415d4bb"
+        ],
+        "originalRootCauseClass": "SimulationBakedAmountOverTimeDependentState",
+        "fingerprintIfOriginalClassKept": "abb5b706aa801767c4160fb2faeb7a6b0a9c8c98b4917c506039350daec0e4b9",
+        "reviewFlag": "Severity likely QA (1.2e13 wei on a mock chain); the classifier decides. Shares the symptom (3,299.64 DOLA stuck on legacy MockAutoDOLA) with DEV39-03 but the root cause and fix are different, so the two are not merged."
+      },
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "sanitizer": {
+        "decision": "pass",
+        "knownIssueMatch": null,
+        "ownerRulingApplied": false,
+        "note": "Not covered by the ruling: the violated check is dev's OWN story-089 post-condition (require(principalOf==0)) that is false on the broadcast chain, independent of mainnet parity (cluster rank 4 says the same). Same rootCauseClass as promotion-ready MR-22-01 but different entryPoint => different fingerprint by design; related-but-distinct from dev 1e8cc0dc58ba/88af91804ec2 (artifact written in simulation vs post-condition evaluated in simulation). Class rename to ForgeLocalPassPrecedesBroadcast accepted."
+      },
+      "originalSeverity": "low",
+      "label": "Q-01",
+      "issueId": "pps39q1",
+      "classifiedFinding": {
+        "id": "CLASS-002",
+        "originalId": "DEV39-02",
+        "label": "Q-01",
+        "issueId": "pps39q1",
+        "severity": "qa",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": false,
+        "reportChannel": "qa-report",
+        "labelClass": "Q",
+        "footgun": false,
+        "humanReviewFlag": false,
+        "classification": {
+          "assetImpact": "None of real value. On the local anvil chain, 11,999,712,006,910 wei (about 1.2e-5 DOLA) of mock minter principal stays on the de-registered legacy MockAutoDOLA strategy, and Phase 9.7 logs 'end state asserted' for a state the chain does not have. The 3,299.64 DOLA of legacy mock yield is stranded either way (story 089 already discloses the legacy yield seed as stranded locally).",
+          "attackPath": [
+            "1. npm run dev broadcasts DeployMocks on anvil --block-time 2.",
+            "2. In simulation, Phase 9.7 reads principalOf(minter)=5000e18 and bakes it into withdrawAsOwner calldata. The require(principalOf==0) passes against simulated state.",
+            "3. On chain, MockAutoDOLA's time-based yield accrues between blocks 434 and 436, so the minter's principal is 5000.000012e18 and the withdrawal leaves 1.2e13 wei.",
+            "4. The require never runs on chain."
+          ],
+          "likelihood": "certain on every dev run, but the effect is dust on a local mock",
+          "assumptions": "Local dev chain only. This is a separate entry point from any mainnet script, and the mainnet siblings of this pattern are tracked separately (78cb5942 fixed, 2c53e944 fix-pending).",
+          "externalRequirements": "none"
+        },
+        "justification": "QA. The impact is dust on a local mock chain, with no mainnet path and no user funds. It is kept and not dropped, because it is one more instance of the ForgeLocalPassPrecedesBroadcast class (a script self-assert certifies simulated, time-dependent state that the broadcast chain does not reproduce), and that class has caused real issues on mainnet entry points. It is not a faithfulness deviation: story 089's review records the collateral move as going beyond the literal spec (Autonomous Decisions 3/4), so no story-stated behaviour is broken. The 2026-09-15 UI-mock ruling does not apply, because the problem is dev's own post-condition being false on chain, not a mock-vs-mainnet fidelity gap.",
+        "recommendation": "Withdraw against the on-chain principal rather than a simulation-time number. Pass type(uint256).max (withdrawAsOwner caps to the available principal in AYieldStrategy._withdrawInternal), or principal plus a margin, and re-seed the deployer's actual DOLA delta. Alternatively, accept and log residual dust explicitly instead of asserting principalOf == 0."
+      },
+      "faithfulness": false,
+      "fingerprintInput": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol:_repointDolaMinterAndSya:ForgeLocalPassPrecedesBroadcast:dev"
+    },
+    {
+      "id": "DEV39-03",
+      "title": "simulate-yield.sh still feeds MockAutoDOLA after story 089's repoint, so dev's yield-simulation step reaches no live DOLA consumer (disclosed, unlanded story-089 follow-up)",
+      "severity": "qa",
+      "severityNote": "Story 089 itself discloses this as a follow-up candidate, carried as [low] at auto-complete. Honest severity is Low; F-class if the classifier treats disclosed follow-ups as faithfulness notes.",
+      "contract": "lib/phoenix-phase-2-staging/simulate-yield.sh",
+      "function": "main",
+      "lineStart": 19,
+      "lineEnd": 48,
+      "entryPoint": "dev",
+      "rootCauseClass": "StaleTargetAfterRepoint",
+      "category": "intent-mismatch",
+      "description": "dev's step 6 ('Simulating yield') mints 2,300 DOLA into the vault at progress.31337.json .contracts.MockAutoDOLA. Since story 089's Phase 9.7, the minter, StableStakerV2 and SYA all sit on YieldStrategyDola over MockSDOLA. SYA no longer lists the legacy strategy, and its withdrawer flag there is revoked. The simulated yield therefore lands only in the legacy vault, and nothing in the live system can skim it. Story 089 (Implementation Notes, line 104; Review, line 216) records this as an out-of-file-list follow-up. simulate-yield.sh is unchanged since baseline, so the follow-up has not landed.",
+      "impact": "UI developers running npm run dev get no simulated DOLA surplus on the live strategy; SYA claim / yield displays are unaffected by the step that claims to drive them. Local only; no mainnet effect.",
+      "evidence": "Executed: MockAutoDOLA totalAssets 1000.12 -> 3300.12 DOLA; SYA isRegisteredStrategy(legacy) = false, (sDOLA) = true; legacy totalBalanceOf(minter) = 3,299.64 DOLA, unreachable (see DEV39-02). Story 089 lines 104, 182, 216, 261.",
+      "recommendation": "Land the story-089 follow-up. Retarget simulate-yield.sh to .contracts.MockSDOLA (or call MockSDOLA.addYield), and assert that YieldStrategyDola's surplus for SYA increased after the step. If the work stays deferred, open a tracked story for it so the disclosure does not live only in 089's review notes.",
+      "fingerprint": "b8036903340e5737add73ade7e0c0640dd93fad9020bc7ba5ce2685c5615dca9",
+      "originalIds": [
+        "DEV39-03"
+      ],
+      "dedup": {
+        "disposition": "keep",
+        "reason": "New. No existing ledger entry, under any entryPoint, for simulate-yield.sh, MockAutoDOLA, or a stale yield-simulation target. Story 089 discloses it as a follow-up, but a disclosed and unlanded follow-up is not a ledger entry and not a known issue, so it is not suppressed here. Q-03 111b6f04c9b72ba71e4ad9eb7d2dc5df01790dce7e97d1fe95e093d0ef9b41af (dev-local.sh anvil flag drift) is a different file and root cause; evidence-only, not related to this finding. Kept separate from DEV39-02: they share a symptom, but here the cause is a stale address in the shell script, while DEV39-02 is a simulation-baked withdrawal amount.",
+        "relatedLedger": [],
+        "reviewFlag": "Severity Low vs F-class (disclosed story-089 follow-up) is for the classifier to decide."
+      },
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "sanitizer": {
+        "decision": "pass",
+        "knownIssueMatch": null,
+        "ownerRulingApplied": false,
+        "note": "Story-089 disclosed follow-up. A story-disclosed, unlanded follow-up is an admission of outstanding work, not a known issue; KI suppression has no authority anyway. Not mainnet-fidelity: it concerns dev's internal coherence (yield simulation feeds a de-registered mock), so the ruling does not apply."
+      },
+      "originalSeverity": "low",
+      "label": "F-01",
+      "issueId": "pps39f1",
+      "classifiedFinding": {
+        "id": "CLASS-003",
+        "originalId": "DEV39-03",
+        "label": "F-01",
+        "issueId": "pps39f1",
+        "severity": "qa",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": true,
+        "reportChannel": "spec-conformance",
+        "labelClass": "F",
+        "footgun": false,
+        "humanReviewFlag": false,
+        "classification": {
+          "assetImpact": "None. Local dev only: the 2,300 mock DOLA from dev's 'Simulating yield' step lands in the legacy MockAutoDOLA vault, which nothing live skims, so UI developers see no simulated DOLA surplus on the live sDOLA strategy.",
+          "attackPath": [
+            "1. Story 089 Phase 9.7 repoints the minter, StableStakerV2 and SYA to YieldStrategyDola over MockSDOLA, and revokes SYA's withdrawer flag on the legacy strategy.",
+            "2. simulate-yield.sh (unchanged since baseline) still mints into .contracts.MockAutoDOLA.",
+            "3. The yield lands on a de-registered strategy, so the SYA claim and yield displays are not driven by the step that is meant to drive them."
+          ],
+          "likelihood": "certain on every dev run; no adversary involved",
+          "assumptions": "Local dev only; no mainnet effect.",
+          "externalRequirements": "none"
+        },
+        "justification": "Routed to spec-conformance as F-01 at QA severity, not as a Low defect. Story 089 itself scoped the retargeting out and recorded it as a disclosed follow-up ([low], carried at auto-complete), so 089's own stated behaviour is not violated. What is broken is a consequence: the earlier dev behaviour (step 6 simulates yield for the live system) silently stopped working when 089 landed, and the follow-up has not been landed or ticketed as its own story. Law 2 says to surface that to the owner and not bury it in the QA bundle. Because the story disclosed it, this is an outstanding-work note rather than a hidden defect. There is no security or value impact, so no Low/Medium rating. The UI-mock ruling does not apply, because this concerns dev's internal coherence, not mainnet fidelity.",
+        "recommendation": "Land the story-089 follow-up. Retarget simulate-yield.sh to .contracts.MockSDOLA (or call MockSDOLA.addYield), and assert that YieldStrategyDola's surplus for SYA increased after the step. If the work stays deferred, open a tracked story for it so the disclosure does not live only in 089's review notes.",
+        "storyEvidence": {
+          "089": {
+            "path": "auto-complete/phStaging2-stable-staker-v2/089-deploymocks-sdola-mock-and-v2-dola-destination.md",
+            "state": "auto-complete",
+            "quotes": [
+              "It needs retargeting to `MockSDOLA` (not done here: outside this story's file list). Follow-up candidate.",
+              "[low] simulate-yield.sh still targets MockAutoDOLA, so it pumps yield into a vault nothing skims. Disclosed follow-up; outside this story's file list."
+            ]
+          }
+        }
+      },
+      "faithfulness": true,
+      "fingerprintInput": "lib/phoenix-phase-2-staging/simulate-yield.sh:main:StaleTargetAfterRepoint:dev"
+    },
+    {
+      "id": "DEV39-04",
+      "title": "Phase 9.7's maxMintPerDay restore assertion is vacuous locally: the pre-value is 0, which is exactly what registerStablecoin resets to",
+      "severity": "qa",
+      "severityNote": "QA-grade weak guard; possibly within the 2026-09-15 owner ruling's reach since 092's fork tests own the mainnet proof. Filed for the classifier to decide.",
+      "contract": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol",
+      "function": "_assertDolaRepoint",
+      "lineStart": 2551,
+      "lineEnd": 2556,
+      "entryPoint": "dev",
+      "rootCauseClass": "VacuousPostcondition",
+      "category": "intent-mismatch",
+      "description": "Story 089's Background names the trap this phase exists to rehearse: registerStablecoin resets maxMintPerDay to 0 (PhusdStableMinter.sol:125), so setMaxMintPerDay must be re-applied. Its acceptance criterion is 'maxMintPerDay equals its value before re-registration'. DeployMocks never sets a non-zero DOLA cap, so prevMaxMintPerDay == 0 (logged: 'maxMintPerDay restored: 0'). If the setMaxMintPerDay line (2521) were deleted, `require(maxMintPerDay == prevMaxMintPerDay)` would still pass.",
+      "impact": "The rehearsal reports the reset-then-restore ordering as asserted while proving nothing about it. A future regression in that ordering would pass dev silently.",
+      "evidence": "dev-run.filtered.log Phase 9.7 line 'maxMintPerDay restored: 0'; PhusdStableMinter.registerStablecoin writes maxMintPerDay: 0; grep shows no other setMaxMintPerDay for DOLA in DeployMocks.",
+      "recommendation": "Seed a non-zero DOLA cap at registration (setMaxMintPerDay(DOLA, X)) and require prevMaxMintPerDay > 0 before the restore check as an anti-vacuity gate, matching Phase 11.7's pattern. If the owner rules this within the UI-mock ruling, triage it as wont-fix and cite the ruling.",
+      "fingerprint": "c35d7cea7c0c71f66d59e5cf2b52b4ea844f1f1e1874540e5393664d8fc615a9",
+      "originalIds": [
+        "DEV39-04"
+      ],
+      "dedup": {
+        "disposition": "keep",
+        "reason": "New. Related vacuity-class dev entries are L-06 c76a8f9f (story-073 stream probe vacuous, _deployStreamerAndBatchMinter/_seedNudgeStream) and Q-01 9067d8a2 (Phase 7.6 tokenIdToDispatcher not asserted). Both have different functions, stories and fixes, so this is not a duplicate. Nothing covers Phase 9.7 / _assertDolaRepoint / maxMintPerDay.",
+        "relatedLedger": [
+          "c76a8f9f94795987c0d2aa5626c69a8afc430b24423cf3c853b9199022e4e9d1",
+          "9067d8a232b53421317b2663c757a6b80f5dc77076d138bd691a8fcfff49f947"
+        ],
+        "reviewFlag": "Borderline: it may fall under the 2026-09-15 owner ruling (DeployMocks rehearsal fidelity invalid; Q-01/Q-03 wont-fix). The ruling covers mock-vs-mainnet fidelity. This finding is about an assertion that cannot fail and that story 089 acceptance criteria rely on, so it was kept rather than set aside. Human or classifier should decide QA vs wont-fix-by-ruling."
+      },
+      "origin": "new",
+      "branch": "master",
+      "branchesSeen": [
+        "master"
+      ],
+      "sanitizer": {
+        "decision": "pass",
+        "knownIssueMatch": null,
+        "ownerRulingApplied": false,
+        "note": "Ruling assessed and NOT applied. The finding is that _assertDolaRepoint's maxMintPerDay restore check cannot fail locally (pre-value 0 == registerStablecoin reset value), so the story-089 acceptance criterion it is cited as satisfying is backed by a vacuous self-assertion; deleting setMaxMintPerDay would still pass. That is a test-adequacy defect of dev's own assertion, not a mock-vs-mainnet fidelity gap. Borderline flag: an owner could argue the only remedy is seeding a non-zero local cap (a fidelity change); the decision whether to fix by seeding or accept is human triage, not sanitizer suppression.",
+        "flag": true
+      },
+      "originalSeverity": "low",
+      "label": "Q-02",
+      "issueId": "pps39q2",
+      "classifiedFinding": {
+        "id": "CLASS-004",
+        "originalId": "DEV39-04",
+        "label": "Q-02",
+        "issueId": "pps39q2",
+        "severity": "qa",
+        "plausibility": "n/a",
+        "regression": false,
+        "faithfulness": false,
+        "reportChannel": "qa-report",
+        "labelClass": "Q",
+        "footgun": false,
+        "humanReviewFlag": true,
+        "classification": {
+          "assetImpact": "None. On the local chain, prevMaxMintPerDay is 0, which equals registerStablecoin's reset value, so require(maxMintPerDay == prevMaxMintPerDay) still passes if the setMaxMintPerDay re-apply is deleted. The rehearsal reports the restore as asserted without proving it.",
+          "attackPath": [
+            "1. DeployMocks never sets a non-zero DOLA cap, so prevMaxMintPerDay == 0.",
+            "2. registerStablecoin resets maxMintPerDay to 0 (PhusdStableMinter.sol:125).",
+            "3. The restore check compares 0 to 0 and cannot fail, so a future regression that drops the re-apply passes dev silently."
+          ],
+          "likelihood": "n/a - a guard weakness, not an exploit",
+          "assumptions": "The mainnet ordering is independently covered by story 092's fork tests.",
+          "externalRequirements": "none"
+        },
+        "justification": "QA. This is a vacuous post-condition on a local UI-mock script. The story-089 acceptance criterion is literally met (0 == 0), so it is not an F deviation, but the evidence for it carries no information. It has no asset or availability impact. It is kept as Q-02, and not set aside under the 2026-09-15 ruling, because it is a test-adequacy defect in dev's own assertion. Since the remedy touches local fidelity, the ruling question is left visible for the owner (humanReviewFlag).",
+        "recommendation": "Seed a non-zero DOLA cap at registration (setMaxMintPerDay(DOLA, X)) and require prevMaxMintPerDay > 0 before the restore check as an anti-vacuity gate, matching Phase 11.7's pattern. If the owner rules this within the UI-mock ruling, triage it as wont-fix and cite the ruling.",
+        "storyEvidence": {
+          "089": {
+            "path": "auto-complete/phStaging2-stable-staker-v2/089-deploymocks-sdola-mock-and-v2-dola-destination.md",
+            "state": "auto-complete",
+            "quotes": [
+              "acceptance criterion: maxMintPerDay equals its value before re-registration (as quoted by the sanitizer from 089 Background/AC; registerStablecoin reset trap)"
+            ]
+          }
+        },
+        "ownerRulingBorderline": {
+          "ruling": "2026-09-15 DeployMocks-is-a-UI-mock",
+          "status": "assessed, NOT applied, borderline - human decides QA vs wont-fix-by-ruling",
+          "reason": "The finding is about a self-assertion that cannot fail (test adequacy), not about mock-vs-mainnet fidelity. However, the only remedy is seeding a non-zero local cap, which an owner could reasonably call a fidelity change covered by the ruling. Story 092's fork tests own the mainnet proof of the reset-then-restore ordering."
+        }
+      },
+      "faithfulness": false,
+      "fingerprintInput": "lib/phoenix-phase-2-staging/script/DeployMocks.s.sol:_assertDolaRepoint:VacuousPostcondition:dev"
+    }
+  ]
+}

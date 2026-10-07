@@ -1,0 +1,129 @@
+{
+  "project": "yield-claim-nft",
+  "run": 21,
+  "branch": "master",
+  "regressionRange": "2bfa090..267660b",
+  "scanTimestamp": "2026-10-02T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scopeScanned": [
+    "src/dispatchers/UniPoolerV2.sol",
+    "src/interfaces/uniswap/IUniswapV2Factory.sol",
+    "src/interfaces/uniswap/IUniswapV2Pair.sol",
+    "src/interfaces/uniswap/IUniswapV2Router02.sol"
+  ],
+  "scopeNote": "Regression scan: only the files changed in 2bfa090..267660b were signature-grepped. Mint-path context read from src/NFTMinterV2.sol L191 and src/dispatchers/ATokenDispatcherV2.sol (setHook L94-98, dispatch L125). Line numbers refer to the real file at 267660b.",
+  "patternsLoaded": 35,
+  "patternsChecked": 35,
+  "patternsSkipped": [
+    {"id": "FRONTRUN-APPROVE", "reason": "DB note: C4 treats as QA/known issue. 0 signature hits anyway (forceApprove used throughout)."},
+    {"id": "CENTRALIZATION-ADMIN", "reason": "DB note: Low/QA unless rug-enabling; rescueERC20 (L556) can move held LP/sUSDS but owner is trusted (Law 3), and the onlyOwner setters are unchanged in this diff. No plausible HM twist."}
+  ],
+  "checkedNoMatch": ["ERC4626-INFLATION","ORACLE-STALE","ORACLE-ROUNDID","SIGNATURE-REPLAY","UNSAFE-DOWNCAST","DIVISION-PRECISION","UNPROTECTED-INIT","STORAGE-COLLISION","RETURN-VALUE-IGNORE","SELFDESTRUCT-FORCE-ETH","DOS-UNBOUNDED-LOOP","DOUBLE-VOTING","PERMIT-FRONTRUN","CROSS-CHAIN-REPLAY","TIMELOCK-BYPASS","REWARD-ACCRUAL-ORDER","REWARD-RUNWAY-DEPLETION","YIELD-PRINCIPAL-ACCOUNTING-SKEW","REENTRANCY-ERC721-RECEIVE","ROUNDING-DIRECTION"],
+  "signatureHitsDismissed": [
+    {"id": "REENTRANCY-ERC777", "reason": "Tokens are USDS/sUSDS/phUSD/USDC, none carry transfer hooks; pool() is nonReentrant (L454) and dispatch() is nonReentrant in the base."},
+    {"id": "INCORRECT-OPERATOR / EMISSION-WINDOW-BOUNDARY / WEAK-PRNG", "reason": "Hits are deadline = block.timestamp at L472/L481, which is not randomness or a window boundary. Already ledgered as Q-20 a9037a2f96 (wont-fix)."},
+    {"id": "MINT-ON-DEMAND-OVERMINT", "reason": "phUSD is only swapped and paired here, never minted. Identifier hit only."},
+    {"id": "TWO-STEP-COMMIT-WINDOW", "reason": "Literal '100' (percent bound / fee math). False positive."},
+    {"id": "REENTRANCY-READONLY", "reason": "getReserves is read by this contract inside its own nonReentrant pool(), not exposed to integrators. The pair has its own lock."},
+    {"id": "REENTRANCY-CROSS-FUNCTION", "reason": "safeTransfer only in owner rescueERC20 (L558)."},
+    {"id": "FEE-ON-TRANSFER-ACCOUNTING", "reason": "No FoT tokens in scope (USDS/sUSDS/phUSD/USDC)."},
+    {"id": "BATCH-PAYOUT-FIXED-POT", "reason": "_dispatch L372 sweeps the whole USDS balance into the PSM donation. That sweep is intended (re-sweeps a parked failed donation), and a third-party USDS top-up only costs the donor. Unchanged by this diff apart from a comment."}
+  ],
+  "findingsCount": 3,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "zap-sandwich",
+      "severity": "potential-high",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "pool",
+      "line": 481,
+      "description": "addLiquidity is called with amountAMin = amountBMin = 0 (L481). The only protection is the keeper-supplied minPhusdOut (swap, L472) and minLP (L483). Re-checked after the sync() change: the sandwich surface is the same, and it stays bounded by caller tolerance.",
+      "confidence": "medium",
+      "matchedSignatures": ["addLiquidity(_sUSDS, _phUSD, sUSDSRemaining, phusdOut, 0, 0, ...)", "swapExactTokensForTokens(s, minPhusdOut, ...)"],
+      "missingMitigations": ["No on-chain/TWAP price bound; mins are spot-derived off-chain"],
+      "ledgerCoverage": {"label": "L-22", "fingerprint": "a846cc40e6", "status": "wont-fix", "verdict": "covered: same root cause, no new vector from this diff"},
+      "references": []
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE",
+      "type": "spot-reserve-sizing",
+      "severity": "potential-high",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "pool / quotePool",
+      "line": 463,
+      "description": "The zap size s = _swapAmount(rS, sUSDSIn) (L541) comes from spot reserves after sync() (L462-463), and quotePool sizes from pair balanceOf (L502, L531). Both can be manipulated within one block. The new sync() also lets an unsynced donation move the sizing price, but a donation is a pure loss for the attacker: it cannot be skimmed back after sync, and it accrues mostly to protocol-owned LP. It is therefore no stronger than the front-run swap already covered by L-22. The manipulation is bounded by minPhusdOut/minLP.",
+      "confidence": "medium",
+      "matchedSignatures": ["getReserves()", "IERC20(_sUSDS).balanceOf(_pair)", "IUniswapV2Pair(_pair).sync()"],
+      "missingMitigations": ["No TWAP/oracle sanity bound on rS"],
+      "ledgerCoverage": {"label": "L-22", "fingerprint": "a846cc40e6", "status": "wont-fix", "verdict": "covered"},
+      "relatedFixCheck": {"label": "L-25", "fingerprint": "8ec2be7d59", "status": "fix-pending", "verdict": "Fix appears complete. sync() at L462 makes the reserves used for sizing equal the reserves swap() and the addLiquidity quote use, so an unsynced donation is no longer credited as swap input. quotePool's _balances() is exactly what sync() would set. The deciding Tier-3 check is to replay the L-25 PoC (0.5% donation, 100k zap) and confirm no phUSD is stranded and no InsufficientLP revert."},
+      "references": []
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "FIRST-DEPOSITOR-ATTACK",
+      "type": "pair-pre-seed-ratio-grief",
+      "severity": "potential-high",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "constructor",
+      "line": 220,
+      "description": "The new canonical check (L220-221: router.factory().getPair(sUSDS, phUSD) == pair_) shows the pair is the factory pair. It does not show the pair is seeded at a sane ratio, because anyone can create and dust-seed the canonical pair first. _reserves()/_balances() revert EmptyPair on zero (L525, L533), so pool() is never the first depositor, but the initial ratio is still set by whoever seeds first.",
+      "confidence": "medium",
+      "matchedSignatures": ["getPair(sUSDS_, phUSD_)", "revert UniPoolerV2__EmptyPair()"],
+      "missingMitigations": ["No ratio/minimum-reserve check at construction or first pool()"],
+      "ledgerCoverage": {"label": "L-24", "fingerprint": "8511fd5206", "status": "wont-fix", "verdict": "covered (dust pre-seed half)"},
+      "relatedFixCheck": {"label": "Q-19", "fingerprint": "098396142d", "status": "fix-pending", "verdict": "The canonical-pair half is fixed by L220-221; propose 'fixed' to a human. The pre-seed half stays under L-24 (wont-fix). Q-19 and L-24 share one title, so the sanitizer must not treat them as separate live issues."},
+      "references": []
+    }
+  ],
+  "manualReviewCount": 3,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "SENTINEL-GUARD-BYPASS (heuristic; no DB pattern)",
+      "type": "identity-sentinel-guard",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "_dispatch",
+      "line": 356,
+      "description": "The L-21 fix guard `if (address(hook) == _defaultHook) revert HookNotSet()` (L356; _defaultHook captured at L230) blocks only the one DefaultDispatchHook instance deployed by the base constructor. A different no-op hook (for example a second DefaultDispatchHook, or a stale hook redeployed by a script) passes the guard and recreates the L-21 zero-mint-debt outcome. setHook rejects only address(0) (ATokenDispatcherV2 L95). A mint-debt hook whose `dispatcher` is not repointed to UniPoolerV2 fails loudly in onDispatch (dispatcher-gated), which is safe. Reaching the bypass needs an owner/script action, so this is a residual Law-3 footgun, not an attacker path. The fix covers the failure mode L-21 states (setHook skipped or reordered).",
+      "confidence": "low",
+      "ledgerCoverage": {"label": "L-21", "fingerprint": "6867d791f3", "status": "fix-pending", "verdict": "The fix addresses the stated root cause; the residual is identity-vs-type. Do not auto-close L-21. A human applies 'fixed'."},
+      "failLoudNote": "NFTMinterV2.mint calls dispatcher.dispatch at L191 with no try/catch, so until setHook runs, every index-4 mint reverts UniPoolerV2__HookNotSet. The other indices are unaffected. This is an intended fail-loud ordering requirement (NatSpec 'Hook must be set before the first mint'), not a DoS finding, provided the cutover script calls setHook before registering index 4."
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "pattern-db",
+      "patternId": "QUOTE-EXECUTE-DIVERGENCE (heuristic; DIVISION-PRECISION/ROUNDING-DIRECTION family)",
+      "type": "view-vs-execute-toctou",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "quotePool",
+      "line": 517,
+      "description": "quotePool reads totalSupply() (L517) without the _mintFee LP that pair.mint() issues to feeTo when the V2 fee switch is on. Fees accrued since kLast, plus any donation folded in by sync(), grow sqrt(k). In execution, the pooler's liquidity is computed against a larger totalSupply, so the realised LP is at least the quote. The divergence errs in the safe direction for a minLP derived from quotePool. The quote's swapIn and phusdOut match pool() exactly after sync. The real exposure is TOCTOU: the keeper derives minPhusdOut/minLP off-chain from quotePool and executes in a later block (already the L-22/L-23 tolerance surface). If the keeper is ever a contract that calls quotePool in the same transaction, the mins become vacuous. No such caller exists in the source.",
+      "confidence": "low",
+      "ledgerCoverage": {"label": "L-22 / L-23", "fingerprint": "a846cc40e6 / c15c71fd22", "status": "wont-fix", "verdict": "no new HM exposure"}
+    },
+    {
+      "id": "PATTERN-MR-003",
+      "source": "pattern-db",
+      "patternId": "CANONICAL-PAIR-CHECK (heuristic; CREATE2/getPair)",
+      "type": "trusted-router-derives-factory",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "constructor",
+      "line": 220,
+      "description": "The canonical check takes its factory from the caller-supplied router_ (IUniswapV2Router02(router_).factory()). A wrong router plus a matching fake factory would pass. Router and pair are both deploy-time owner/deployer inputs, so this is Law-3 trusted (an obvious misconfig) unless the deploy script reads the router from an unverified source. The check also needs the pair to exist before deployment (getPair returns 0 and pair_ != 0), which pushes pair creation and seeding into the L-24 pre-seed window.",
+      "confidence": "low",
+      "ledgerCoverage": {"label": "Q-19", "fingerprint": "098396142d", "status": "fix-pending", "verdict": "Residual only; supports proposing Q-19 fixed."}
+    }
+  ],
+  "errors": []
+}

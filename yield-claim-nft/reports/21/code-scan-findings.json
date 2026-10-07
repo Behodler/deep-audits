@@ -1,0 +1,115 @@
+{
+  "project": "yield-claim-nft",
+  "run": 21,
+  "scanTimestamp": "2026-10-02T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "mode": "regression",
+  "baselineCommit": "2bfa090",
+  "commit": "267660b",
+  "branch": "master",
+  "contractsScanned": 1,
+  "contractsTouchedByDiff": ["src/dispatchers/UniPoolerV2.sol", "src/interfaces/uniswap/IUniswapV2Factory.sol", "src/interfaces/uniswap/IUniswapV2Pair.sol", "src/interfaces/uniswap/IUniswapV2Router02.sol"],
+  "interactionPartnersRead": ["src/dispatchers/ATokenDispatcherV2.sol", "src/NFTMinterV2.sol", "src/hooks/DefaultDispatchHook.sol", "src/hooks/BalancerPoolerMintDebtHook.sol"],
+  "story": {"tag": "story-051", "path": "/home/justin/code/product-owner/stories/yield-claim-nft/review/yield-claim-nft-Balancexit/051-unipoolerv2-audit-fixes-hook-guard-sync-canonical-pair.md", "state": "review", "note": "Story sits in review; it calls L-25 'ycn20l24' (label drift). Reconcile on fingerprint 8ec2be7d, not the label."},
+  "evidenceRuns": [
+    {"what": "forge test --match-contract UniPoolerV2Test in yield-claim-nft/work (byte-identical to 267660b UniPoolerV2.sol and UniPoolerV2.t.sol)", "result": "115 passed, 0 failed"},
+    {"what": "run-20 L-25 PoC yield-claim-nft/work/test/run20/DonationStrand.t.sol replay", "result": "INCONCLUSIVE: setUp reverts 'DeadRouter: unavailable' (harness bit-rot from the new constructor router.factory() call), not a fix signal. Repo-native unit and fork donation tests (test_pool_unsyncedSUSDSDonation_leftoverIsDust, _forkUnsyncedDonationZap) assert dust-only leftovers and reserves equal to balances."},
+    {"what": "cast sig for the new interface members", "result": "sync()=0xfff6cae9, factory()=0xc45a0155, getPair(address,address)=0xe6a43905. All match canonical Uniswap V2. Return types (getPair -> address, factory -> address, sync -> none) match."}
+  ],
+  "fixVerification": [
+    {
+      "label": "L-21", "fingerprint": "6867d791f35ac9ac3b0058eec51525b64dc8bf3f7172fab2d23936d5d2ecf0bc",
+      "verdict": "FIX-COMPLETE",
+      "evidence": "UniPoolerV2.sol:230 `_defaultHook = address(hook);` runs in the derived constructor after ATokenDispatcherV2's constructor (ATokenDispatcherV2.sol:51 `hook = new DefaultDispatchHook();`), so it captures the base-deployed instance. UniPoolerV2.sol:356 `if (address(hook) == _defaultHook) revert UniPoolerV2__HookNotSet();` is the first statement of _dispatch, before any wrap or donation side effect. The revert bubbles through NFTMinterV2._executeMint:189, which rolls back the safeTransferFrom (L181) and the price growth (L186). test_hookGuard_nftMinterMint_revertsUntilHookSet exercises this end to end.",
+      "bricksLegitimatePath": "No. The guard is only on dispatch. pause/unpause (ATokenDispatcherV2.sol:102-109, via NFTMinterV2.setDispatcherActive:309-327), NFTMinterV2.mintFor:206-214 (no dispatch call), replaceDispatcher:227-247 and registerDispatcher (neither calls the dispatcher), pool(), rescueERC20 and every owner setter are unaffected. The only deliberate effect is that index-4 mints revert between replaceDispatcher(4) and setHook. That is loud and atomic, with no loss of funds.",
+      "bypassAnalysis_MR001": "Suppressed under Law 3; listed in setAside. Only a deliberately deployed fresh DefaultDispatchHook, or any non-accruing hook, gets past the identity check. Story-051 Concerns and the NatSpec at UniPoolerV2.sol:91-97 document this as an intentional escape hatch. In the sibling phoenix-phase-2-staging src (excluding lib and test), nothing constructs `new DefaultDispatchHook`, so no script path reaches the bypass by accident. A competent owner would not be surprised that installing a no-op hook accrues no debt, so this is not a footgun.",
+      "newBugsIntroduced": "None found. The immutable cannot be re-pointed. Re-installing the original default via setHook re-arms the guard, which is a loud owner choice."
+    },
+    {
+      "label": "L-25", "fingerprint": "8ec2be7d59270e73e7f7c2cf1759514ebc94d198324477c8f2a22f4b82c54ef7",
+      "verdict": "FIX-COMPLETE",
+      "evidence": "UniPoolerV2.sol:462 `IUniswapV2Pair(_pair).sync();` comes immediately before :463 `(uint256 rS,) = _reserves();`, so s is sized against reserves equal to balances. Router swapExactTokensForTokens then transfers exactly s, and pair.swap credits balance - reserve = s. addLiquidity's quote reads the post-swap _update reserves, which also equal balances. Both legs therefore balance to wei dust. quotePool:502 uses _balances() (:531-535), which equals the post-sync reserves in the same state. This closes the owner-noted quote/execute divergence that the run-20 triage expected the fix to leave behind.",
+      "orderingAndGuards": "sync() runs after the auth, pause, nonReentrant, zero-floor and balance checks, and before any approve or transfer. Allowance resets (:473, :483-484) are unchanged. minPhusdOut and minLP floors are unchanged. The InsufficientLP revert at :482 rolls back the sync too, which is harmless.",
+      "valueShiftAnalysis": "With sync, an unsynced donation accrues pro rata to all current LPs instead of being absorbed into this contract's swap or mint. The donation was never protocol value, so the protocol loses nothing it owned. An attacker gains nothing: a donation is a pure gift, and its price effect is a strictly costlier version of the swap front-run that the floors already bound (L-22, wont-fix, unchanged). Nothing in the pair moves between sync and swap inside pool(), because sUSDS and phUSD have no hooks and the pair's lock prevents re-entry.",
+      "syncRevertAnalysis": "pair.sync() reverts 'UniswapV2: OVERFLOW' only if a balance reaches 2^112 (about 5.19e33 wei, or 5.19e15 tokens at 18 decimals). Nobody can force that for sUSDS or phUSD (phUSD minting is collateral-backed), so this is not a griefing lever. sync carries the pair's `lock` modifier, and pool() is never reached from a pair callback.",
+      "newBugsIntroduced": "None at Low or above. See CODE-21-002 (informational) for the empty-pair case, which is not new."
+    },
+    {
+      "label": "Q-19", "fingerprint": "098396142dcb5a8179009d4a0d844130b32b814cc03fb982240a8aabd6d63953",
+      "verdict": "FIX-COMPLETE",
+      "evidence": "UniPoolerV2.sol:220-221 `address canonical = IUniswapV2Factory(IUniswapV2Router02(router_).factory()).getPair(sUSDS_, phUSD_); if (canonical != pair_) revert UniPoolerV2__PairNotCanonical(canonical, pair_);`. A missing pair returns address(0), which differs from the non-zero pair_ (enforced at :213), so the constructor reverts. A lookalike pair also reverts. The check runs after PairTokenMismatch, so wrong-token diagnostics are preserved. Factory getPair is symmetric, so token order does not matter.",
+      "scopeNote": "Q-19 is facet A of DEDUP-20-04 (non-canonical pair accepted at deploy). The dust pre-seed and MINIMUM_LIQUIDITY griefing half was split to L-24 (8511fd52, wont-fix). The profiler graded this fix 'partially', but its residual is L-24's root cause, not Q-19's. Do not mark it INCOMPLETE on that basis. The trust root is now router_; a fake router with a fake factory is an obvious owner misconfiguration (Law 3).",
+      "deploymentOrdering": "The old constructor already called pair_.token0() (:215), so the pair contract had to exist before deployment. The new check does not open a longer permissionless pre-seed window than before. Script ordering issues in phStaging2:100/101/103 are listed in setAside as MR-002."
+    },
+    {
+      "label": "Q-21", "fingerprint": "4c2f9c705c39776aba9242b9c1871f1e165a8f55faeeaefb93abe594e58b41e6",
+      "verdict": "NOT-ADDRESSED",
+      "evidence": "267660b makes no code or doc change for Q-21. Story-051 defers it to phStaging2:108 (docs/BalancerWinddownPlan.md, outside this repo). The contract still has no price ceiling by design (UniPoolerV2.sol:78-80). It stays fix-pending. Do not propose 'fixed'."
+    }
+  ],
+  "otherLedgerReconciliation": [
+    {"label": "F-01-048", "fingerprint": "771101e7d7", "status": "open", "observation": "Addressed by the NatSpec rewrite. DonationSkipped NatSpec (:167-171), the contract Donation section (:31-38), the _dispatch dev notes (:339-344) and the _psmDonate notes (:387-389, :411-416) now say a zero gemAmt is a silent no-op with no event, and that DonationSkipped is emitted only from the catch at :377. Proposed for human review as 'fixed'. Not auto-applied."},
+    {"label": "F-02-048", "fingerprint": "49c7408c94", "status": "open", "observation": "Contract half addressed: the Kill switches NatSpec (:82-89) is accurate against code (pool is whenNotPaused :453; pause/unpause are onlyMinter; NFTMinterV2.setDispatcherActive is the only caller). The plan and runbook half is deferred to phStaging2:108, so this stays open."},
+    {"label": "M-04", "fingerprint": "c91bef813d", "status": "fixed", "observation": "Different contract (NudgeRatchet). Untouched by this diff. No regression."},
+    {"label": "L-22 / L-24 / Q-20", "status": "wont-fix", "observation": "Root causes unchanged by the diff: floor-only sandwich bound, permissionless pre-seed, block.timestamp deadline. Not widened. L-24 interaction with sync is covered in CODE-21-002."}
+  ],
+  "regressionCheck": "No ledger 'fixed' finding on UniPoolerV2, ATokenDispatcherV2, DefaultDispatchHook or BalancerPoolerMintDebtHook is reopened. ATokenDispatcherV2.sol, DefaultDispatchHook.sol, BalancerPoolerMintDebtHook.sol and NFTMinterV2.sol are byte-unchanged in 2bfa090..267660b. The guard lives only in the concrete UniPoolerV2._dispatch, so the live sibling dispatchers are unaffected.",
+  "reentrancyChecklist": [
+    {"class": "classic single-fn", "cleared": true, "why": "pool is nonReentrant (:454). The new external call sync() goes to the factory-bound pair, whose lock prevents re-entry. sUSDS and phUSD are hookless ERC20s."},
+    {"class": "cross-contract", "cleared": true, "why": "The new constructor calls (router.factory, factory.getPair) run before any state exists. The only new runtime call is pair.sync(), which makes no outbound call except balanceOf. hook.onDispatch runs after _dispatch under the base nonReentrant (ATokenDispatcherV2.sol:118-126). The guard reads hook before the call."},
+    {"class": "cross-function", "cleared": true, "why": "OZ ReentrancyGuard is contract-wide, so dispatch and pool share one lock. _psmDonate is self-only (msg.sender == this) and reachable only inside dispatch's frame."},
+    {"class": "read-only", "cleared": true, "why": "quotePool is a view with no on-chain consumers (grep of src/ finds none; MultiPooler targets the 4-arg Uniboost pool). Between sync and addLiquidity, control passes only to router, pair and hookless tokens, so no attacker code runs mid-zap to read a transient quote."},
+    {"class": "ERC721 receive hook", "cleared": true, "why": "No ERC721 mint or transfer in UniPoolerV2."},
+    {"class": "ERC1155 receive hook", "cleared": true, "why": "NFTMinterV2._executeMint calls _mint (onERC1155Received) after dispatch returns. The new guard reverts before any state change. Ordering is unchanged from baseline."},
+    {"class": "ERC777", "cleared": true, "why": "USDS, sUSDS, phUSD and USDC are not ERC777 (trust assumption in the profile, unchanged)."}
+  ],
+  "findings": [
+    {
+      "id": "CODE-21-001",
+      "type": "natspec-inaccuracy",
+      "severity": "informational",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "quotePool / _swapAmount (contract @dev 'Overflow bound')",
+      "line": 73, "lineStart": 72, "lineEnd": 76,
+      "description": "The 'Overflow bound' NatSpec bounds _swapAmount's checked product with two claims: 'V2 reserves are uint112' and 'a is capped by this contract's sUSDS balance'. After 267660b, quotePool feeds _swapAmount uint256 balanceOf(pair) values (:502, :531-533), not uint112 reserves. quotePool also never caps sUSDSIn by the contract balance (its own @dev says it can quote hypothetical amounts), so the second claim has never held for quotePool. pool() still satisfies both: sync() reverts above uint112, and :459 caps a.",
+      "codeSnippet": "///      arithmetic. V2 reserves are `uint112` (< 5.2e33), and `a` is capped by this contract's\n///      sUSDS balance which, to be added as liquidity at all, must also fit `uint112`;",
+      "attackVector": "None. Arithmetic is checked, so an out-of-range quotePool input reverts and never wraps. Documentation accuracy only.",
+      "relatedLocal": "Duplicates LOCAL-Q-01 (profiler) and extends it with the 'a is capped' half, which predates this diff. Dedup should merge.",
+      "recommendation": "Scope the bound to pool(): sync() enforces uint112 and the balance check caps a. State that quotePool takes uint256 balances and arbitrary sUSDSIn and relies on checked arithmetic to revert.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-21-002",
+      "type": "behaviour-change-empty-pair",
+      "severity": "informational",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "pool",
+      "line": 462, "lineStart": 456, "lineEnd": 482,
+      "description": "Before the fix, pool() on an unseeded canonical pair (totalSupply == 0) reverted EmptyPair because stored reserves were 0. Now pool() calls sync() first. If a third party has transferred dust of both tokens to the pair at an arbitrary ratio, sync turns that dust into non-zero reserves, and pool() proceeds to swap and to be the first minter at the donor-chosen ratio. quotePool returns expectedLP = 0 when ts == 0 (:517-518), so a UI-driven call reverts ZeroMinimum (:456). Only a keeper that hand-sets minLP > 0 can execute it, and even then the floors (minPhusdOut) bound the swap leg.",
+      "codeSnippet": "IUniswapV2Pair(_pair).sync();\n(uint256 rS,) = _reserves();",
+      "attackVector": "Not new. UniswapV2Pair.sync() is permissionless, so before the fix an attacker could call sync() themselves to reach exactly this state, or simply mint() the first LP at a skewed ratio. That is L-24 (permissionless pre-seed, wont-fix). The fix does not widen L-24. Recorded for recall (Law 1), not as a defect.",
+      "recommendation": "No code change. The cutover runbook (phStaging2:108) should seed the pair in the same transaction as, or before, any pool() call, and keepers should derive floors from quotePool only (a 0 expectedLP refuses to pool, which is the safe behaviour).",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-21-003",
+      "type": "natspec-assumption",
+      "severity": "informational",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "contract @dev 'The zap'",
+      "line": 61, "lineStart": 60, "lineEnd": 62,
+      "description": "The NatSpec says a synced donation accrues 'to the pair's LPs, overwhelmingly this contract's POL'. That holds only if this contract holds most of the LP supply. Per Q-21, the cutover seeds the pair with only the protocol's 62.9% of BPT, the EOA-held BPT question is still open, and whoever seeds the pair (pooler, multisig or EOA) determines who holds the seed LP. The claim is an operational assumption, not a code guarantee. It has no security impact, because the donated value was never the protocol's.",
+      "codeSnippet": "///      donation into the reserves — to the pair's LPs, overwhelmingly this contract's POL — so",
+      "attackVector": "None.",
+      "recommendation": "Reword to 'to the pair's LPs pro rata (the protocol's POL, to the extent the seed LP is held here)', or confirm in phStaging2:108 that the seed LP is custodied on the pooler.",
+      "confidence": "medium"
+    }
+  ],
+  "setAside": [
+    {"id": "MR-001", "topic": "L-21 guard bypass via a fresh DefaultDispatchHook (or any non-accruing hook, e.g. BalancerPoolerMintDebtHook with ratio 0)", "disposition": "suppressed (Law 3: obvious, deliberate owner action)", "reason": "Documented escape hatch in NatSpec (:91-97) and story-051 Concerns. No phStaging script constructs DefaultDispatchHook (grep of phoenix-phase-2-staging/src, excluding lib and test). A ratio-0 hook is an explicit setRatio choice. A mint-debt hook still bound to the old BalancerPoolerV2 fails loudly (OnlyDispatcher, BalancerPoolerMintDebtHook.sol:110), not silently."},
+    {"id": "MR-002", "topic": "phStaging2 deployment ordering against the new constructor and guard", "disposition": "cross-boundary manual-review; route to /audit-script on phoenix-phase-2-staging", "reason": "Story-051 says phStaging2:100/101/103 deploy UniPoolerV2 before the pair exists, which now reverts PairNotCanonical at deploy. It also says phStaging2:104 registers or replaces index 4 before setHook, which makes index-4 mints revert HookNotSet during that window (atomic, no fund loss). Both failures are loud by design. Re-verify once phStaging2:108 lands. The ordering must also seed the pair and custody the seed LP so that CODE-21-002 and CODE-21-003 hold."},
+    {"id": "MR-003", "topic": "Run-20 L-25 PoC bit-rot", "disposition": "INCONCLUSIVE replay; not a fix signal", "reason": "yield-claim-nft/work/test/run20/DonationStrand.t.sol setUp reverts 'DeadRouter: unavailable' because the constructor now calls router.factory(). The fix verdict rests on code reading plus the repo-native unit tests (115/115 pass) and the fork tests. Refresh the PoC harness before any /recheck of 8ec2be7d."},
+    {"id": "MR-004", "topic": "Uniswap V2 protocol fee (feeTo) interaction with sync()", "disposition": "cleared", "reason": "sync() raises k without touching kLast. With feeOn, the next mint's _mintFee would take 1/6 of the donation-driven sqrt(k) growth. feeTo is off on the mainnet V2 factory, and the effect would only redistribute donated value. quotePool's NatSpec already notes that fee-on only raises our LP."}
+  ]
+}
