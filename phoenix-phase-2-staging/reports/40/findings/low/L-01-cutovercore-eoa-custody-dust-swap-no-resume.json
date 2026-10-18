@@ -1,0 +1,169 @@
+{
+  "id": "L-01",
+  "label": "L-01",
+  "issueId": "pps40l1",
+  "project": "phoenix-phase-2-staging",
+  "run": "phoenix-phase-2-staging-40",
+  "status": "draft",
+  "ledgerStatus": "open",
+  "severity": "low",
+  "severityClass": "low",
+  "reportChannel": "qa-report",
+  "title": "UniPoolerCutoverCore routes the whole protocol LP through the OWNER EOA across separate broadcast txs (step 4 withdrawBPT -> step 5 exit -> step 6 seed) with simulation-baked bptIn/sAmt/pAmt and no resume path; any Balancer swap between simulation and the exit strands the liquidity on the EOA",
+  "contract": "script/helpers/UniPoolerCutoverCore.sol",
+  "function": "_step4WithdrawBPT / _step5ExitBalancer / _checkMinAmountsOut / _step6SeedPair",
+  "line": 430,
+  "lineStart": 359,
+  "lineEnd": 439,
+  "fileLine": "script/helpers/UniPoolerCutoverCore.sol:359-439",
+  "instances": [
+    {
+      "contract": "script/helpers/UniPoolerCutoverCore.sol",
+      "function": "_step4WithdrawBPT",
+      "line": 362,
+      "note": "withdrawBPT(p.owner, bal): all 20,401.8 BPT to the EOA as its own tx"
+    },
+    {
+      "contract": "script/helpers/UniPoolerCutoverCore.sol",
+      "function": "_step5ExitBalancer",
+      "line": 373,
+      "note": "exit of balanceOf(owner); bptIn baked; floors checked vs simulation balancesRaw (MR-002)"
+    },
+    {
+      "contract": "script/helpers/UniPoolerCutoverCore.sol",
+      "function": "_checkMinAmountsOut",
+      "line": 404,
+      "note": "accepts floors up to exitToleranceBps (<=100) below the simulated share (MR-002)"
+    },
+    {
+      "contract": "script/helpers/UniPoolerCutoverCore.sol",
+      "function": "_step6SeedPair",
+      "line": 430,
+      "note": "addLiquidity(sAmt, pAmt) with sAmt/pAmt = simulation deltas"
+    }
+  ],
+  "entryPoint": "",
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "commit": "a4f9f3c66ee133a7cacb79f4d24300bba5945966",
+  "baseline": "0e190e8 (branchBaselines.master)",
+  "fingerprint": "7d5a26570be9093ad8a0704ee939953879a0a01a7201a88e8c182a97630bf505",
+  "fingerprintPreimage": "script/helpers/UniPoolerCutoverCore.sol:_step4WithdrawBPT / _step5ExitBalancer / _checkMinAmountsOut / _step6SeedPair:multi-tx-eoa-custody-no-resume",
+  "fingerprintScheme": "sha256(contract:function:rootCauseClass), entryPoint empty",
+  "fingerprintVerified": true,
+  "rootCauseClass": "multi-tx-eoa-custody-no-resume",
+  "rootCause": "Non-atomic EOA custody of the cutover liquidity (steps 4-6 are independent OWNER txs whose amounts are fixed in forge simulation) combined with no skip-if-done resume gates. The escrow (UniPoolerCutoverEscrow.exitAndSeed) that removes this is not wired into the core at a4f9f3c.",
+  "origin": "new",
+  "description": "Under forge --broadcast, steps 4, 5 and 6 are separate OWNER transactions whose amounts are baked in simulation. A Balancer swap that lands before the step-5 exit either (A) shifts the per-BPT composition inside the 1% _checkMinAmountsOut window so the exit succeeds but the baked step-6 addLiquidity pulls more of the short leg than OWNER holds (0 spare sUSDS, 1.47 phUSD), or (B) pushes the exit past its floor so it reverts after step 4 already moved all BPT to OWNER. Either way ~$41.3k of protocol POL sits on the OWNER EOA, which story 103's 2026-10-07 requirement ('no protocol funds transit the owner EOA') forbids. The canonical pair stays empty and public, which extends the ledgered 2-wei poisoning window (9a694ae01fe1), and index 4/hook remain on the old pooler. Re-running the core fails at step 5 (bptIn == 0) or step 0.",
+  "failureScenario": {
+    "attackPath": [
+      "1. Operator simulates UniPoolerCutoverCore (PROPORTIONAL); bptIn/sAmt/pAmt are baked into calldata",
+      "2. Any Balancer phUSD/sUSDS swap (organic ~5/week, or a ~$0.03 dust front-run of the step-4/5 txs) lands before the step-5 exit",
+      "3a. Scenario A: exit lands inside the 1% floors; step-6 addLiquidity reverts TRANSFER_FROM_FAILED (sUSDS shortfall 5.16e14 wei)",
+      "3b. Scenario B: swap >=100 tokens at 10 bps tolerance; step-5 exit reverts AmountOutBelowMin after step 4 already moved all BPT to OWNER",
+      "4. Re-running the core fails at step 0/step 5; recovery is a hand-written owner transaction"
+    ],
+    "scenarios": [
+      {
+        "name": "A: split-brain (exit lands, seed reverts)",
+        "trigger": "Any phUSD-in Balancer swap from 1e7 wei (Balancer minimum) up to >=10 phUSD, or ~10 sUSDS-in, mined between simulation and the step-5 exit (organic ~5 swaps/week, or a ~$0.03 front-run)",
+        "forkResult": "Exit lands inside floors; seed reverts TransferHelper: TRANSFER_FROM_FAILED (sUSDS shortfall 516,227,577,953,238 wei vs baked sAmt). OWNER holds 18,571.8868 sUSDS + 22,560.1816 phUSD; pair empty (0/0) and public; re-running core reverts 'owner holds no BPT'.",
+        "evidence": "work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::test_CODE001_dustSwap_phUSDIn_seedReverts, ::test_CODE001_sweep, ::testFuzz_CODE001_exitImpliesSeed (FAIL = property falsified; counterexamples 26,181,500 wei and 135,600,680,029 wei phUSD-in)"
+      },
+      {
+        "name": "B: clean exit revert, BPT stranded on EOA",
+        "trigger": "Organic swap >=100 tokens in either direction at exit/seed tolerance 10 bps",
+        "forkResult": "Step-5 exit reverts AmountOutBelowMin 0x2f785e46 (e.g. sUSDS out 17,593.8 < min 18,553.3); all 20,401.8 BPT remain on OWNER because step 4 already landed; no resume.",
+        "evidence": "work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::test_CODE001_organicSwap_phUSDIn, ::test_CODE001_organicSwap_sUSDSIn, ::test_CODE001_sweep"
+      }
+    ],
+    "attackVector": "Organic: the pool saw 5 swaps in the last ~7 days. Adversarial: watch the mempool for OWNER's removeLiquidityProportional and front-run it with a dust swap in either direction. This is the same ~$0.03 trigger as ycn L-28. Here the exit SUCCEEDS (it stays inside the floors) and the seed reverts. Under a --slow Ledger broadcast forge then halts. State: ~18,572 sUSDS + ~22,559 phUSD (live share of 20,401.8 BPT) sit on the OWNER EOA, which is exactly what story 103's 2026-10-07 'no funds through any EOA' requirement forbids. UniPoolerV2 is deployed but unseeded, the canonical pair exists and is empty and public (poisonable, see 9a694ae01fe1), and index 4/hook are still on the old pooler. There is no resume entry point: re-running _runCutover fails step 5 (bptIn == 0, L374). Without --slow, steps 7-12 would still land after the failed seed and cut index 4 over to an UNSEEDED pooler.",
+    "likelihood": "medium - organic swaps alone can trigger it during the multi-tx --slow Ledger window; adversarial trigger costs <$0.20 and earns nothing",
+    "assumptions": "Story 103 broadcasts the current un-rewired core in PROPORTIONAL mode; owner is non-malicious and controls the EOA",
+    "externalRequirements": "A Balancer swap mined between simulation and step 5; no mainnet entry point currently calls the core (only DeployMocks rehearsal)"
+  },
+  "impact": "Liveness + custody: protocol liquidity stranded on an EOA until a hand-written recovery; new pair left exposed to the 2-wei poisoning brick meanwhile. No third-party theft path (owner controls the EOA, Law 3).",
+  "assetImpact": "~$41.3k protocol POL (18,571.89 sUSDS + 22,560.18 phUSD, or 20,401.8 BPT) parked on the trusted OWNER EOA mid-cutover; canonical pair left empty/public; index 4 and hook stay on the old pooler. No value extractable (ECON-001).",
+  "economicAnalysis": "ECON-001: zero extractable value. The seed either lands at exactly the simulation price or the short-leg transferFrom reverts, so the core can never seed at a manipulated ratio. The attacker's round trip loses ~2 x 0.3% fee (-0.60 sUSDS at 100, -1.11 at 185.7, -11.2 at 2,000). Pure grief at <$0.20/attempt. The 1% tolerance (~$206.6/leg) is a revert bound, not a loss bound (refutes MR-002's 'up to 1% extractable').",
+  "evidence": {
+    "tests": [
+      "work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::test_CODE001_control_noSwap",
+      "work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::test_CODE001_dustSwap_phUSDIn_seedReverts",
+      "work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::test_CODE001_dustSwap_sUSDSIn_observe",
+      "work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::test_CODE001_organicSwap_phUSDIn",
+      "work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::test_CODE001_organicSwap_sUSDSIn",
+      "work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::test_CODE001_sweep",
+      "work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::testFuzz_CODE001_exitImpliesSeed"
+    ],
+    "logs": [
+      "phoenix-phase-2-staging/reports/40/tier3/core-fork-tests.log",
+      "phoenix-phase-2-staging/reports/40/tier3/core-code001-fuzz-fresh.log"
+    ],
+    "reports": [
+      "phoenix-phase-2-staging/reports/40/tier3/invariants.md#1-unipoolercutovercore-fork"
+    ],
+    "fork": "mainnet block 26181500 (pinned); tolerances 10/10 bps",
+    "unverifiedSubClaims": [
+      "CODE-001: 'without --slow, steps 7-12 would still land after the failed seed and cut index 4 over to an UNSEEDED pooler' -- NOT exercised on fork"
+    ],
+    "tier3Report": "phoenix-phase-2-staging/reports/40/tier3/invariants.md",
+    "independentReproduction": "Independent reproduction (final review, review/validity.md): the validity-checker re-ran work/test/audit-run40/UniPoolerCutoverCoreRun40.fork.t.sol::test_CODE001_dustSwap_phUSDIn_seedReverts at fork block 26181500: PASS, revert data Error(\"TransferHelper: TRANSFER_FROM_FAILED\") asserted byte-exact; sUSDS shortfall 516,227,577,953,238 wei matches."
+  },
+  "recommendation": "Wire story 103 onto UniPoolerCutoverEscrow.exitAndSeed (atomic, whole-balance seed). Until then, do not broadcast the core in PROPORTIONAL mode. If it is kept, seed desired = the on-chain-guaranteed minAmountsOut floors (not simulation deltas), sweep the remainder later, and add per-step skip-if-done gates.",
+  "classification": {
+    "id": "CLASS-001",
+    "severity": "low",
+    "borderline": true,
+    "footgun": true,
+    "faithfulness": true,
+    "regression": false,
+    "justification": "Fork-confirmed and a genuine footgun (a competent owner would not expect a 0.001-phUSD swap to split the cutover with no resume), so it is reported, not suppressed. But the impact it unlocks is custody of protocol POL on the trusted OWNER's own EOA plus a liveness stall that the owner can unwind by hand: in A the owner holds both legs and can seed the pair directly (the plan, BalancerWinddownPlan.md L414, already anticipates 'recovered sUSDS and phUSD sit on OWNER ... operator re-runs from step 6'); in B the owner holds the BPT and can exit it directly, and a proportional recovery exit remains available after 30 Nov (plan L22/L38). ECON-001 shows zero extractable value, so no Medium value-leak path exists. The availability impact is narrower than it looks: index-4 minting keeps working after 30 Oct because BalancerPoolerV2._dispatch never calls Balancer (plan L9), so only pool() and the cutover schedule are affected. Decisively, the vulnerable sequence has no mainnet entry point at a4f9f3c (story 103 is incomplete; the core is called only by DeployMocks), and story 103 is specified to move it onto the atomic escrow. Case for Medium (recorded): fork-proven, cheap/organic trigger, ~$41k, violates story 103's 2026-10-07 'no protocol funds transit the owner EOA' requirement, opens the 9a694ae01fe1 poisoning window, and the deadline compresses recovery time. Case for Low (chosen): no loss, trusted custodian, manual recovery available, not yet broadcastable. Faithfulness facet (EOA custody vs the 2026-10-07 amendment) is tagged but carried by DEDUP-008/DEDUP-009 rather than a separate F label.",
+    "specConformanceCrossRef": null
+  },
+  "humanReviewFlag": true,
+  "reweighTrigger": "Raise to Medium if any story-103 mainnet entry point runs steps 4–6 as separate transactions in PROPORTIONAL mode before 30 Oct 2026 without escrow or skip-if-done gates.",
+  "storyTag": "story-103 (incomplete), story-100 (auto-complete)",
+  "relatedLedger": [
+    "yield-claim-nft L-28 d77a482de757 (same trigger vs escrow: clean revert; fix-pending)",
+    "ledger 9a694ae01fe1 (pair poisoning window this leaves open)",
+    "yield-claim-nft L-27 2268ead7cb / F-02-052 5a7732a4ea (fixes routed to story-103)"
+  ],
+  "relatedFindings": [
+    "DEDUP-003",
+    "DEDUP-004",
+    "DEDUP-009",
+    "MR-004 (manualReview)"
+  ],
+  "sanitizerNote": "No KI match. Related, not duplicate: ycn L-28 d77a482de757 (fix-pending; same Balancer-swap trigger but against the escrow it is a clean revert, here BPT is stranded on the OWNER EOA with no resume), 9a694ae01fe1 (pair-poisoning window this leaves open), ycn L-27/F-02-052 (story-103 escrow rewire would dissolve this root cause once landed; until then the un-rewired core is the live code). No wont-fix/acknowledged entry covers EOA custody in this core.",
+  "sourceIds": {
+    "dedup": "DEDUP-001",
+    "original": [
+      "CODE-001",
+      "ECON-001",
+      "PATTERN-002",
+      "MR-002"
+    ],
+    "primary": "CODE-001"
+  },
+  "pocNote": "Low/QA/F: no submission PoC required; fork evidence listed under evidence.",
+  "reportPath": "phoenix-phase-2-staging/reports/40/findings/low/L-01-cutovercore-eoa-custody-dust-swap-no-resume.json",
+  "metadata": {
+    "createdAt": "2026-10-13T06:58:31Z",
+    "updatedAt": "2026-10-13T07:33:49Z",
+    "scanOrigin": "CODE-001",
+    "classificationOrigin": "CLASS-001",
+    "dedupOrigin": "DEDUP-001"
+  },
+  "humanReviewReason": [
+    "Low vs Medium (borderline). Case for Medium: fork-confirmed in both scenarios with a fuzz falsification; organic (~5 swaps/week) or ~$0.03 trigger; ~$41.3k POL lands on the OWNER EOA with no resume entry point; violates story 103 2026-10-07 \"no protocol funds transit the owner EOA\"; leaves the 9a694ae01fe1 pair-poisoning window open; 30 Oct / 30 Nov deadlines compress recovery. Case for Low (chosen): nothing lost or extractable (ECON-001); trusted owner custodian can recover by hand (plan L414); index-4 minting survives 30 Oct (plan L9) and a proportional recovery exit stays open after 30 Nov (plan L22/L38); no mainnet entry point calls the core at a4f9f3c (only DeployMocks).",
+    "Overlaps the story-103 fix obligation (DEDUP-009, ycn L-27 2268ead7cb / F-02-052 5a7732a4ea): if story 103 lands the escrow rewire this finding dissolves. Re-check then; do NOT pre-close it."
+  ],
+  "severityRaiseTrigger": "Raise to Medium if any story-103 mainnet entry point runs steps 4–6 as separate transactions in PROPORTIONAL mode before 30 Oct 2026 without escrow or skip-if-done gates.",
+  "labelCollisionNote": "Run-40 L-01 is NOT the carried entries also originally labelled L-01: run-39 dev L-01 9a694ae01fe1 (pps39l1) and run-38 balancer-holding L-01 59527bfa8478 (pps38l1). Cite those by fingerprint.",
+  "triggerSelfCloses": "The trigger closes itself at the 30 Oct pool pause, because Balancer swaps are then blocked, so the hazard exists only in the PROPORTIONAL window before that date.",
+  "reviewEdits": [
+    "2026-10-13 final review (review/validity.md, review/severity-audit.md): removed runs 31-37 precedent from severity rationale (precedent is not load-bearing); replaced raise trigger; added trigger self-closing note; added independent reproduction."
+  ]
+}

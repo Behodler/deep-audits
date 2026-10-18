@@ -1,0 +1,71 @@
+# Cluster analysis — unipooler-cutover (run 41, src e75ee07, fork 26,221,761)
+
+All "verified" claims cite `logs/run41-forktests.log` (work/test/audit-run41/UniPoolerCutoverRun41.fork.t.sol, 17/17 PASS) or the CLI logs listed in side-effects.json.
+
+## 1. Predecessor: balancer-holding (story 099) — precondition HOLDS on chain
+- `old.authVersion()` = 2 live; all four poolers `poolerAuthVersion` = 1 (closure manifest; re-read: `cast call 0x7f68… authVersion()` = 2). Step 0 `pooler still authorized` require passed in every preview.
+- Open sibling finding pps40 L-01 `59527bfa8478` (balancer-holding: verifier and step 0 check only four hardcoded addresses). Unchanged by this script: `_step0Preconditions` still loops `p.poolers` = the same four constants (DeployMainnetUniPoolerCutover.s.sol:120-126, core :428-433). Not re-filed; it belongs to that entry point.
+
+## 2. Sibling: uniswap-helper (story 109/111) — NOT deployed; ordering decides pps40l2
+- `mainnet-addresses.ts` UniswapHelper = 0x0, no progress file, no broadcast dir (manifest). `src/periphery/UniswapHelper.sol:428-431` `_requirePair` is still existence-only at e75ee07.
+- The canonical pair does not exist today (`getPair(sUSDS, phUSD)` = 0x0) and the cutover creates and seeds it inside one session (tx 1 createPair → tx 5 exitAndSeed). If the helper is deployed and UI-exposed BEFORE the cutover, an honest add-liquidity in the tx 1→5 window makes `exitAndSeed` revert `PairNotEmpty` (BPT stays in escrow; abort() restores). Deployed AFTER the cutover, the hazard does not exist.
+- Story 111 calls the two "independent: may go before or after". That is not safe for the "before" order. Safe guidance: deploy uniswap-helper after `unipooler-cutover:verify` passes, or land the one-line reserve check first. Reconciles with pps40l2 `1d7e436f7dad` (still live, conditional). Basis: static for this run (run-40 fork-proved the helper path).
+
+## 3. Rehearsal: dev / DeployMocks Phase 11.7
+- Shares `UniPoolerCutoverCore` verbatim. Per the owner ruling of 2026-09-15, DeployMocks is a UI mock and not a rehearsal, so no rehearsal-fidelity findings are filed. Its strict escrow-empty assertion (story-103 revision Decision 5) is not a mainnet concern.
+- Stale audit PoCs `work/test/audit-run39/**` and `work/test/audit-run40/**` no longer compile against the rewired core. That is bit-rot and says nothing about whether those findings were fixed. They were excluded with `--skip`.
+
+## 4. Sibling-config: stable-staker-v2-cutover (completed)
+- Its phUSD-minter mask includes MINT_DEBT_HOOK. The state diff shows no write to phUSD's minter set and no phUSD mint (mintDebt was 0), so the hook's minter rights are unchanged. The hook's `recipient` stays NFTStaker `0xc851…a13b`. No interaction.
+
+## 5. Downstream readers
+- `src/views/MintPageView.sol:190-193` reads `configs(4)` and then `ITokenDispatcherV2(dispatcher).primeToken()` generically. UniPoolerV2.primeToken() = USDS, so the mint page keeps working. Its NatSpec (:21, :161) still names BalancerPoolerV2 (cosmetic).
+- MultiPooler (`lib/yield-claim-nft/src/MultiPooler.sol:60-64`) forwards only the Uniboost 4-arg `pool(uint,uint,uint,uint)`. UniPoolerV2.pool is 3-arg, so its re-authorization is parity-only and cannot be exercised. The same was already true of BalancerPoolerV2.pool(uint), so nothing regresses. Off-chain pooling bots must switch ABI to `pool(sUSDSIn, minPhusdOut, minLP)`. Observation only.
+- NudgeStreamer and BatchNFTMinter have no writes. batchDonationSize = 0, so the donation branch stays inert.
+
+## 6. Routed fixes from yield-claim-nft (owner-designated to land here)
+
+### ycn L-27 `2268ead7cba4` (fix-pending) — evidence supports proposing FIXED (scripted paths); residual is documentation
+| Required placement | Code | Evidence |
+|---|---|---|
+| Immediately before `withdrawBPT(escrow, bal)` | `UniPoolerCutoverCore.sol:519-525`: `address livePool = ICutoverBalancerPooler(oldPooler).pool(); require(livePool == ICutoverEscrow(escrow).bpt(), CUTOVER_BPT_GUARD_MESSAGE); … withdrawBPT(escrow, bal);`. Read live, not the step-0 cached `l.bPool`. | `test_r41_L27_scriptFlow_…` (real run(), setPool(DAI) injected after step 3b: guard revert, `expectCall(withdrawBPT, 0)` holds); `test_r41_L27_direct_…` (amendment test verbatim: old pooler BPT and X unchanged, escrow holds neither) |
+| Before owner→escrow transfer | Transfer dropped (F-02-052), so N/A | grep: no BPT transfer from OWNER anywhere in script/ |
+| Before re-funding an existing escrow | `_fundEscrow` is the only `withdrawBPT` call site (grep of script/: :525 only) | `test_r41_L27_refundAfterAbort_guarded` PASS; upstream `test_L27_resumeAfterAbort_refundsThroughGuard` PASS |
+| Header forbids `old.setPool` while escrow live | DeployMainnetUniPoolerCutover.s.sol:56-59; core :80-83 | upstream guard test `test_scriptHeader_statesPoisonedProgressAndL27Rules` PASS |
+| Non-vacuity | — | `test_r41_L27_withoutGuard_manualResumeStrandsX`: the unguarded manual `withdrawBPT` after `setPool(DAI)` + `abort()` strands 1000 DAI in the escrow |
+
+Residual: no script entry point re-funds an existing escrow. `run()` always deploys a fresh UniPoolerV2 and escrow, and a fresh escrow snapshots the then-current `pool()` (preflight :171 also requires `old.pool()==BPT`). So the only unguarded path is a hand-typed `cast send withdrawBPT` resume, which the header rule covers. The header sentence "Any re-funding of an existing escrow goes through the core's guarded `_fundEscrow`" (:53-54) is not true of any reachable path. That inaccuracy is filed as QA (candidate C5), not as an incomplete fix. Also noted: at live state the old pooler holds only BPT, sUSDS and USDS, and all three are escrow snapshot tokens that `abort()` returns. The L-27 strand therefore needs a non-snapshot token on the old pooler, which it does not hold today.
+
+### ycn F-02-052 `5a7732a4ea71` (fix-pending) — evidence supports proposing FIXED
+- No owner→escrow BPT transfer exists. Owner BPT is only read (`_ownerBalances` :364-373 for the not-credited invariant) and reported (`_reportOwnerBpt` DeployMainnetUniPoolerCutover.s.sol:288-296, verify :82).
+- Floors are checked against `bptWithdrawn`, the BPT step 4 moved from the old pooler (`_step5ExitAndSeed` :547-549, `_checkMinAmountsOut` :582-594). They are not checked against `balanceOf(escrow)` or any combined balance.
+- The quote script sizes on `BPT.balanceOf(OLD_POOLER)` (quote-balancer-exit-min-amounts.js:101,107). At 26,221,761 that is 20,401,809,116,957,261,204,353 wei ≈ 20,401.809 BPT. The in-test floors equal the CLI quote to the wei (assertEq in `test_r41_fullRun_stateDiff_verify`).
+- A non-zero owner BPT does not revert and is not moved: upstream `test_fork_ownerBptDonation_isNotMoved_andReported` PASS. Live owner BPT = 0.
+
+### ycn L-28 `d77a482de757` (fix-pending, closeCondition = successful mainnet cutover) — NOT mitigated by the script; do not propose closure
+- Floors default to 10 bps (core accepts ≤ 50 bps). `:broadcast` sends through the public mempool with `--slow`. There is no private-relay or bundle option, and nothing in the runbook mentions one.
+- Fork-measured: an attacker swap on the Balancer pool between tx 4 (`withdrawBPT`) and tx 5 (`exitAndSeed`) of 30 sUSDS at 10 bps, or 160 sUSDS at 50 bps, makes tx 5 revert `AmountOutBelowMin(phUSD)` (`0x2f785e46`). The attacker pays only the 0.30% swap fee (~$0.10 / ~$0.53) and keeps the phUSD.
+- Custody is fail-safe: the BPT stays in the escrow, OWNER is never credited, and a re-quoted `exitAndSeed` succeeds. Filed as candidate C2 with `reconcilesWith` d77a482de757.
+
+## 7. Reconciliation of run-39/40 open findings against this entry point
+| Ledger | Verdict | Evidence |
+|---|---|---|
+| pps40 L-01 `7d5a26570be9` (OWNER EOA custody across txs, no resume) | **FIXED by this script, propose `fixed`** (human-applied). Medium trigger NOT met: the escrow makes exit+seed one atomic tx (tx 5), no fund transits OWNER (state diff: OWNER has 0 token deltas; core not-credited invariant after all 13 steps), and the BPT sits on a contract with `abort()` between tx 4 and tx 5. | side-effects.json `transactions`, `valueAccounting.endState`; L-28 probe custody result |
+| pps40 L-02 `1d7e436f7dad` (UniswapHelper first-LP brick) | **Still live, conditional on deploy order** (helper not on mainnet) | §2; candidate C7 |
+| pps40 L-03 `85095591a60a` (OnlyDispatcher window, no resume) | **Still live.** Window = 12 txs (8..19) after tx 7 lands; no resume gates | `test_r41_window_mintsRevertOnlyDispatcher`; candidate C1 |
+| pps40 L-04 `5dce56307136` (RECOVERY never enables Recovery Mode; mock conflation) | **Root cause fixed, propose `fixed`**: the RECOVERY path is now fork-proven against real Balancer governance (pool pause + permissionless `enableRecoveryMode`), and also with only the Vault paused. Residual nit: the script never calls `enableRecoveryMode` itself; it fails closed with `PoolNotInRecoveryMode` and the runbook should name the one-line `vault.enableRecoveryMode(BPT)` call | `test_r41_recovery_*` (4 tests), logs/preview-recovery-live.log |
+| pps40 Q-01 `c8fb41a168e1` (local-pass-only post-conditions, baked rescue amounts) | **Still live** (ForgeLocalPassPrecedesBroadcast). Rescue amounts (txs 20/21) and `withdrawBPT` bal are baked at local-pass time. Interim mints before tx 7 or third-party dust leave sUSDS on the paused old pooler, and the hard `:verify` check then fails the `&&` tail. OWNER can clear it with `rescueERC20` (not pause-gated) | `test_r41_bakedRescue_interimDust_failsVerify_ownerCanSweep`; candidate C4 |
+| pps40 Q-02 `6d49f9353148` (1-wei unsynced pair donation DoS; owner-BPT require) | **FIXED, propose `fixed`**: step 2 records and the escrow skims; `_assertRetired` has no owner-BPT require | `test_r41_pairUnsyncedDonation_doesNotBlock`; upstream `test_fork_ownerBptDonation_isNotMoved_andReported`; core :726-736 |
+| pps40 F-01 `48d88a589ca4` (story self-contradiction) | **Still live (doc)**: story Background L63-75 still lists `withdrawBPT(OWNER…)`, "Exit the OWNER's whole BPT", and `addLiquidity … from the owner`. The implementation follows the amendments | story file lines 63-75 |
+| pps40 F-02 `91aa9008aaca` (wrong third-party BPT holders) | **Still live (doc)**: story L120 and L217 still name 0xE74E…1322, 0x5f97…d2 and 0xde44…3D07, and all three hold 0 BPT at ~26,221,761 (`cast call balanceOf`). The remaining 12,036.97 BPT (37.1%) is held elsewhere (run-40: 0xc65f…e8db). Out of scope for the exit either way | cast output in session |
+| pps39 L-01 `9a694ae01fe1` (2-wei donate+sync bricks the pair; recovery must be atomic) | **Still live.** The pair does not exist today, so anyone can create it and sync 1+1 wei for about $1–2 of gas. The script then cannot proceed and has no recovery branch | `test_r41_pairSyncedDonation_bricksPreview`; candidate C3 |
+| ycn L-26 `b2a29359fde5` (wont-fix 2026-10-07) | Same root cause on the escrow side. **Not re-raised.** Disclosed in C3 with the owner's triageReason ("it should just panic and then I'll have to figure out what to do") | — |
+
+## 8. Script-specific lens
+- **ForgeLocalPassPrecedesBroadcast.** `_writeProgress` (:386, :470-497) runs at the end of forge's local pass with `deploymentStatus: "completed"`, before tx 1 is signed. `--skip-simulation` removes the second (RPC) simulation pass. Every require therefore holds only for local-pass state. Consequences: (a) the patcher's `completed` gate carries no information, and only the `&&` chain protects it (MR-22-01 family; story review informational #5). (b) After a crash, the file exists and is `completed`. `_alreadyCompleted` then treats "configs(4)==UniPooler" as done, so a crash after tx 19 makes a re-run print "Nothing to do". Only `:verify` catches it (candidate C5, fork-proven). (c) `cutoverBlock` in the progress file is the local-pass block, not the landing block (cosmetic).
+- **Predicted CREATE addresses.** OWNER nonce is 1758 now. Broadcast order gives UniPoolerV2 = 0x5699…a3D2 (1759) and escrow = 0xc369…3CeA (1760); the canonical pair is 0x0b96…6F7f (CREATE2). Under prank (preview, fork harnesses) createPair takes no nonce, so the preview prints escrow = 0x5699…, which is the broadcast's UniPooler address. The upstream test `test_fork_escrowPreDonation_doesNotBlockCutover` pre-funds `nonce+1`, which on mainnet is the UniPooler, not the escrow. The property it proves (delta-only checks) does not depend on the address, so this is a test-comment inaccuracy only. Nonce drift is not exploitable: forge pins nonces, so an interleaved OWNER tx makes the next scripted tx fail "nonce too low" and does not silently shift addresses. The closure manifest's pair prediction 0x194e1F06… is wrong.
+- **Gas.** About 9.36M gas simulated across 24 txs, roughly 0.0028 ETH at the 0.3 gwei default. OWNER holds 0.01303 ETH, which covers about 1.39 gwei uniform. Base fee over the last ~20k blocks was 0.06–0.16 gwei, so 0.3 gwei legacy clears with margin. A spike above 0.3 gwei stalls the pending tx. Because the seed deadline is local-pass time + 1 h (:114, :429), a tx 5 stalled for more than 1 h reverts `BadDeadline` with custody intact (escrow). A stall inside txs 8–19 extends the OnlyDispatcher window (C1). Raising `CUTOVER_GAS_PRICE_WEI` above ~1.4 gwei would exhaust OWNER's ETH partway through the session, and there is no ETH preflight. That is an observation, not filed: the owner sets gas knowingly.
+- **Value left behind.** None, in both the full run and the preview: OWNER has 0 deltas; the old pooler holds 0 BPT/sUSDS/USDS; the escrow holds 0 of all four tokens. UniPoolerV2's constructor leaves an orphaned empty DefaultDispatchHook.
+- **Minter rights.** UniPoolerV2 `_minter` = NFTMinterV2 and the old pooler's = OWNER (slot-1 reads verified in the state diff). There are no phUSD minter changes.
+- **Seed price.** 1 sUSDS = 1.2581 phUSD, equal to the Balancer spot (router query 1.2543 after the 0.30% fee). No arbitrage gap is opened. phUSD ≈ 0.885 USDS at sUSDS 1.11327.
+- **Deadline 30 Oct 2026 (12 days).** PROPORTIONAL works today. After the pause, RECOVERY works once someone calls the permissionless `enableRecoveryMode` (fork-proven, including the Vault-paused-only case).

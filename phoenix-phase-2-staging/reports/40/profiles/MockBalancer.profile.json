@@ -1,0 +1,59 @@
+{
+  "contracts": ["src/mocks/MockBalancerPool.sol", "src/mocks/MockBalancerRouter.sol", "src/mocks/MockBalancerVault.sol"],
+  "kind": "anvil test doubles (story-100 added exits); no production deployment",
+  "profileTimestamp": "2026-10-13T00:00:00Z",
+  "run": 40,
+  "solidityVersion": "^0.8.19",
+  "priority": 1,
+
+  "MockBalancerPool": {
+    "functions": [
+      {"fn": "setVault(address)", "line": 23, "access": "NONE - one-shot (vault == 0), first caller wins"},
+      {"fn": "mint(to, amount)", "line": 34, "access": "msg.sender == vault"},
+      {"fn": "burnFrom(from, spender, amount)", "line": 50, "access": "msg.sender == vault; spends spender's allowance when from != spender, then burns"}
+    ],
+    "status": "VERIFIED"
+  },
+
+  "MockBalancerRouter": {
+    "functions": [
+      {"fn": "queryAddLiquidityUnbalanced", "line": 76, "behaviour": "pure sum of amounts (1:1 BPT)"},
+      {"fn": "removeLiquidityProportional(pool, bptIn, minAmountsOut, wethIsEth, userData)", "line": 88, "behaviour": "rejects wethIsEth; forwards to vault(pool).removeLiquidityProportional(pool, from=msg.sender, to=msg.sender, ...)"},
+      {"fn": "removeLiquidityRecovery(pool, bptIn, minAmountsOut)", "line": 101, "behaviour": "forwards to vault removeLiquidityRecovery with from=to=msg.sender"}
+    ],
+    "status": "VERIFIED"
+  },
+
+  "MockBalancerVault": {
+    "functions": [
+      {"fn": "unlock(bytes)", "line": 210, "access": "none", "behaviour": "low-level call back into msg.sender with raw data"},
+      {"fn": "addLiquidity(params)", "line": 228, "access": "none", "behaviour": "mints sum(maxAmountsIn) BPT to params.to; does NOT verify tokens arrived"},
+      {"fn": "settle", "line": 257, "behaviour": "no-op"},
+      {"fn": "sendTo(token, to, amount)", "line": 269, "access": "NONE - anyone can transfer any vault-held token out"},
+      {"fn": "setSwapRate", "line": 189, "access": "none"},
+      {"fn": "setPoolTokens(address[])", "line": 282, "access": "none, one-shot"},
+      {"fn": "setPoolPaused(bool)", "line": 290, "access": "none"},
+      {"fn": "getPoolTokens / getPoolTokenInfo", "line": "296/306", "behaviour": "balancesRaw == lastBalancesLiveScaled18 == vault's ERC20 balanceOf each pool token; tokenInfo all-zero (STANDARD, no rate provider)"},
+      {"fn": "removeLiquidityProportional(pool, from, to, bptIn, mins)", "line": 330, "access": "none (but burn requires msg.sender == from or msg.sender allowance from `from`)", "behaviour": "reverts while poolPaused"},
+      {"fn": "removeLiquidityRecovery(pool, from, to, bptIn, mins)", "line": 345, "behaviour": "reverts unless poolPaused"},
+      {"fn": "_exit", "line": 363, "behaviour": "amountsOut[i] = balance_i * bptIn / totalSupply (floor); min check per token BEFORE burn; burnFrom(from, msg.sender, bptIn); transfer each non-zero amount to `to`"},
+      {"fn": "swap", "line": 402, "behaviour": "mints MockERC4626Wrapper shares of tokenOut at configured rate"}
+    ],
+    "status": "VERIFIED"
+  },
+
+  "fidelityToBalancerV3Exit": [
+    {"aspect": "BPT burn authorization", "mock": "vault spends the ROUTER's allowance from the holder (from != msg.sender)", "mainnet": "Vault removeLiquidity spends router's BPT allowance (ERC20MultiToken) - matches", "verdict": "FAITHFUL (ASSUMED mainnet semantics, as cited in core NatSpec)"},
+    {"aspect": "Proportional payout math", "mock": "floor(balanceOf(vault, token_i) * bptIn / totalSupply)", "mainnet": "computed from pool balances (live scaled18, then descaled, rounded down); totalSupply includes a 1e6 BPT minimum-supply reserve minted to address(0) at initialize; removal must leave totalSupply >= POOL_MINIMUM_TOTAL_SUPPLY", "verdict": "APPROXIMATE - no minimum-supply reserve or check; differences are dust-scale (ASSUMED)"},
+    {"aspect": "Pool balance source", "mock": "the vault's raw ERC20 balanceOf - any token sent directly to the mock vault inflates every exit and getPoolTokenInfo", "mainnet": "per-pool accounted balances inside a commingled Vault; direct transfers to the Vault do not change a pool's balances", "verdict": "UNFAITHFUL (donation-sensitive in mock only)"},
+    {"aspect": "Paused vs Recovery Mode", "mock": "one flag: paused => proportional reverts AND recovery allowed; unpaused => recovery reverts", "mainnet": "independent states: recovery exit works whenever Recovery Mode is enabled (paused or not); proportional exit works whenever the pool/vault is not paused (even in Recovery Mode); paused pool requires someone to call permissionless enableRecoveryMode before recovery exits work", "verdict": "UNFAITHFUL - conflates the two; cannot model 'paused but recovery not yet enabled' (both exits revert on mainnet) or 'recovery enabled while unpaused'"},
+    {"aspect": "Revert reasons", "mock": "string reverts ('MockBalancerVault: pool paused', 'amount out below minimum')", "mainnet": "custom errors (PoolPaused, AmountOutBelowMin, PoolNotInRecoveryMode)", "verdict": "DIFFERENT - tests keyed on mock strings will not match mainnet selectors (yield-claim-nft fork test pins 'Vault PoolPaused')"},
+    {"aspect": "Hooks / exit fees / aggregate fees", "mock": "none", "mainnet": "pool may have hooks and aggregate protocol fees held outside raw balances (ASSUMED none for the phUSD/sUSDS 50/50 pool)", "verdict": "UNKNOWN for this pool - not verifiable from source"},
+    {"aspect": "Rate providers", "mock": "STANDARD tokens, no rate provider", "mainnet": "sUSDS may be registered WITH_RATE (ASSUMED STANDARD per mock NatSpec 'matching what mainnet returns')", "verdict": "ASSUMED FAITHFUL"},
+    {"aspect": "Add liquidity", "mock": "1:1 BPT for sum of maxAmountsIn, no invariant math, does not check token receipt", "mainnet": "UNBALANCED add priced by pool invariant with swap fee", "verdict": "UNFAITHFUL (not exercised by the exit path, but drives the rehearsal's BPT quantities)"},
+    {"aspect": "Access control on mock-only knobs", "mock": "setVault/setPoolTokens one-shot unguarded; setPoolPaused/setSwapRate/sendTo/addLiquidity unguarded", "mainnet": "N/A", "verdict": "Mock-only; acceptable on anvil, would be drainable on any public network (Sepolia artefacts excluded from this run by user directive)"}
+  ],
+
+  "verifiedProperties": {"noUnboundedLoops": {"value": true, "note": "loops over pool tokens (one-shot set)"}, "checkedArithmetic": true, "reentrancyGuarded": []},
+  "localFindings": []
+}

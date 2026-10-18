@@ -1,0 +1,120 @@
+{
+  "id": "L-26",
+  "label": "L-26",
+  "issueId": "ycn22l26",
+  "project": "yield-claim-nft",
+  "status": "draft",
+  "severity": "low",
+  "title": "UniPoolerCutoverEscrow.exitAndSeed can be permanently bricked for ~1 wei (sync'd donation) or ~1e3 wei per side (dust first pair.mint) + gas by poisoning the empty canonical sUSDS/phUSD pair; the escrow seeds only via Router02 behind a strict-empty gate and has no recovery mode",
+  "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+  "function": "exitAndSeed",
+  "line": 359,
+  "lineStart": 359,
+  "lineEnd": 375,
+  "link": "https://github.com/Behodler/yield-claim-nft/blob/0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630/src/migration/UniPoolerCutoverEscrow.sol#L359-L375",
+  "entryPoint": null,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "b2a29359fde54466776d650fd0a1097730653f4ed0fc21d380a3b9b00c0742f7",
+  "fingerprintBasis": "UniPoolerCutoverEscrow.sol:exitAndSeed:dos-empty-pair-poisoning",
+  "rootCauseClass": "dos-empty-pair-poisoning",
+  "origin": "new",
+  "regression": false,
+  "footgun": false,
+  "faithfulness": false,
+  "channel": "qa",
+  "borderline": true,
+  "borderlineNote": "Borderline Low/Medium. The case for Medium: the DoS is permanent for this escrow, costs the griefer ~1 wei (sync) or ~1e3 wei per side (mint) plus gas, and the escrow cannot run the recovery that L-24's wont-fix rationale depended on. The case for Low, which is the classification: no asset is at risk (abort() is fork-proven to restore the old pooler fully); no ongoing protocol function is impaired (the old pooler keeps working after abort, and the canonical pair and UniPoolerV2 stay usable through a mint-path seed, fork-proven); the cost is delay plus redeploying a differently-shaped one-off seeder. Precedents L-24 (same primitive, owner wont-fix: 'a mild inconvenience at most') and phStaging run-39 L-01 (Low) are both Low. A human may re-apply L-24's wont-fix, but should do so knowing the escrow lacks the mint-path recovery L-24 assumed. Final review (severity + validity) held Low and asked that this flag stay so the human decides knowingly before the story-103 broadcast. Re-weigh to Medium if either upgrade trigger holds (see upgradeTriggers).",
+  "codeLocation": [
+    {
+      "lines": "L359-L375",
+      "code": "359:     function _requireEmptyPair() internal {\n360:         (uint112 r0, uint112 r1,) = IUniswapV2Pair(_pair).getReserves();\n361:         address t0 = IUniswapV2Pair(_pair).token0();\n362:         address t1 = IUniswapV2Pair(_pair).token1();\n363:         uint256 b0 = IERC20(t0).balanceOf(_pair);\n364:         uint256 b1 = IERC20(t1).balanceOf(_pair);\n365:         if (r0 == 0 && r1 == 0 && (b0 != 0 || b1 != 0)) {\n366:             ICutoverPairSkim(_pair).skim(_newPooler);\n367:             emit PairSkimmed(_newPooler, b0, b1);\n368:             (r0, r1,) = IUniswapV2Pair(_pair).getReserves();\n369:             b0 = IERC20(t0).balanceOf(_pair);\n370:             b1 = IERC20(t1).balanceOf(_pair);\n371:         }\n372:         if (r0 != 0 || r1 != 0 || b0 != 0 || b1 != 0) {\n373:             revert UniPoolerCutoverEscrow__PairNotEmpty(r0, r1, b0, b1);\n374:         }\n375:     }"
+    },
+    {
+      "lines": "L249-L249",
+      "code": "249:         _requireEmptyPair();"
+    }
+  ],
+  "description": "Fork-confirmed on the real canonical pair and Router02. A griefer sends 1 wei of sUSDS to the pair and calls sync(). The alternative dust pair.mint variant is not ~1 wei: a first mint on an empty pair must satisfy sqrt(a*b) > MINIMUM_LIQUIDITY (1,000), i.e. on the order of 1,001 wei per side. Both are negligible. exitAndSeed then reverts with PairNotEmpty(1,0,1,0). abort() returns the whole BPT to the old pooler, and the old pooler is left usable, because BalancerPoolerV2 keeps no BPT accounting (withdrawBPT and rescueERC20 are plain transfers). The cross-contract refinement: a direct transfer followed by pair.mint(newPooler) still seeds the poisoned pair and absorbs the dust (fork: 1000e18 per side minted 999999999999999999000 LP). So the brick is permanent only for this escrow's Router02-only seed path, not for the UniPoolerV2 deployment or the canonical pair. The window is structural: UniPoolerV2's constructor requires the canonical pair to exist (PairNotCanonical), and the escrow reads newPooler.pair() at construction. The pair is therefore public across several broadcast txs (createPair, UniPoolerV2 deploy, escrow deploy, withdrawBPT, owner BPT transfer, exitAndSeed).",
+  "impact": "None. The escrow's BPT/sUSDS/phUSD/USDS go back to the old pooler through abort() (fork-proven under a normal pool, a paused pool and a paused vault). The impact is that this escrow's exitAndSeed can never succeed, so the one-off cutover is delayed until a replacement seeder is deployed and reviewed.",
+  "failureScenario": [
+    "1. The canonical sUSDS/phUSD V2 pair is public from createPair onward. UniPoolerV2's constructor requires it, and the escrow reads newPooler.pair() at construction, so the window spans several broadcast txs.",
+    "2. Griefer: sUSDS.transfer(pair, 1) + pair.sync() (~1 wei + gas), or a dust first pair.mint, which needs sqrt(a*b) > MINIMUM_LIQUIDITY (1,000), i.e. ~1,001 wei per side + gas.",
+    "3. exitAndSeed -> _requireEmptyPair reverts PairNotEmpty(1,0,1,0). This holds permanently, because the escrow seeds only via Router02 behind a strict reserves==(0,0) gate and has no mint-path branch. Redeploying the same escrow fails the same way.",
+    "4. Operator calls abort(). Funds return to the old pooler. Recovery requires a different contract that seeds through transfer + pair.mint(newPooler) with a reserve-ratio assertion (fork: the mint path absorbs the dust)."
+  ],
+  "likelihood": "medium. Cost is negligible and the call is permissionless, but the griefer gains nothing and must act inside the cutover window.",
+  "assumptions": "The canonical pair is created in a separate, publicly visible tx before exitAndSeed (structural under story-103's multi-tx --slow broadcast).",
+  "externalRequirements": "An external griefer who watches for the pair's creation.",
+  "plausibility": "plausible (cheap, permissionless), impact availability-only",
+  "evidence": [
+    "work/test/run22/EscrowCrossContract.fork.t.sol::test_run22_oneWeiSyncPoison_blocksSeed_abortRestores_mintPathRecovers PASS (fork, chainid 1, block 26136000)",
+    "work/test/run22/EscrowCrossContract.fork.t.sol::test_run22_vaultPaused_withdrawAbortAndRecoveryExitWork PASS (abort/recovery under paused pool and paused vault)",
+    "work/test/UniPoolerCutoverEscrow.fork.t.sol 4/4 PASS (repo fork suite)"
+  ],
+  "crossRefs": {
+    "priorWontFixDisclosure": {
+      "label": "L-24",
+      "issueId": "ycn20l24",
+      "fingerprint": "8511fd5206fbe9a686ea64e1a375a39fdf55bfa3582d92fc46710a7e6e362f7f",
+      "status": "wont-fix",
+      "triageReasonVerbatim": "Owner triage 2026-10-01: wont-fix. Owner: \"This is a mild inconvenience at most.\" Basis: a third-party dust pre-seed only trips the cutover's fail-loud reserves==(0,0) precondition, so the impact is delay on a one-off cutover; the griefer gains nothing and the skew is cheaply and profitably arbitraged back. Safe-recovery guidance retained (footgun): if the pair is pre-seeded, arbitrage it to the target ratio, then seed via direct transfer + pair.mint with a reserve-ratio assertion. Never relax the precondition or router-addLiquidity with zero mins into a skewed pair. Does not cover Q-19 ycn20q19 (pair not bound to router factory), which is triaged separately.",
+      "whatIsNew": "This finding re-raises the root of L-24 (permissionless dust pre-seed of the empty canonical sUSDS/phUSD pair) on a different contract. L-24's wont-fix rests on recoverability: its own triageReason prescribes the safe recovery 'seed via direct transfer + pair.mint with a reserve-ratio assertion'. UniPoolerCutoverEscrow seeds only via Router02 behind a strict reserves==(0,0) gate and has no mint-path branch, so it cannot execute that recovery: one synced wei bricks this escrow permanently (a redeploy of the same escrow fails identically), forcing abort() and an un-reviewed replacement seeder. The owner did not weigh this on 2026-10-01. A human may legitimately re-apply L-24's wont-fix; this record exists so the decision is made knowingly, not by silent suppression."
+    },
+    "notRegressionOf": {
+      "label": "Q-19",
+      "issueId": "ycn20q19",
+      "fingerprint": "098396142dcb5a8179009d4a0d844130b32b814cc03fb982240a8aabd6d63953",
+      "status": "fixed",
+      "why": "Q-19 is the non-canonical-pair half; its fix (UniPoolerV2 L220-221) is unchanged and intact."
+    },
+    "crossProject": "phoenix-phase-2-staging run-39 L-01 (2-wei pair poisoning blocks story-103 core; recovery seed must be atomic), Low.",
+    "story": "story-052 (review/) asks the auditor to evaluate \"DoS only; abort returns funds\". Confirmed, but abort is not a recovery: this escrow cannot complete the cutover."
+  },
+  "priorWontFixDisclosure": {
+    "label": "L-24",
+    "issueId": "ycn20l24",
+    "fingerprint": "8511fd5206fbe9a686ea64e1a375a39fdf55bfa3582d92fc46710a7e6e362f7f",
+    "status": "wont-fix",
+    "triageReasonVerbatim": "Owner triage 2026-10-01: wont-fix. Owner: \"This is a mild inconvenience at most.\" Basis: a third-party dust pre-seed only trips the cutover's fail-loud reserves==(0,0) precondition, so the impact is delay on a one-off cutover; the griefer gains nothing and the skew is cheaply and profitably arbitraged back. Safe-recovery guidance retained (footgun): if the pair is pre-seeded, arbitrage it to the target ratio, then seed via direct transfer + pair.mint with a reserve-ratio assertion. Never relax the precondition or router-addLiquidity with zero mins into a skewed pair. Does not cover Q-19 ycn20q19 (pair not bound to router factory), which is triaged separately.",
+    "whatIsNew": "This finding re-raises the root of L-24 (permissionless dust pre-seed of the empty canonical sUSDS/phUSD pair) on a different contract. L-24's wont-fix rests on recoverability: its own triageReason prescribes the safe recovery 'seed via direct transfer + pair.mint with a reserve-ratio assertion'. UniPoolerCutoverEscrow seeds only via Router02 behind a strict reserves==(0,0) gate and has no mint-path branch, so it cannot execute that recovery: one synced wei bricks this escrow permanently (a redeploy of the same escrow fails identically), forcing abort() and an un-reviewed replacement seeder. The owner did not weigh this on 2026-10-01. A human may legitimately re-apply L-24's wont-fix; this record exists so the decision is made knowingly, not by silent suppression."
+  },
+  "severityJustification": "C4 Medium needs the protocol's function or availability to be impaired, or value to leak. Neither holds here. The only thing bricked is a one-off migration helper, and abort() returns the full status quo, so all protocol functions (old pooler dispatch, UniPoolerV2, the canonical pair) keep working. The cost is operational delay plus a redeploy of a mint-path seeder, which is exactly the 'delay on a one-off cutover' tier the owner judged in L-24 and the reason phStaging run-39 L-01 is Low. Severity is the same as L-24. What is new is the locus: L-24's wont-fix assumed the safe recovery 'direct transfer + pair.mint with a reserve-ratio assertion' was available, and this escrow cannot execute it. That is why this is a separate Low and is not suppressed under L-24. PATTERN-001's mechanical 'potential-high' (first-depositor mapping) did not set the label: no inflation or theft is possible, since the gate reverts before any value moves.",
+  "recommendedMitigation": "Pre-broadcast decision for phStaging2 story-103/108 (do not improvise recovery under pressure). Either (a) add the mint-path branch to the escrow now: when IUniswapV2Pair(pair).totalSupply()==0, seed via safeTransfer of both sides to the pair plus pair.mint(newPooler) instead of Router02, and replace the strict-empty gate with a dust-tolerant reserve-ratio and LP post-check; or (b) before broadcast, write the abort() + mint-path-seeder runbook, with a reserve-ratio assertion on the replacement seed. Never seed by Router02 addLiquidity with zero or loose mins into a skewed pair (the anti-pattern L-24's triageReason forbids).",
+  "poc": null,
+  "pocNote": "No H/M this run: no PoC requirement. Fork tests listed under evidence are the supporting proof.",
+  "metadata": {
+    "createdAt": "2026-10-07T00:00:00Z",
+    "updatedAt": "2026-10-07T00:00:00Z",
+    "run": "yield-claim-nft-22",
+    "commit": "0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630",
+    "scanOrigin": "DEDUP-001",
+    "dedupOriginalIds": [
+      "LOCAL-001",
+      "PATTERN-001",
+      "CODE-001",
+      "SLITHER-004"
+    ],
+    "classificationOrigin": "CLASS-22-01"
+  },
+  "reportPath": "yield-claim-nft/reports/22/submissions/qa-report.md",
+  "upgradeTriggers": [
+    "Hard deadline: the cutover acquires real time pressure where delay itself exposes value (e.g. funds left in a Balancer pool known to be at risk, or a deadline after which the Proportional/Recovery exit is unavailable and value is lost).",
+    "No permissible replacement seeder: a replacement path is shown to be unavailable (e.g. the story-052 L23 tax/accounting constraint forbids any other seeder contract), making the cutover permanently blockable."
+  ],
+  "finalReview": {
+    "sources": [
+      "reports/22/final-review-severity.json",
+      "reports/22/final-review-validity.json"
+    ],
+    "appliedAt": "2026-10-07T00:00:00Z",
+    "changes": [
+      "dust pair.mint cost corrected to ~1,001 wei/side (MINIMUM_LIQUIDITY); ~1 wei applies to the sync variant only",
+      "mitigation reframed as a pre-broadcast decision for story-103/108 (mint-path branch, or pre-written abort + mint-path-seeder runbook with reserve-ratio assertion)",
+      "Medium re-weigh triggers added (hard deadline exposing value; no permissible replacement seeder)",
+      "severity unchanged: Low, borderline flag kept"
+    ]
+  }
+}

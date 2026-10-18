@@ -1,0 +1,97 @@
+{
+  "id": "L-27",
+  "label": "L-27",
+  "issueId": "ycn22l27",
+  "project": "yield-claim-nft",
+  "status": "draft",
+  "severity": "low",
+  "title": "UniPoolerCutoverEscrow snapshots _bpt from the owner-mutable oldPooler.pool(); a BalancerPoolerV2.setPool between escrow deploy and withdrawBPT delivers a different token that exitAndSeed rejects (NoBPT) and abort() never returns -- permanently stranded (owner ordering footgun)",
+  "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+  "function": "constructor",
+  "line": 199,
+  "lineStart": 199,
+  "lineEnd": 217,
+  "link": "https://github.com/Behodler/yield-claim-nft/blob/0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630/src/migration/UniPoolerCutoverEscrow.sol#L199-L217",
+  "entryPoint": null,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "2268ead7cba40c097fd2723e45032f2afc947b04736bbc77b87450ba02111bd4",
+  "fingerprintBasis": "UniPoolerCutoverEscrow.sol:constructor:stale-immutable-snapshot-owner-footgun",
+  "rootCauseClass": "stale-immutable-snapshot-owner-footgun",
+  "origin": "new",
+  "regression": false,
+  "footgun": true,
+  "faithfulness": false,
+  "channel": "qa",
+  "borderline": false,
+  "borderlineNote": "Permanent loss of whatever withdrawBPT sends after a repoint could argue for Medium under Law 3 ('up to High if it enables direct asset loss'). Held at Low because it needs two owner calls that story-103 does not contain (setPool, then withdrawBPT to the escrow), and the original BPT is never at risk because it stays on the old pooler, where rescueERC20 can reach it.",
+  "codeLocation": [
+    {
+      "lines": "L199-L217",
+      "code": "199:         address bpt_ = ICutoverOldPooler(oldPooler_).pool();\n200:         address usds_ = ICutoverOldPooler(oldPooler_).primeToken();\n201:         require(pair_ != address(0), \"UniPoolerCutoverEscrow: zero pair\");\n202:         require(uniRouter_ != address(0), \"UniPoolerCutoverEscrow: zero router\");\n203:         require(sUSDS_ != address(0), \"UniPoolerCutoverEscrow: zero sUSDS\");\n204:         require(phUSD_ != address(0), \"UniPoolerCutoverEscrow: zero phUSD\");\n205:         require(bpt_ != address(0), \"UniPoolerCutoverEscrow: zero pool\");\n206:         require(usds_ != address(0), \"UniPoolerCutoverEscrow: zero USDS\");\n207: \n208:         address oldSUSDS = ICutoverOldPooler(oldPooler_).sUSDS();\n209:         if (oldSUSDS != sUSDS_) revert UniPoolerCutoverEscrow__SUSDSMismatch(oldSUSDS, sUSDS_);\n210:         address asset = IERC4626(sUSDS_).asset();\n211:         if (asset != usds_) revert UniPoolerCutoverEscrow__UsdsMismatch(usds_, asset);\n212: \n213:         _operator = operator_;\n214:         _newPooler = newPooler_;\n215:         _oldPooler = oldPooler_;\n216:         _v3Router = v3Router_;\n217:         _bpt = bpt_;"
+    },
+    {
+      "lines": "L296-L299",
+      "code": "296:         uint256 b = _returnAll(_bpt);\n297:         uint256 s = _returnAll(_sUSDS);\n298:         uint256 p = _returnAll(_phUSD);\n299:         uint256 u = _returnAll(_usds);"
+    },
+    {
+      "lines": "L415-L418",
+      "code": "415:     function _returnAll(address token) internal returns (uint256 amount) {\n416:         amount = IERC20(token).balanceOf(address(this));\n417:         if (amount != 0) IERC20(token).safeTransfer(_oldPooler, amount);\n418:     }"
+    }
+  ],
+  "description": "Fork-confirmed against the deployed old pooler, where setPool exists and is callable by the owner. Sequence: the escrow is deployed, then the owner calls setPool(X), then withdrawBPT(escrow, n). The escrow receives token X, not its snapshot _bpt. exitAndSeed reverts NoBPT, and abort() moves only _bpt/_sUSDS/_phUSD/_usds (L296-299), so X stays stranded in the escrow forever. The escrow has no owner, no rescue path and immutable addresses. Refinement: the original BPT is not lost, because it stays on the old pooler and the owner can rescue it with rescueERC20. Only the tokens withdrawBPT paid out after the repoint are stranded. story-103 does not call setPool, so this is a non-obvious ordering footgun (Law 3), not a live path. Relation to story-052 L345: the story accepts 'no general rescue for arbitrary airdropped tokens outside the four handled tokens' as INFO. This case differs: the stranded token is not an airdrop, it arrives via the protocol's own withdrawBPT, the call the runbook uses to fund the escrow, while abort() is documented as the universal undo.",
+  "impact": "Tokens of the new pool X that the owner sends to the escrow via withdrawBPT after BalancerPoolerV2.setPool(X) are permanently stranded. exitAndSeed reverts NoBPT, abort() moves only the snapshot _bpt/_sUSDS/_phUSD/_usds, and the escrow has no owner or rescue. The original BPT is not affected.",
+  "failureScenario": [
+    "1. The escrow is deployed and snapshots _bpt = oldPooler.pool() (immutable, L199/L217).",
+    "2. The owner calls BalancerPoolerV2.setPool(X) for an unrelated reason.",
+    "3. The owner calls withdrawBPT(escrow, n), which transfers token X to the escrow.",
+    "4. exitAndSeed reverts NoBPT. abort() returns nothing of X, so X is stranded forever."
+  ],
+  "likelihood": "low. story-052 L208 places the escrow deploy and withdrawBPT in the same broadcast, so the first-pass broadcast leaves no room for a repoint. The realistic window is escrow re-use after an abort (e.g. one forced by L-26 or L-28) followed by a setPool repoint before a second withdrawBPT. Not on the story-103 path, and BalancerPoolerV2 is being retired (story-050).",
+  "assumptions": "A non-malicious owner repoints the old pooler between escrow deploy and withdrawBPT.",
+  "externalRequirements": "none (owner-only sequence)",
+  "plausibility": "implausible as an attack (no external actor); plausible only as an owner sequencing slip outside the runbook",
+  "evidence": [
+    "work/test/run22/EscrowCrossContract.fork.t.sol::test_run22_setPoolAfterDeploy_strandsNewPoolTokenInEscrow PASS (fork, chainid 1, block 26136000)"
+  ],
+  "crossRefs": {
+    "related": "L-17 79a2cd4a791fff2001793d0426aef75fc11d77fd357611b52526214d7d00dbd2 (open; BalancerPoolerV2 config coupling) -- different contract and mechanism, not a match.",
+    "manualReview": "PATTERN-MR-003 (generic no-rescue stranding) stays parked separately in manual-review.",
+    "knownIssues": "KI #1/#4 (owner trust) partial match only; kept as a Law-3 footgun (non-obvious consequence).",
+    "abortReuse": "L-26 (ycn22l26) and L-28 (ycn22l28): both make an abort-and-reuse of the escrow likely, which is the main path to this footgun.",
+    "story": "story-052 L345 (accepted INFO: no rescue for non-handled airdropped tokens; differs here because the token arrives via withdrawBPT); story-052 L208 (escrow deploy + withdrawBPT in the same broadcast)."
+  },
+  "severityJustification": "Law-3 footgun, not a malicious-owner vector. A competent owner would not expect the escrow to bind silently to the pre-repoint BPT, or that abort() cannot return the token withdrawBPT just delivered. Surprise means footgun, which means in scope at honest severity. The impact is real, permanent stranding, but it is reachable only through an owner sequence that the runbook does not contain, and the main asset (the original BPT) stays recoverable on the old pooler. That is Low with footgun guidance. It is not Medium, since there is no external path and protocol availability is unaffected. Fork-proven by test_run22_setPoolAfterDeploy_strandsNewPoolTokenInEscrow.",
+  "recommendedMitigation": "Safe-config guidance: in UniPoolerCutoverCore, assert oldPooler.pool() == escrow.bpt() in the same broadcast immediately before withdrawBPT(escrow, bal), and never call setPool on the old pooler while an escrow is live. Code-side option: have abort() also return oldPooler.pool() via _returnAll, or expose a bpt-match check.",
+  "poc": null,
+  "pocNote": "No H/M this run: no PoC requirement. Fork tests listed under evidence are the supporting proof.",
+  "metadata": {
+    "createdAt": "2026-10-07T00:00:00Z",
+    "updatedAt": "2026-10-07T00:00:00Z",
+    "run": "yield-claim-nft-22",
+    "commit": "0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630",
+    "scanOrigin": "DEDUP-002",
+    "dedupOriginalIds": [
+      "LOCAL-002",
+      "PATTERN-MR-002",
+      "CODE-002"
+    ],
+    "classificationOrigin": "CLASS-22-02"
+  },
+  "reportPath": "yield-claim-nft/reports/22/submissions/qa-report.md",
+  "finalReview": {
+    "sources": [
+      "reports/22/final-review-severity.json",
+      "reports/22/final-review-validity.json"
+    ],
+    "appliedAt": "2026-10-07T00:00:00Z",
+    "changes": [
+      "cited story-052 L345 and why this case differs (token arrives via the protocol's own withdrawBPT, not an airdrop)",
+      "likelihood cites story-052 L208; realistic window = escrow re-use after an abort, then a repoint",
+      "cross-referenced L-26/L-28 as the abort-and-reuse drivers",
+      "severity unchanged: Low"
+    ]
+  }
+}

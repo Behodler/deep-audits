@@ -1,0 +1,444 @@
+{
+  "project": "yield-claim-nft",
+  "run": 22,
+  "runLabel": "yield-claim-nft-22",
+  "mode": "REGRESSION",
+  "branch": "master",
+  "head": "0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630",
+  "baseline": "267660b96b92160a21919b043e571f2dbe51d216",
+  "scanTimestamp": "2026-10-07T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scopeNote": "Literal codeSignature grep over all 37 run-context scope files. Deep analysis targeted the only changed/newInScope contract, src/migration/UniPoolerCutoverEscrow.sol (cold), and its interactions with UniPoolerV2.sol and BalancerPoolerV2.sol (read: setPool L182-185, withdrawBPT L424-425, rescueERC20 L437-440, UniPoolerV2.pool gating L450-456, _reserves/_balances EmptyPair L523-535, rescueERC20 L556). Unchanged contracts are byte-identical to 267660b and the pattern DB is unchanged (mtime 2026-07-09), so their matches equal run 21's. They are listed under carryOvers and not re-emitted.",
+  "patternsLoaded": 35,
+  "patternsChecked": 35,
+  "patternsSkipped": [
+    {
+      "id": "FRONTRUN-APPROVE",
+      "reason": "DB note: C4 QA/known issue. 0 signature hits anyway; forceApprove is exact and reset throughout. No HM twist."
+    },
+    {
+      "id": "CENTRALIZATION-ADMIN",
+      "reason": "DB note: Low/QA unless rug-enabling. The escrow has no owner/onlyOwner. The operator gate is the trusted cutover sender (Law 3). Key-loss stranding is routed to manualReview MR-003, not skipped silently."
+    }
+  ],
+  "findingsCount": 3,
+  "findings": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "FIRST-DEPOSITOR-ATTACK",
+      "matchKind": "heuristic (no literal codeSignature; empty-UniV2-pair seeding variant)",
+      "type": "empty-pair-poisoning-dos",
+      "severity": "potential-high",
+      "assessedImpact": "DoS-only on the cutover; funds safe via abort(). Pattern severity HIGH is mapped mechanically; realistic rating Low..Medium (availability), consistent with phStaging run-39 L-01.",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed/_requireEmptyPair",
+      "line": 372,
+      "lines": "L249, L359-375, L399-400",
+      "description": "exitAndSeed requires a strictly empty canonical pair (reserves AND balances 0) and seeds only through Router02.addLiquidity. Anyone can permanently block it: donate 1 wei of either token and call pair.sync() (one-sided reserves also make Router02 quote() revert), or do a dust first mint via pair.mint. The skim branch (L365-371) handles only the passive unsynced donation; the griefer can call sync() themselves, because it is permissionless. The pair is fixed as canonical (factory.getPair) by UniPoolerV2's constructor, and _pair is immutable here, so a same-code redeploy fails identically. The escrow has no fallback seed mode. Recovery needs a new contract (direct transfer + pair.mint when totalSupply()==0, which absorbs synced dust into newPooler's LP).",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "_requireEmptyPair(): if (r0 != 0 || r1 != 0 || b0 != 0 || b1 != 0) revert UniPoolerCutoverEscrow__PairNotEmpty(...)",
+        "IUniswapV2Router02(_uniRouter).addLiquidity(_sUSDS, _phUSD, s, p, s, p, _newPooler, deadline)"
+      ],
+      "missingMitigations": [
+        "No totalSupply()==0 fallback that transfers directly and calls pair.mint (would absorb a synced-dust donation)",
+        "No tolerance band to accept a near-empty pair whose ratio is within bounds"
+      ],
+      "presentMitigations": [
+        "Funds cannot be redirected: abort() returns all four tokens to oldPooler",
+        "An unsynced donation is skimmed to newPooler (fixed protocol recipient)",
+        "Strict emptiness prevents the classic first-depositor price-setting theft"
+      ],
+      "crossRefs": [
+        "profile LOCAL-001",
+        "phStaging run-39 L-01 (2-wei pair poisoning blocks story-103 core)",
+        "ycn Q-19 098396142d (fixed: canonical pair check) / L-24 8511fd5206 (wont-fix)",
+        "run-21 PATTERN-003 (FIRST-DEPOSITOR on UniPoolerV2 pair): the escrow is the seeding mechanism that run-21 match anticipated",
+        "story-052 L58, L224, L319, L343: acknowledged as DoS-only, 'raise with auditor'"
+      ],
+      "carryover": false,
+      "references": [
+        "https://github.com/Uniswap/v2-core/blob/master/contracts/UniswapV2Pair.sol (sync/mint)"
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "matchKind": "heuristic (signatures swap(/amountOutMin absent; exit-floor variant)",
+      "type": "weak-exit-floor",
+      "severity": "potential-high",
+      "assessedImpact": "Value at risk only if the off-chain floors are loose or mis-ordered. The call is operator-gated and the story-103 core computes tight floors over the combined BPT and broadcasts privately. Likely Low/QA under Law 3, but the guard lives entirely off-chain.",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed/_exit",
+      "line": 258,
+      "lines": "L256-259, L382, L384",
+      "description": "The only on-chain guard on the Balancer V3 exit is minAmountsOut.length == 2 && minAmountsOut[i] > 0, so 1 wei passes. The escrow does not compute the live proportional share of bptIn, and it does not check that the floors follow Balancer token order (sorted by address). A swapped-order floor pair would set the tight floor on the wrong token. Router02's mins equal the desired amounts, which only forces exact consumption and is not a price floor. Story-052 L212 requires the core to size the floors over the COMBINED BPT (old pooler ~20,401.8 + owner 202.30), because exitAndSeed exits balanceOf(escrow). A floor sized on the old pooler's balance alone would be loose by about 1%.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "if (minAmountsOut[i] == 0) revert UniPoolerCutoverEscrow__ZeroMinAmountOut(i);",
+        "removeLiquidityProportional(_bpt, bptIn, minAmountsOut, false, \"\")",
+        "removeLiquidityRecovery(_bpt, bptIn, minAmountsOut)"
+      ],
+      "missingMitigations": [
+        "No on-chain floor relative to the proportional share (e.g. via the V3 Router queryRemoveLiquidityProportional, or a bps tolerance)",
+        "No token-order validation of minAmountsOut"
+      ],
+      "presentMitigations": [
+        "onlyOperator (operator alone chooses timing and floors)",
+        "deadline bounded to 1 day (L260); the exit and seed are atomic",
+        "Zero floors forbidden"
+      ],
+      "crossRefs": [
+        "profile LOCAL-003, story-052 Q1/L226 ('Flag for the auditor')",
+        "ycn L-06 342075dfba (wont-fix): same off-chain-floor reliance on BalancerPoolerV2.pool",
+        "ycn L-22 a846cc40e6 (wont-fix): UniPoolerV2.pool"
+      ],
+      "carryover": false,
+      "references": [
+        "https://docs.balancer.fi/developer-reference/contracts/router-api.html"
+      ]
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE",
+      "matchKind": "literal signatures getReserves() and balanceOf(address(this)); context = seed price",
+      "type": "spot-derived-opening-price",
+      "severity": "potential-high",
+      "assessedImpact": "The new pair's opening price is the Balancer pool's spot composition at exit time, with no oracle or $1-peg band. Manipulation must happen BEFORE the private exitAndSeed tx and is bounded by the per-token minAmountsOut floors (PATTERN-002). Economic sizing is deferred to econ-scanner. Likely Low unless the floors are loose.",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed/_seed",
+      "line": 268,
+      "lines": "L268-270, L400, L408-410",
+      "description": "The seed ratio is s:p = the escrow's whole sUSDS and phUSD balances after a proportional or recovery exit. A proportional exit pays out at the pool's CURRENT composition, so whoever skews the Balancer sUSDS/phUSD pool before the exit (1) makes the escrow realise impermanent loss on the exit, and (2) has that skewed ratio written into the fresh Uniswap pair as its opening price. They can then arbitrage the new pair back as well. There is no TWAP, no oracle and no peg-band check on s/p. The getReserves() reads at L360/L408 check emptiness and verify the post-state; they are not used for pricing, so those reads are not themselves the vulnerable use.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "uint256 s = IERC20(_sUSDS).balanceOf(address(this));",
+        "uint256 p = IERC20(_phUSD).balanceOf(address(this));",
+        "IUniswapV2Pair(_pair).getReserves()"
+      ],
+      "missingMitigations": [
+        "No on-chain ratio/peg band on s:p before seeding (e.g. require s*sUSDS.convertToAssets(1e18)/1e18 within X bps of p)"
+      ],
+      "presentMitigations": [
+        "Atomic exit+seed: there is no window between exit and seed",
+        "Per-token exit floors (if tight) bound the composition skew",
+        "Operator-only timing plus private broadcast"
+      ],
+      "crossRefs": [
+        "profile story-question 6 ('Inherited seed price: deferred to econ-scanner')",
+        "related to PATTERN-002 (same guard); report as one root cause if both survive triage"
+      ],
+      "carryover": false,
+      "references": [
+        "https://blog.openzeppelin.com/defi-security-flash-loans"
+      ]
+    }
+  ],
+  "manualReviewCount": 5,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT (whole-balance family)",
+      "type": "whole-balance-seed",
+      "severity": "potential-medium",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed",
+      "line": 268,
+      "lines": "L252, L268-269, L296-299, L416",
+      "description": "bptIn, s, p and every abort amount are whole balanceOf(this) values rather than deltas. A stray non-proportional sUSDS/phUSD transfer to the escrow shifts the seeded price. Mitigations were found: the recipient is pinned (LP goes to newPooler, abort goes to oldPooler), and the donor loses money. Seeding (S, P+x) and arbitraging back to the true price yields at most (sqrt(P+x)-sqrt(S))^2, which is less than x for S\u2248P. Not exploitable for profit. The remaining value of this record is the price-shift note, which feeds PATTERN-003.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "IERC20(_sUSDS).balanceOf(address(this))",
+        "IERC20(_bpt).balanceOf(address(this))"
+      ],
+      "missingMitigations": [],
+      "presentMitigations": [
+        "recipient pinned to a non-caller address",
+        "operator-gated"
+      ],
+      "crossRefs": [
+        "story-052 L225 (flagged for auditor)",
+        "profile Q2"
+      ]
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "heuristic (immutable-snapshot staleness; no DB pattern)",
+      "patternId": "IMMUTABLE-SNAPSHOT-STALENESS",
+      "type": "owner-footgun",
+      "severity": "potential-low",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "constructor/abort",
+      "line": 199,
+      "lines": "L199, L217, L296, L415-418; BalancerPoolerV2.sol L182-185, L424-425",
+      "description": "_bpt is snapshotted from oldPooler.pool(), but BalancerPoolerV2.setPool is owner-mutable and withdrawBPT pays IERC20(_pool) (the CURRENT pool). If setPool runs between escrow deploy and withdrawBPT, and oldPooler holds the new pool's BPT, then the escrow receives a token it can neither exit (NoBPT) nor abort. The escrow has no generic rescue, so that token is stranded forever. Would a competent owner be surprised by this? Plausibly yes (Law 3 footgun), though the precondition is unlikely.",
+      "confidence": "low",
+      "crossRefs": [
+        "profile LOCAL-002"
+      ]
+    },
+    {
+      "id": "PATTERN-MR-003",
+      "source": "heuristic (stuck-token / no-rescue; no DB pattern)",
+      "patternId": "NO-RESCUE",
+      "type": "stuck-token",
+      "severity": "potential-low",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "(contract-wide)",
+      "line": 295,
+      "lines": "L295-301, L415-418",
+      "description": "The escrow has no rescue for tokens outside {BPT, sUSDS, phUSD, USDS}, no receive or fallback, and no key fallback: all three functions are onlyOperator, and operator is immutable. Losing the operator key strands all four balances, which story-052 accepts by design (Law 3). Any other token sent here, including a wrong BPT (MR-002), is lost permanently. The story rates this INFO (L323, L345).",
+      "confidence": "low",
+      "crossRefs": [
+        "story-052 L323/L345",
+        "profile Q4/Q5"
+      ]
+    },
+    {
+      "id": "PATTERN-MR-004",
+      "source": "pattern-db",
+      "patternId": "ERC4626-INFLATION (depositor-side variant)",
+      "type": "erc4626-deposit-no-min-shares",
+      "severity": "potential-high",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "wrapUsds",
+      "line": 287,
+      "lines": "L283-291",
+      "description": "IERC4626(_sUSDS).deposit(amt, _newPooler) has no minimum-shares check. The run found this NOT vulnerable in practice: the sUSDS share price comes from the Sky chi accumulator and not from balanceOf, so donations cannot manipulate it, and sUSDS has a very large existing supply. It is recorded so the depositor-side check is visible, not dropped. The pattern's codeSignatures (vault-side) did not match.",
+      "confidence": "low",
+      "crossRefs": [
+        "ycn Q-02 261859a435 (qa-bundled): unchecked ERC4626 deposit return in BalancerPoolerV2"
+      ]
+    },
+    {
+      "id": "PATTERN-MR-005",
+      "source": "heuristic (skim side-effect)",
+      "patternId": "SKIM-RECIPIENT-ORPHAN",
+      "type": "orphaned-value",
+      "severity": "potential-low",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "_requireEmptyPair",
+      "line": 366,
+      "lines": "L365-367",
+      "description": "skim(_newPooler) sends any unsynced phUSD donation to UniPoolerV2. UniPoolerV2.pool() never consumes phUSD it holds, so the phUSD can only be recovered through the owner's rescueERC20, which story-052 L129 accepts. PairSkimmed emits the pre-skim pair BALANCES (b0, b1), not the skimmed excess. Those are equal only because reserves are (0,0) at that point, so the event is correct as written but fragile.",
+      "confidence": "low",
+      "crossRefs": [
+        "story-052 L129"
+      ]
+    }
+  ],
+  "carryOverCount": 6,
+  "carryOvers": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "zap-sandwich",
+      "severity": "potential-high",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "pool",
+      "line": 481,
+      "description": "addLiquidity is called with amountAMin = amountBMin = 0 (L481). The only protection is the keeper-supplied minPhusdOut (swap, L472) and minLP (L483). Re-checked after the sync() change: the sandwich surface is the same, and it stays bounded by caller tolerance.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "addLiquidity(_sUSDS, _phUSD, sUSDSRemaining, phusdOut, 0, 0, ...)",
+        "swapExactTokensForTokens(s, minPhusdOut, ...)"
+      ],
+      "missingMitigations": [
+        "No on-chain/TWAP price bound; mins are spot-derived off-chain"
+      ],
+      "ledgerCoverage": {
+        "label": "L-22",
+        "fingerprint": "a846cc40e6",
+        "status": "wont-fix",
+        "verdict": "covered: same root cause, no new vector from this diff"
+      },
+      "references": [],
+      "carryover": true,
+      "carryoverFrom": "yield-claim-nft-21 PATTERN-001",
+      "carryoverNote": "UniPoolerV2.sol unchanged 267660b..0fd6bdf (git diff empty); pattern DB unchanged since 2026-07-09. Not re-emitted as a new finding.",
+      "_bucket": "findings",
+      "ledgerRef": "L-22 a846cc40e6 (wont-fix)"
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE",
+      "type": "spot-reserve-sizing",
+      "severity": "potential-high",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "pool / quotePool",
+      "line": 463,
+      "description": "The zap size s = _swapAmount(rS, sUSDSIn) (L541) comes from spot reserves after sync() (L462-463), and quotePool sizes from pair balanceOf (L502, L531). Both can be manipulated within one block. The new sync() also lets an unsynced donation move the sizing price, but a donation is a pure loss for the attacker: it cannot be skimmed back after sync, and it accrues mostly to protocol-owned LP. It is therefore no stronger than the front-run swap already covered by L-22. The manipulation is bounded by minPhusdOut/minLP.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "getReserves()",
+        "IERC20(_sUSDS).balanceOf(_pair)",
+        "IUniswapV2Pair(_pair).sync()"
+      ],
+      "missingMitigations": [
+        "No TWAP/oracle sanity bound on rS"
+      ],
+      "ledgerCoverage": {
+        "label": "L-22",
+        "fingerprint": "a846cc40e6",
+        "status": "wont-fix",
+        "verdict": "covered"
+      },
+      "relatedFixCheck": {
+        "label": "L-25",
+        "fingerprint": "8ec2be7d59",
+        "status": "fix-pending",
+        "verdict": "Fix appears complete. sync() at L462 makes the reserves used for sizing equal the reserves swap() and the addLiquidity quote use, so an unsynced donation is no longer credited as swap input. quotePool's _balances() is exactly what sync() would set. The deciding Tier-3 check is to replay the L-25 PoC (0.5% donation, 100k zap) and confirm no phUSD is stranded and no InsufficientLP revert."
+      },
+      "references": [],
+      "carryover": true,
+      "carryoverFrom": "yield-claim-nft-21 PATTERN-002",
+      "carryoverNote": "UniPoolerV2.sol unchanged 267660b..0fd6bdf (git diff empty); pattern DB unchanged since 2026-07-09. Not re-emitted as a new finding.",
+      "_bucket": "findings",
+      "ledgerRef": "L-25 8ec2be7d59 (fixed) / L-22 (wont-fix)"
+    },
+    {
+      "id": "PATTERN-003",
+      "source": "pattern-db",
+      "patternId": "FIRST-DEPOSITOR-ATTACK",
+      "type": "pair-pre-seed-ratio-grief",
+      "severity": "potential-high",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "constructor",
+      "line": 220,
+      "description": "The new canonical check (L220-221: router.factory().getPair(sUSDS, phUSD) == pair_) shows the pair is the factory pair. It does not show the pair is seeded at a sane ratio, because anyone can create and dust-seed the canonical pair first. _reserves()/_balances() revert EmptyPair on zero (L525, L533), so pool() is never the first depositor, but the initial ratio is still set by whoever seeds first.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "getPair(sUSDS_, phUSD_)",
+        "revert UniPoolerV2__EmptyPair()"
+      ],
+      "missingMitigations": [
+        "No ratio/minimum-reserve check at construction or first pool()"
+      ],
+      "ledgerCoverage": {
+        "label": "L-24",
+        "fingerprint": "8511fd5206",
+        "status": "wont-fix",
+        "verdict": "covered (dust pre-seed half)"
+      },
+      "relatedFixCheck": {
+        "label": "Q-19",
+        "fingerprint": "098396142d",
+        "status": "fix-pending",
+        "verdict": "The canonical-pair half is fixed by L220-221; propose 'fixed' to a human. The pre-seed half stays under L-24 (wont-fix). Q-19 and L-24 share one title, so the sanitizer must not treat them as separate live issues."
+      },
+      "references": [],
+      "carryover": true,
+      "carryoverFrom": "yield-claim-nft-21 PATTERN-003",
+      "carryoverNote": "UniPoolerV2.sol unchanged 267660b..0fd6bdf (git diff empty); pattern DB unchanged since 2026-07-09. Not re-emitted as a new finding.",
+      "_bucket": "findings",
+      "ledgerRef": "Q-19 098396142d (fixed) / L-24 8511fd5206 (wont-fix); escrow-side delta is run-22 PATTERN-001"
+    },
+    {
+      "id": "PATTERN-MR-001",
+      "source": "pattern-db",
+      "patternId": "SENTINEL-GUARD-BYPASS (heuristic; no DB pattern)",
+      "type": "identity-sentinel-guard",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "_dispatch",
+      "line": 356,
+      "description": "The L-21 fix guard `if (address(hook) == _defaultHook) revert HookNotSet()` (L356; _defaultHook captured at L230) blocks only the one DefaultDispatchHook instance deployed by the base constructor. A different no-op hook (for example a second DefaultDispatchHook, or a stale hook redeployed by a script) passes the guard and recreates the L-21 zero-mint-debt outcome. setHook rejects only address(0) (ATokenDispatcherV2 L95). A mint-debt hook whose `dispatcher` is not repointed to UniPoolerV2 fails loudly in onDispatch (dispatcher-gated), which is safe. Reaching the bypass needs an owner/script action, so this is a residual Law-3 footgun, not an attacker path. The fix covers the failure mode L-21 states (setHook skipped or reordered).",
+      "confidence": "low",
+      "ledgerCoverage": {
+        "label": "L-21",
+        "fingerprint": "6867d791f3",
+        "status": "fix-pending",
+        "verdict": "The fix addresses the stated root cause; the residual is identity-vs-type. Do not auto-close L-21. A human applies 'fixed'."
+      },
+      "failLoudNote": "NFTMinterV2.mint calls dispatcher.dispatch at L191 with no try/catch, so until setHook runs, every index-4 mint reverts UniPoolerV2__HookNotSet. The other indices are unaffected. This is an intended fail-loud ordering requirement (NatSpec 'Hook must be set before the first mint'), not a DoS finding, provided the cutover script calls setHook before registering index 4.",
+      "carryover": true,
+      "carryoverFrom": "yield-claim-nft-21 PATTERN-MR-001",
+      "carryoverNote": "UniPoolerV2.sol unchanged 267660b..0fd6bdf (git diff empty); pattern DB unchanged since 2026-07-09. Not re-emitted as a new finding.",
+      "_bucket": "manualReview",
+      "ledgerRef": null
+    },
+    {
+      "id": "PATTERN-MR-002",
+      "source": "pattern-db",
+      "patternId": "QUOTE-EXECUTE-DIVERGENCE (heuristic; DIVISION-PRECISION/ROUNDING-DIRECTION family)",
+      "type": "view-vs-execute-toctou",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "quotePool",
+      "line": 517,
+      "description": "quotePool reads totalSupply() (L517) without the _mintFee LP that pair.mint() issues to feeTo when the V2 fee switch is on. Fees accrued since kLast, plus any donation folded in by sync(), grow sqrt(k). In execution, the pooler's liquidity is computed against a larger totalSupply, so the realised LP is at least the quote. The divergence errs in the safe direction for a minLP derived from quotePool. The quote's swapIn and phusdOut match pool() exactly after sync. The real exposure is TOCTOU: the keeper derives minPhusdOut/minLP off-chain from quotePool and executes in a later block (already the L-22/L-23 tolerance surface). If the keeper is ever a contract that calls quotePool in the same transaction, the mins become vacuous. No such caller exists in the source.",
+      "confidence": "low",
+      "ledgerCoverage": {
+        "label": "L-22 / L-23",
+        "fingerprint": "a846cc40e6 / c15c71fd22",
+        "status": "wont-fix",
+        "verdict": "no new HM exposure"
+      },
+      "carryover": true,
+      "carryoverFrom": "yield-claim-nft-21 PATTERN-MR-002",
+      "carryoverNote": "UniPoolerV2.sol unchanged 267660b..0fd6bdf (git diff empty); pattern DB unchanged since 2026-07-09. Not re-emitted as a new finding.",
+      "_bucket": "manualReview",
+      "ledgerRef": "Q-23 ae13a21ad9 (open)"
+    },
+    {
+      "id": "PATTERN-MR-003",
+      "source": "pattern-db",
+      "patternId": "CANONICAL-PAIR-CHECK (heuristic; CREATE2/getPair)",
+      "type": "trusted-router-derives-factory",
+      "severity": "potential-low",
+      "contract": "src/dispatchers/UniPoolerV2.sol",
+      "function": "constructor",
+      "line": 220,
+      "description": "The canonical check takes its factory from the caller-supplied router_ (IUniswapV2Router02(router_).factory()). A wrong router plus a matching fake factory would pass. Router and pair are both deploy-time owner/deployer inputs, so this is Law-3 trusted (an obvious misconfig) unless the deploy script reads the router from an unverified source. The check also needs the pair to exist before deployment (getPair returns 0 and pair_ != 0), which pushes pair creation and seeding into the L-24 pre-seed window.",
+      "confidence": "low",
+      "ledgerCoverage": {
+        "label": "Q-19",
+        "fingerprint": "098396142d",
+        "status": "fix-pending",
+        "verdict": "Residual only; supports proposing Q-19 fixed."
+      },
+      "carryover": true,
+      "carryoverFrom": "yield-claim-nft-21 PATTERN-MR-003",
+      "carryoverNote": "UniPoolerV2.sol unchanged 267660b..0fd6bdf (git diff empty); pattern DB unchanged since 2026-07-09. Not re-emitted as a new finding.",
+      "_bucket": "manualReview",
+      "ledgerRef": null
+    }
+  ],
+  "checkedNoMatch": {
+    "ORACLE-STALE": "0 hits",
+    "ORACLE-ROUNDID": "0 hits",
+    "SIGNATURE-REPLAY": "0 hits",
+    "UNSAFE-DOWNCAST": "0 hits (uint112->uint256 widening only, L409)",
+    "DIVISION-PRECISION": "0 hits",
+    "UNPROTECTED-INIT": "0 hits (constructor-only, no initializer)",
+    "STORAGE-COLLISION": "0 hits (not upgradeable)",
+    "RETURN-VALUE-IGNORE": "0 hits in escrow (SafeERC20 safeTransfer/forceApprove)",
+    "SELFDESTRUCT-FORCE-ETH": "no escrow hit; no ETH logic",
+    "DOS-UNBOUNDED-LOOP": "one loop, fixed at 2 (L257)",
+    "DOUBLE-VOTING": "0",
+    "PERMIT-FRONTRUN": "0",
+    "CROSS-CHAIN-REPLAY": "0",
+    "TIMELOCK-BYPASS": "0",
+    "REWARD-ACCRUAL-ORDER": "0 (no accumulator)",
+    "REWARD-RUNWAY-DEPLETION": "no escrow hit",
+    "EMISSION-WINDOW-BOUNDARY": "block.timestamp used only for the deadline bound",
+    "MINT-ON-DEMAND-OVERMINT": "phUSD hit is a token address only; no mint",
+    "TWO-STEP-COMMIT-WINDOW": "'pending' substring false positive; there is no commit/reveal",
+    "REENTRANCY-ERC777": "IERC20 hit only; the four tokens are plain ERC20; every entry is nonReentrant",
+    "REENTRANCY-ERC721-RECEIVE": "no 721 surface",
+    "REENTRANCY-READONLY": "escrow has no value-reporting views",
+    "REENTRANCY-CROSS-FUNCTION": "mitigated: one contract-wide nonReentrant lock on all 3 mutators; no mutable storage",
+    "ROUNDING-DIRECTION": "no division",
+    "WEAK-PRNG": "block.timestamp is not used as randomness",
+    "INCORRECT-OPERATOR": "deadline check `deadline <= block.timestamp` (L260) is 1s stricter than Router02's ensure(); no value consequence (notVulnerableWhen #2)",
+    "FEE-ON-TRANSFER-ACCOUNTING": "token set fixed to sUSDS/phUSD/USDS/BPT (non-FoT); exact-consumption and reserve checks would revert under FoT rather than mis-account",
+    "UNI-APPROVAL-HYGIENE (requested family)": "every forceApprove is exact and reset to 0 (L380/386, L397-402, L286/288); no residual allowance"
+  },
+  "errors": []
+}

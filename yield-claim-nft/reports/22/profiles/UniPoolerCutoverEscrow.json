@@ -1,0 +1,174 @@
+{
+  "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+  "run": "yield-claim-nft-22",
+  "commit": "0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630",
+  "profileTimestamp": "2026-10-07T00:00:00Z",
+  "solidityVersion": "^0.8.20",
+  "story": "story-052 (state: review)",
+  "newInScope": true,
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {"value": true, "confidence": "verified", "note": "only loop is fixed i<2 over minAmountsOut after length==2 check (L257)"},
+    "checkedArithmetic": {"value": true, "confidence": "verified", "note": "0.8.x, no unchecked, no assembly. Only subtraction: lpReceived = balanceOf(newPooler) - lpBefore (L405), cannot underflow in practice; would revert, not wrap"},
+    "reentrancyGuarded": {"value": ["exitAndSeed", "wrapUsds", "abort"], "confidence": "verified", "note": "OZ ReentrancyGuard on every state-changing external fn; no unguarded state-changing entry point"},
+    "accessControlled": {"value": ["exitAndSeed", "wrapUsds", "abort"], "confidence": "verified", "note": "onlyOperator (immutable _operator, non-zero-checked); no owner, no transferOwnership/renounce, no setters"},
+    "initializerProtected": {"value": "n/a", "confidence": "verified", "note": "non-upgradeable; constructor only; all config immutable"},
+    "pauseMechanism": {"value": false, "confidence": "verified", "note": "none; abort() is the operator escape"},
+    "noReceiveFallback": {"value": true, "confidence": "verified", "note": "no receive/fallback; no payable fn; V3 router called with msg.value 0 and wethIsEth=false"},
+    "noCallerChosenRecipient": {"value": true, "confidence": "verified", "note": "recipients are only _v3Router (BPT burn via allowance), _uniRouter->pair (seed), _newPooler (LP, skim, sUSDS shares), _oldPooler (abort). No function parameter is an address."},
+    "approvalsExactAndReset": {"value": true, "confidence": "verified", "note": "forceApprove(exact) before, forceApprove(0) after for BPT->v3Router (L380/386), sUSDS/phUSD->Router02 (L397-402), USDS->sUSDS (L286/288)"},
+    "oneShotSeed": {"value": true, "confidence": "verified", "note": "_requireEmptyPair + Uniswap V2 MINIMUM_LIQUIDITY lock make a second successful exitAndSeed impossible"},
+    "weakRandomness": {"value": "none", "confidence": "verified"},
+    "inboundCallbackSurface": {"value": "none", "confidence": "likely", "note": "no ERC721/1155/777 paths; relies on sUSDS/phUSD/USDS/BPT being hook-free ERC20s"},
+    "storageSafety": {"value": "only ReentrancyGuard._status in storage; everything else immutable", "confidence": "verified"},
+    "fileLocalInterfacesOnly": {"value": true, "confidence": "verified", "note": "imports only OZ + src/interfaces/uniswap/*; no src/interfaces/balancer/* or BalancerPoolerV2 import (story-050 decoupling)"}
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-001",
+      "type": "griefing-dos-no-in-contract-recovery",
+      "severity": "local-low",
+      "function": "exitAndSeed -> _requireEmptyPair / _seed",
+      "line": "359-375, 399-400",
+      "description": "Any third party can make exitAndSeed permanently unexecutable for THIS escrow (and any redeploy of the same code) for ~1 wei + gas: transfer 1 wei of sUSDS or phUSD to the canonical pair and call pair.sync() (reserves become non-zero, so the skim branch is skipped and PairNotEmpty reverts), or mint a dust first-LP directly via pair.mint. Even a skim-less, one-sided reserve state cannot be seeded through Router02 (UniswapV2Library.quote reverts INSUFFICIENT_LIQUIDITY), and the escrow seeds only via Router02 with the exact-empty gate. The story classifies this as 'DoS only; abort returns funds' — correct for funds (abort is unaffected), but the escrow has no recovery mode: completing the cutover after poisoning requires abort + a DIFFERENT contract (direct transfer + pair.mint which tolerates one-sided reserves, or a seed-at-existing-ratio path). Redeploying UniPoolerCutoverEscrow will fail identically because the pair is the factory-canonical one fixed by UniPoolerV2 (PairNotCanonical). Front-running is possible whenever exitAndSeed is broadcast publicly, and the poisoning can also be done any time before.",
+      "codeQuote": "if (r0 == 0 && r1 == 0 && (b0 != 0 || b1 != 0)) { ICutoverPairSkim(_pair).skim(_newPooler); ... }\nif (r0 != 0 || r1 != 0 || b0 != 0 || b1 != 0) { revert UniPoolerCutoverEscrow__PairNotEmpty(r0, r1, b0, b1); }",
+      "crossRef": "phStaging run-39 L-01 (2-wei pair poisoning blocks story-103 core; recovery seed must be atomic); UniPoolerV2 L-24 (dust pre-seed, wont-fix). Escrow does not worsen funds-at-risk; it inherits the DoS and lacks a recovery branch.",
+      "recommendation": "Broadcast exitAndSeed via a private relay; have a pre-built fallback seeding contract (direct transfer + pair.mint, tolerating dust reserves within a bounded tolerance) ready, or add a bounded 'dust-tolerant' mode to the escrow. Not a funds-loss issue."
+    },
+    {
+      "id": "LOCAL-002",
+      "type": "stranded-tokens-no-rescue / mutable-source-snapshot",
+      "severity": "local-low (owner footgun candidate)",
+      "function": "constructor / abort / _returnAll",
+      "line": "199, 217, 295-301, 415-418",
+      "description": "Only four tokens can ever leave the escrow (_bpt, _sUSDS, _phUSD, _usds). Any other ERC20 sent to it is permanently locked (no rescue, no owner). The BPT address is SNAPSHOTTED from oldPooler.pool(), which is owner-mutable via BalancerPoolerV2.setPool, while BalancerPoolerV2.withdrawBPT transfers IERC20(_pool) — the CURRENT pool. If oldPooler.setPool is called between escrow deployment and withdrawBPT(escrow, amt) (or the owner hand-transfers a BPT of a different pool), the BPT that lands on the escrow is not _bpt: exitAndSeed reverts NoBPT and abort does not return it, so it is permanently stranded. Likewise any mis-sent token (e.g. USDC, a wrong BPT, an LP token) is unrecoverable. Story open question #5 accepts 'no rescue for tokens outside the four (INFO)'; the setPool interaction is the non-obvious part.",
+      "codeQuote": "address bpt_ = ICutoverOldPooler(oldPooler_).pool();  // constructor\n...\nuint256 b = _returnAll(_bpt); uint256 s = _returnAll(_sUSDS); uint256 p = _returnAll(_phUSD); uint256 u = _returnAll(_usds);",
+      "recommendation": "Operational: assert escrow.bpt() == oldPooler.pool() immediately before withdrawBPT in the cutover core (story-103), and never call setPool during the cutover window. Optionally allow abort() to return an arbitrary non-protected token to oldPooler (destination still fixed, so custody guarantee is preserved)."
+    },
+    {
+      "id": "LOCAL-003",
+      "type": "slippage-floor-offchain-only",
+      "severity": "local-info",
+      "function": "exitAndSeed",
+      "line": "256-262, 382-384",
+      "description": "Exit slippage protection is entirely the operator-supplied minAmountsOut, validated only as length==2 and each >0. A 1-wei floor is accepted. The array is passed straight to the V3 Router in Balancer pool-token order (sorted by address: sUSDS 0xa393.. before phUSD 0xf3B5.. on mainnet); the escrow neither validates order nor recomputes the proportional share of the combined BPT. A mis-ordered array either reverts (safe) or silently loosens one token's floor. The seed itself has NO price/ratio floor: Router02 mins == desired only enforce exact consumption on an empty pair, not a price. Story open question #1 — confirmed as described.",
+      "codeQuote": "if (minAmountsOut.length != 2) revert ...; for (uint256 i = 0; i < 2; i++) { if (minAmountsOut[i] == 0) revert ...ZeroMinAmountOut(i); }",
+      "recommendation": "Defer to econ/script audit: the phStaging2 core must compute floors over the COMBINED escrow BPT (incl. owner's 202.30) in Balancer token order with a tight tolerance."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "exitAndSeed(ExitMode mode, uint256[] minAmountsOut, uint256 deadline) returns (uint256 liquidity)",
+        "visibility": "external",
+        "accessControl": "onlyOperator",
+        "reentrancyGuard": true,
+        "stateChanges": ["ReentrancyGuard._status only (no other storage); token balances of escrow/pair/newPooler"],
+        "steps": [
+          "1 _requireEmptyPair: getReserves/token0/token1/balanceOf(pair) x2; if reserves (0,0) and balances !=0 -> pair.skim(newPooler); require reserves==0 && balances==0",
+          "2 bptIn = BPT.balanceOf(this) > 0",
+          "3 minAmountsOut.length==2, each>0; block.timestamp < deadline <= block.timestamp + 1 days",
+          "4 BPT.forceApprove(v3Router,bptIn); v3Router.removeLiquidityProportional(bpt,bptIn,mins,false,\"\") OR removeLiquidityRecovery(bpt,bptIn,mins); forceApprove(0); require BPT bal==0",
+          "5 s=sUSDS.balanceOf(this), p=phUSD.balanceOf(this) (WHOLE balances); require s,p>0; forceApprove Router02 exact; Router02.addLiquidity(sUSDS,phUSD,s,p,s,p,newPooler,deadline); reset approvals; require a==s&&b==p; require liq>0 && pair.balanceOf(newPooler) delta == liq; require reserves==(s,p)",
+          "6 require escrow BPT/sUSDS/phUSD == 0; emit Seeded"
+        ],
+        "externalCalls": ["pair.getReserves/token0/token1/skim", "IERC20(t0/t1).balanceOf(pair)", "BPT.balanceOf/approve", "v3Router.removeLiquidityProportional|removeLiquidityRecovery", "sUSDS/phUSD.balanceOf/approve", "Router02.addLiquidity", "pair.balanceOf(newPooler)"],
+        "valueOutflows": ["BPT -> burned by Balancer V3 Vault via v3Router allowance", "unsynced pair donation -> newPooler (skim)", "sUSDS+phUSD -> pair (via Router02 transferFrom)", "LP -> newPooler"]
+      },
+      {
+        "function": "wrapUsds() returns (uint256 shares)",
+        "visibility": "external",
+        "accessControl": "onlyOperator",
+        "reentrancyGuard": true,
+        "stateChanges": ["none in escrow storage; USDS balance -> 0; newPooler sUSDS balance += shares"],
+        "externalCalls": ["USDS.balanceOf/approve", "sUSDS.deposit(amt, newPooler)"],
+        "notes": "callable repeatedly; reverts NoUSDS on zero balance; requires USDS bal==0 afterwards"
+      },
+      {
+        "function": "abort()",
+        "visibility": "external",
+        "accessControl": "onlyOperator",
+        "reentrancyGuard": true,
+        "stateChanges": ["none in escrow storage; whole BPT/sUSDS/phUSD/USDS balances -> oldPooler"],
+        "externalCalls": ["balanceOf + safeTransfer(oldPooler) for each of BPT, sUSDS, phUSD, USDS"],
+        "notes": "no-op allowed (zero balances skip transfer, still emits Aborted). Callable before or after exitAndSeed. Cannot touch LP on newPooler."
+      },
+      {"function": "operator()/newPooler()/oldPooler()/v3Router()/bpt()/usds()/sUSDS()/phUSD()/pair()/uniRouter()", "visibility": "external view", "accessControl": "none"},
+      {"function": "MAX_DEADLINE_WINDOW()", "visibility": "public constant", "value": "1 days"}
+    ],
+
+    "constructor": {
+      "signature": "constructor(address operator_, address newPooler_, address oldPooler_, address v3Router_)",
+      "reads": ["newPooler.pair()", "newPooler.router()", "newPooler.sUSDS()", "newPooler.phUSD()", "oldPooler.pool() [snapshot of mutable value]", "oldPooler.primeToken()", "oldPooler.sUSDS()", "IERC4626(sUSDS).asset()", "pair.token0()"],
+      "checks": ["all 4 args != 0", "pair/router/sUSDS/phUSD/pool/USDS != 0", "oldPooler.sUSDS()==newPooler.sUSDS()", "sUSDS.asset()==oldPooler.primeToken()"],
+      "notChecked": ["pair tokens == {sUSDS, phUSD} (relies on UniPoolerV2 constructor PairTokenMismatch check)", "pair canonical for router.factory (relies on UniPoolerV2 PairNotCanonical check)", "BPT pool tokens == {sUSDS, phUSD} (not checked; a mismatch is fail-safe: exit length mismatch or NothingToSeed reverts atomically)", "v3Router is the real Balancer V3 Router (trusted deploy arg)"]
+    },
+
+    "externalCalls": [
+      {"target": "UniPoolerV2 newPooler", "methods": ["pair", "router", "sUSDS", "phUSD"], "when": "constructor only", "trustLevel": "trusted (protocol, owner-deployed)", "notes": "Also a value RECIPIENT: LP, skim proceeds, wrapped sUSDS shares. Recipient never calls back."},
+      {"target": "BalancerPoolerV2 oldPooler (mainnet 0x7f68…11F1)", "methods": ["pool", "primeToken", "sUSDS"], "when": "constructor only", "trustLevel": "trusted (protocol)", "notes": "Sole abort destination. pool() is owner-mutable (setPool) — snapshotted."},
+      {"target": "Balancer V3 Router v3Router (mainnet 0x5C6f…9FDd)", "methods": ["removeLiquidityProportional(pool,exactBptIn,mins,false,\"\")", "removeLiquidityRecovery(pool,exactBptIn,mins)"], "trustLevel": "semi-trusted (external protocol, constructor arg)", "notes": "Gets exact BPT allowance (Vault burns BPT by spending the ROUTER's allowance), reset to 0 after. Sends pool tokens (sUSDS, phUSD) to the escrow. No deadline param on the V3 leg."},
+      {"target": "BPT (Balancer V3 pool token, mainnet 0x642B…db04)", "methods": ["balanceOf", "approve(forceApprove)", "transfer (abort)"], "trustLevel": "semi-trusted"},
+      {"target": "Uniswap V2 Router02 (mainnet 0x7a25…488D)", "methods": ["addLiquidity(sUSDS,phUSD,s,p,s,p,newPooler,deadline)"], "trustLevel": "semi-trusted (canonical)", "notes": "Exact approvals, reset after. On empty pair consumes desired exactly; pair.mint locks MINIMUM_LIQUIDITY(1000) to address(0)."},
+      {"target": "Uniswap V2 pair sUSDS/phUSD (canonical factory pair)", "methods": ["getReserves", "token0", "token1", "skim(newPooler)", "balanceOf(newPooler)"], "trustLevel": "semi-trusted; its STATE is attacker-influenceable (donations, sync, direct mint)", "notes": "Factory feeTo LIVE on mainnet (Q-23): first mint has kLast==0 so no fee on seed; sets kLast for future fee accrual. Escrow's lpReceived==liq check is unaffected."},
+      {"target": "sUSDS (ERC4626, mainnet 0xa393…7fbD)", "methods": ["asset", "deposit(amt, newPooler)", "balanceOf", "approve", "transfer"], "trustLevel": "semi-trusted (Sky)"},
+      {"target": "USDS (mainnet 0xdC03…384F)", "methods": ["balanceOf", "approve", "transfer"], "trustLevel": "semi-trusted (Sky)"},
+      {"target": "phUSD (mainnet 0xf3B5…D605)", "methods": ["balanceOf", "approve", "transfer"], "trustLevel": "trusted (protocol)", "notes": "Assumed hook-free ERC20"}
+    ],
+
+    "stateVariables": [
+      {"name": "_operator,_newPooler,_oldPooler,_v3Router,_bpt,_usds,_sUSDS,_phUSD,_pair,_uniRouter,_sUSDSIsToken0", "type": "immutable", "mutators": ["constructor"], "readers": ["all"]},
+      {"name": "ReentrancyGuard._status", "type": "uint256 (OZ)", "mutators": ["exitAndSeed", "wrapUsds", "abort"]}
+    ],
+
+    "events": ["Seeded(bptIn,sUSDSSeeded,phUSDSeeded,liquidity,mode)", "PairSkimmed(recipient indexed,amount0,amount1)", "UsdsWrapped(usdsWrapped,shares)", "Aborted(recipient indexed,bpt,sUSDS,phUSD,usds)"],
+    "modifiers": ["onlyOperator", "nonReentrant"],
+    "customErrors": ["NotOperator", "SUSDSMismatch", "UsdsMismatch", "PairNotEmpty", "NoBPT", "BadMinAmountsLength", "ZeroMinAmountOut", "BadDeadline", "BPTRemaining", "NothingToSeed", "SeedNotExact", "LPNotMinted", "ReserveMismatch", "BalanceRemaining", "NoUSDS"],
+
+    "custodyGraph": {
+      "BPT": ["v3Router/Vault (burn) in exitAndSeed", "oldPooler in abort"],
+      "sUSDS": ["pair (seed) in exitAndSeed", "oldPooler in abort"],
+      "phUSD": ["pair (seed) in exitAndSeed", "oldPooler in abort"],
+      "USDS": ["sUSDS vault (deposit, shares->newPooler) in wrapUsds", "oldPooler in abort"],
+      "pairDonations": ["newPooler via skim (only when reserves are 0,0)"],
+      "LP": ["newPooler (minted)"],
+      "anyOtherToken": ["NONE — permanently locked"]
+    }
+  },
+
+  "storyOpenQuestions": [
+    {"q": "1. No on-chain share floor", "codeBehaviour": "Confirmed. Only length==2 and each>0 (L256-259). Floors forwarded verbatim to the V3 Router in Balancer token order; no proportional-share recomputation, no ratio/price check on the seed.", "status": "as-described; LOCAL-003"},
+    {"q": "2. Whole-balance seed", "codeBehaviour": "Confirmed. s/p = balanceOf(this) AFTER the exit (L268-270), so any pre-sent sUSDS/phUSD (and any BPT sent to the escrow, L252) joins the seed; minAmountsOut bounds only the exit leg, not stray balances. Because the seeded LP is 100% newPooler's (empty pair), a stray donation is a gift to protocol POL — a donor cannot profit from shifting the seed price (donate-then-arb nets the donor a loss in constant-product). The only party who can exploit a mispriced seed is an arbitrageur trading against a seed price that differs from the external phUSD price, which exists independently of donations (see Q6).", "status": "as-described; no local finding"},
+    {"q": "3. Pair DoS", "codeBehaviour": "Confirmed DoS-only for funds: unsynced donation is skimmed to newPooler (L365-371); synced donation or a dust first-mint reverts PairNotEmpty (L372-374). abort() has no pair dependency. Escrow has no recovery path; a same-code redeploy fails identically.", "status": "LOCAL-001"},
+    {"q": "4. Operator key loss", "codeBehaviour": "Confirmed. _operator is immutable (L95, L213); every state-changing fn including abort is onlyOperator (L176-179). No owner/second key/timelocked fallback. Key loss strands all four balances permanently.", "status": "accepted design; Law-3 trusted; not a finding"},
+    {"q": "5. No rescue for other tokens", "codeBehaviour": "Confirmed. Only _bpt/_sUSDS/_phUSD/_usds are ever transferred (L296-299, L415-418). Non-obvious extension: the BPT is a snapshot of owner-mutable oldPooler.pool(), and withdrawBPT pays the current pool.", "status": "LOCAL-002"},
+    {"q": "6. Inherited seed price", "codeBehaviour": "Confirmed. Seed ratio = exit proceeds ratio (+ any stray balances); proportional exit returns the Balancer pool's composition ratio, which is NOT a price check against $1 or any oracle. Router02 mins==desired (L400) only pin exact consumption on an empty pair. Post-seed arbitrage toward the external phUSD price is an economic question (econ-scanner).", "status": "defer to econ-scanner"}
+  ],
+
+  "otherObservations": [
+    "Recovery vs proportional is operator-chosen (enum), never clock-derived — matches story.",
+    "deadline only reaches Router02; the V3 exit has no deadline but is in the same atomic tx, so the Router02 deadline (<= now+1 day) bounds the whole call.",
+    "Fail-safe post-checks: if Router02 seeded a different pair than _pair, lpReceived (on _pair) != liq and reserves != (s,p) -> revert. If the BPT pool's tokens are not {sUSDS, phUSD}, NothingToSeed or router length mismatch reverts atomically.",
+    "PairSkimmed emits pre-skim balances in pair token0/token1 order (not sUSDS/phUSD order).",
+    "Router02 approval reset after addLiquidity is unobservable (Router02 consumes exactly s,p) — defensive only, as the story notes.",
+    "abort() restores the pre-cutover status quo on oldPooler: returned sUSDS is re-poolable by any authorized pooler via BalancerPoolerV2.pool(minBPT) (whole-balance), returned USDS is re-swept by oldPooler._dispatch donation (if still the active dispatcher with donation enabled). All four are recoverable by oldPooler owner via rescueERC20 (no token restriction) / withdrawBPT.",
+    "Unit tests (37 incl. invariant handler) pass in workspace; fork tests not run here (need RPC)."
+  ],
+
+  "trustAssumptions": [
+    "operator EOA is non-malicious and keeps its key (Law 3); it chooses timing, mode and minAmountsOut",
+    "newPooler is the UniPoolerV2 whose constructor enforced pair tokens == {sUSDS,phUSD} and pair == router.factory().getPair(sUSDS,phUSD)",
+    "v3Router constructor arg is the genuine Balancer V3 Router; it only burns BPT via its allowance and pays pool tokens to msg.sender",
+    "BPT (snapshot of oldPooler.pool()) is the pool whose BPT is actually transferred in; oldPooler.setPool is not called during the cutover window",
+    "Balancer pool tokens are exactly {sUSDS, phUSD} (sorted: sUSDS first on mainnet)",
+    "sUSDS, phUSD, USDS, BPT are plain ERC20s without transfer hooks or fees",
+    "Off-chain core (phStaging2 story-103) computes minAmountsOut over the combined BPT with a tight tolerance and broadcasts privately",
+    "The canonical UniV2 pair is empty (no synced reserves, no LP supply) at exitAndSeed time"
+  ],
+
+  "inheritanceChain": ["ReentrancyGuard (OZ)"],
+
+  "complexity": {"loc": 425, "functions": 17, "externalEntryPointsStateChanging": 3, "externalCalls": 22, "stateVariables": 11, "storageSlots": 1}
+}

@@ -1,0 +1,107 @@
+{
+  "project": "yield-claim-nft",
+  "run": "yield-claim-nft-22",
+  "scanTimestamp": "2026-10-07T00:00:00Z",
+  "scanType": "economic",
+  "tier": "2b",
+  "head": "0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630",
+  "contractsScanned": 3,
+  "contracts": ["src/migration/UniPoolerCutoverEscrow.sol", "src/dispatchers/UniPoolerV2.sol", "src/dispatchers/BalancerPoolerV2.sol"],
+  "evidence": {
+    "rpcProbe": "RPC_MAINNET live (cast block-number 26137017). No degradation.",
+    "onChain@26136000": {
+      "balancerPool": "29,663.476 sUSDS / 35,705.515 phUSD, no rate providers (raw==live), BPT supply 32,438.774",
+      "holders": "old pooler 20,401.809 BPT (62.89%), EOA 0xc65faaafbbda520791f344d33497485edf58e8db 12,036.965 BPT (37.11%); supply = exactly the sum. OWNER_EOA 0xCad1 holds 0 BPT",
+      "sUSDS.convertToAssets(1e18)": "1.111919 USDS",
+      "seed": "18,656.333 sUSDS / 22,456.370 phUSD (fork test, within 2 wei of the pro-rata share), LP 20,468.35",
+      "phUSDPriceAtSeed": "0.830781 sUSDS = 0.9238 USDS per phUSD (7.62% below the $1 mint price). The plan's figure was 0.971 at block 26,093,540 (30,418.9 / 34,816.8); about 889 phUSD were sold into the pool between the two blocks"
+    },
+    "tests": "work/test/run22/EscrowSandwichEcon.fork.t.sol: 5/5 PASS (mainnet fork, block 26136000; the suite FAILS without RPC). The inherited repo fork suite (3 tests) also passes in the same run: 8 passed, 0 failed"
+  },
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "sandwich-verification",
+      "severity": "info",
+      "relation": "Quantitatively CONFIRMS CODE-003 / LOCAL-003 (cleared). Not a new finding.",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed",
+      "lineStart": 265,
+      "lineEnd": 270,
+      "codeSnippet": "_exit(mode, bptIn, minAmountsOut);\nuint256 s = IERC20(_sUSDS).balanceOf(address(this));\nuint256 p = IERC20(_phUSD).balanceOf(address(this));\nliquidity = _seed(s, p, deadline);",
+      "description": "Setup: a public-mempool sandwich around exitAndSeed on the real fork. The attacker pre-skews the Balancer pool to just inside the exit floors, the escrow exits and seeds at the skewed ratio, and the attacker then arbitrages BOTH the new V2 pair and the 37.1% Balancer remainder back to the pre-attack price. Both venues are 50/50 constant-product with a 0.3% fee. The protocol's seeded invariant is therefore preserved, and the back-arb returns exactly the attacker's own slippage, minus fees on both legs.\n\nFork numbers (p0 = 0.830781 sUSDS/phUSD):\n- tol 1%: seed price moved to 0.8473 (buy direction) or 0.8146 (sell direction), i.e. +/-2.0%. Attacker PnL is -1.753 sUSDS in both directions. The protocol's V2 position is worth 37,313.63 sUSDS at p0 against a 37,312.67 baseline (+0.96), and sqrtK rises from 20,468.354 to 20,468.882.\n- tol 5%: seed price moved to 0.9187 or 0.7513 (+10.6% / -9.6%). Attacker PnL is -8.808 sUSDS. The protocol gains +4.82 sUSDS at p0, and sqrtK rises to 20,470.996.\n\nOrganic off-peg case, where the pre-cutover price is not attacker-induced: phUSD is at $0.9238. phUSD is mint-only at $1 through PhusdStableMinter, with no redeem or withdraw (phoenix-protocol-explained.md: 'deliberately not redeemable'). So no below-peg arbitrage exists. The only other venue is the Balancer remainder, which sits at the identical price after the proportional exit. An arbitrageur therefore extracts 0 from the freshly seeded pair. If phUSD were above $1 at cutover, the mint-and-sell arbitrage would take the same skim from POL on Balancer as on V2 (same curve, same fee). The plan states that skim is intended (BalancerWinddownPlan.md L502-506 'Pushing through the mint price is intended'). Neither case is a value leak introduced by the escrow, and the escrow does not change the L-22/L-24/Q-20 bounds.",
+      "economicImpact": "None to the protocol. The protocol's invariant strictly increases, from the attacker's fees.",
+      "attackScenario": "1. Swap X sUSDS->phUSD (or the reverse) on the Balancer pool, up to the floor tolerance.\n2. exitAndSeed exits pro rata and seeds V2 at the skewed ratio.\n3. Arbitrage V2 and the Balancer remainder back to p0. Net: -fees.",
+      "profitability": "Never profitable: -1.75 sUSDS at a 1% tolerance, -8.81 sUSDS at 5%.",
+      "affectedParties": "Attacker only.",
+      "confidence": "high",
+      "test": "work/test/run22/EscrowSandwichEcon.fork.t.sol::test_run22_econ_sandwich_tol{100,500}bps_{buy,sell}Phusd PASS"
+    },
+    {
+      "id": "ECON-002",
+      "type": "griefing-dos-tight-floors",
+      "severity": "potential-low",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed / _exit (floors computed off-chain by phStaging2 UniPoolerCutoverCore)",
+      "lineStart": 256,
+      "lineEnd": 266,
+      "codeSnippet": "for (uint256 i = 0; i < 2; i++) {\n    if (minAmountsOut[i] == 0) revert UniPoolerCutoverEscrow__ZeroMinAmountOut(i);\n}\n...\n_exit(mode, bptIn, minAmountsOut);",
+      "description": "story-052 justifies the immutable-operator gate partly on the grounds that a stranger 'front-running between the owner's withdrawBPT and exitAndSeed ... would revert the forge broadcast mid-cutover'. story-103 broadcasts through the public mempool (forge --broadcast --slow --ledger --legacy, with no private relay), using 'live proportional share minus a tight tolerance' floors that are quoted at simulation time. The gate does not stop the cheapest version of that front-run: any Balancer swap that moves one side by more than the tolerance makes the Vault revert. Fork-proven at the repo's 1 bp tolerance: a 4 sUSDS->phUSD Balancer swap makes exitAndSeed revert with AmountOutBelowMin(phUSD, 22,453.35e18, 22,454.12e18). The griefer then unwinds for a round-trip cost of 0.024 sUSDS (about $0.027) plus gas. Organic Balancer flow during the multi-tx --slow broadcast can trip the same check. Funds are safe: the tx is atomic, the BPT stays in the escrow, and the operator can re-quote and retry, or abort. But the cutover can be held hostage for pennies per attempt, and per the plan a mid-broadcast revert poisons the progress file. ECON-001 proves that a loose floor gives up no value, because a sandwich is net-negative for the attacker. So the 'tight tolerance' buys no economic protection and only maximises griefability.",
+      "economicImpact": "No value loss. Availability only: each cutover attempt can be reverted for about $0.03 plus gas, and with --slow the attack window spans several blocks.",
+      "attackScenario": "1. Watch the mempool for the escrow deploy, withdrawBPT, or exitAndSeed.\n2. Front-run exitAndSeed with a ~4 sUSDS Balancer swap (1 bp tolerance) or a ~tol*Y swap generally.\n3. exitAndSeed reverts AmountOutBelowMin; the forge script halts before wiring.\n4. Unwind; repeat on retry.",
+      "profitability": "Not profitable. Griefing cost is about 0.024 sUSDS plus gas per revert at 1 bp. The cost scales as about 0.6*tol*35.7k*0.003 sUSDS, so a 2% tolerance raises it to roughly 1.3 sUSDS of fees plus the slippage the griefer must stomach.",
+      "affectedParties": "Protocol operations (cutover schedule). Funds unaffected.",
+      "recommendation": "phStaging2:103 core: (a) use a moderate exit tolerance (for example 1-3%), since ECON-001 shows wider floors cost POL nothing; and/or (b) submit exitAndSeed through a private relay (Flashbots Protect); and (c) document the 'exitAndSeed reverted: re-quote and resume from receipts' runbook step. No escrow code change is needed.",
+      "confidence": "high",
+      "test": "work/test/run22/EscrowSandwichEcon.fork.t.sol::test_run22_econ_tightFloor_griefCost PASS (trace: Vault AmountOutBelowMin; 'grief round-trip cost (sUSDS wei) 23961190401828642')"
+    },
+    {
+      "id": "ECON-003",
+      "type": "intent-premise-stale-seed-price",
+      "severity": "info",
+      "relation": "Re-weigh of Q-21 (4c2f9c705c, fix-pending). Update its numbers; do not re-file. Answers story-052's 'human to confirm phUSD price'.",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed (seed price inherited from Balancer)",
+      "description": "Where the plan stands: BalancerWinddownPlan.md §5/Stage 4 sizes the post-cutover price lift on p ~= 0.971 USDS/phUSD at block 26,093,540, with a crossing (Δ*) of about $636-640. At the escrow's fork block 26,136,000, the Balancer price that exitAndSeed carries over is 0.830781 sUSDS x 1.111919 = 0.9238 USDS per phUSD, 7.62% below the $1 mint price. Δ* for the seeded pair, computed as Y/r - X, is 22,456.37/1.111919 - 18,656.33 = 1,539.7 sUSDS, or about $1,712. That is about 2.7x the plan's figure. The seed itself is fair market: phUSD is non-redeemable, there is no other venue, and seed USD value = 20,744 sUSDS-side + 20,744 phUSD-side at market = $41,489, against $43,200 if phUSD were marked at $1. The $1,712 gap is the phUSD discount, not a leak. But the plan's 'first call of about Δ* lifts phUSD to peg with no arbitrage skim', and the chunk sizes built on it, rest on a stale price. Q-21's numbers ('crosses $1 at ~$636') are stale in the same direction.",
+      "economicImpact": "None from the escrow. Operational sizing of the post-cutover zap is off by about 2.7x.",
+      "recommendation": "Before broadcast, the human confirms that a seed at about $0.92 is acceptable, as story-052 asks. Recompute Δ* from live reserves in the Stage 4 runbook instead of quoting the plan's $640.",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-004",
+      "type": "cross-venue-arb-balancer-remainder",
+      "severity": "info",
+      "contract": "src/dispatchers/UniPoolerV2.sol (post-cutover) / src/migration/UniPoolerCutoverEscrow.sol (whole-balance seed)",
+      "function": "pool() after seed; exitAndSeed whole-balance seed",
+      "description": "After the cutover, the external EOA's 37.1% stays on Balancer as a live second venue: 11,007 sUSDS and 13,249 phUSD, at the same price. It remains swappable until Balancer swaps stop or the LP exits. Any price lift on the V2 pair is partly arbitraged into that remainder. Constant-product, 0.3% fees both venues:\n- Zap Δ* = 1,540 sUSDS (V2 to $1.000): the arbitrage moves 259.5 sUSDS through and nets 9.68 sUSDS ($11). V2 settles at $0.9735 and Balancer at $0.9678.\n- Stray 1,308.1 sUSDS (the old pooler's idle sUSDS), had it been routed through the escrow before exitAndSeed instead of rescueERC20 -> UniPoolerV2 as story-103 step 9 specifies: the seed price becomes $0.9885 and the arbitrage nets 6.84 sUSDS ($8).\nDonor strays sent to the escrow are seeded as 100% POL at the donor's cost (the profile's claim is confirmed).",
+      "economicImpact": "Immaterial ($8-$11). Note, though, that part of the intended peg lift is exported to the third-party Balancer LP: V2 ends at $0.9735, not $1.",
+      "recommendation": "Run the Stage-4 price lift after the 0xc65f LP has exited or Balancer swaps are disabled (the plan's open question #1). Keep the sUSDS rescue going directly to UniPoolerV2, not via the escrow.",
+      "confidence": "medium (closed-form CP model, inputs from fork state)"
+    },
+    {
+      "id": "ECON-005",
+      "type": "intent-premise-false-owner-bpt",
+      "severity": "info",
+      "relation": "Spec-conformance for story-052 / story-103 (the consumer). Route to spec-conformance.md.",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed (bptIn = whole balance)",
+      "description": "story-052 L59 and story-103 checklist L199 say: 'The owner already holds 202.30 BPT ... phStaging2 will transfer it owner -> escrow' and 'compute minAmountsOut over the escrow's COMBINED BPT balance'. On-chain this is false. The 202.30039704702753 BPT reached OWNER_EOA from the old pooler at block 25,985,116, and at block 25,985,119 (tx 0xd8ecb3be133b0262ab5fc27a221c5007268b40c7017363a216fee9ae6c5cc082) it was sent to 0xf719d6d9cd90836506a4845969ecd753d6d963b9 and burned in the same tx. BPT supply now equals exactly old pooler + EOA 0xc65f, and OWNER_EOA holds 0 at the fork block and at head. Consequences, none of which lose value:\n- floors sized on 20,604.1 BPT exceed the true share by 0.99%, so exitAndSeed reverts at any tolerance below 0.99%;\n- a hardcoded transfer(escrow, 202.30e18) reverts;\n- a live-read transfer of 0 is a no-op.\nAll fail loud before wiring.",
+      "economicImpact": "None. Possible self-DoS of the broadcast if the script trusts the story's number.",
+      "recommendation": "story-103 core: read the owner's BPT live and skip the transfer when it is 0. Compute floors over BPT.balanceOf(escrow) after all transfers. Correct the 202.30 premise in stories 052/103.",
+      "confidence": "high"
+    }
+  ],
+  "clearedChecks": [
+    {"check": "Arbitrage immediately after seed (protocol-owned liquidity mis-pricing)", "result": "cleared", "why": "The seed equals the Balancer pro-rata ratio within 2 wei. The Balancer remainder trades at the same price. phUSD is below its mint price and non-redeemable, so there is no profitable path. Extraction = 0."},
+    {"check": "CODE-003 'arbitrage-back only recovers the attacker's own slippage'", "result": "confirmed", "why": "Fork-measured for both directions at tolerances of 1% and 5% (ECON-001). The organic off-peg case is also cleared."},
+    {"check": "wrapUsds share pricing", "result": "cleared", "why": "The old pooler's USDS is 4.7e11 wei (~$5e-7). sUSDS shares are priced off the chi/rho drip accumulator, not balanceOf, so donation inflation is impossible. ERC4626 round-down favours the vault by <1 wei. Deposits go to newPooler, and UniPoolerV2 holds no share accounting."},
+    {"check": "Cross-contract rounding (Vault exit round-down -> Router02 exact seed)", "result": "cleared", "why": "The exit rounds down in the Vault's favour (<=1 wei per token). The seed consumes the whole balance exactly, with the first mint burning MINIMUM_LIQUIDITY (1000 wei LP). There is no round-trip leg that favours an external user."},
+    {"check": "Fee switch (Q-23) on the seed", "result": "cleared", "why": "The first mint has kLast == 0, so no protocol fee is taken (the fork asserts LP == totalSupply - 1000)."},
+    {"check": "Escrow materially changes the L-22 / L-24 / Q-20 bounds (wont-fix)", "result": "no", "why": "The escrow seeds the same exit proceeds with the same curve and fee. Pool depth equals the protocol's 62.9% share (Q-21). The sandwich surface on the seed itself is net-negative (ECON-001)."}
+  ],
+  "assumptions": [
+    "USDS = $1. sUSDS valued at convertToAssets.",
+    "Attacker back-arb targets p0. Arbitrage toward any other price redistributes value only between arbitrageurs; the protocol's constant-product invariant is unaffected.",
+    "ECON-004 uses the closed-form CP model, not a fork run (Low/info only)."
+  ]
+}

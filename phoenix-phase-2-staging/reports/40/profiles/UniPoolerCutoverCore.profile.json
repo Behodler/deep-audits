@@ -1,0 +1,102 @@
+{
+  "contract": "script/helpers/UniPoolerCutoverCore.sol",
+  "kind": "abstract script helper (inherited by DeployMocks story-101 rehearsal, test/UniPoolerCutoverCore.t.sol; intended for the story-103 mainnet script + fork test, which DO NOT EXIST yet at a4f9f3c)",
+  "story": "phStaging2 story-100 (Balancexit Stage 2 core); plan docs/BalancerWinddownPlan.md section 4",
+  "profileTimestamp": "2026-10-13T00:00:00Z",
+  "run": 40,
+  "commit": "a4f9f3c",
+  "solidityVersion": "^0.8.20",
+  "priority": 1,
+
+  "executionModel": {
+    "summary": "No storage, no external entry points. `_runCutover(CutoverParams)` (L242) runs steps 0..12 from the INHERITING contract's context: under `vm.startBroadcast(OWNER)` every external call below becomes a separate OWNER-EOA transaction. The core's own `require`s execute in forge's local simulation pass only; they are NOT on-chain guards for a mainnet broadcast.",
+    "status": "VERIFIED (L50-53 NatSpec + no on-chain contract deployed for the orchestration itself; only `new UniPoolerV2` at L353)",
+    "onChainGuardsActuallyEnforced": [
+      "Balancer V3 Router/Vault: minAmountsOut per token (step 5, L382-385)",
+      "Uniswap V2 Router02: amountAMin/amountBMin = recovered*(1-seedTol) and deadline = p.seedDeadline (step 6, L429-430)",
+      "Callee access control (onlyOwner on old pooler / hook / NFTMinter / new pooler; onlyOwnerOrRecipient on hook.pull)",
+      "UniPoolerV2 constructor: pair token set + canonical-pair check (yield-claim-nft UniPoolerV2.sol L215-221)"
+    ],
+    "simulationOnlyChecks": "All `require(...)` in steps 0-12 and `_assertRetired` (L268-323, L332-348, L354, L364, L374, L388-391, L399-406, L423, L432-438, L444, L451-455, L478-486, L495-498, L522-535, L543, L548-559)"
+  },
+
+  "sequence": [
+    {"step": 0, "fn": "_step0Preconditions", "line": 264, "mutates": "nothing (view)", "checks": "owner owns old pooler, hook, NFT minter; tolerances <= 100 bps; seedDeadline in (now, now+1d]; every p.poolers[i] non-zero and fails old.onlyAuthorizedPooler (poolerAuthVersion != authVersion); configs(index).dispatcher == oldPooler; hook.dispatcher == oldPooler; old.hook == mintDebtHook; live reads sUSDS/USDS(primeToken)/phUSD(hook.phUSD)/bPool/bVault/factory non-zero; Balancer pool tokens == {sUSDS, phUSD} (2 tokens, either order); minAmountsOut.length == 2 and each > 0", "status": "VERIFIED"},
+    {"step": 1, "fn": "_step1CreatePair", "line": 327, "mutates": "UniV2 factory: createPair(sUSDS, phUSD) iff getPair == 0 (permissionless call; anyone may have created it first, reused)", "status": "VERIFIED"},
+    {"step": 2, "fn": "_step2EnsurePairEmpty", "line": 336, "mutates": "pair.skim(p.owner) iff pair holds sUSDS or phUSD balance with zero reserves", "checks": "reserves (0,0) before and after; balances (0,0) after. A SYNCED donation (non-zero reserves) reverts here (simulation) - griefable DoS, see run-39 L-01", "note": "skim destination is OWNER here; the escrow (yield-claim-nft) skims to newPooler instead", "status": "VERIFIED"},
+    {"step": 3, "fn": "_step3DeployPooler", "line": 352, "mutates": "CREATE UniPoolerV2(sUSDS, phUSD, uniV2Router, pair, owner) from the broadcaster", "status": "VERIFIED"},
+    {"step": 4, "fn": "_step4WithdrawBPT", "line": 359, "mutates": "old.withdrawBPT(OWNER, fullBalance): BPT custody moves to the OWNER EOA", "status": "VERIFIED"},
+    {"step": 5, "fn": "_step5ExitBalancer", "line": 369, "mutates": "OWNER: BPT.approve(balancerRouter, bptIn) then removeLiquidityProportional|removeLiquidityRecovery(bPool, bptIn, minAmountsOut). sUSDS + phUSD land on OWNER EOA", "checks": "bptIn = OWNER's WHOLE BPT balance (includes OWNER's own pre-existing BPT, not only what step 4 withdrew); `_checkMinAmountsOut` (L396) requires share*(1-exitTol) <= minAmountsOut[i] <= share where share = balancesRaw[i]*bptIn/totalSupply (live, simulation-time); after: OWNER BPT == 0; sOut/pOut measured as OWNER balance deltas, both > 0", "approvalHygiene": "approve to Balancer Router is exact and fully consumed by the burn; not reset (ASSUMED fully spent - mainnet Router burns exactly exactBptAmountIn)", "status": "VERIFIED (code); ASSUMED (mainnet Router semantics)"},
+    {"step": 6, "fn": "_step6SeedPair", "line": 417, "mutates": "OWNER: approve sUSDS/phUSD to Router02 (exact), addLiquidity(sUSDS, phUSD, sAmt, pAmt, sMin, pMin, to=newPooler, seedDeadline). LP minted to UniPoolerV2", "checks": "a == sAmt && b == pAmt; liquidity > 0; pair.balanceOf(newPooler) == liquidity; reserves == seeded amounts (all simulation-only). On-chain only the 1%-max mins bind", "status": "VERIFIED"},
+    {"step": 7, "fn": "_step7PullDebt", "line": 442, "mutates": "hook.pull(): mints mintDebt phUSD to hook.recipient (NFTStaker on mainnet), mintDebt -> 0", "precondition": "hook.recipient != 0 else reverts RecipientUnset; hook must hold phUSD mint rights (ASSUMED)", "status": "VERIFIED"},
+    {"step": 8, "fn": "_step8RepointHook", "line": 448, "mutates": "hook.setDispatcher(newPooler) THEN newPooler.setHook(hook)", "status": "VERIFIED"},
+    {"step": 9, "fn": "_step9ConfigurePooler", "line": 460, "mutates": "newPooler.setMinter(nftMinter); setPSM(old.psm) iff non-zero; setMaxTout; setBatchMinter (copied even if zero); setBatchDonationSize; setAuthorizedPooler(p.poolers[i], true); setNudgeStreamer(old.nudgeStreamer) iff non-zero (last)", "note": "re-authorizes exactly the caller-supplied p.poolers on the NEW pooler (the same set that step 0 proved revoked on the old one)", "status": "VERIFIED"},
+    {"step": 10, "fn": "_step10ReplaceDispatcher", "line": 490, "mutates": "NFTMinterV2.replaceDispatcher(index, newPooler)", "checks": "price/growth/disabled unchanged", "status": "VERIFIED"},
+    {"step": 11, "fn": "_step11MoveBalances", "line": 502, "mutates": "old.rescueERC20(sUSDS, newPooler, all). USDS: if new pooler donation is live (size>0 && batchMinter!=0 && psm!=0) rescue USDS straight to newPooler; else rescue to OWNER, OWNER approve sUSDS + sUSDS.deposit(usds, newPooler)", "checks": "old pooler sUSDS == 0 and USDS == 0", "status": "VERIFIED"},
+    {"step": 12, "fn": "_step12RetireOld", "line": 539, "mutates": "old.setMinter(OWNER); old.pause() iff not paused", "status": "VERIFIED"},
+    {"step": "final", "fn": "_assertRetired", "line": 547, "mutates": "nothing", "checks": "index on newPooler; hook on newPooler; BPT == 0 on old pooler AND on OWNER; old pooler sUSDS/USDS == 0; old paused", "status": "VERIFIED"}
+  ],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {"value": true, "confidence": "verified", "note": "loops over p.poolers (caller input) and 2 pool tokens"},
+    "checkedArithmetic": {"value": true, "confidence": "verified", "note": "0.8.x; no unchecked/assembly. `_totalSupply` uses low-level staticcall with length check (L410-414)"},
+    "reentrancyGuarded": [],
+    "accessControlled": "N/A - internal-only abstract contract; authority is the broadcaster's ownership of old pooler / hook / NFT minter (step 0)",
+    "initializerProtected": "N/A",
+    "stepOrderStrict": {"value": true, "confidence": "verified", "note": "_runCutover L242-259"},
+    "fundsLeaveProtocolCustody": {"value": true, "confidence": "verified", "note": "Between step 4 and step 6 the BPT, then the recovered sUSDS+phUSD, sit on the OWNER EOA across separate transactions; in the no-donation branch of step 11 the parked USDS also transits OWNER. The UniPoolerCutoverEscrow (yield-claim-nft story-052) exists to remove exactly this, but this core does not reference it"},
+    "seedUsesDeltasNotWholeBalance": {"value": true, "confidence": "verified", "note": "step 6 seeds only the step-5 OWNER balance deltas; the escrow seeds whole balances - the two designs differ"},
+    "idempotentOrResumable": {"value": false, "confidence": "verified", "note": "no resume/progress logic: a partial broadcast leaves state that step 0 rejects on re-run (e.g. after step 8 hook.dispatcher != oldPooler; after step 4 BPT on OWNER is still handled by step 5 but step 3 would deploy a second UniPoolerV2). Plan section text L414 says the operator re-runs 'from step 6 with a reviewed recovery' - no such entry point exists in this core"}
+  },
+
+  "localFindings": [],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [],
+    "internalEntryPoint": {"function": "_runCutover(CutoverParams memory p) returns (CutoverResult memory r)", "line": 242},
+    "params": {
+      "callerSupplied": ["owner", "oldPooler", "mintDebtHook", "nftMinter", "dispatcherIndex", "uniV2Router", "balancerRouter (not exposed by BalancerPoolerV2, so unverifiable on-chain against the pooler)", "poolers[]", "exitMode", "minAmountsOut[] (Balancer pool-token order)", "exitToleranceBps <= 100", "seedToleranceBps <= 100", "seedDeadline (absolute)"],
+      "readLive": ["sUSDS = old.sUSDS()", "usds = old.primeToken()", "phUSD = hook.phUSD()", "bPool = old.pool() (MUTABLE on old pooler via setPool)", "bVault = old.vault()", "factory = uniV2Router.factory()", "pair = factory.getPair/createPair", "psm/maxTout/batchMinter/batchDonationSize/nudgeStreamer from old pooler"]
+    },
+    "externalCalls": [
+      {"target": "BalancerPoolerV2 (old)", "methods": ["owner", "authVersion", "poolerAuthVersion", "hook", "sUSDS", "primeToken", "pool", "vault", "psm", "maxTout", "batchMinter", "batchDonationSize", "nudgeStreamer", "paused", "withdrawBPT", "rescueERC20", "setMinter", "pause"], "trustLevel": "trusted (protocol, owner-controlled)"},
+      {"target": "BalancerPoolerMintDebtHook", "methods": ["owner", "dispatcher", "phUSD", "mintDebt", "pull", "setDispatcher"], "trustLevel": "trusted"},
+      {"target": "NFTMinterV2", "methods": ["owner", "configs", "replaceDispatcher"], "trustLevel": "trusted"},
+      {"target": "Balancer V3 Vault", "methods": ["getPoolTokenInfo"], "trustLevel": "semi-trusted external (governance can pause; 30 Oct pools paused, 30 Nov vault paused per plan)"},
+      {"target": "Balancer V3 Router (caller-supplied)", "methods": ["removeLiquidityProportional (0x51682750)", "removeLiquidityRecovery (0x08c04793)"], "trustLevel": "semi-trusted external; address NOT cross-checked against anything on-chain"},
+      {"target": "BPT (pool token)", "methods": ["balanceOf", "approve", "totalSupply (raw staticcall)"], "trustLevel": "semi-trusted"},
+      {"target": "Uniswap V2 Router02 / Factory / Pair", "methods": ["factory", "getPair", "createPair", "addLiquidity", "getReserves", "token0", "balanceOf", "skim"], "trustLevel": "semi-trusted immutable; the PAIR's state is attacker-influenceable (anyone can transfer tokens to it, sync, or mint LP once it exists)"},
+      {"target": "sUSDS (ERC4626)", "methods": ["deposit", "balanceOf", "approve"], "trustLevel": "semi-trusted"},
+      {"target": "UniPoolerV2 (new, CREATEd at step 3)", "methods": ["pair", "owner", "setHook", "hook", "setMinter", "setPSM", "setMaxTout", "setBatchMinter", "setBatchDonationSize", "setAuthorizedPooler", "setNudgeStreamer", "psm", "maxTout", "batchMinter", "batchDonationSize", "nudgeStreamer", "authVersion", "poolerAuthVersion"], "trustLevel": "trusted"}
+    ],
+    "stateVariables": [],
+    "events": [],
+    "modifiers": []
+  },
+
+  "custody": {
+    "holdsTokens": "none (abstract script code). Custody during the run, in order: BPT old pooler -> OWNER EOA (step 4) -> burned via Router (step 5); sUSDS+phUSD Balancer vault -> OWNER EOA (step 5) -> pair (step 6); LP -> UniPoolerV2; old-pooler sUSDS -> UniPoolerV2 (step 11); old-pooler USDS -> UniPoolerV2 or OWNER -> sUSDS -> UniPoolerV2 (step 11); skimmed donation -> OWNER (step 2)",
+    "status": "VERIFIED"
+  },
+
+  "crossTransactionWindows": [
+    {"between": "step 1 (createPair tx) and step 6 (seed tx)", "exposure": "pair exists, empty and public: anyone can mint first LP / donate+sync (2-wei poisoning, run-39 L-01) or donate unsynced (skimmed in step 2 only if before step 2)", "status": "VERIFIED (code), interaction exploitability deferred"},
+    {"between": "step 4 and step 5/6", "exposure": "BPT then sUSDS/phUSD held by OWNER EOA; Balancer pool composition can be moved by swaps before the exit (pre-30-Oct); exit floors are minAmountsOut only", "status": "VERIFIED"},
+    {"between": "step 8 (hook -> new pooler) and step 10 (index -> new pooler)", "exposure": "index-4 mints still dispatch to the OLD pooler, whose ATokenDispatcherV2.dispatch calls hook.onDispatch, which now reverts OnlyDispatcher -> every index-4 mint reverts for those blocks", "status": "VERIFIED (BalancerPoolerMintDebtHook.sol L109-110 + ATokenDispatcherV2.sol L118-126)"},
+    {"between": "step 7 (pull) and step 8", "exposure": "index-4 mints accrue new debt on the hook (not pulled before repoint); debt is preserved on the hook, not lost", "status": "VERIFIED"},
+    {"between": "step 10 and step 12", "exposure": "old pooler still has NFTMinter as minter until step 12 but is no longer indexed", "status": "VERIFIED"}
+  ],
+
+  "trustAssumptions": [
+    "OWNER EOA (Ledger) is the broadcaster and owns old pooler, hook and NFTMinterV2 (checked in simulation)",
+    "p.balancerRouter is the genuine Balancer V3 Router (not verified on-chain)",
+    "Balancer V3 burns the caller's BPT by spending the ROUTER's BPT allowance (NatSpec L59-61; ASSUMED)",
+    "RECOVERY mode exit requires the pool to be in Recovery Mode; enableRecoveryMode is permissionless once paused (plan L38) - the core never calls enableRecoveryMode (ASSUMED someone has)",
+    "Pool exit returns exactly balancesRaw*bptIn/totalSupply per token (used for the floor window); real V3 rounds and the BPT supply includes a 1e6 minimum-supply reserve (ASSUMED negligible)",
+    "hook.recipient set and hook is a phUSD minter (pull must succeed)",
+    "The old pooler's donation config (PSM, batchMinter, nudgeStreamer stream registration) remains valid for the new pooler (stream is keyed by batchMinter+gem, not by the pooler; ASSUMED)"
+  ],
+
+  "inheritanceChain": [],
+  "complexity": {"loc": 561, "functions": 17, "externalCalls": 60, "stateVariables": 0}
+}

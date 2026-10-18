@@ -1,0 +1,91 @@
+{
+  "id": "L-28",
+  "label": "L-28",
+  "issueId": "ycn22l28",
+  "project": "yield-claim-nft",
+  "status": "draft",
+  "severity": "low",
+  "title": "Tight off-chain exit floors + public-mempool --slow broadcast let anyone revert exitAndSeed cheaply (Balancer swap past tolerance -> Vault AmountOutBelowMin; cost scales with the chosen tolerance); story-052's claim that the operator gate prevents the mid-cutover front-run revert is incomplete",
+  "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+  "function": "exitAndSeed",
+  "line": 256,
+  "lineStart": 256,
+  "lineEnd": 266,
+  "link": "https://github.com/Behodler/yield-claim-nft/blob/0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630/src/migration/UniPoolerCutoverEscrow.sol#L256-L266",
+  "entryPoint": null,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "d77a482de757221d9ff311a43a46c11b40aa7df997199914fad7469d7128b209",
+  "fingerprintBasis": "UniPoolerCutoverEscrow.sol:exitAndSeed:griefing-dos-tight-floors",
+  "rootCauseClass": "griefing-dos-tight-floors",
+  "origin": "new",
+  "regression": false,
+  "footgun": true,
+  "faithfulness": false,
+  "channel": "qa",
+  "borderline": true,
+  "borderlineNote": "Borderline Low/QA. The revert is temporary, and both retry and abort are available, so it could be QA. Kept at Low because the runbook's own 'tight tolerance' advice (BalancerWinddownPlan.md L385) maximises griefability while buying no economic protection (ECON-001), and a mid-broadcast revert poisons the story-103 progress file. That is a concrete operational hazard with a cheap fix.",
+  "codeLocation": [
+    {
+      "lines": "L256-L266",
+      "code": "256:         if (minAmountsOut.length != 2) revert UniPoolerCutoverEscrow__BadMinAmountsLength(minAmountsOut.length);\n257:         for (uint256 i = 0; i < 2; i++) {\n258:             if (minAmountsOut[i] == 0) revert UniPoolerCutoverEscrow__ZeroMinAmountOut(i);\n259:         }\n260:         if (deadline <= block.timestamp || deadline > block.timestamp + MAX_DEADLINE_WINDOW) {\n261:             revert UniPoolerCutoverEscrow__BadDeadline(deadline, block.timestamp);\n262:         }\n263: \n264:         // 4. Exit.\n265:         _exit(mode, bptIn, minAmountsOut);\n266: "
+    },
+    {
+      "lines": "L63-L65",
+      "code": "63: ///      The `operator` gate exists only to deny strangers control of timing and slippage floors\n64: ///      (sandwiching, front-running the cutover broadcast between `withdrawBPT` and\n65: ///      `exitAndSeed`, griefing `abort`). The custody guarantee does not depend on it."
+    }
+  ],
+  "description": "story-052 justifies the immutable-operator gate partly on the grounds that a stranger 'front-running between the owner's withdrawBPT and exitAndSeed ... would revert the forge broadcast mid-cutover'. story-103 broadcasts through the public mempool (forge --broadcast --slow --ledger --legacy, with no private relay, 103 L99), with floors quoted at simulation time. The runbook, phStaging2 docs/BalancerWinddownPlan.md L385, sets minAmountsOut to 'the live proportional share minus a tight tolerance'. (story-103 L189 only asks for a quote helper with a tolerance argument, following scripts/compute-min-bpt-poolerv2.js whose default is 100 bps = 1%; story-052 L194 is a fork-test spec, not the runbook.) The gate does not stop the cheapest version of that front-run: any Balancer swap that moves one side by more than the tolerance makes the Vault revert. Fork-proven at the repo's 1 bp tolerance: a 4 sUSDS->phUSD Balancer swap makes exitAndSeed revert with AmountOutBelowMin(phUSD, 22,453.35e18, 22,454.12e18). The griefer then unwinds for a round-trip cost of 0.024 sUSDS (about $0.027) plus gas at that 1 bp test tolerance. Cost is tolerance-dependent: at the 103 helper-pattern default of 1% the griefer must move the pool roughly 100x further, a round trip of roughly a few hundred dollars notional (fees plus impact), still cheap and still unprofitable. Organic Balancer flow during the multi-tx --slow broadcast can trip the same check. Funds are safe: the tx is atomic, the BPT stays in the escrow, and the operator can re-quote and retry, or abort. But the cutover can be held hostage cheaply per attempt, and per the plan a mid-broadcast revert poisons the progress file. ECON-001 proves that a loose floor gives up no value, because a sandwich is net-negative for the attacker. So the 'tight tolerance' buys no economic protection and only maximises griefability.",
+  "impact": "None. exitAndSeed is atomic, the BPT stays in the escrow, and the operator can re-quote and retry or abort(). The impact is repeated liveness denial of the cutover at a tolerance-dependent cost per attempt (~$0.03 at the 1 bp test tolerance; roughly a few hundred dollars notional round trip at 1%), plus a mid-broadcast revert that leaves the forge progress file inconsistent.",
+  "failureScenario": [
+    "1. story-103 broadcasts exitAndSeed through the public mempool (--broadcast --slow, no private relay) with floors set to the live proportional share minus a tight tolerance, per BalancerWinddownPlan.md L385 (1 bp in the repo fork test).",
+    "2. A griefer front-runs with a Balancer swap of ~4 sUSDS->phUSD that moves one side past the tolerance.",
+    "3. The Vault reverts AmountOutBelowMin(phUSD, 22,453.35e18, 22,454.12e18) (fork-proven).",
+    "4. The griefer unwinds at a ~0.024 sUSDS round trip at 1 bp (roughly a few hundred dollars notional at 1%). Repeatable per attempt."
+  ],
+  "likelihood": "low-medium. Cheap, but the griefer gains nothing. Organic flow during a slow multi-tx broadcast can trip it with no attacker at all.",
+  "assumptions": "Floors are set at the runbook's tight tolerance (BalancerWinddownPlan.md L385) and the tx goes through the public mempool.",
+  "externalRequirements": "A mempool-watching griefer, or organic Balancer flow inside the broadcast window.",
+  "plausibility": "plausible (any Balancer swapper; organic flow can trip it too)",
+  "evidence": [
+    "work/test/run22/EscrowSandwichEcon.fork.t.sol::test_run22_econ_tightFloor_griefCost PASS (fork block 26136000; trace: Vault AmountOutBelowMin(phUSD, 22,453.35e18, 22,454.12e18); grief round-trip cost 23961190401828642 wei sUSDS)",
+    "work/test/run22/EscrowSandwichEcon.fork.t.sol::test_run22_econ_sandwich_tol{100,500}bps_{buy,sell}Phusd PASS (ECON-001: loose floors give up no value)"
+  ],
+  "crossRefs": {
+    "linkedSpecConformance": "F-01-052 (ycn22f1) -- the story-052 operator-gate rationale half. Same DEDUP-004 root: count once, never as two independent issues in any tally.",
+    "related": "Q-24 (ycn22q24) -- same floors, opposite failure mode"
+  },
+  "severityJustification": "Temporary, retriable availability griefing of a one-off migration, with no value at risk. C4 Medium needs protocol function or availability impact beyond a recoverable, operator-mitigable delay, so this is not Medium. It sits above QA because the protocol's own runbook (BalancerWinddownPlan.md L385) prescribes the tight floor that maximises griefability, and story-052's operator-gate rationale is incomplete (spec half routed as F-01-052, Informational) and the tight-tolerance configuration is a non-obvious operational footgun: a competent operator would expect tighter floors to be strictly safer, but ECON-001 proves a loose floor gives up no value on two 50/50 constant-product venues.",
+  "recommendedMitigation": "Size the exit tolerance for griefing resistance (e.g. 0.5-1%), not tight. ECON-001 shows sandwiching is net-negative at 1% and 5%. Use a private relay for exitAndSeed if available. Document that floor reverts are expected and recoverable, and how the progress file resumes after an exitAndSeed revert.",
+  "poc": null,
+  "pocNote": "No H/M this run: no PoC requirement. Fork tests listed under evidence are the supporting proof.",
+  "metadata": {
+    "createdAt": "2026-10-07T00:00:00Z",
+    "updatedAt": "2026-10-07T00:00:00Z",
+    "run": "yield-claim-nft-22",
+    "commit": "0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630",
+    "scanOrigin": "DEDUP-004",
+    "dedupOriginalIds": [
+      "ECON-002",
+      "F-01-052"
+    ],
+    "classificationOrigin": "CLASS-22-03"
+  },
+  "reportPath": "yield-claim-nft/reports/22/submissions/qa-report.md",
+  "finalReview": {
+    "sources": [
+      "reports/22/final-review-severity.json",
+      "reports/22/final-review-validity.json"
+    ],
+    "appliedAt": "2026-10-07T00:00:00Z",
+    "changes": [
+      "tight-tolerance attribution moved to BalancerWinddownPlan.md L385 (story-103 L189 only asks for a tolerance argument defaulting to 1%; 052 L194 is a test spec)",
+      "single ~$0.03 figure removed from the title; cost stated as tolerance-dependent (~$0.03 at 1 bp; roughly a few hundred dollars notional at 1%)",
+      "plan L385 cited in the borderline note",
+      "shared DEDUP-004 root with F-01-052 noted (not counted twice)",
+      "severity unchanged: Low"
+    ]
+  }
+}

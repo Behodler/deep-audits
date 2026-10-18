@@ -1,0 +1,73 @@
+{
+  "contract": "src/periphery/UniswapHelper.sol",
+  "relatedInterfaces": ["src/periphery/interfaces/ICurveMetaPool.sol", "ICurveStableSwapNG.sol", "IQuoterV2.sol", "IUniswapV2PairBurn.sol", "IUniswapV2RouterPeriphery.sol (extends yield-claim-nft IUniswapV2Router02 + getAmountsOut)", "IUniswapV3SwapRouter.sol (SwapRouter v1 ExactInputSingleParams WITH deadline)", "IWETH.sol"],
+  "story": "phStaging2 stories 109 (contract), 110 (anvil venue mocks), 111 (mainnet deploy/verify)",
+  "profileTimestamp": "2026-10-13T00:00:00Z",
+  "run": 40,
+  "solidityVersion": "^0.8.20",
+  "priority": 2,
+  "mainnetStatus": "NOT deployed at a4f9f3c: mainnet-addresses.ts UniswapHelper = 0x0 (L157) and no server/deployments/progress.uniswap-helper.1.json exists (VERIFIED). UniPooler and PhusdSusdsPair are also 0x0 (L151-152). Pair does not exist on mainnet until the story-103 cutover, so every swap/liquidity call reverts until then.",
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {"value": true, "confidence": "verified", "note": "no loops"},
+    "checkedArithmetic": {"value": true, "confidence": "verified", "note": "0.8.x, no unchecked, no assembly. psmGemForUsds: (usdsBudget+1)*WAD overflows only for budget > ~1.15e59 (reverts)"},
+    "reentrancyGuarded": [],
+    "accessControlled": [],
+    "ownerless": {"value": true, "confidence": "verified", "note": "no owner, no rescue, no upgrade, no storage variables (only immutables)"},
+    "initializerProtected": "N/A",
+    "noStandingAllowances": {"value": "likely", "confidence": "likely", "note": "every approve is forceApprove(exact) right before the pull. Explicit resets only for USDS->PSM in _usdsToUsdc (L478) and sUSDS/phUSD->Router02 in _addLiquidity (L548-549). Other approvals (USDC->PSM sellGem, DOLA/USDe/USDC->Curve, sUSDS/phUSD->Router02 swap, WETH/USDC->V3 router, USDS->sUSDS) rely on the venue consuming exactly the approved amount (ASSUMED for mainnet venues)"},
+    "zeroResidualAfterCall": {"value": "likely", "confidence": "likely", "note": "design claim (NatSpec L37-39). Refund paths: buyGem USDS dust -> dustTo (recipient); addLiquidity leftovers -> recipient; USDS route leftover shares redeemed to recipient. Residual if a venue returns more than consumed or for tokens sent directly to the helper (no sweep)"},
+    "receiveRestricted": {"value": true, "confidence": "verified", "note": "receive() only from WETH (L182-184)"},
+    "intermediateLegsZeroMin": {"value": true, "confidence": "verified", "note": "Curve exchange minDy 0, V2 swap amountOutMin 0, V3 amountOutMinimum 0 / sqrtPriceLimitX96 0; single final check vs caller's minOut"},
+    "weakRandomness": "none",
+    "inboundCallbacks": "native ETH send to caller-chosen recipient at the END of swapPhUSDToETH (L263) after all checks; no ERC721/1155/777"
+  },
+
+  "localFindings": [],
+
+  "interfaceAbstraction": {
+    "constructor": {"line": 138, "checks": ["13 addresses non-zero", "curveUsdePool.coins(0) == USDe && coins(1) == USDC"], "notChecked": ["DOLA-3CRV underlying indices (0=DOLA, 2=USDC) - fixed constants", "v3Fee (any uint24; a non-existent tier makes ETH routes revert)", "PSM gem/usds tokens", "sUSDS.asset() == USDS", "v2Router.WETH()"], "note": "mainnet deploy script's preflight covers the unchecked items except Curve DOLA underlying index 2"},
+    "externalEntryPoints": [
+      {"function": "swapToPhUSD(address tokenIn, uint256 amountIn, uint256 minPhusdOut, address recipient, uint256 deadline) returns (uint256)", "line": 190, "access": "none", "pulls": "tokenIn from msg.sender", "route": "tokenIn -> [Curve] -> USDC -> PSM.sellGem -> USDS -> sUSDS.deposit -> V2 swap sUSDS->phUSD to recipient", "guards": ["deadline", "amountIn > 0", "recipient != 0", "tokenIn in {sUSDS, USDS, USDC, DOLA, USDe}", "phusdOut >= minPhusdOut"]},
+      {"function": "swapETHToPhUSD(uint256 minPhusdOut, address recipient, uint256 deadline) payable returns (uint256)", "line": 206, "access": "none", "route": "ETH -> WETH -> V3 (fee tier) -> USDC -> PSM -> USDS -> sUSDS -> V2 -> phUSD"},
+      {"function": "swapFromPhUSD(address tokenOut, uint256 phusdIn, uint256 minOut, address recipient, uint256 deadline) returns (uint256)", "line": 225, "access": "none", "route": "phUSD -> V2 -> sUSDS -> [redeem USDS] -> [PSM.buyGem floored, USDS dust to recipient] -> [Curve]", "note": "amountOut excludes refunded USDS dust"},
+      {"function": "swapPhUSDToETH(uint256 phusdIn, uint256 minEthOut, address payable recipient, uint256 deadline) returns (uint256)", "line": 247, "access": "none", "externalCalls": ["recipient.call{value: ethOut}"]},
+      {"function": "addLiquiditySUSDS(uint256 susdsDesired, uint256 phusdDesired, uint256 susdsMin, uint256 phusdMin, address recipient, uint256 deadline)", "line": 273, "access": "none", "note": "requires pair to exist; works on an EMPTY pair (first LP sets price); LP and leftovers to recipient; zero desired amounts not rejected"},
+      {"function": "addLiquidityUSDS(...)", "line": 300, "access": "none", "note": "sharesMin = sUSDS.previewDeposit(usdsMin); leftover shares redeemed to recipient; usdsUsed = usdsDesired - usdsRefunded (redeem rounding counts as 'used')"},
+      {"function": "removeLiquiditySUSDS(uint256 liquidity, uint256 susdsMin, uint256 phusdMin, address recipient, uint256 deadline)", "line": 333, "access": "none", "pulls": "LP from msg.sender directly to the pair (msg.sender must approve the helper on the LP)", "note": "burns against the pair without Router02; ordering by address comparison sUSDS < phUSD"},
+      {"function": "removeLiquidityUSDS(...)", "line": 352, "access": "none"},
+      {"function": "quoteToPhUSD / quoteFromPhUSD", "line": "375/381", "access": "view"},
+      {"function": "quoteETHToPhUSD / quotePhUSDToETH", "line": "389/397", "access": "none, NON-view (QuoterV2 reverts internally); intended for eth_call only"},
+      {"function": "pair()", "line": 403, "access": "view; factory(v2Router).getPair(sUSDS, phUSD)"},
+      {"function": "psmGemForUsds(uint256)", "line": 411, "access": "view; floor((budget+1)*WAD - 1)/(conv*(WAD+tout))"}
+    ],
+    "externalCalls": [
+      {"target": "Uniswap V2 Router02 (immutable v2Router)", "methods": ["swapExactTokensForTokens", "addLiquidity", "getAmountsOut", "factory"], "trustLevel": "semi-trusted immutable", "notes": "Router02 computes the pair via CREATE2 pairFor; with no pair the swap reverts (no code at the computed address)"},
+      {"target": "phUSD/sUSDS V2 pair (resolved at call time)", "methods": ["burn (remove paths)", "transferFrom target"], "trustLevel": "untrusted state (public pair; price manipulable within one block)"},
+      {"target": "Sky LitePSM wrapper (skyPSM)", "methods": ["sellGem", "buyGem", "tin", "tout", "to18ConversionFactor"], "trustLevel": "semi-trusted external (governance-set fees)"},
+      {"target": "sUSDS ERC4626", "methods": ["deposit", "redeem", "previewDeposit", "previewRedeem"], "trustLevel": "semi-trusted"},
+      {"target": "Curve DOLA-3CRV metapool", "methods": ["exchange_underlying(0<->2)", "get_dy_underlying"], "trustLevel": "semi-trusted external"},
+      {"target": "Curve USDe/USDC stableswap-ng", "methods": ["exchange(0<->1)", "get_dy", "coins"], "trustLevel": "semi-trusted external"},
+      {"target": "Uniswap V3 SwapRouter (v1) + QuoterV2", "methods": ["exactInputSingle", "quoteExactInputSingle"], "trustLevel": "semi-trusted external"},
+      {"target": "WETH9", "methods": ["deposit", "withdraw"], "trustLevel": "trusted"},
+      {"target": "recipient (caller-chosen)", "methods": ["call{value}"], "trustLevel": "untrusted", "notes": "last action of swapPhUSDToETH; helper holds no state, so callback can only re-enter stateless entry points"}
+    ],
+    "stateVariables": [],
+    "immutables": ["phUSD", "sUSDS", "USDS", "USDC", "DOLA", "USDe", "WETH", "skyPSM", "v2Router", "v3SwapRouter", "v3Quoter", "curveDolaPool", "curveUsdePool", "v3Fee"],
+    "events": ["Swapped", "LiquidityAdded", "LiquidityRemoved"],
+    "modifiers": ["checkDeadline"]
+  },
+
+  "custody": {"holds": "nothing between calls (transient only within a tx). Tokens sent to it directly are stranded (no rescue) unless swept as part of a later call's balance - VERIFIED no whole-balance sweeps exist, every leg uses explicit amounts, so stray tokens stay stranded", "status": "VERIFIED"},
+
+  "trustAssumptions": [
+    "Every venue consumes exactly the approved amount (otherwise residual allowances persist on a stateless contract)",
+    "Mainnet Curve DOLA-3CRV underlying index 2 is USDC (3pool coin order) - not checked on-chain",
+    "PSM buyGem pulls exactly floor(g*conv*(WAD+tout)/WAD) (DssLitePsm), matching psmGemForUsds",
+    "Users rely on minOut for the whole route; quote functions read spot state and are manipulable intra-block",
+    "Non-standard ERC20s out of scope (USDC/DOLA/USDe/USDS/sUSDS/phUSD standard; USDT not used)"
+  ],
+
+  "inheritanceChain": [],
+  "complexity": {"loc": 606, "functions": 30, "externalCalls": 30, "stateVariables": 0}
+}

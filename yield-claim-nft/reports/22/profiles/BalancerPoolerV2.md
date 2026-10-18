@@ -1,0 +1,11 @@
+# BalancerPoolerV2 — light profile (escrow-facing surface; unchanged this run)
+- **Surface the escrow reads (constructor only):** `pool()` (mutable via owner `setPool`, which the escrow snapshots), `primeToken()` (USDS, immutable) and `sUSDS()` (immutable).
+- **Cutover functions around the escrow:**
+  - `withdrawBPT(recipient, amount)` is `onlyOwner` and transfers the **current** `_pool` token.
+  - `rescueERC20(token, to, amount)` is `onlyOwner`, accepts any token and is not pause-gated.
+  - `setPool` is the hazard behind escrow LOCAL-002.
+- **Escrow abort destination:**
+  - Everything the escrow returns is recoverable by the owner.
+  - Returned sUSDS can be re-pooled by an authorized pooler via whole-balance `pool(minBPT)`.
+  - Returned USDS is swept by `_dispatch` donations if the pooler is still active.
+- **Local findings:** none new.

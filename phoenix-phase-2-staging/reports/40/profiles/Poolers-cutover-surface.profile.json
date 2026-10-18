@@ -1,0 +1,94 @@
+{
+  "contracts": [
+    "lib/yield-claim-nft/src/dispatchers/UniPoolerV2.sol",
+    "lib/yield-claim-nft/src/dispatchers/BalancerPoolerV2.sol",
+    "lib/yield-claim-nft/src/dispatchers/ATokenDispatcherV2.sol (base)",
+    "lib/yield-claim-nft/src/hooks/BalancerPoolerMintDebtHook.sol"
+  ],
+  "firstParty": false,
+  "scopeNote": "Nested dependency (yield-claim-nft @ 0fd6bdf). Profiled for the cutover-relevant interface and state ONLY, per orchestrator instruction. Not a full profile.",
+  "profileTimestamp": "2026-10-13T00:00:00Z",
+  "run": 40,
+  "priority": 1,
+
+  "ATokenDispatcherV2_base": {
+    "file": "lib/yield-claim-nft/src/dispatchers/ATokenDispatcherV2.sol",
+    "inheritance": ["ITokenDispatcherV2", "Pausable", "Ownable", "ReentrancyGuard"],
+    "functions": [
+      {"fn": "setMinter(address)", "line": 85, "access": "onlyOwner", "note": "no zero check; the cutover sets old pooler minter = OWNER at step 12 so OWNER can pause it"},
+      {"fn": "setHook(IDispatchHook)", "line": 94, "access": "onlyOwner", "note": "non-zero"},
+      {"fn": "pause()/unpause()", "line": "102/107", "access": "onlyMinter (NOT owner)"},
+      {"fn": "dispatch(address minter, uint256 amount, bytes)", "line": 118, "access": "onlyMinter + whenNotPaused + nonReentrant", "behaviour": "_dispatch(...) then hook.onDispatch(minter, amount, extraData)"},
+      {"fn": "setMetadata", "line": 58, "access": "onlyOwner"}
+    ],
+    "constructor": "deploys a fresh DefaultDispatchHook as initial hook (L51)",
+    "status": "VERIFIED"
+  },
+
+  "BalancerPoolerMintDebtHook": {
+    "file": "lib/yield-claim-nft/src/hooks/BalancerPoolerMintDebtHook.sol",
+    "state": {"dispatcher": "address, owner-settable (setDispatcher L98, non-zero)", "phUSD": "immutable IMintable", "recipient": "owner-settable (may be 0)", "mintDebt": "uint256", "ratio": "uint8 <= 50, default 50"},
+    "functions": [
+      {"fn": "onDispatch(address minter, uint256 amount, bytes)", "line": 109, "access": "msg.sender == dispatcher else revert OnlyDispatcher", "effect": "mintDebt += amount*ratio/100"},
+      {"fn": "pull()", "line": 120, "access": "owner or recipient; nonReentrant", "effect": "reverts RecipientUnset if recipient==0; mints mintDebt phUSD to recipient; mintDebt=0"},
+      {"fn": "setDispatcher/setRecipient/setRatio", "access": "onlyOwner"}
+    ],
+    "cutoverRelevance": "Single-dispatcher binding: after hook.setDispatcher(new) any dispatch from the OLD pooler reverts (old pooler's dispatch calls hook.onDispatch). Debt accrued is in USDS-amount units * ratio (phUSD minted 1:1 on pull, ASSUMED 18-dec parity USDS/phUSD).",
+    "status": "VERIFIED"
+  },
+
+  "BalancerPoolerV2_old": {
+    "file": "lib/yield-claim-nft/src/dispatchers/BalancerPoolerV2.sol",
+    "mainnet": "0x7f6874332c4629429d70D15f685A8230323F11F1 (index 4)",
+    "immutables": ["_sUSDS", "_primeToken = sUSDS.asset() (USDS)", "_vault", "_router (no public getter - why the core/escrow take the V3 router as a parameter)", "_sUSDSIsFirst"],
+    "mutableState": ["_pool (setPool L182, onlyOwner, non-zero) - MUTABLE; core reads it live, escrow snapshots it", "authVersion / poolerAuthVersion", "batchDonationSize", "batchMinter", "psm", "maxTout", "nudgeStreamer", "hook (base)", "_minter (base)"],
+    "cutoverFunctions": [
+      {"fn": "withdrawBPT(address recipient, uint256 amount)", "line": 424, "access": "onlyOwner", "pauseGated": false, "note": "transfers _pool token; recipient unchecked (zero allowed by code, OZ ERC20 would revert on 0)"},
+      {"fn": "rescueERC20(address token, address to, uint256 amount)", "line": 437, "access": "onlyOwner", "pauseGated": false, "note": "any token incl. sUSDS, USDS, BPT"},
+      {"fn": "incrementAuthVersion()", "line": 202, "access": "onlyOwner", "note": "mass-revokes every pooler (story-099 holding pattern, broadcast recorded d9d43f6)"},
+      {"fn": "setAuthorizedPooler(address,bool)", "line": 190, "access": "onlyOwner", "note": "authorizing after a bump re-opens pool() for that address"},
+      {"fn": "pool(uint256 minBPT)", "line": 356, "access": "onlyAuthorizedPooler + whenNotPaused + nonReentrant", "note": "single-sided Balancer V3 add of WHOLE sUSDS balance via vault.unlock -> unlockCallback (L365, msg.sender == vault)"},
+      {"fn": "getIdealBPT()", "line": 405, "access": "none (non-view, router query)"},
+      {"fn": "setMinter / pause (base)", "access": "onlyOwner / onlyMinter"}
+    ],
+    "custody": "Holds BPT (LP from pool()), sUSDS (wrapped mint proceeds, accumulating since the holding-pattern revoke), USDS (parked by skipped donations or disabled donation). Movable only by owner (withdrawBPT, rescueERC20) and by authorized poolers via pool() into Balancer.",
+    "dispatchDuringHoldingPattern": "_dispatch only wraps USDS->sUSDS and donates; does not call Balancer, so index-4 mints keep working after 30 Oct (VERIFIED: BalancerPoolerV2._dispatch L266-295 only wraps and donates; identical to UniPoolerV2 minus the HookNotSet guard)",
+    "status": "VERIFIED except where noted"
+  },
+
+  "UniPoolerV2_new": {
+    "file": "lib/yield-claim-nft/src/dispatchers/UniPoolerV2.sol",
+    "constructor": {
+      "line": 207,
+      "checks": ["non-zero sUSDS/phUSD/router/pair", "pair tokens exactly {sUSDS, phUSD} (PairTokenMismatch)", "pair == factory(router).getPair(sUSDS, phUSD) (PairNotCanonical)", "pair MAY be empty"],
+      "sets": ["_primeToken = sUSDS.asset()", "_sUSDSIsToken0", "_defaultHook = constructor-deployed DefaultDispatchHook", "authVersion = 1"],
+      "status": "VERIFIED"
+    },
+    "immutables": ["_sUSDS", "_primeToken (USDS)", "_phUSD", "_router", "_pair", "_sUSDSIsToken0", "_defaultHook"],
+    "mutableState": ["authVersion (starts 1)", "poolerAuthVersion", "batchDonationSize (<=100)", "batchMinter (0 allowed)", "psm (non-zero when set)", "maxTout (default 0.01e18)", "nudgeStreamer (non-zero when set, no unset)", "hook/_minter/paused (base)"],
+    "functions": [
+      {"fn": "setAuthorizedPooler", "line": 267, "access": "onlyOwner"},
+      {"fn": "incrementAuthVersion", "line": 280, "access": "onlyOwner"},
+      {"fn": "setBatchDonationSize / setBatchMinter / setPSM / setMaxTout / setNudgeStreamer", "line": "288-329", "access": "onlyOwner"},
+      {"fn": "_dispatch (via base dispatch)", "line": 348, "access": "onlyMinter + whenNotPaused + nonReentrant (base)", "behaviour": "reverts HookNotSet while hook == _defaultHook; wraps pooling share USDS->sUSDS (to self); if donation enabled sweeps ALL USDS balance into try this._psmDonate", "status": "VERIFIED"},
+      {"fn": "_psmDonate(uint256)", "line": 396, "access": "msg.sender == address(this)", "behaviour": "tout <= maxTout; gemAmt floor; buyGem to self; forceApprove streamer; collectNudge(batchMinter, gem, gemAmt)"},
+      {"fn": "pool(uint256 sUSDSIn, uint256 minPhusdOut, uint256 minLP)", "line": 450, "access": "onlyAuthorizedPooler + whenNotPaused + nonReentrant", "behaviour": "non-zero floors; sUSDSIn <= balance; pair.sync(); s = closed-form zap from synced sUSDS reserve; swapExactTokensForTokens(s, minPhusdOut, deadline=block.timestamp); addLiquidity(a-s, phusdOut, 0, 0, self, block.timestamp); liquidity >= minLP. Reverts EmptyPair on zero reserves, so it cannot run before the seed", "status": "VERIFIED"},
+      {"fn": "quotePool(uint256)", "line": 501, "access": "view", "note": "sizes from pair token balances (what sync() will set)"},
+      {"fn": "rescueERC20(token, to, amount)", "line": 556, "access": "onlyOwner", "pauseGated": false, "note": "also the only LP exit"},
+      {"fn": "pair(), router(), sUSDS(), phUSD(), primeToken(), sUSDSIsToken0()", "access": "view"}
+    ],
+    "custody": "Holds LP (seed + every pool() zap), sUSDS (dispatch wraps + cutover rescue + escrow wrapUsds), USDS (parked donations), transient USDC during donation. Movers: owner (rescueERC20, any amount, any recipient), authorized poolers (pool() moves sUSDS into the pair as LP kept on self), minter (dispatch).",
+    "localInvariants": [
+      {"property": "LP minted by pool() always lands on this contract", "status": "VERIFIED (to = address(this), L472/L481)"},
+      {"property": "No standing router allowance after pool()", "status": "VERIFIED on success path (L473, L483-484); approvals reset after the minLP check"},
+      {"property": "Mints revert until setHook to a non-default hook", "status": "VERIFIED (L356)"},
+      {"property": "No Pauser integration (no pauser() getter)", "status": "VERIFIED (absent)"}
+    ]
+  },
+
+  "cutoverInvariantsToFollowUp": [
+    "Hook <-> dispatcher is a 1:1 binding; repointing it before replaceDispatcher creates a mint-revert window (see core profile crossTransactionWindows)",
+    "Old pooler pool() is dead for everyone after the version bump, unless the owner re-authorizes an address afterwards (verifier only checks four named addresses, run-38 L-01)",
+    "Old pooler `_pool` is owner-mutable: escrow snapshots it at construction, the core reads it live; a setPool between escrow deploy and funding would desynchronise them"
+  ]
+}

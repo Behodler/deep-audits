@@ -1,0 +1,106 @@
+{
+  "contract": "lib/yield-claim-nft/src/migration/UniPoolerCutoverEscrow.sol",
+  "firstParty": false,
+  "note": "Nested dependency (yield-claim-nft @ 0fd6bdf, story-052). Profiled because the phStaging2 cutover depends on it. Not referenced by any phStaging2 script or test at a4f9f3c: UniPoolerCutoverCore (story-100) routes funds through the OWNER EOA instead. Integration is expected in story-103 (not yet landed).",
+  "story": "yield-claim-nft story-052; runbook docs/UniPoolerCutoverRunbookNotes.md ('set the exitAndSeed tolerance to 1%', ycn L-28 report 22)",
+  "profileTimestamp": "2026-10-13T00:00:00Z",
+  "run": 40,
+  "solidityVersion": "^0.8.20",
+  "priority": 1,
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {"value": true, "confidence": "verified", "note": "only a fixed 2-iteration loop (L257)"},
+    "checkedArithmetic": {"value": true, "confidence": "verified", "note": "0.8.x, no unchecked, no assembly"},
+    "reentrancyGuarded": ["exitAndSeed", "wrapUsds", "abort"],
+    "accessControlled": {"onlyOperator": ["exitAndSeed", "wrapUsds", "abort"], "operator": "immutable, set at construction (intended OWNER 0xCad1...D0B6)"},
+    "initializerProtected": "N/A (no initializer, not upgradeable)",
+    "noOwnerNoSetterNoReceive": {"value": true, "confidence": "verified", "note": "all 11 config values immutable (L95-115); no receive/fallback; payable router calls send value 0"},
+    "noCallerChosenRecipient": {"value": true, "confidence": "verified", "note": "value exits only to: V3 Router (BPT burn), Router02/pair (seed), newPooler (LP, skim, wrapped sUSDS), oldPooler (abort)"},
+    "exitAndSeedOneShot": {"value": "likely", "confidence": "likely", "note": "requires empty pair (reserves AND balances 0 after optional skim) and leaves it seeded; a second call reverts PairNotEmpty unless the pair is fully drained again, which UniV2 MINIMUM_LIQUIDITY (1000 LP burned to 0x0) prevents (ASSUMED canonical V2 pair)"},
+    "approvalsResetToZero": {"value": true, "confidence": "verified", "note": "BPT->v3Router reset L386; sUSDS/phUSD->Router02 reset L401-402; USDS->sUSDS reset L288"},
+    "postConditionNoResidual": {"value": true, "confidence": "verified", "note": "exitAndSeed requires zero BPT, sUSDS, phUSD on escrow (L273-275); wrapUsds requires zero USDS (L289). exitAndSeed does NOT require zero USDS (USDS is the wrapUsds path)"},
+    "seedExact": {"value": true, "confidence": "verified", "note": "addLiquidity mins == desired (L400); a==s && b==p (L404); LP delta == liq > 0 (L405-406); post reserves == (s,p) ordered by _sUSDSIsToken0 (L408-410)"},
+    "exitFloorNotRecomputedOnChain": {"value": true, "confidence": "verified", "note": "minAmountsOut only checked length==2 and each != 0 (L256-259); not compared to the live proportional share (by design, NatSpec L78-79). Effective floor is whatever the operator passes"},
+    "seedPriceUnbounded": {"value": true, "confidence": "verified", "note": "no check that s:p matches any reference price; whole-balance seed (L268-270) means stray sUSDS/phUSD donated to the escrow before the call change the seeded ratio (NatSpec L75-77 acknowledges)"},
+    "weakRandomness": "none"
+  },
+
+  "localFindings": [],
+
+  "interfaceAbstraction": {
+    "constructor": {
+      "signature": "constructor(address operator_, address newPooler_, address oldPooler_, address v3Router_)",
+      "line": 189,
+      "reads": ["newPooler.pair()", "newPooler.router()", "newPooler.sUSDS()", "newPooler.phUSD()", "oldPooler.pool() (SNAPSHOT of a mutable value - old pooler has setPool)", "oldPooler.primeToken()", "oldPooler.sUSDS()", "sUSDS.asset()", "pair.token0()"],
+      "checks": ["all four args non-zero", "all derived addresses non-zero", "old.sUSDS == new.sUSDS (SUSDSMismatch)", "sUSDS.asset() == old.primeToken() (UsdsMismatch)"],
+      "notChecked": ["v3Router is the genuine Balancer router", "pair is the router factory's canonical pair (relies on UniPoolerV2 constructor having enforced it)", "bpt's pool tokens are {sUSDS, phUSD}", "operator identity beyond non-zero"],
+      "orderingConstraint": "pair and UniPoolerV2 must exist before the escrow is deployed (constructor reads newPooler.pair() and pair.token0())",
+      "status": "VERIFIED"
+    },
+    "externalEntryPoints": [
+      {
+        "function": "exitAndSeed(ExitMode mode, uint256[] calldata minAmountsOut, uint256 deadline) returns (uint256 liquidity)",
+        "line": 242,
+        "visibility": "external",
+        "accessControl": "onlyOperator",
+        "reentrancyGuard": true,
+        "steps": ["_requireEmptyPair (L359): if reserves (0,0) and any pair token balance, pair.skim(newPooler) then re-read; revert PairNotEmpty if any reserve or balance remains (a SYNCED donation = permanent DoS of this path until the pair is otherwise emptied, which V2 cannot do once LP minted)", "bptIn = whole BPT balance, > 0", "minAmountsOut.length == 2, each != 0; deadline in (now, now + 1 day]", "_exit (L379): forceApprove(v3Router, bptIn); removeLiquidityProportional(bpt, bptIn, minAmountsOut, false, '') or removeLiquidityRecovery(bpt, bptIn, minAmountsOut); forceApprove 0; BPT balance must be 0", "_seed (L393) with WHOLE sUSDS and phUSD balances: both > 0; Router02.addLiquidity(sUSDS, phUSD, s, p, s, p, newPooler, deadline)", "post: escrow BPT, sUSDS, phUSD == 0", "emit Seeded"],
+        "stateChanges": "none in escrow storage (no storage); token balances only",
+        "externalCalls": ["pair.getReserves/token0/token1/skim", "IERC20(t0/t1).balanceOf(pair)", "BPT.balanceOf/forceApprove", "v3Router.removeLiquidityProportional|removeLiquidityRecovery", "sUSDS/phUSD.balanceOf/forceApprove", "Router02.addLiquidity", "pair.balanceOf(newPooler)"]
+      },
+      {
+        "function": "wrapUsds() returns (uint256 shares)",
+        "line": 283,
+        "visibility": "external",
+        "accessControl": "onlyOperator",
+        "reentrancyGuard": true,
+        "behaviour": "whole USDS balance (>0) -> sUSDS.deposit(amt, newPooler); approval reset; require USDS balance 0",
+        "repeatable": true
+      },
+      {
+        "function": "abort()",
+        "line": 295,
+        "visibility": "external",
+        "accessControl": "onlyOperator",
+        "reentrancyGuard": true,
+        "behaviour": "whole BPT, sUSDS, phUSD, USDS balances -> oldPooler via safeTransfer (each skipped if 0). Never reverts on empty. Recovery from oldPooler requires its owner (withdrawBPT / rescueERC20, not pause-gated)",
+        "repeatable": true
+      },
+      {"function": "operator(), newPooler(), oldPooler(), v3Router(), bpt(), usds(), sUSDS(), phUSD(), pair(), uniRouter()", "visibility": "external view", "accessControl": "none"},
+      {"function": "MAX_DEADLINE_WINDOW()", "visibility": "public constant", "value": "1 days"}
+    ],
+    "externalCalls": [
+      {"target": "Balancer V3 Router (immutable _v3Router)", "methods": ["removeLiquidityProportional", "removeLiquidityRecovery"], "trustLevel": "semi-trusted external, address unverified at construction", "notes": "Router burns the escrow's BPT by spending the ROUTER's allowance; pays tokens to msg.sender (escrow). Proportional exit reverts when pool paused; Recovery exit needs Recovery Mode (ASSUMED per mainnet semantics; fork test pins 'Vault PoolPaused')"},
+      {"target": "Uniswap V2 Router02 (from newPooler.router())", "methods": ["addLiquidity"], "trustLevel": "semi-trusted immutable"},
+      {"target": "Uniswap V2 pair (from newPooler.pair())", "methods": ["getReserves", "token0", "token1", "skim", "balanceOf"], "trustLevel": "untrusted STATE (anyone can transfer, sync, mint LP on a public pair)", "notes": "skim(newPooler) sends any unsynced donation to the new pooler"},
+      {"target": "sUSDS ERC4626", "methods": ["deposit", "asset", "balanceOf"], "trustLevel": "semi-trusted (Sky)"},
+      {"target": "BPT / USDS / sUSDS / phUSD ERC20", "methods": ["balanceOf", "forceApprove", "safeTransfer"], "trustLevel": "semi-trusted"},
+      {"target": "newPooler / oldPooler (constructor only)", "methods": ["pair", "router", "sUSDS", "phUSD", "pool", "primeToken"], "trustLevel": "trusted protocol"}
+    ],
+    "inboundCallbackSurface": "none: no ERC721/1155/777 hooks; tokens are standard ERC20 (phUSD, sUSDS, USDS, BPT)",
+    "stateVariables": [
+      {"name": "_operator,_newPooler,_oldPooler,_v3Router,_bpt,_usds,_sUSDS,_phUSD,_pair,_uniRouter", "type": "address immutable", "mutators": ["constructor"]},
+      {"name": "_sUSDSIsToken0", "type": "bool immutable", "mutators": ["constructor"]}
+    ],
+    "events": ["Seeded", "PairSkimmed", "UsdsWrapped", "Aborted"],
+    "errors": ["NotOperator", "SUSDSMismatch", "UsdsMismatch", "PairNotEmpty", "NoBPT", "BadMinAmountsLength", "ZeroMinAmountOut", "BadDeadline", "BPTRemaining", "NothingToSeed", "SeedNotExact", "LPNotMinted", "ReserveMismatch", "BalanceRemaining", "NoUSDS"],
+    "modifiers": ["onlyOperator", "nonReentrant"]
+  },
+
+  "custody": {
+    "tokensHeld": ["BPT (from old.withdrawBPT(escrow, ...) - an owner tx on the OLD pooler, outside this contract)", "USDS (from old.rescueERC20(USDS, escrow, ...))", "transiently sUSDS + phUSD (exit output)", "anything anyone sends (swept by exitAndSeed/wrapUsds/abort)"],
+    "whoCanMove": "only `operator`, and only to the fixed destinations above. No owner/rescue for arbitrary tokens: any token other than BPT/USDS/sUSDS/phUSD sent to the escrow is permanently stuck (VERIFIED)",
+    "status": "VERIFIED"
+  },
+
+  "trustAssumptions": [
+    "operator (OWNER EOA) chooses timing, exit mode, minAmountsOut and deadline; slippage protection for both the exit and the seed price rests entirely on operator diligence (only zero-floors are rejected)",
+    "bpt snapshot equals old pooler's pool() at the time BPT is withdrawn into the escrow (old pooler's setPool is owner-only)",
+    "Funding the escrow (old.withdrawBPT / old.rescueERC20) and exitAndSeed are separate transactions; between them the escrow's balances are public and griefable by donation (seed ratio) but not withdrawable by strangers",
+    "UniPoolerV2 constructor guaranteed the pair is canonical and has token set {sUSDS, phUSD}",
+    "Uniswap V2 addLiquidity into a pair with reserves (0,0) and totalSupply 0 consumes desired amounts exactly (ASSUMED canonical Router02)"
+  ],
+
+  "inheritanceChain": ["ReentrancyGuard (OZ)"],
+  "complexity": {"loc": 425, "functions": 18, "externalCalls": 25, "stateVariables": 11}
+}

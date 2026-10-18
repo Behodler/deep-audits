@@ -1,0 +1,82 @@
+{
+  "project": "yield-claim-nft",
+  "run": "yield-claim-nft-22",
+  "scanTimestamp": "2026-10-07T00:00:00Z",
+  "scanType": "code",
+  "tier": "2a-cross-contract",
+  "head": "0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630",
+  "contractsScanned": 3,
+  "contracts": ["src/migration/UniPoolerCutoverEscrow.sol", "src/dispatchers/BalancerPoolerV2.sol", "src/dispatchers/UniPoolerV2.sol"],
+  "newFindingsCount": 0,
+  "evidence": {
+    "forkRpc": "RPC_MAINNET sourced from repo-root .envrc; fork chainid 1 at block 26136000 logged in every test, so these runs are not vacuous",
+    "repoForkSuite": "work/test/UniPoolerCutoverEscrow.fork.t.sol: 4/4 PASS against the real V3 Router/Vault, Router02, factory and old pooler",
+    "run22Suite": "work/test/run22/EscrowCrossContract.fork.t.sol: 3/3 PASS (test_run22_vaultPaused_withdrawAbortAndRecoveryExitWork, test_run22_oneWeiSyncPoison_blocksSeed_abortRestores_mintPathRecovers, test_run22_setPoolAfterDeploy_strandsNewPoolTokenInEscrow)",
+    "onChainFacts": "BPT 0x642B...db04 is 'phUSD / sUSDS - 50/50' WEIGHTED (weights 0.5/0.5), static swap fee 0.3%, hooksConfig all-false and hooksContract 0x0. Pool token order is [sUSDS, phUSD]. Old pooler holds 20401.8 BPT, 1308.1 sUSDS and 4.7e11 wei USDS. The canonical sUSDS/phUSD V2 pair does not exist yet at the live head (26136994)."
+  },
+  "findings": [
+    {
+      "id": "CODE-001",
+      "relation": "confirms+refines LOCAL-001 / PATTERN-001 (same root as phStaging run-39 L-01 and ycn L-24 8511fd5206, wont-fix). NOT a new finding.",
+      "type": "dos-empty-pair-poisoning",
+      "severity": "potential-low",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed/_requireEmptyPair/_seed",
+      "line": 372,
+      "lineStart": 359,
+      "lineEnd": 375,
+      "codeSnippet": "if (r0 != 0 || r1 != 0 || b0 != 0 || b1 != 0) {\n    revert UniPoolerCutoverEscrow__PairNotEmpty(r0, r1, b0, b1);\n}",
+      "description": "Fork-confirmed on the real canonical pair and Router02. A griefer sends 1 wei of sUSDS to the pair and calls sync(). exitAndSeed then reverts with PairNotEmpty(1,0,1,0). abort() returns the whole BPT to the old pooler, and the old pooler is left usable, because BalancerPoolerV2 keeps no BPT accounting (withdrawBPT and rescueERC20 are plain transfers). The cross-contract refinement: a direct transfer followed by pair.mint(newPooler) still seeds the poisoned pair and absorbs the dust (fork: 1000e18 per side minted 999999999999999999000 LP). So the brick is permanent only for this escrow's Router02-only seed path, not for the UniPoolerV2 deployment or the canonical pair. The window is structural: UniPoolerV2's constructor requires the canonical pair to exist (PairNotCanonical), and the escrow reads newPooler.pair() at construction. The pair is therefore public across several broadcast txs (createPair, UniPoolerV2 deploy, escrow deploy, withdrawBPT, owner BPT transfer, exitAndSeed).",
+      "attackVector": "Between createPair and exitAndSeed: transfer(pair, 1 wei) + pair.sync(). Cost is gas only. Funds are not at risk.",
+      "recommendation": "Optional and defense in depth: when IUniswapV2Pair(_pair).totalSupply()==0, seed through safeTransfer to the pair plus pair.mint(_newPooler) instead of Router02, keeping the reserve and LP post-checks with a dust tolerance. Otherwise phStaging2:103/108 must document the abort-and-redeploy-a-mint-path-seeder runbook.",
+      "confidence": "high",
+      "test": "work/test/run22/EscrowCrossContract.fork.t.sol::test_run22_oneWeiSyncPoison_blocksSeed_abortRestores_mintPathRecovers PASS"
+    },
+    {
+      "id": "CODE-002",
+      "relation": "confirms+refines LOCAL-002 / MR-002. NOT a new finding.",
+      "type": "owner-footgun-stale-snapshot",
+      "severity": "potential-low",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "constructor / abort / _returnAll (with BalancerPoolerV2.setPool + withdrawBPT)",
+      "line": 199,
+      "lineStart": 199,
+      "lineEnd": 217,
+      "codeSnippet": "address bpt_ = ICutoverOldPooler(oldPooler_).pool();   // escrow L199, frozen as _bpt (L217)\n// BalancerPoolerV2 L182-185 / L424-425:\nfunction setPool(address newPool) external onlyOwner { ... _pool = newPool; }\nfunction withdrawBPT(address recipient, uint256 amount) external onlyOwner { IERC20(_pool).safeTransfer(recipient, amount); }",
+      "description": "Fork-confirmed against the deployed old pooler, where setPool exists and is callable by the owner. Sequence: the escrow is deployed, then the owner calls setPool(X), then withdrawBPT(escrow, n). The escrow receives token X, not its snapshot _bpt. exitAndSeed reverts NoBPT, and abort() moves only _bpt/_sUSDS/_phUSD/_usds (L296-299), so X stays stranded in the escrow forever. The escrow has no owner, no rescue path and immutable addresses. Refinement: the original BPT is not lost, because it stays on the old pooler and the owner can rescue it with rescueERC20. Only the tokens withdrawBPT paid out after the repoint are stranded. story-103 does not call setPool, so this is a non-obvious ordering footgun (Law 3), not a live path.",
+      "attackVector": "None external. Owner ordering hazard only.",
+      "recommendation": "In UniPoolerCutoverCore, assert oldPooler.pool() == escrow.bpt() in the same broadcast immediately before withdrawBPT(escrow, bal). Or have the escrow expose the check, or _returnAll(oldPooler.pool()) in abort.",
+      "confidence": "high",
+      "test": "work/test/run22/EscrowCrossContract.fork.t.sol::test_run22_setPoolAfterDeploy_strandsNewPoolTokenInEscrow PASS"
+    },
+    {
+      "id": "CODE-003",
+      "relation": "refines LOCAL-003 / PATTERN-002 (weak minAmountsOut). Cross-contract seed-price manipulation CLEARED. Informational.",
+      "type": "seed-price-inheritance-cleared",
+      "severity": "info",
+      "contract": "src/migration/UniPoolerCutoverEscrow.sol",
+      "function": "exitAndSeed",
+      "line": 268,
+      "lineStart": 265,
+      "lineEnd": 270,
+      "codeSnippet": "_exit(mode, bptIn, minAmountsOut);\nuint256 s = IERC20(_sUSDS).balanceOf(address(this));\nuint256 p = IERC20(_phUSD).balanceOf(address(this));\nliquidity = _seed(s, p, deadline);",
+      "description": "The seed ratio is whatever composition the Balancer pool has at exit, and story-103's floors are quoted from live state. So a pre-skewed Balancer pool would be baked into both the floors and the V2 seed price. Checked against mainnet: the pool is a 50/50 weighted pool, which is constant-product like V2, with no hooks and a 0.3% fee. For two constant-product venues an LP position's value at a given price depends only on its invariant. If an attacker skews the Balancer price and the escrow exits and seeds at the skewed price, arbitraging both venues back returns the attacker roughly their own slippage, minus 0.3% fees on each leg. POL is not extracted. Hookless pool: no V3 hook can adjust amounts or call back. Residual risk is limited to wrong-order or loose floors (PATTERN-002). The escrow cannot check order, so the core should assert getPoolTokenInfo order [sUSDS, phUSD] when building minAmountsOut.",
+      "confidence": "medium"
+    }
+  ],
+  "clearedChecks": [
+    {"check": "Classic, cross-contract and cross-function reentrancy", "result": "cleared", "why": "All three mutators are onlyOperator+nonReentrant. The escrow has no other entry points and no receive/fallback. The V3 Router pays out via Vault.sendTo, which makes a plain ERC20 transfer with no callback to the escrow. The pool has no hooks (on-chain hooksConfig all false). Router02 and pair transfers are plain ERC20 (sUSDS and phUSD have no hooks)."},
+    {"check": "Read-only reentrancy", "result": "cleared", "why": "The escrow exposes only immutable getters. No escrow code runs while the V3 Vault is unlocked, and nothing runs mid-transfer during the V2 seed, so UniPoolerV2.quotePool and pair views never see a transient state that escrow code produced."},
+    {"check": "ERC721/1155/777 hooks", "result": "not applicable", "why": "Only BPT, sUSDS, phUSD, USDS and LP move. All are plain ERC20; BPT is a V3 BalancerPoolToken."},
+    {"check": "Access-control chain", "result": "cleared", "why": "oldPooler.withdrawBPT, rescueERC20 and setPool are onlyOwner (trusted). newPooler.pool() is authorized-pooler-only and reverts EmptyPair before the seed: it calls sync() and then _reserves(), and a reverted tx rolls back the sync. A stranger can reach the cutover only through the permissionless pair (CODE-001) or donations. Donations to the escrow are whole-balance-seeded into POL at a net loss to the donor. Donations to the pair are skimmed to newPooler."},
+    {"check": "Vault-wide pause (story-103: '30 Nov V3 vault paused, recovery exit still works')", "result": "verified", "why": "On the fork with pauseVault() and permissionless enableRecoveryMode: withdrawBPT, the escrow's BPT forceApprove, abort(), and exitAndSeed(RECOVERY) all succeed and seed identical amounts. PROPORTIONAL reverts. test_run22_vaultPaused_withdrawAbortAndRecoveryExitWork PASS."},
+    {"check": "abort() restores a usable old-pooler state", "result": "verified", "why": "BalancerPoolerV2 has no BPT or sUSDS accounting variables, so a plain transfer back is the full status quo. Fork-proven under a normal pool, a paused pool (repo case2) and a paused vault. Funds already forwarded by wrapUsds (on newPooler) are not reachable by abort, but newPooler's owner can rescue them; this is not a loss."},
+    {"check": "LP / skim / sUSDS arriving at UniPoolerV2 without accounting", "result": "cleared", "why": "UniPoolerV2 has no LP or token accounting: pool() sizes from balanceOf(sUSDS), and LP is POL that leaves only via owner rescueERC20. Skimmed phUSD sits idle on newPooler (owner-recoverable). Only an attacker's own donation can produce it."},
+    {"check": "Q-21 (fix-pending) impact change", "result": "unchanged (marginal)", "why": "The escrow seeds the same exit proceeds the owner-routed flow would have, plus the owner's ~202.30 BPT (about +1% depth). The pair is still ~1.59x shallower than plan §5 assumes. Do not re-file."},
+    {"check": "Q-23 feeTo live", "result": "no effect on seed", "why": "Fork: the factory feeTo is non-zero, the seed is the first mint (kLast==0), and LP == totalSupply - 1000."}
+  ],
+  "notes": [
+    "No new High/Medium. All three items confirm or refine Tier-1 findings with fork evidence; the dedup stage should merge them into LOCAL-001/002/003.",
+    "work/test/run22/EscrowCrossContract.fork.t.sol inherits the repo fork harness; it FAILS (does not skip) without RPC_MAINNET/MAINNET_RPC_URL."
+  ]
+}
