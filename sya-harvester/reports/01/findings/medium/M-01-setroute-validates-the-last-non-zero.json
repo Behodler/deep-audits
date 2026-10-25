@@ -1,0 +1,150 @@
+{
+  "id": "M-01",
+  "label": "M-01",
+  "issueId": "sh1m1",
+  "project": "sya-harvester",
+  "status": "submitted",
+  "severity": "medium",
+  "title": "setRoute validates the last non-zero path entry, but Curve Router NG stops at the first empty pool slot, so a gapped route is accepted and silently strands the intermediate token",
+  "contract": "src/SYAHarvester.sol",
+  "function": "setRoute",
+  "line": 135,
+  "lineStart": 133,
+  "lineEnd": 140,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "rootCauseClass": "validation-diverges-from-executor-semantics",
+  "fingerprintInput": "src/SYAHarvester.sol:setRoute:validation-diverges-from-executor-semantics",
+  "fingerprint": "004d4547d93b2d4431753bd11b17f2c86b50e65d1eaa37b530f34188feb739a3",
+  "origin": "new",
+  "faithfulnessTag": "F-02",
+  "faithfulnessType": "story-unsafe (Law 1 over Law 2)",
+  "ownerFootgun": true,
+  "humanReviewFlag": true,
+  "channel": "submissions/M-01 + spec-conformance (F-02)",
+  "description": "Route-end validation semantics (last non-zero entry anywhere in path[11]) diverge from the executor's semantics (Router NG terminates at the first zero pool slot); swapParams/pools are not cross-checked. Root is story-001's own prescribed rule.",
+  "impact": "The caller's paid-for yield on the gap-routed strategy is lost, every harvest. SYA is paid in full for that strategy's yield, the router delivers the intermediate token (crvUSD on fork) instead of the reward token, and the intermediate is held by the harvester. It is not a strategy token, so _sellYield never touches it, and there is no sweep (DEDUP-007), so it is stuck permanently. CORRECTION to the brief: the stranded value is NOT claimable by the next caller in the proven case. Only if the intermediate happened to be another routed strategy token would a later harvest sell it, which moves the value to an unrelated caller rather than recovering it. Protocol (SYA) value is not at risk; the loss falls on harvest callers, a permissionless set that includes third parties.",
+  "attackPath": [
+    "1. Precondition (non-obvious owner footgun): the owner registers a multi-hop route in which a middle pool/token slot is address(0), e.g. a two-hop USDe->crvUSD->USDC route whose second pool address resolved to zero, with USDC in a later slot. setRoute's validator, which is advertised (and prescribed by story-001) as the route-end guard, accepts it because USDC is the last non-zero entry.",
+    "2. Any caller (harvest.sh or a third party) calls harvest(). Curve Router NG stops at the first empty pool slot and delivers crvUSD, not USDC (fork: 100 USDe -> 100.09 crvUSD, 0 USDC).",
+    "3. Proceeds from the other strategies (or the 1% buffer, or a USDe-exempt-free claim with reward-token yield) cover `owed`, so the underflow guard at L290-L291 (`balanceOf(reward) - owed`) does not fire; the harvest succeeds (fork: 'harvest ok true', 4.29e18 crvUSD stranded).",
+    "4. harvest.sh derives minEthOut from an eth_call simulation that already reflects the strand, so the caller's only slippage protection does not catch it. Nothing reverts and no event flags it.",
+    "5. Repeats on every harvest until the route is noticed and fixed; each round's stranded tokens are permanent."
+  ],
+  "likelihood": "medium - requires a single owner configuration slip (a zero middle slot) that the validator was specifically supposed to reject; once present, loss is certain and recurring with no further action. Halmos A3 proves the gap is the ONLY silent-misroute shape, so the hazard is narrow but real.",
+  "assumptions": "Owner is non-malicious and mis-enters a route with a middle zero slot (typo / unset address variable / slot-10 convention). Other proceeds cover the borrow (otherwise it fails loud).",
+  "externalRequirements": "Owner route-registration slip; at least one other harvested strategy or reward-token yield covering owed.",
+  "severityRationale": "Resolved flagged question 1 as MEDIUM (operational hazard / owner footgun). Law 3 test: a competent non-malicious owner who sees setRoute reject a wrong route end would be surprised that a route with a missing middle hop passes and then silently pays the router output into a dead balance. The consequence is not obvious, so this is a footgun, not trusted misuse, and is classified by the impact it unlocks. That impact is real-value loss (the caller pays SYA the discounted price for yield it never receives), silent (the harvest succeeds and simulation-derived minEthOut absorbs it), recurring (every harvest), and permanent (no sweep, not a strategy token). That matches C4 Medium 'leak value with a hypothetical attack path with stated assumptions, but external requirements'; the stated assumption is the owner slip. Not High: it needs the owner precondition, the loss is per-harvest bounded by one strategy's yield, protocol/SYA funds are untouched, and no attacker profits. Not Low: the validator was the designed guard against exactly this, the story's own rule is the root cause (F-02, story-unsafe), story-002's 'zero balances after a successful harvest' acceptance and CLAUDE.md's 'reverts rather than stranding' invariant are both broken, and the harm reaches third-party callers rather than staying with the owner. Fork PoC, adversarial invariants on forge+medusa, and Halmos witnesses all agree. Flagged for severity-auditor second opinion as a footgun-gated Medium; floor is Low.",
+  "severityBasis": "potential-low (CODE-001, F-02, invariants, symbolic all agree)",
+  "plausibility": "n/a (Medium)",
+  "confidence": "high (mechanics) / medium (severity band)",
+  "recommendation": "Validate contiguity: let k = first index with path[2k+1]==0; require path[2k]==rewardToken and every slot after 2k zero; optionally require swapParams rows beyond k-1 to be zero. Add an end-of-callback assertion that every touched non-reward token balance is zero, or make MockCurveRouter follow Router NG semantics. Amend story-001's validation rule as well (F-02).",
+  "safeConfigGuidance": "Until fixed: after every setRoute, read getRoute(token) and confirm path[2k] for the first k with path[2k+1]==0 equals sya.rewardToken() and every later slot is zero; also eth_call the router with the stored route and check the output token. Fix: contiguity check in setRoute (Halmos A5/A6 prove it sufficient and non-rejecting), amend story-001's rule, make MockCurveRouter follow Router NG semantics.",
+  "evidence": {
+    "fork": "test_audit_gapRoute_acceptedAndRouterDeliversIntermediate: 'setRoute accepted gap path', router direct call 100 USDe -> 100.0939 crvUSD, 0 USDC; 'harvest ok true', 'crvUSD stranded in harvester 4293593474622762397'.",
+    "invariants": "invariant_routeRegistrySound + invariant_noStranding FAIL in adversarial config on forge AND medusa (counterexample: act_setRoute USDe gap shape -> act_harvest succeeds, crvUSD balance grows; deterministic tripwire 50e18 USDe yield -> exactly 50e18 crvUSD stranded). Honest config PASS.",
+    "symbolic": "SYMBOLIC-001: Halmos check_A1/A2 FAIL with witness path[0..8] non-zero, path[9]=0, path[10]=USDC -> router delivers path[8] (silent misroute). Proofs: A3 PASS (no-gap => correct delivery or loud revert; the gap is the ONLY silent-misroute shape), A4 PASS (odd-index end without gap is loud), A5 PASS (recommended contiguity fix sufficient), A6 PASS (fix rejects no legitimate route), route_exhaustive.py over {0,T,R,X,P}^10: SILENT_MISROUTE_nogap = 0. A5b (contiguity + non-zero executed pools) TIMEOUT, not proven by Halmos (exhaustive abstraction + bounded fuzz only)."
+  },
+  "instances": [
+    {
+      "contract": "src/SYAHarvester.sol",
+      "function": "setRoute",
+      "line": 133
+    },
+    {
+      "contract": "src/interfaces/ICurveRouterNG.sol",
+      "function": "(NatSpec)",
+      "line": 9,
+      "note": "LOCAL-IF-001: interface NatSpec does not state stop-at-first-zero semantics"
+    },
+    {
+      "contract": "test/mocks/MockCurveRouter.sol",
+      "function": "exchange",
+      "note": "mock copies the same last-non-zero rule; see DEDUP-010(2)"
+    }
+  ],
+  "crossReferences": {
+    "faithfulness": [
+      {
+        "id": "F-02",
+        "storyTag": "story-001 (rule) -> breaks story-002 acceptance and src/CLAUDE.md invariants",
+        "type": "story-unsafe",
+        "lawImpacted": 1,
+        "specText": "story-001 Technical Details: \"`setRoute` validates `path[0] == token` ... It also checks that the last non-zero entry of `path` equals `sya.rewardToken()` ... Use the CurveAMMAdapter loop as the template.\"  versus  src/CLAUDE.md: \"Route coverage invariant ... otherwise the harvest reverts rather than stranding tokens in the contract\" / \"The contract holds no balances between calls\" and story-002 Acceptance: \"After a successful harvest the contract holds zero balances of every token.\"",
+        "specSource": "story-001 doc (Technical Details > Contract surface); story-002 doc Acceptance; src/CLAUDE.md Design decisions",
+        "deviation": "Faithful to story-001, but story-001's rule cannot uphold the invariants that story-002 and CLAUDE.md promise. The story's validation is the root cause, so a fix has to amend the story's rule as well as the code. MockCurveRouter copies the same rule (CODE-007(2)), which hides the problem in the unit tests.",
+        "mustAppearIn": "spec-conformance.md"
+      }
+    ],
+    "related": [
+      "DEDUP-010 (MockCurveRouter hides it)",
+      "DEDUP-007 (no sweep makes the strand permanent)"
+    ]
+  },
+  "poc": {
+    "file": "sya-harvester/work/test/poc-M-01-gap-route-strand.t.sol",
+    "reportCopy": "sya-harvester/reports/01/pocs/M-01-poc.t.sol",
+    "diff": "sya-harvester/reports/01/pocs/M-01-poc.diff",
+    "diffAppliesCleanAgainst": "62c19c86be1594dcf82e8af794fcd6c28f9a8fc0",
+    "runLog": "sya-harvester/reports/01/pocs/M-01-poc-run.txt",
+    "status": "passing",
+    "result": "PASS 15/15 (3 M01 tests + 12 inherited fork-fixture tests)",
+    "independentlyRevalidated": true,
+    "fixtureMode": "inherits project fork fixture (mode 1)",
+    "lastRun": "2026-10-25T01:21:28Z",
+    "keyNumbers": {
+      "round1ControlEthOutWei": "4553583013453051",
+      "round1GapEthOutWei": "2757397646213466",
+      "round1DeltaWei": "-1796185367239585",
+      "round1DeltaPct": "39.4% (this fork snapshot only)",
+      "crvUSDStranded": "4.2936e18",
+      "gapEthOutGasInvariance": {
+        "value": "identical at gasprice 0 / 0.2 / 0.5 / 1 gwei (silent at realistic gas)",
+        "unverified": "no surviving artefact; do not cite",
+        "caveat": "Figure came from a scratch test the PoC validator ran and deleted; no log survives. Report validator computes the gap harvest (~2.76e15 wei out) may sit near the Unprofitable cutoff at ~1 gwei.",
+        "caveatAddedAt": "2026-10-25T01:27:14Z"
+      }
+    }
+  },
+  "metadata": {
+    "createdAt": "2026-10-25T01:13:56Z",
+    "updatedAt": "2026-10-25T01:27:14Z",
+    "run": "sya-harvester-01",
+    "commit": "62c19c86be1594dcf82e8af794fcd6c28f9a8fc0",
+    "scanOrigin": "DEDUP-001",
+    "classificationOrigin": "CLASS-001",
+    "statusHistory": [
+      {
+        "from": "needs-poc",
+        "to": "ready",
+        "at": "2026-10-25T01:21:28Z",
+        "reason": "PoC attached, PASS 15/15, independently re-validated (caller requested poc-validated; mapped to lifecycle status ready)"
+      },
+      {
+        "from": "ready",
+        "to": "submitted",
+        "at": "2026-10-25T01:27:14Z",
+        "reason": "report-validator VALID (2 fixes applied by validator); report at reports/01/submissions/M-01-submission.md"
+      }
+    ]
+  },
+  "pocClaimLimits": [
+    "(1) The 39.4% ETH shortfall is from one fork snapshot; it is not a general loss rate.",
+    "(2) Round 2 runs at gasprice 0 and would revert Unprofitable at real gas; there is no round-2 control. Round 2 only proves the strand recurs/accumulates.",
+    "(3) The PoC does not exercise script/harvest.sh or minEthOut (it passes minEthOut=0).",
+    "(4) Do not cite '100 USDe -> 100.09 crvUSD' or 'harvest ok true' as PoC figures.",
+    "(5) The loss is silent only while other proceeds cover the owed flash amount; otherwise it surfaces as a loud underflow revert.",
+    "(6) The PoC inherits the project fork fixture (mode 1)."
+  ],
+  "reportPath": "sya-harvester/reports/01/submissions/M-01-submission.md",
+  "reportValidation": {
+    "result": "VALID",
+    "validatedAt": "2026-10-25T01:27:14Z",
+    "fixesAppliedByValidator": [
+      "round-1 gasprice-0 disclosure",
+      "InvalidRouteGap error declaration"
+    ]
+  }
+}

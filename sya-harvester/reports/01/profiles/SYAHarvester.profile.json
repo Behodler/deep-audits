@@ -1,0 +1,183 @@
+{
+  "contract": "src/SYAHarvester.sol",
+  "commit": "62c19c86be1594dcf82e8af794fcd6c28f9a8fc0",
+  "profileTimestamp": "2026-10-25T00:00:00Z",
+  "run": "sya-harvester-01 (cold)",
+  "solidityVersion": "^0.8.26 (foundry pin 0.8.26, evm cancun, via_ir off)",
+  "inheritanceChain": ["Ownable (OZ 5.1.0)", "ERC1155Holder (OZ 5.1.0)", "IUnlockCallback (v4-core 4.0.0)"],
+
+  "verifiedProperties": {
+    "noUnboundedLoops": {"value": "likely", "note": "_sellYield loops sya.getYieldStrategies() (SYA-owner bounded); _contains is O(exempt) per strategy with caller-supplied exempt (self-DoS only); setRoute loop fixed 11."},
+    "checkedArithmetic": {"value": "verified", "note": "0.8.x, no unchecked/assembly. Intentional underflow at L291 (balance - owed) is the loud 'unprofitable claim' failure."},
+    "reentrancyGuarded": {"value": "none (no nonReentrant)", "note": "harvest has no guard; re-entering harvest during the callback phase reverts AlreadyUnlocked in PoolManager, so the V4 lock acts as the guard for the borrow window. After unlock returns, re-entry is possible via the ERC1155 refund hook to msg.sender (L244) and the ETH payout (L254), but both go to msg.sender itself and the contract holds only that caller's proceeds."},
+    "accessControlled": ["setRoute (onlyOwner)", "clearRoute (onlyOwner)", "setEthPool (onlyOwner)", "unlockCallback (msg.sender == poolManager)", "receive (msg.sender == poolManager)", "transferOwnership/renounceOwnership (OZ Ownable, single-step)"],
+    "initializerProtected": "n/a (non-upgradeable, immutables set in constructor with zero-address checks; owner zero rejected by OZ Ownable)",
+    "pauseMechanism": "none in harvester (relies on SYA whenNotPaused; owner can effectively disable by clearRoute / not setting ethPool)",
+    "weakRandomness": "none",
+    "statelessBetweenCalls": {"value": "likely", "note": "Holds no balances by design; violated only by donations, partial V4 fill (LOCAL-002), or non-strategy ERC20/ERC1155 sent in. No sweep function exists."},
+    "approvalHygiene": {"value": "verified", "note": "forceApprove(sya, owed) then 0 around claim (L284-286); forceApprove(router, balance) then 0 around each exchange (L317-319). No standing allowances."}
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-001",
+      "type": "incomplete-input-validation",
+      "severity": "local-low",
+      "function": "setRoute",
+      "line": "133-140",
+      "description": "Route-end validation takes the LAST non-zero entry of path[11] anywhere in the array, but Curve Router NG stops at the first hop whose next pool slot (path[i*2+1]) is zero and pays out path[i*2] to the receiver. A path with an interior gap (e.g. [token, pool0, X, 0, ..., USDC]) passes validation yet the router delivers X, not the reward token. Consequence: X is not sold, surplus = balance - owed underflows, and every harvest reverts until the owner fixes the route (fail-loud DoS, no fund loss since the tx reverts). Also no check that the swapParams/pools agree with the path. The unit-test MockCurveRouter uses the same 'last non-zero' rule (test/mocks/MockCurveRouter.sol), so the suite cannot detect the divergence.",
+      "confidence": "likely (Router NG semantics from the deployed Vyper source; confirm on fork)",
+      "recommendation": "Require the path to be contiguous: after the first zero pool slot, all remaining slots are zero, and the token immediately following the last non-zero pool equals sya.rewardToken()."
+    },
+    {
+      "id": "LOCAL-002",
+      "type": "residual-balance / stateless-invariant-break",
+      "severity": "local-low",
+      "function": "_swapSurplusAndSettle",
+      "line": "328-339",
+      "description": "Exact-input swap with sqrtPriceLimitX96 = MAX_SQRT_PRICE - 1 can partially fill if in-range liquidity is exhausted; debt is computed from the actual delta.amount1, so the unswapped surplus (reward token) stays in the harvester after the tx. It is then credited to the NEXT caller's surplus. The current caller is protected only by minEthOut. Practically requires a near-empty pool (owner-chosen deepest pool), so impact is small.",
+      "confidence": "verified (code path)",
+      "recommendation": "Assert -delta.amount1() == surplus or pay any reward-token residue to msg.sender."
+    },
+    {
+      "id": "LOCAL-003",
+      "type": "griefing-dos-by-donation",
+      "severity": "local-low",
+      "function": "_sellYield",
+      "line": "312-315",
+      "description": "Coverage check is keyed on the harvester's raw balanceOf, not on what SYA delivered. If a registered, non-exempt strategy token has no route (legitimately: strategy is new, empty, or its token is paused in SYA so nothing is delivered), any party can donate 1 wei of that token to the harvester and every harvest reverts RouteNotConfigured. Workaround exists: caller passes that strategy in exemptStrategies (SYA accepts any registered strategy), at the cost of not skimming it. Donation is permanent (no sweep).",
+      "confidence": "verified (code path)",
+      "recommendation": "Sell only the delta received during claim (snapshot balances before sya.claim), or skip tokens whose SYA tokenConfig is paused, or add an owner sweep."
+    },
+    {
+      "id": "LOCAL-004",
+      "type": "no-rescue-path",
+      "severity": "local-info",
+      "function": "(contract-wide)",
+      "line": "27",
+      "description": "No sweep/rescue for ERC20, ERC1155 or ETH. ERC1155Holder accepts any ERC1155 from anyone; non-strategy ERC20s and ERC1155 ids other than the one a caller passes are permanently stuck. Stray strategy tokens, reward token and ETH are swept to the next harvest caller (a gift, not a loss).",
+      "confidence": "verified"
+    },
+    {
+      "id": "LOCAL-005",
+      "type": "config-coupling-footgun",
+      "severity": "local-low",
+      "function": "setRoute / setEthPool / unlockCallback",
+      "line": "139, 174, 280",
+      "description": "Route ends and ethPool.currency1 are validated against sya.rewardToken() only at set time, while unlockCallback reads it live. If the SYA owner calls setRewardToken, every stored route and the ethPool become stale: routes output the old token (surplus underflow) or the V4 swap leaves an unsettled old-token delta (CurrencyNotSettled). Harvest bricks until the harvester owner re-registers all routes and the pool. Fail-loud, no fund loss; operational coupling between two owner roles worth documenting.",
+      "confidence": "verified (code path)",
+      "recommendation": "In harvest, check Currency.unwrap(ethPool.currency1) == sya.rewardToken() and revert with a named error; document the re-registration step in the SYA reward-token migration runbook."
+    }
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {
+        "function": "harvest(address[] exemptStrategies, uint256 nftIndex, uint256 minEthOut) returns (uint256 ethOut)",
+        "visibility": "external",
+        "stateChanges": ["none persistent (token/ETH/NFT balances transit only)"],
+        "externalCalls": [
+          "sya.nftMinter()",
+          "IERC1155(nftMinter).safeTransferFrom(msg.sender -> this, nftIndex, 1) [if nftIndex!=0 && minter!=0]",
+          "poolManager.unlock(abi.encode(exempt, nftIndex)) -> unlockCallback",
+          "IERC1155(nftMinter).balanceOf / safeTransferFrom(this -> msg.sender, whole balance) [refund; onERC1155Received hook on msg.sender]",
+          "msg.sender.call{value: address(this).balance}"
+        ],
+        "accessControl": "none (public)",
+        "reentrancyGuard": false,
+        "checks": ["EthPoolNotSet", "InsufficientEthOut(balance < minEthOut)", "Unprofitable((g0-gasleft+60000)*tx.gasprice > ethOut)", "EthTransferFailed"],
+        "notes": "ethOut is the WHOLE ETH balance, not the delta produced by this call."
+      },
+      {
+        "function": "unlockCallback(bytes data) returns (bytes)",
+        "visibility": "external",
+        "stateChanges": ["none persistent"],
+        "externalCalls": [
+          "sya.rewardToken()",
+          "sya.calculateClaimAmount(exempt)",
+          "poolManager.take(reward, this, owed = calc * 10100 / 10000)",
+          "reward.forceApprove(sya, owed); sya.claim(nftIndex, 0, exempt); reward.forceApprove(sya, 0)",
+          "sya.getYieldStrategies(); sya.strategyTokens(s); token.balanceOf(this)",
+          "token.forceApprove(router, bal); router.exchange(path, params, bal, 0, pools, this); forceApprove(router, 0)",
+          "poolManager.swap(ethPool, zeroForOne=false, exactIn=surplus, limit=MAX_SQRT_PRICE-1)",
+          "poolManager.sync(reward); reward.safeTransfer(poolManager, debt); poolManager.settle()",
+          "poolManager.take(ETH, this, ethAmount) -> receive()"
+        ],
+        "accessControl": "msg.sender == poolManager (V4 delivers callback only to unlock caller => only via harvest)",
+        "reentrancyGuard": "PoolManager unlock lock (nested unlock reverts AlreadyUnlocked)"
+      },
+      {"function": "setRoute(address token, address[11] path, uint256[5][5] swapParams, address[5] pools)", "accessControl": "onlyOwner", "stateChanges": ["routes[token]"], "externalCalls": ["sya.rewardToken()"], "validation": "token!=0; path[0]==token; last non-zero path entry == sya.rewardToken() (see LOCAL-001)"},
+      {"function": "clearRoute(address token)", "accessControl": "onlyOwner", "stateChanges": ["routes[token] deleted"]},
+      {"function": "setEthPool(PoolKey key)", "accessControl": "onlyOwner", "stateChanges": ["ethPool"], "externalCalls": ["sya.rewardToken()"], "validation": "currency0 == native; currency1 == sya.rewardToken(); fee/tickSpacing/hooks unvalidated, pool initialisation unchecked (swap reverts if not)"},
+      {"function": "getRoute(address) view / getEthPool() view / poolManager() / sya() / router() / owner()", "accessControl": "none"},
+      {"function": "receive()", "accessControl": "msg.sender == poolManager only"},
+      {"function": "onERC1155Received / onERC1155BatchReceived (ERC1155Holder)", "accessControl": "none; accepts any ERC1155 from anyone"}
+    ],
+
+    "externalCalls": [
+      {"target": "IPoolManager poolManager (immutable)", "methods": ["unlock", "take", "swap", "sync", "settle"], "trustLevel": "trusted (canonical V4)", "notes": "Flash source; free flash accounting. Settlement = owed + actual reward-token spent on ETH swap; ETH taken = delta.amount0."},
+      {"target": "IStableYieldAccumulator sya (immutable)", "methods": ["rewardToken", "nftMinter", "calculateClaimAmount", "claim", "getYieldStrategies", "strategyTokens"], "trustLevel": "semi-trusted (protocol-owned)", "notes": "claim is whenNotPaused + nonReentrant; validates exempt list, burns 1 NFT unit from msg.sender (harvester) via authorized-burner burn, pushes yield via strategy.skimSurplus(token, harvester), then pulls payment computed on ACTUAL delivered amount with safeTransferFrom (allowance = owed). Payment can exceed estimate if skimSurplus delivers > estimate; buffer is only 1% (SYA NatSpec: estimate 'can diverge')."},
+      {"target": "SYA yield strategies (via sya.claim -> skimSurplus)", "methods": ["skimSurplus"], "trustLevel": "semi-trusted (SYA-owner registered)", "notes": "Executed inside harvester's unlock; any nested poolManager.unlock reverts. Live USDe strategy trades on Curve pool 0xF55B... that the harvester's own route also uses (double fee / price impact)."},
+      {"target": "ICurveRouterNG router (immutable)", "methods": ["exchange(path, params, balance, 0, pools, this)"], "trustLevel": "trusted (immutable Router NG)", "notes": "_expected = 0 on every hop; only end-to-end minEthOut protects. Route Curve pools are owner-chosen and untrusted for price (sandwichable inside a public mempool; script submits via private relay)."},
+      {"target": "IERC1155 nftMinter (read from sya at call time)", "methods": ["safeTransferFrom (pull 1)", "balanceOf", "safeTransferFrom (refund whole balance)"], "trustLevel": "semi-trusted", "notes": "Refund safeTransferFrom triggers onERC1155Received on msg.sender: inbound callback to an attacker-controlled (=caller) address after unlock but BEFORE ethOut is read and paid. Contract holds only caller's own ETH at that point."},
+      {"target": "ERC20 reward token (USDC) and yield tokens", "methods": ["forceApprove", "balanceOf", "safeTransfer"], "trustLevel": "semi-trusted", "notes": "Assumes standard ERC20; balance-based accounting (donations are absorbed into the caller's surplus)."},
+      {"target": "msg.sender", "methods": ["call{value: ethOut}"], "trustLevel": "untrusted", "notes": "Last operation; checks done before. Contract wallets that cannot receive ETH revert EthTransferFailed."}
+    ],
+
+    "stateVariables": [
+      {"name": "poolManager / sya / router", "type": "immutable", "mutators": ["constructor"]},
+      {"name": "routes", "type": "mapping(address => CurveRoute{address[11] path; uint256[5][5] swapParams; address[5] pools; bool configured})", "mutators": ["setRoute", "clearRoute"], "readers": ["getRoute", "_sellYield"]},
+      {"name": "ethPool", "type": "PoolKey", "mutators": ["setEthPool"], "readers": ["harvest (currency1 != 0 gate)", "_swapSurplusAndSettle", "getEthPool"]},
+      {"name": "_owner", "type": "address (Ownable)", "mutators": ["transferOwnership", "renounceOwnership"]}
+    ],
+    "constants": {"BORROW_BUFFER_BPS": 100, "GAS_OVERHEAD": 60000},
+    "events": ["RouteSet", "RouteCleared", "EthPoolSet", "OwnershipTransferred"],
+    "errors": ["ZeroAddress", "InvalidRouteStart", "InvalidRouteEnd", "InvalidEthPool", "RouteNotConfigured", "InsufficientEthOut", "NotPoolManager", "EthPoolNotSet", "EthTransferFailed", "Unprofitable"],
+    "modifiers": ["onlyOwner"]
+  },
+
+  "tokenFlow": {
+    "sequence": [
+      "1. [opt] NFT: caller -> harvester (1 unit of nftIndex)",
+      "2. PM.take reward: PM -> harvester, owed = calc*1.01 (debt +owed)",
+      "3. sya.claim: NFT burned from harvester; strategies push yield tokens -> harvester; SYA pulls payment (<= owed by allowance) reward harvester -> SYA",
+      "4. each non-exempt strategy token with balance>0 (token != reward): harvester -> router, router -> harvester reward token",
+      "5. surplus = rewardBal - owed (underflow revert if sale < borrow); PM.swap exactIn surplus reward -> ETH delta",
+      "6. sync/transfer debt (owed + actual swap input)/settle; PM.take ETH -> harvester (receive gated to PM)",
+      "7. NFT refund: whole harvester balance of nftIndex -> caller",
+      "8. ethOut = address(this).balance; minEthOut + Unprofitable checks; ETH -> caller"
+    ],
+    "invariantsClaimed": [
+      "INV-1 Post-tx zero balances: harvester holds 0 ETH, 0 reward, 0 of each strategy token, 0 of nftIndex (breakable by LOCAL-002 residue, donations of non-strategy tokens/other NFT ids).",
+      "INV-2 PoolManager deltas net to zero inside unlock (enforced by V4; any mismatch reverts CurrencyNotSettled).",
+      "INV-3 Route coverage: a non-exempt strategy token with non-zero harvester balance and no route reverts the whole harvest (never strands).",
+      "INV-4 ethOut >= max(minEthOut, (gasMeasured + 60000) * tx.gasprice) or revert.",
+      "INV-5 No standing ERC20 allowances to sya/router after a call.",
+      "INV-6 Only harvest can trigger unlockCallback with the harvester as locker."
+    ],
+    "rounding": "Borrow rounds down (calc*10100/10000); over-borrow settled back. All value accrues to msg.sender; protocol (SYA) side fixed by SYA's own pricing."
+  },
+
+  "trustAssumptions": [
+    "PoolManager is canonical Uniswap V4; callback delivery to locker only.",
+    "SYA payment for the delivered yield never exceeds calculateClaimAmount * 1.01; otherwise claim's safeTransferFrom reverts (insufficient allowance) and the caller must exempt the offending strategy. Unit MockSYA makes estimate == delivered exactly, so this path is untested.",
+    "No SYA strategy skimSurplus and no Curve route step calls poolManager.unlock (nested-unlock hazard, fork-tested for live USDe strategy at block 26261000 only).",
+    "Owner registers contiguous, correct Router NG routes and a deep native-ETH/reward pool (no hook validation).",
+    "sya.rewardToken() is stable between setRoute/setEthPool and harvest (LOCAL-005).",
+    "Caller's only price protection is minEthOut; per-hop _expected = 0 and SYA minRewardTokenSupplied = 0 (design decision). Sandwich resistance relies on private submission (script/harvest.sh -> Flashbots Protect).",
+    "Gas check protects the caller only; Unprofitable ignores the NFT's own value consumed by the claim.",
+    "Reward token is standard ERC20 (USDC); SafeERC20 + forceApprove cover USDT-shape."
+  ],
+
+  "designDecisionsContext": "All 10 registry designDecisions are reflected faithfully in code: V4-only flash (L239/277), nested-unlock hazard documented and tested, on-chain per-token Router NG routes swapping whole balance (L312-318), single minEthOut (L249), coverage revert (L315), live rewardToken skip (L280/311), borrow = calc + 1% inside callback (L281), nftIndex 0 sentinel + whole-balance refund (L234-246), gas check (L251-252), public/stateless (no state beyond config). Context only, no suppression authority.",
+
+  "testFidelityNotes": [
+    "test/mocks/MockCurveRouter.sol ignores swapParams/pools and derives output as the last non-zero path entry, mirroring the harvester's validation rule rather than Router NG's stop-at-first-zero-pool rule: unit tests cannot falsify LOCAL-001.",
+    "test/mocks/MockSYA.sol: calculateClaimAmount uses the strategy's surplus() which equals exactly what skimSurplus delivers (overEstimateBps only adds); the delivered > estimate*1.01 revert path is never exercised. Mock burns NFT before validating exempt (real SYA validates exempt first) - harmless ordering divergence.",
+    "test/SYAHarvester.registry.t.sol:284 test_noHarvestFunction calls signature harvest(uint256,uint256,address[]) which never existed; it passes vacuously now that harvest(address[],uint256,uint256) exists (stale TDD-RED artefact, asserts nothing).",
+    "HarvesterFixture uses a real local V4 PoolManager (good fidelity for settle/take/swap), ETH/USDC pool at raw 1:1 with deep liquidity, so partial-fill (LOCAL-002) is not exercised.",
+    "No unit test for donation-DoS (LOCAL-003) or stale-rewardToken coupling (LOCAL-005). Fork suite at block 26261000 covers live strategies, routes and gas overhead calibration."
+  ],
+
+  "complexity": {"loc": 357, "functions": 10, "externalCallSites": 22, "stateVariables": 5, "assembly": false}
+}

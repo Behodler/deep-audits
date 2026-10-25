@@ -1,0 +1,71 @@
+{
+  "project": "sya-harvester",
+  "run": "sya-harvester-01",
+  "scanTimestamp": "2026-10-25T00:00:00Z",
+  "scanType": "economic",
+  "sourceCommit": "62c19c8",
+  "crossRepo": {"stable-yield-accumulator": "../stable-yield-accumulator/src @ 6eab35c", "reflax-yield-vault": "../reflax-yield-vault/src (ERC4626MarketYieldStrategy, CurveAMMAdapter)"},
+  "contractsScanned": 1,
+  "evidence": {
+    "forkTest": "sya-harvester/work/test/audit/EconScan01.fork.t.sol (3/3 pass @ PINNED_BLOCK 26_261_000 +1h)",
+    "forkLog": "sya-harvester/reports/01/econ-scan/EconScan01.fork.log",
+    "liveReads_block_26265643": {"discountRate_bps": 3000, "nudgeSplit": 20, "calculateClaimAmount_USDC": 26.416494, "YS_USDE_slippageToleranceBps": 30, "ETH_USD": 2340.88, "basefee_gwei": 0.0302, "nftMintPrices": {"1": "10.78 USDC", "2": "10.61 USDC", "3": "10.02 USDC", "4": "18.24 USDS", "5": "17624 sat WBTC (~14.19 USD)", "6": "12.05 USDS", "7": "70.00 USDC"}}
+  },
+  "findings": [
+    {
+      "id": "ECON-001",
+      "type": "incentive-misalignment / spec-conformance",
+      "sharpens": "CODE-003",
+      "severity": "potential-low",
+      "contract": "src/SYAHarvester.sol + script/harvest.sh",
+      "function": "harvest (Unprofitable check) / harvest.sh step 4 (minEthOut)",
+      "line": 252,
+      "description": "Neither profitability gate prices the claim-NFT unit SYA burns. Fork evidence shows this is systematic, not an edge case: at the story-004/005 reference state the flagship 'profitable' full harvest pays 10.822 USD of ETH while burning NFT index 1 whose mint price is 10.783 USDC (+0.04 USD before gas, about -0.45 USD after gas at basefee+0.01 gwei; story-005's own validation 'profitable send' netted 0.00365 ETH ~ 8.5 USD against the same 10.78 USD NFT, i.e. ~-2.2 USD). A USDe-only harvest (USDC+DOLA exempt) succeeds on-chain and would be sent by harvest.sh (default MIN_PROFIT_WEI=0) paying 2.65 USD for a 10.78 USD NFT. At today's ~0.03 gwei base fee the gas floor is ~0.1-0.5 USD, so harvest.sh fires once pending yield exceeds ~1-2 USD, while the NFT-adjusted break-even is NFT/discount = 10.78/0.30 ~ 36 USD of pending yield (index 7: ~233 USD).",
+      "economicImpact": "Operator-only (caller) value loss up to ~one NFT mint price (10-70 USD) per harvest. Protocol is not harmed: it was paid at mint and is paid 70% of delivered yield; an early burn is protocol-favourable.",
+      "attackScenario": "No attacker. Operator runs harvest.sh with defaults (or on a schedule) while pending yield x 0.30 < NFT price; the script's floor max(sim*(1-slip), gasLimit*maxFee + 0) and the on-chain Unprofitable check both pass; the NFT unit is burned for less than its replacement cost.",
+      "profitability": "N/A (self-inflicted loss). Mitigation: add an NFT_COST_WEI / MIN_PROFIT_WEI default derived from NFTMinterV2.getPrice(nftIndex) converted to ETH, or document that MIN_PROFIT_WEI must be set to at least the NFT's value.",
+      "affectedParties": "harvest caller / operator",
+      "docQuote": "src/CLAUDE.md: 'A claim therefore has positive expected value whenever market value of the yield tokens - discounted USDC payment > gas + NFT cost.'",
+      "confidence": "high",
+      "severityRationale": "Low: user/operator self-loss bounded by one NFT per tx, controllable via MIN_PROFIT_WEI, no third-party extraction, no protocol loss. Law-2 deviation from src/CLAUDE.md's own profitability definition."
+    },
+    {
+      "id": "ECON-002",
+      "type": "doc-mismatch / profitability",
+      "severity": "potential-info",
+      "contract": "test/fork/MainnetRoutes.sol (route choice) / src/SYAHarvester.sol (_sellYield)",
+      "function": "usdeRoute / _sellYield",
+      "description": "The documented 'double fee' on pool 0xF55B (USDe/crvUSD) is real but its stated mechanism is wrong. The live CurveAMMAdapter route for sUSDe->USDe is [sUSDe, 0x5706.., crvUSD, 0xF55B.., USDe], so the strategy skim BUYS USDe from 0xF55B (fork: pool USDe 134630.07 -> 134624.36, -5.707 USDe) and the harvester then SELLS the delivered 4.29 USDe back into the same pool (net -1.417). The trades are in opposite directions, so the first trade's price impact FAVOURS the second; the cost is two pool fees plus a needless crvUSD->USDe->crvUSD round trip, not adverse price movement. Both legs are atomic inside one tx, so no third party can insert between them.",
+      "economicImpact": "Cents per harvest at current sizes; caller-side profitability only. The direct USDe/USDC pool 0x0295.. noted in MainnetRoutes avoids the round trip.",
+      "attackScenario": "None.",
+      "profitability": "N/A",
+      "affectedParties": "caller (fees); strategy-side fee is pre-existing and independent of the harvester",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-003",
+      "type": "threat-model-review (negative result)",
+      "severity": "none",
+      "contract": "src/SYAHarvester.sol x ../stable-yield-accumulator/src/src/StableYieldAccumulator.sol",
+      "function": "unlockCallback -> SYA.claim",
+      "description": "The permissionless, flash-funded harvester does not open a new path to protocol funds. (1) SYA prices a claim oracle-free: payment = (1-discount) x delivered x owner-set normalizedExchangeRate (StableYieldAccumulator.sol:614-615), pulled AFTER delivery; nothing the harvester does after claim (its Curve and V4 sales, minOut=0) can change what SYA receives. (2) Capital was never a security assumption of SYA (V4/Balancer/Morpho flash liquidity exists regardless); the harvester only lowers the claimer's capital barrier. (3) The only AMM exposure of protocol funds on the claim path is the USDe strategy's skim swap, whose minOut is NAV-anchored with slippageToleranceBps=30 (ERC4626MarketYieldStrategy._skimSurplus); a sandwich there is bounded by 30 bps of the skimmed sUSDe (~0.017 USD on today's surplus) and is the root of reflax-yield-vault M-02 d7f6c2dfd5, owner-triaged false-positive 2026-06-09 -- not re-filed. The protocol bears ~70% of any skim shortfall (payment tracks delivery), the caller ~30%; the caller's minEthOut does not protect the protocol leg, but the strategy's own bound does. (4) The harvester's allowance = calculateClaimAmount x 1.01 acts as a hard payment CEILING for harvester callers, mitigating SYA L-06(a) (no max-payment) for this integrator; with minRewardTokenSupplied=0 no floor is needed because payment is monotone in delivery. SYA L-01 (zero-payment dust claim) is not profitably reachable through the harvester (Router NG reverts on dust < 1e13 wei, CODE-002, and an NFT is burned per claim). (5) Who captures the discount: the NFT holder (msg.sender), first-come (SYA QA-01 63cff232c4, already open); at 30% discount the NFT mint price (10-70 USD) is the effective gate, ECON-001.",
+      "economicImpact": "None new. Externally-derived yield over-payment (30% discount) is opportunity cost by project policy.",
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-004",
+      "type": "MEV exposure (if private relay leaks)",
+      "severity": "potential-qa",
+      "contract": "src/SYAHarvester.sol + script/harvest.sh",
+      "function": "harvest",
+      "description": "If the operator's tx reaches the public mempool: (a) generalized front-running/replay fails because the copier must hold an NFT unit of the index and approve the harvester; (b) a rival NFT holder can win the claim race (SYA QA-01), after which the victim tx reverts atomically (NFT preserved; only gas lost if included -- Flashbots Protect does not include reverts); (c) sandwiching the harvester's sales (thinnest leg: DOLA/FRAXBP metapool, ~5.3k DOLA) is bounded by harvest.sh SLIPPAGE_BPS=50 on ethOut (~0.05 USD today) plus the 30 bps strategy bound on the protocol leg; (d) no deadline (already CODE-008(a)). Unprofitable check is caller-protection only and protocol-neutral; it over-charges by the SSTORE refund (documented, story-004 Decision 9).",
+      "economicImpact": "Sub-dollar at current harvest sizes; scales linearly with pending yield.",
+      "confidence": "medium"
+    }
+  ],
+  "notFiled": [
+    "Stray ERC1155 units accidentally sent to the harvester are swept to the next caller holding one unit of the same index (refund returns the whole balance): user-mistake, known-invalid class.",
+    "Stray ETH/USDC/yield tokens are swept to the next caller (stateless design, documented); dust variant is CODE-002.",
+    "Over-delivery > estimate x 1.01 reverting the claim: CODE-005 (DoS only, caller can exempt)."
+  ]
+}

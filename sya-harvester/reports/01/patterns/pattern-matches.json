@@ -1,0 +1,394 @@
+{
+  "project": "sya-harvester",
+  "run": "sya-harvester-01",
+  "mode": "cold",
+  "commit": "62c19c8",
+  "branch": "master",
+  "scanTimestamp": "2026-10-24T22:46:43Z",
+  "scanType": "pattern-matching",
+  "patternDb": "patterns/vulnerability-patterns.json",
+  "patternsLoaded": 35,
+  "patternsChecked": 32,
+  "patternsSkipped": [
+    {
+      "id": "FRONTRUN-APPROVE",
+      "reason": "note: C4 QA/known issue. Zero hits anyway (forceApprove to exact amount then reset to 0).",
+      "matchedAt": []
+    },
+    {
+      "id": "CENTRALIZATION-ADMIN",
+      "reason": "note: C4 treats centralization as Low/QA unless it enables rug pull; owner trusted (Law 3). onlyOwner on setRoute/clearRoute/setEthPool (L129,L155,L173) matched. No HM twist: the owner cannot divert caller ETH or SYA funds beyond loud reverts; owner-config validation gaps routed as OBS-01/OBS-02.",
+      "matchedAt": [
+        "src/SYAHarvester.sol:129",
+        "src/SYAHarvester.sol:155",
+        "src/SYAHarvester.sol:173"
+      ]
+    },
+    {
+      "id": "PERMIT-FRONTRUN",
+      "reason": "note: usually low (griefing only). Zero hits.",
+      "matchedAt": []
+    }
+  ],
+  "scope": {
+    "primary": [
+      "src/SYAHarvester.sol",
+      "src/interfaces/ICurveRouterNG.sol"
+    ],
+    "alsoGrepped": "all 16 first-party .sol under sya-harvester/src excluding lib/ (tests/mocks/fixtures); test-only hits recorded as false positives",
+    "nonSolidityReviewedForContext": [
+      "script/harvest.sh (minEthOut derivation)"
+    ]
+  },
+  "findingsCount": 0,
+  "findings": [],
+  "manualReviewCount": 4,
+  "manualReview": [
+    {
+      "id": "PATTERN-MR-01",
+      "source": "pattern-db",
+      "patternId": "MISSING-SLIPPAGE",
+      "type": "zero-min-out-multihop",
+      "severity": "potential-low",
+      "patternSeverity": "HIGH",
+      "contract": "src/SYAHarvester.sol",
+      "function": "_sellYield / _swapSurplusAndSettle",
+      "line": 318,
+      "description": "Every intermediate leg runs with no minimum: router.exchange(..., _expected=0, ...) per yield token (L318), V4 swap exact-input with sqrtPriceLimitX96 = MAX_SQRT_PRICE-1 i.e. no price bound (L328-336), and sya.claim(nftIndex, 0, exempt) (L285). harvest() has no deadline parameter. Pattern conditions 'amountOutMin = 0' and 'no deadline' are met; 'user cannot specify minimum' is NOT met: the single aggregate minEthOut check (L249) is an atomic end-to-end bound, and the operator script sets minEthOut = max(simEthOut*(1-50bps), gas floor) and submits via a private relay (script/harvest.sh L12, L234-247, L255+). Sandwich value at risk is only the caller's own harvest profit; SYA's payment is fixed at par from skimSurplus and is not affected by the sale price, so no protocol/third-party value is exposed. Downgraded from pattern HIGH for that reason.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "router.exchange(r.path, r.swapParams, balance, 0, r.pools, address(this))",
+        "sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1",
+        "sya.claim(nftIndex, 0, exempt)"
+      ],
+      "mitigationsFound": [
+        "aggregate minEthOut check after the atomic unlock (L249)",
+        "on-chain Unprofitable gas floor (L251-252)",
+        "harvest.sh 50bps haircut on fee-carrying simulation + Flashbots private submission"
+      ],
+      "missingMitigations": [
+        "no deadline on harvest()",
+        "contract accepts minEthOut=0 (direct callers/integrators bypassing harvest.sh rely on the gas floor only)"
+      ],
+      "verificationNeeded": "Confirm harvest.sh minEthOut derivation is from the same fee-carrying simulation that will execute (bc math, SLIPPAGE_BPS bounds 0..10000), and that a stale/delayed private tx cannot execute against a materially worse state than minEthOut tolerates. Likely QA at most.",
+      "branch": "master",
+      "commit": "62c19c8",
+      "references": []
+    },
+    {
+      "id": "PATTERN-MR-02",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "type": "whole-balance-payout",
+      "severity": "potential-low",
+      "patternSeverity": "MEDIUM",
+      "contract": "src/SYAHarvester.sol",
+      "function": "harvest",
+      "line": 248,
+      "description": "ethOut = address(this).balance (L248) pays the WHOLE ETH balance to msg.sender, and surplus = IERC20(reward).balanceOf(address(this)) - owed (L291) swaps the WHOLE reward-token balance; the NFT refund returns the WHOLE balance of nftIndex (L242-244); _sellYield sells the WHOLE balance of each strategy token (L312). Matches 'contract balance paid out', 'recipient caller-chosen', 'payout not compared to contribution'. Also SELFDESTRUCT-FORCE-ETH (balance-dependent logic). Mitigating context: the contract is stateless between calls, receive() only accepts ETH from the PoolManager (L297-299), so any pot is stray value left by a third party (forced ETH, PoolManager.take donations, mistaken ERC20/ERC1155 transfers, V4 partial-fill leftovers if the price limit were ever reached). That is user-error value captured by the next caller, not an attack on honest users. Stray ETH can also make a gas-unprofitable harvest pass the Unprofitable check (benign). No rescue/sweep function exists, so mistakenly-sent assets are recoverable only by whoever harvests next.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "ethOut = address(this).balance",
+        "IERC20(reward).balanceOf(address(this)) - owed",
+        "IERC1155(nftAddr).balanceOf(address(this), nftIndex)"
+      ],
+      "mitigationsFound": [
+        "stateless contract; receive() restricted to PoolManager; design decision documented in harvest() NatSpec (whole-balance NFT refund)"
+      ],
+      "missingMitigations": [
+        "no owner sweep for mistakenly-sent assets"
+      ],
+      "verificationNeeded": "Confirm no path leaves an honest caller's value in the contract at the end of a successful harvest (V4 partial fill with sqrtPriceLimit MAX-1 should be unreachable; check hooks on the configured ethPool cannot return a delta that leaves reward/ETH behind). Expected QA/informational.",
+      "branch": "master",
+      "commit": "62c19c8",
+      "references": []
+    },
+    {
+      "id": "PATTERN-MR-03",
+      "source": "pattern-db",
+      "patternId": "FLASH-LOAN-PRICE",
+      "type": "donation-griefing-balance-based-sell",
+      "severity": "potential-low",
+      "patternSeverity": "HIGH",
+      "contract": "src/SYAHarvester.sol",
+      "function": "_sellYield",
+      "line": 312,
+      "description": "Balance-based branching in _sellYield (L312-315): for each non-exempt strategy token, a non-zero harvester balance with no registered route reverts RouteNotConfigured, and any non-zero balance is routed through Curve Router NG. An unprivileged griefer can donate 1 wei of a non-exempt strategy token (e.g. a token whose strategy delivered nothing this round, a token paused in SYA, or a registered strategy whose route the owner has not set) to force either RouteNotConfigured or a dust Curve exchange that may revert in some pool types (e.g. StableSwap-NG `dy = xp[j] - y - 1` underflow / ERC4626 zero-share deposit). Because the dust persists (no sweep), the DoS persists until a harvest sells it or the caller passes the strategy in exemptStrategies. Workaround exists (exempt the strategy; it had no yield anyway), and harvest.sh exempt list is manual, so impact is liveness/operator friction only. The DB pattern's spot-price conditions (critical spot-price decision, no TWAP) are NOT met: the harvester uses no price oracle and SYA prices claims at par from skimSurplus.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "IERC20(token).balanceOf(address(this))",
+        "if (!r.configured) revert RouteNotConfigured(token)"
+      ],
+      "mitigationsFound": [
+        "caller can exempt the strategy; a strategy delivering real yield sells the dust together with its yield"
+      ],
+      "missingMitigations": [
+        "no dust threshold / no skip on unrouted dust"
+      ],
+      "verificationNeeded": "Verify on a fork whether Curve Router NG / the registered mainnet pools revert on a 1-wei exchange for each MainnetRoutes route; if any does, the griefing is concrete (Low).",
+      "branch": "master",
+      "commit": "62c19c8",
+      "references": []
+    },
+    {
+      "id": "PATTERN-MR-04",
+      "source": "pattern-db",
+      "patternId": "REENTRANCY-ERC721-RECEIVE",
+      "type": "erc1155-receiver-reentry",
+      "severity": "potential-low",
+      "patternSeverity": "HIGH",
+      "contract": "src/SYAHarvester.sol",
+      "function": "harvest",
+      "line": 244,
+      "description": "safeTransferFrom(address(this), msg.sender, nftIndex, bal, '') (L244) invokes msg.sender.onERC1155Received AFTER the unlock has produced the ETH and BEFORE ethOut = address(this).balance is read (L248) and paid (L254); harvest() has no nonReentrant. A re-entrant harvest from the hook would read and pay out the outer call's ETH. Conditions 'no reentrancy guard' and 'hook can re-enter' are met, but there is no victim: the hook runs only in the caller's own contract, the ETH in flight belongs to that same caller, the PoolManager unlock and SYA claim (nonReentrant) have already completed, and the harvester holds no other state. A nested unlock during the callback is impossible (AlreadyUnlocked). Inbound pull (L236) hits the harvester's own ERC1155Holder hook only.",
+      "confidence": "low",
+      "matchedSignatures": [
+        "IERC1155(nftAddr).safeTransferFrom(address(this), msg.sender, nftIndex, bal, \"\")",
+        "no nonReentrant on harvest"
+      ],
+      "mitigationsFound": [
+        "stateless contract; ETH only exists transiently for the current caller; SYA.claim nonReentrant; V4 single-unlock"
+      ],
+      "missingMitigations": [
+        "no reentrancy guard (not needed given statelessness)"
+      ],
+      "verificationNeeded": "Confirm no stray third-party ETH can be present at L244 time beyond BATCH-PAYOUT case above; otherwise informational.",
+      "branch": "master",
+      "commit": "62c19c8",
+      "references": []
+    }
+  ],
+  "nonPatternObservations": [
+    {
+      "id": "OBS-01",
+      "kind": "non-DB observation (Curve Router NG route-encoding)",
+      "severity": "potential-low",
+      "line": 133,
+      "function": "setRoute",
+      "description": "setRoute validates only path[0]==token and that the LAST non-zero path entry equals sya.rewardToken(). Curve Router NG stops at the FIRST zero pool slot (it breaks when _route[i*2+1]==0), so a path with an interior gap (e.g. [T,p0,X,0,Y,p2,USDC,...]) passes validation but the router outputs X. swapParams (i,j,swap_type,pool_type,n_coins) and pools are not validated, and a route ending in native ETH (0xEeee / swap_type 8 unwrap) would be rejected by receive() (NotPoolManager). Consequence is a loud harvest revert (surplus underflow L291 / receive revert), not value loss: owner-config validation that gives false assurance. Hand to code-scanner; QA."
+    },
+    {
+      "id": "OBS-02",
+      "kind": "non-DB observation (config staleness across repos)",
+      "severity": "potential-low",
+      "line": 139,
+      "function": "setRoute / setEthPool",
+      "description": "Routes and ethPool are validated against sya.rewardToken() at SET time only (L139, L174); harvest re-reads rewardToken at run time (L280). SYA exposes setRewardToken (see memory: stable-yield-accumulator run-14). After a reward-token change every stored route ends in the old token and ethPool.currency1 is the old token, so harvest reverts (underflow or CurrencyNotSettled) until the owner re-registers everything. Liveness only; possible non-obvious owner footgun across repos (Law 3). Hand to code-scanner/econ-scanner."
+    },
+    {
+      "id": "OBS-03",
+      "kind": "V4 delta accounting review (no issue)",
+      "severity": "none",
+      "line": 282,
+      "function": "unlockCallback / _swapSurplusAndSettle",
+      "description": "Checked: take(reward, owed) -> delta -owed; exact-input swap zeroForOne=false (amountSpecified = -surplus) -> amount1<0 added to debt, amount0>0 taken as native; sync(reward) precedes the safeTransfer and settle() (correct ERC20 settle order, no msg.value); take(native) delivered to receive() from PoolManager. All deltas net to zero for a non-hooked pool; hook deltas are included in the returned BalanceDelta. Callback access control: msg.sender==poolManager and V4 only calls back the unlock caller, so the check is sufficient. int128 negation/casting paths cannot be reached with wrong signs for exact-input. No pattern match."
+    },
+    {
+      "id": "OBS-04",
+      "kind": "flash-loan-funded claim pricing (no issue in harvester)",
+      "severity": "none",
+      "line": 281,
+      "function": "unlockCallback",
+      "description": "owed = calculateClaimAmount*1.01; allowance to SYA is exactly owed and reset to 0. SYA charges actualPayment computed from skimSurplus at par minus discount; if actualPayment > owed, SYA's transferFrom reverts (loud). Sale price does not affect SYA's receipt; a yield-token depeg below (1-discount) makes harvest revert via surplus underflow (loud). Donation into a strategy to inflate skim is unprofitable (attacker pays (1-d) for value it donated). No FLASH-LOAN-PRICE condition in the harvester."
+    }
+  ],
+  "patternResults": [
+    {
+      "id": "ERC4626-INFLATION",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "ORACLE-STALE",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "ORACLE-ROUNDID",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "REENTRANCY-ERC777",
+      "status": "matched-not-vulnerable: no persistent state; SafeERC20; USDC reward",
+      "srcHits": 9,
+      "testHits": 20
+    },
+    {
+      "id": "SIGNATURE-REPLAY",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "FLASH-LOAN-PRICE",
+      "status": "manualReview PATTERN-MR-03",
+      "srcHits": 2,
+      "testHits": 0
+    },
+    {
+      "id": "UNSAFE-DOWNCAST",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "DIVISION-PRECISION",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "UNPROTECTED-INIT",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "STORAGE-COLLISION",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "MISSING-SLIPPAGE",
+      "status": "manualReview PATTERN-MR-01",
+      "srcHits": 3,
+      "testHits": 1
+    },
+    {
+      "id": "RETURN-VALUE-IGNORE",
+      "status": "test-only-false-positive",
+      "srcHits": 0,
+      "testHits": 7
+    },
+    {
+      "id": "SELFDESTRUCT-FORCE-ETH",
+      "status": "manualReview PATTERN-MR-02 (merged)",
+      "srcHits": 1,
+      "testHits": 0
+    },
+    {
+      "id": "DOS-UNBOUNDED-LOOP",
+      "status": "heuristic: loops at L134 (fixed 11), L308 (owner-bounded SYA strategy list), L352 (caller-supplied exempt; self-griefing only); not vulnerable",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "DOUBLE-VOTING",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "FIRST-DEPOSITOR-ATTACK",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "INCORRECT-OPERATOR",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "CROSS-CHAIN-REPLAY",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "TIMELOCK-BYPASS",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "REWARD-ACCRUAL-ORDER",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "REWARD-RUNWAY-DEPLETION",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "EMISSION-WINDOW-BOUNDARY",
+      "status": "test-only-false-positive",
+      "srcHits": 0,
+      "testHits": 1
+    },
+    {
+      "id": "MINT-ON-DEMAND-OVERMINT",
+      "status": "test-only-false-positive",
+      "srcHits": 0,
+      "testHits": 7
+    },
+    {
+      "id": "BATCH-PAYOUT-FIXED-POT",
+      "status": "manualReview PATTERN-MR-02",
+      "srcHits": 2,
+      "testHits": 0
+    },
+    {
+      "id": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+      "status": "false positive (skimSurplus only in NatSpec of SRC; real logic is SYA-side, cross-repo)",
+      "srcHits": 1,
+      "testHits": 12
+    },
+    {
+      "id": "TWO-STEP-COMMIT-WINDOW",
+      "status": "false positive ('100' in BORROW_BUFFER_BPS, 'pending' in comments)",
+      "srcHits": 3,
+      "testHits": 23
+    },
+    {
+      "id": "REENTRANCY-ERC721-RECEIVE",
+      "status": "manualReview PATTERN-MR-04",
+      "srcHits": 2,
+      "testHits": 5
+    },
+    {
+      "id": "REENTRANCY-READONLY",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "REENTRANCY-CROSS-FUNCTION",
+      "status": "matched-not-vulnerable: no shared state to desync (stateless)",
+      "srcHits": 2,
+      "testHits": 3
+    },
+    {
+      "id": "ROUNDING-DIRECTION",
+      "status": "no-match",
+      "srcHits": 0,
+      "testHits": 0
+    },
+    {
+      "id": "WEAK-PRNG",
+      "status": "test-only-false-positive",
+      "srcHits": 0,
+      "testHits": 2
+    },
+    {
+      "id": "FEE-ON-TRANSFER-ACCOUNTING",
+      "status": "matched-not-vulnerable: balance-measured sale; FoT reward would revert CurrencyNotSettled (loud); USDC only",
+      "srcHits": 11,
+      "testHits": 26
+    }
+  ],
+  "errors": [],
+  "crossRefs": {
+    "static": "reports/01/static/static-analysis-findings.json: SLITHER-001 arbitrary-send-eth L254 (msg.sender payout, by design), ADERYN-001/002 reentrancy-no-eth L139/L174 (owner setters reading sya.rewardToken(); benign) are consistent with PATTERN-MR-02/MR-04 being low-risk",
+    "crossRepo": "SYA claim/calculateClaimAmount/_validateAndBurnNFT read from ../stable-yield-accumulator/src (top-level sibling, not nested pin)"
+  }
+}
