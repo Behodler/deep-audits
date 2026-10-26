@@ -1,0 +1,1166 @@
+{
+ "project": "sya-harvester",
+ "run": "sya-harvester-02",
+ "mode": "regression",
+ "commit": "6b862aa",
+ "branch": "master",
+ "baseline": {
+  "run": "sya-harvester-01",
+  "commit": "62c19c8",
+  "file": "reports/01/patterns/pattern-matches.json"
+ },
+ "scanTimestamp": "2026-10-25T17:30:00Z",
+ "scanType": "pattern-matching",
+ "patternDb": "patterns/vulnerability-patterns.json",
+ "patternDbVersion": "1.1",
+ "patternsLoaded": 35,
+ "patternsChecked": 32,
+ "patternsSkipped": [
+  {
+   "id": "FRONTRUN-APPROVE",
+   "reason": "note: C4 QA/known issue. Zero hits anyway (forceApprove to exact amount then reset to 0).",
+   "matchedAt": [],
+   "regression": "carried"
+  },
+  {
+   "id": "CENTRALIZATION-ADMIN",
+   "reason": "note: C4 treats centralization as Low/QA unless it enables rug pull; owner trusted (Law 3). onlyOwner on setRoute/clearRoute/setEthPool (L129,L155,L173) matched. No HM twist: the owner cannot divert caller ETH or SYA funds beyond loud reverts; owner-config validation gaps routed as OBS-01/OBS-02. Run-02: lines shifted (+45/+27); rewritten setRoute is still onlyOwner; no HM twist (stricter validator only narrows owner-accepted inputs).",
+   "matchedAt": [
+    "src/SYAHarvester.sol:156",
+    "src/SYAHarvester.sol:200",
+    "src/SYAHarvester.sol:218"
+   ],
+   "regression": "carried"
+  },
+  {
+   "id": "PERMIT-FRONTRUN",
+   "reason": "note: usually low (griefing only). Zero hits.",
+   "matchedAt": [],
+   "regression": "carried"
+  }
+ ],
+ "scope": {
+  "primary": [
+   "src/SYAHarvester.sol",
+   "src/interfaces/ICurveRouterNG.sol"
+  ],
+  "regressionFocus": [
+   "src/SYAHarvester.sol::setRoute",
+   "test/SYAHarvester.routeGap.t.sol",
+   "test/mocks/MockCurveRouter.t.sol"
+  ],
+  "alsoGrepped": "all 18 computedInScope first-party .sol (run-setup.json), excluding src/lib/; test-only hits recorded as false positives",
+  "scopeFileCount": 18,
+  "nonSolidityReviewedForContext": [
+   "script/harvest.sh (diff: +4 KNOWN_ERRORS only; minEthOut derivation unchanged)"
+  ]
+ },
+ "findingsCount": 0,
+ "findings": [],
+ "manualReviewCount": 4,
+ "manualReview": [
+  {
+   "id": "PATTERN-MR-01",
+   "source": "pattern-db",
+   "patternId": "MISSING-SLIPPAGE",
+   "type": "zero-min-out-multihop",
+   "severity": "potential-low",
+   "patternSeverity": "HIGH",
+   "contract": "src/SYAHarvester.sol",
+   "function": "_sellYield / _swapSurplusAndSettle",
+   "line": 363,
+   "description": "Every intermediate leg runs with no minimum: router.exchange(..., _expected=0, ...) per yield token (L318), V4 swap exact-input with sqrtPriceLimitX96 = MAX_SQRT_PRICE-1 i.e. no price bound (L328-336), and sya.claim(nftIndex, 0, exempt) (L285). harvest() has no deadline parameter. Pattern conditions 'amountOutMin = 0' and 'no deadline' are met; 'user cannot specify minimum' is NOT met: the single aggregate minEthOut check (L249) is an atomic end-to-end bound, and the operator script sets minEthOut = max(simEthOut*(1-50bps), gas floor) and submits via a private relay (script/harvest.sh L12, L234-247, L255+). Sandwich value at risk is only the caller's own harvest profit; SYA's payment is fixed at par from skimSurplus and is not affected by the sale price, so no protocol/third-party value is exposed. Downgraded from pattern HIGH for that reason.",
+   "confidence": "low",
+   "matchedSignatures": [
+    "router.exchange(r.path, r.swapParams, balance, 0, r.pools, address(this))",
+    "sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1",
+    "sya.claim(nftIndex, 0, exempt)"
+   ],
+   "mitigationsFound": [
+    "aggregate minEthOut check after the atomic unlock (L249)",
+    "on-chain Unprofitable gas floor (L251-252)",
+    "harvest.sh 50bps haircut on fee-carrying simulation + Flashbots private submission"
+   ],
+   "missingMitigations": [
+    "no deadline on harvest()",
+    "contract accepts minEthOut=0 (direct callers/integrators bypassing harvest.sh rely on the gas floor only)"
+   ],
+   "verificationNeeded": "Confirm harvest.sh minEthOut derivation is from the same fee-carrying simulation that will execute (bc math, SLIPPAGE_BPS bounds 0..10000), and that a stale/delayed private tx cannot execute against a materially worse state than minEthOut tolerates. Likely QA at most.",
+   "branch": "master",
+   "commit": "6b862aa",
+   "references": [],
+   "run01Line": 318,
+   "regression": "carried",
+   "regressionReason": "Function untouched by 6b862aa (run-setup changedFunctions: only setRoute + errors changed); line shift +45 from validator rewrite. L363 router.exchange(..,0,..); L373-381 V4 swap sqrtPriceLimit MAX-1; L330 sya.claim(nftIndex,0,exempt); minEthOut check L294. harvest.sh diff is +4 KNOWN_ERRORS entries only; minEthOut derivation (L238-251) and Flashbots relay (L260-266) unchanged.",
+   "run01Id": "PATTERN-MR-01"
+  },
+  {
+   "id": "PATTERN-MR-02",
+   "source": "pattern-db",
+   "patternId": "BATCH-PAYOUT-FIXED-POT",
+   "type": "whole-balance-payout",
+   "severity": "potential-low",
+   "patternSeverity": "MEDIUM",
+   "contract": "src/SYAHarvester.sol",
+   "function": "harvest",
+   "line": 293,
+   "description": "ethOut = address(this).balance (L248) pays the WHOLE ETH balance to msg.sender, and surplus = IERC20(reward).balanceOf(address(this)) - owed (L291) swaps the WHOLE reward-token balance; the NFT refund returns the WHOLE balance of nftIndex (L242-244); _sellYield sells the WHOLE balance of each strategy token (L312). Matches 'contract balance paid out', 'recipient caller-chosen', 'payout not compared to contribution'. Also SELFDESTRUCT-FORCE-ETH (balance-dependent logic). Mitigating context: the contract is stateless between calls, receive() only accepts ETH from the PoolManager (L297-299), so any pot is stray value left by a third party (forced ETH, PoolManager.take donations, mistaken ERC20/ERC1155 transfers, V4 partial-fill leftovers if the price limit were ever reached). That is user-error value captured by the next caller, not an attack on honest users. Stray ETH can also make a gas-unprofitable harvest pass the Unprofitable check (benign). No rescue/sweep function exists, so mistakenly-sent assets are recoverable only by whoever harvests next.",
+   "confidence": "low",
+   "matchedSignatures": [
+    "ethOut = address(this).balance",
+    "IERC20(reward).balanceOf(address(this)) - owed",
+    "IERC1155(nftAddr).balanceOf(address(this), nftIndex)"
+   ],
+   "mitigationsFound": [
+    "stateless contract; receive() restricted to PoolManager; design decision documented in harvest() NatSpec (whole-balance NFT refund)"
+   ],
+   "missingMitigations": [
+    "no owner sweep for mistakenly-sent assets"
+   ],
+   "verificationNeeded": "Confirm no path leaves an honest caller's value in the contract at the end of a successful harvest (V4 partial fill with sqrtPriceLimit MAX-1 should be unreachable; check hooks on the configured ethPool cannot return a delta that leaves reward/ETH behind). Expected QA/informational.",
+   "branch": "master",
+   "commit": "6b862aa",
+   "references": [],
+   "run01Line": 248,
+   "regression": "carried",
+   "regressionReason": "Function untouched by 6b862aa (run-setup changedFunctions: only setRoute + errors changed); line shift +45 from validator rewrite. L293 ethOut = address(this).balance; L336 surplus; L287-289 NFT whole-balance refund; L357 whole-balance sell. Same as profile LOCAL-002/LOCAL-004.",
+   "run01Id": "PATTERN-MR-02"
+  },
+  {
+   "id": "PATTERN-MR-03",
+   "source": "pattern-db",
+   "patternId": "FLASH-LOAN-PRICE",
+   "type": "donation-griefing-balance-based-sell",
+   "severity": "potential-low",
+   "patternSeverity": "HIGH",
+   "contract": "src/SYAHarvester.sol",
+   "function": "_sellYield",
+   "line": 357,
+   "description": "Balance-based branching in _sellYield (L312-315): for each non-exempt strategy token, a non-zero harvester balance with no registered route reverts RouteNotConfigured, and any non-zero balance is routed through Curve Router NG. An unprivileged griefer can donate 1 wei of a non-exempt strategy token (e.g. a token whose strategy delivered nothing this round, a token paused in SYA, or a registered strategy whose route the owner has not set) to force either RouteNotConfigured or a dust Curve exchange that may revert in some pool types (e.g. StableSwap-NG `dy = xp[j] - y - 1` underflow / ERC4626 zero-share deposit). Because the dust persists (no sweep), the DoS persists until a harvest sells it or the caller passes the strategy in exemptStrategies. Workaround exists (exempt the strategy; it had no yield anyway), and harvest.sh exempt list is manual, so impact is liveness/operator friction only. The DB pattern's spot-price conditions (critical spot-price decision, no TWAP) are NOT met: the harvester uses no price oracle and SYA prices claims at par from skimSurplus.",
+   "confidence": "low",
+   "matchedSignatures": [
+    "IERC20(token).balanceOf(address(this))",
+    "if (!r.configured) revert RouteNotConfigured(token)"
+   ],
+   "mitigationsFound": [
+    "caller can exempt the strategy; a strategy delivering real yield sells the dust together with its yield"
+   ],
+   "missingMitigations": [
+    "no dust threshold / no skip on unrouted dust"
+   ],
+   "verificationNeeded": "Verify on a fork whether Curve Router NG / the registered mainnet pools revert on a 1-wei exchange for each MainnetRoutes route; if any does, the griefing is concrete (Low).",
+   "branch": "master",
+   "commit": "6b862aa",
+   "references": [],
+   "run01Line": 312,
+   "regression": "carried",
+   "regressionReason": "Function untouched by 6b862aa (run-setup changedFunctions: only setRoute + errors changed); line shift +45 from validator rewrite. L357-360 balance-based sell / RouteNotConfigured. Same as profile LOCAL-003 (still open at 6b862aa).",
+   "run01Id": "PATTERN-MR-03"
+  },
+  {
+   "id": "PATTERN-MR-04",
+   "source": "pattern-db",
+   "patternId": "REENTRANCY-ERC721-RECEIVE",
+   "type": "erc1155-receiver-reentry",
+   "severity": "potential-low",
+   "patternSeverity": "HIGH",
+   "contract": "src/SYAHarvester.sol",
+   "function": "harvest",
+   "line": 289,
+   "description": "safeTransferFrom(address(this), msg.sender, nftIndex, bal, '') (L244) invokes msg.sender.onERC1155Received AFTER the unlock has produced the ETH and BEFORE ethOut = address(this).balance is read (L248) and paid (L254); harvest() has no nonReentrant. A re-entrant harvest from the hook would read and pay out the outer call's ETH. Conditions 'no reentrancy guard' and 'hook can re-enter' are met, but there is no victim: the hook runs only in the caller's own contract, the ETH in flight belongs to that same caller, the PoolManager unlock and SYA claim (nonReentrant) have already completed, and the harvester holds no other state. A nested unlock during the callback is impossible (AlreadyUnlocked). Inbound pull (L236) hits the harvester's own ERC1155Holder hook only.",
+   "confidence": "low",
+   "matchedSignatures": [
+    "IERC1155(nftAddr).safeTransferFrom(address(this), msg.sender, nftIndex, bal, \"\")",
+    "no nonReentrant on harvest"
+   ],
+   "mitigationsFound": [
+    "stateless contract; ETH only exists transiently for the current caller; SYA.claim nonReentrant; V4 single-unlock"
+   ],
+   "missingMitigations": [
+    "no reentrancy guard (not needed given statelessness)"
+   ],
+   "verificationNeeded": "Confirm no stray third-party ETH can be present at L244 time beyond BATCH-PAYOUT case above; otherwise informational.",
+   "branch": "master",
+   "commit": "6b862aa",
+   "references": [],
+   "run01Line": 244,
+   "regression": "carried",
+   "regressionReason": "Function untouched by 6b862aa (run-setup changedFunctions: only setRoute + errors changed); line shift +45 from validator rewrite. L289 safeTransferFrom refund before L293 balance read and L299 payout. Was parked in reports/01/manual-review.json row 50 as refuted (no victim); premise (stateless, recipient == msg.sender) still holds at 6b862aa. Kept low-confidence here per never-drop rule; reopen only if harvester gains persistent state or a non-caller recipient.",
+   "run01Id": "PATTERN-MR-04"
+  }
+ ],
+ "nonPatternObservations": [
+  {
+   "id": "OBS-01",
+   "regression": "no-longer-matching (root cause resolved)",
+   "kind": "non-DB observation (Curve Router NG route-encoding)",
+   "severity": "potential-low",
+   "line": "157-185",
+   "function": "setRoute",
+   "description": "Run-01 OBS-01 (last-non-zero end check vs first-empty-pool termination; = ledger M-01 004d4547d9 fix-pending) is resolved at path level by the 6b862aa rewrite: k derived from first empty pool slot (L161-162), InvalidRouteGap on any entry after the executed prefix (L164-166), InvalidRouteToken on zero executed intermediates (L168-170), InvalidRouteEnd on delivered=path[2k] (L171-173), and unexecuted swapParams rows / pools forced zero (L176-185). Spot-reproduced this session: reports/02/profiles/evidence/route-validator-model.py -> \"accepted but router not delivering R: 1\", the single case being the k=0 reward-token route [R,0x10] which reverts in Router NG (never executed: _sellYield skips the reward token, L356). Zero accepted routes deliver a non-reward token, so the silent strand cannot recur. ETH-ending routes (receive() NotPoolManager) are also now rejected via InvalidRouteEnd since delivered must equal rewardToken. Residual over-acceptance is fail-loud only: see OBS-05.",
+   "bearsOn": "ledger M-01 004d4547d9 \u2014 candidate for a human PROPOSED-fixed after the work/ PoC is renamed (_gapPath collision) and replayed; this agent does not change status"
+  },
+  {
+   "id": "OBS-05",
+   "regression": "new",
+   "kind": "non-DB observation (setRoute residual validation, fail-loud)",
+   "severity": "potential-low",
+   "line": "177-178",
+   "function": "setRoute",
+   "description": "Executed rows require only swapParams[h][2] != 0. Deployed Router NG v1.1 (0x16C6...) dispatches swap_type 1..8 and raises \"Bad swap type\" otherwise, so swap_type >= 9 is stored and reverts every harvest selling that token. i/j/pool_type/n_coins and executed-hop pools are unconstrained by design (story-007 out-of-scope); a wrong i/j reverts in Router NG (\"Received nothing\"). All consequences are loud reverts, no strand, no value at risk; caller can exempt the strategy. Same as profile LOCAL-006/LOCAL-007. Not a pattern-DB match (closest: INCORRECT-OPERATOR, but not a deadline/threshold boundary). Hand to code-scanner as QA/Low."
+  },
+  {
+   "id": "OBS-02",
+   "regression": "carried (extended)",
+   "kind": "non-DB observation (config staleness across repos)",
+   "severity": "potential-low",
+   "line": "171, 219, 325",
+   "function": "setRoute / setEthPool / unlockCallback",
+   "description": "Unchanged root: routes and ethPool validated against sya.rewardToken() at set time only; unlockCallback reads it live (L325). Run-02 extension: the canonical k=0 route stored for the then-current reward token becomes reachable after SYA setRewardToken if a strategy delivers the old token, and reverts inside Router NG with empty revert data that harvest.sh cannot decode. Fail-loud liveness; cross-owner footgun (Law 3). Same as profile LOCAL-005; ledger L-03-related."
+  },
+  {
+   "id": "OBS-03",
+   "kind": "V4 delta accounting review (no issue)",
+   "severity": "none",
+   "line": 327,
+   "function": "unlockCallback / _swapSurplusAndSettle",
+   "description": "Checked: take(reward, owed) -> delta -owed; exact-input swap zeroForOne=false (amountSpecified = -surplus) -> amount1<0 added to debt, amount0>0 taken as native; sync(reward) precedes the safeTransfer and settle() (correct ERC20 settle order, no msg.value); take(native) delivered to receive() from PoolManager. All deltas net to zero for a non-hooked pool; hook deltas are included in the returned BalanceDelta. Callback access control: msg.sender==poolManager and V4 only calls back the unlock caller, so the check is sufficient. int128 negation/casting paths cannot be reached with wrong signs for exact-input. No pattern match.",
+   "regression": "carried (code untouched; lines now L327 take, L373-392 swap/settle/take)"
+  },
+  {
+   "id": "OBS-04",
+   "kind": "flash-loan-funded claim pricing (no issue in harvester)",
+   "severity": "none",
+   "line": 326,
+   "function": "unlockCallback",
+   "description": "owed = calculateClaimAmount*1.01; allowance to SYA is exactly owed and reset to 0. SYA charges actualPayment computed from skimSurplus at par minus discount; if actualPayment > owed, SYA's transferFrom reverts (loud). Sale price does not affect SYA's receipt; a yield-token depeg below (1-discount) makes harvest revert via surplus underflow (loud). Donation into a strategy to inflate skim is unprofitable (attacker pays (1-d) for value it donated). No FLASH-LOAN-PRICE condition in the harvester.",
+   "regression": "carried (code untouched; L326 owed)"
+  }
+ ],
+ "patternResults": [
+  {
+   "id": "ERC4626-INFLATION",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "ORACLE-STALE",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "ORACLE-ROUNDID",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "REENTRANCY-ERC777",
+   "status": "matched-not-vulnerable: no persistent state; SafeERC20; USDC reward (unchanged)",
+   "srcHits": 9,
+   "testHits": 33,
+   "run01": {
+    "srcHits": 9,
+    "testHits": 20
+   },
+   "regression": "carried",
+   "testHitDeltaReason": "new/changed test files (fork.t, registry.t, routeGap.t, MockCurveRouter.sol/.t.sol); all test-only, no production analogue"
+  },
+  {
+   "id": "SIGNATURE-REPLAY",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "FLASH-LOAN-PRICE",
+   "status": "manualReview PATTERN-MR-03 (carried)",
+   "srcHits": 2,
+   "testHits": 9,
+   "run01": {
+    "srcHits": 2,
+    "testHits": 0
+   },
+   "regression": "carried",
+   "testHitDeltaReason": "new/changed test files (fork.t, registry.t, routeGap.t, MockCurveRouter.sol/.t.sol); all test-only, no production analogue"
+  },
+  {
+   "id": "UNSAFE-DOWNCAST",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "DIVISION-PRECISION",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "UNPROTECTED-INIT",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "STORAGE-COLLISION",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "MISSING-SLIPPAGE",
+   "status": "manualReview PATTERN-MR-01 (carried)",
+   "srcHits": 3,
+   "testHits": 16,
+   "run01": {
+    "srcHits": 3,
+    "testHits": 1
+   },
+   "regression": "carried",
+   "testHitDeltaReason": "new/changed test files (fork.t, registry.t, routeGap.t, MockCurveRouter.sol/.t.sol); all test-only, no production analogue; new-in-scope files hit: ['test/SYAHarvester.routeGap.t.sol', 'test/mocks/MockCurveRouter.t.sol']"
+  },
+  {
+   "id": "RETURN-VALUE-IGNORE",
+   "status": "test-only-false-positive",
+   "srcHits": 0,
+   "testHits": 9,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 7
+   },
+   "regression": "carried",
+   "testHitDeltaReason": "new/changed test files (fork.t, registry.t, routeGap.t, MockCurveRouter.sol/.t.sol); all test-only, no production analogue"
+  },
+  {
+   "id": "SELFDESTRUCT-FORCE-ETH",
+   "status": "manualReview PATTERN-MR-02 (merged, carried)",
+   "srcHits": 1,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 1,
+    "testHits": 0
+   },
+   "regression": "carried"
+  },
+  {
+   "id": "DOS-UNBOUNDED-LOOP",
+   "status": "heuristic: loops at L162 (k-while, <=5), L164 (gap, <=10), L168 (token, <=4), L176/L180 (hop x field, 5x5) all fixed-bound in rewritten setRoute; L353 (SYA-owner-bounded strategy list), L397 (caller-supplied exempt; self-griefing only); not vulnerable",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "DOUBLE-VOTING",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "FIRST-DEPOSITOR-ATTACK",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "INCORRECT-OPERATOR",
+   "status": "no signature hit. Heuristic check of new setRoute boundaries (k<5 short-circuit before path[2k+1]; gap loop i=2k+1..10 empty at k=5; intermediates 0<i<k; delivered=path[2k]; h<k executed vs h>=k unexecuted) matches deployed Router NG v1.1 termination (break if i==4 or _route[2i+3]==0); no off-by-one. Exhaustive path-level model re-run this session: 0 accepted routes deliver a non-reward token. Not a deadline/threshold boundary anyway.",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "CROSS-CHAIN-REPLAY",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "TIMELOCK-BYPASS",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "REWARD-ACCRUAL-ORDER",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "REWARD-RUNWAY-DEPLETION",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "EMISSION-WINDOW-BOUNDARY",
+   "status": "test-only-false-positive",
+   "srcHits": 0,
+   "testHits": 1,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 1
+   },
+   "regression": "carried"
+  },
+  {
+   "id": "MINT-ON-DEMAND-OVERMINT",
+   "status": "test-only-false-positive",
+   "srcHits": 0,
+   "testHits": 15,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 7
+   },
+   "regression": "carried",
+   "testHitDeltaReason": "new/changed test files (fork.t, registry.t, routeGap.t, MockCurveRouter.sol/.t.sol); all test-only, no production analogue; new-in-scope files hit: ['test/SYAHarvester.routeGap.t.sol', 'test/mocks/MockCurveRouter.t.sol']"
+  },
+  {
+   "id": "BATCH-PAYOUT-FIXED-POT",
+   "status": "manualReview PATTERN-MR-02 (carried)",
+   "srcHits": 2,
+   "testHits": 9,
+   "run01": {
+    "srcHits": 2,
+    "testHits": 0
+   },
+   "regression": "carried",
+   "testHitDeltaReason": "new/changed test files (fork.t, registry.t, routeGap.t, MockCurveRouter.sol/.t.sol); all test-only, no production analogue"
+  },
+  {
+   "id": "YIELD-PRINCIPAL-ACCOUNTING-SKEW",
+   "status": "false positive (skimSurplus only in NatSpec of SRC; real logic is SYA-side, cross-repo)",
+   "srcHits": 1,
+   "testHits": 12,
+   "run01": {
+    "srcHits": 1,
+    "testHits": 12
+   },
+   "regression": "carried"
+  },
+  {
+   "id": "TWO-STEP-COMMIT-WINDOW",
+   "status": "false positive ('100' in BORROW_BUFFER_BPS/NatSpec, '1000'/'100e18' amounts and 'pending' in tests)",
+   "srcHits": 3,
+   "testHits": 27,
+   "run01": {
+    "srcHits": 3,
+    "testHits": 23
+   },
+   "regression": "carried",
+   "testHitDeltaReason": "new/changed test files (fork.t, registry.t, routeGap.t, MockCurveRouter.sol/.t.sol); all test-only, no production analogue; new-in-scope files hit: ['test/SYAHarvester.routeGap.t.sol', 'test/mocks/MockCurveRouter.t.sol']"
+  },
+  {
+   "id": "REENTRANCY-ERC721-RECEIVE",
+   "status": "manualReview PATTERN-MR-04 (carried)",
+   "srcHits": 2,
+   "testHits": 5,
+   "run01": {
+    "srcHits": 2,
+    "testHits": 5
+   },
+   "regression": "carried"
+  },
+  {
+   "id": "REENTRANCY-READONLY",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "REENTRANCY-CROSS-FUNCTION",
+   "status": "matched-not-vulnerable: no shared state to desync (stateless)",
+   "srcHits": 2,
+   "testHits": 3,
+   "run01": {
+    "srcHits": 2,
+    "testHits": 3
+   },
+   "regression": "carried"
+  },
+  {
+   "id": "ROUNDING-DIRECTION",
+   "status": "no-match",
+   "srcHits": 0,
+   "testHits": 0,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 0
+   },
+   "regression": "no-match-both-runs"
+  },
+  {
+   "id": "WEAK-PRNG",
+   "status": "test-only-false-positive",
+   "srcHits": 0,
+   "testHits": 2,
+   "run01": {
+    "srcHits": 0,
+    "testHits": 2
+   },
+   "regression": "carried"
+  },
+  {
+   "id": "FEE-ON-TRANSFER-ACCOUNTING",
+   "status": "matched-not-vulnerable: balance-measured sale; FoT reward would revert CurrencyNotSettled (loud); USDC only",
+   "srcHits": 11,
+   "testHits": 56,
+   "run01": {
+    "srcHits": 11,
+    "testHits": 26
+   },
+   "regression": "carried",
+   "testHitDeltaReason": "new/changed test files (fork.t, registry.t, routeGap.t, MockCurveRouter.sol/.t.sol); all test-only, no production analogue"
+  }
+ ],
+ "regressionSummary": {
+  "findings": {
+   "new": 0,
+   "carried": 0,
+   "noLongerMatching": 0
+  },
+  "manualReview": {
+   "new": 0,
+   "carried": 4,
+   "noLongerMatching": 0,
+   "ids": [
+    "PATTERN-MR-01",
+    "PATTERN-MR-02",
+    "PATTERN-MR-03",
+    "PATTERN-MR-04"
+   ]
+  },
+  "nonPatternObservations": {
+   "new": [
+    "OBS-05"
+   ],
+   "carried": [
+    "OBS-02",
+    "OBS-03",
+    "OBS-04"
+   ],
+   "noLongerMatching": [
+    {
+     "id": "OBS-01",
+     "reason": "setRoute validator rewritten at 6b862aa; path-level soundness verified (model spot-reproduced)"
+    }
+   ]
+  },
+  "patternResults": "all 32 checked patterns: src hit counts identical to run-01 (lines shifted); test hit deltas only from changed/new test files",
+  "newInScopeFiles": {
+   "test/SYAHarvester.routeGap.t.sol": "hits MISSING-SLIPPAGE (router.exchange min 0), MINT-ON-DEMAND-OVERMINT (mock mint), TWO-STEP-COMMIT-WINDOW (100e18): all test-only false positives",
+   "test/mocks/MockCurveRouter.t.sol": "hits MISSING-SLIPPAGE (exchange min 0), MINT-ON-DEMAND-OVERMINT (mock mint), TWO-STEP-COMMIT-WINDOW (AMOUNT=100e18): all test-only false positives"
+  }
+ },
+ "run01ManualReviewReconciliation": {
+  "source": "reports/01/manual-review.json",
+  "rows": 51,
+  "counts": {
+   "still-live-as-parked": 49,
+   "resolved": 2
+  },
+  "entries": [
+   {
+    "row": 0,
+    "originalId": "ADERYN-001",
+    "run01Location": "src/SYAHarvester.sol:139",
+    "function": "setRoute",
+    "run02Id": "ADERYN-001",
+    "run02Location": "src/SYAHarvester.sol:171",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "rewritten setRoute still makes only the view sya.rewardToken() (L171) before storage writes L187-191; onlyOwner (static run-02 tags carried)"
+   },
+   {
+    "row": 1,
+    "originalId": "ADERYN-002",
+    "run01Location": "src/SYAHarvester.sol:174",
+    "function": "setEthPool",
+    "run02Id": "ADERYN-002",
+    "run02Location": "src/SYAHarvester.sol:219",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "setEthPool unchanged (static run-02 tags carried)"
+   },
+   {
+    "row": 2,
+    "originalId": "SLITHER-001",
+    "run01Location": "src/SYAHarvester.sol:254",
+    "function": "harvest",
+    "run02Id": "SLITHER-001",
+    "run02Location": "src/SYAHarvester.sol:299",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "payout to msg.sender unchanged (static run-02 tags carried)"
+   },
+   {
+    "row": 3,
+    "originalId": "SLITHER-007",
+    "run01Location": "src/SYAHarvester.sol:133",
+    "function": "setRoute",
+    "status": "resolved: code removed",
+    "reason": "`address last;` local deleted by the 6b862aa validator rewrite; static run-02 lists it in notReproducedFindings"
+   },
+   {
+    "row": 4,
+    "originalId": "SLITHER-028",
+    "run01Location": "src/SYAHarvester.sol:239",
+    "function": "harvest",
+    "run02Id": "SLITHER-049",
+    "run02Location": "src/SYAHarvester.sol:284",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "unlock return still unused (by design) (static run-02 tags carried)"
+   },
+   {
+    "row": 5,
+    "originalId": "SLITHER-033",
+    "run01Location": "src/SYAHarvester.sol:318",
+    "function": "_sellYield",
+    "run02Id": "SLITHER-033",
+    "run02Location": "src/SYAHarvester.sol:363",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "exchange return still unused (balance-measured) (static run-02 tags carried)"
+   },
+   {
+    "row": 6,
+    "originalId": "SLITHER-006",
+    "run01Location": "src/SYAHarvester.sol:326",
+    "function": "_swapSurplusAndSettle",
+    "run02Id": "SLITHER-007",
+    "run02Location": "src/SYAHarvester.sol:371",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "ethAmount default-0 unchanged (static run-02 tags carried)"
+   },
+   {
+    "row": 7,
+    "originalId": "SLITHER-015",
+    "run01Location": "src/SYAHarvester.sol:344",
+    "function": "_swapSurplusAndSettle",
+    "run02Id": "SLITHER-029",
+    "run02Location": "src/SYAHarvester.sol:389",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "settle return unused unchanged (static run-02 tags carried)"
+   },
+   {
+    "row": 8,
+    "originalId": "ADERYN-009",
+    "run01Location": "test/SYAHarvester.gas.t.sol:14",
+    "function": null,
+    "run02Id": "ADERYN-014",
+    "run02Location": "test/SYAHarvester.gas.t.sol:14",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 9,
+    "originalId": "ADERYN-012",
+    "run01Location": "test/SYAHarvester.harvest.t.sol:125",
+    "function": null,
+    "run02Id": "ADERYN-018",
+    "run02Location": "test/SYAHarvester.harvest.t.sol:125",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 10,
+    "originalId": "ADERYN-010",
+    "run01Location": "test/SYAHarvester.nft.t.sol:16",
+    "function": null,
+    "run02Id": "ADERYN-015",
+    "run02Location": "test/SYAHarvester.nft.t.sol:16",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 11,
+    "originalId": "ADERYN-011",
+    "run01Location": "test/Toolchain.t.sol:8",
+    "function": null,
+    "run02Id": "ADERYN-017",
+    "run02Location": "test/Toolchain.t.sol:8",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 12,
+    "originalId": "ADERYN-013",
+    "run01Location": "test/fork/SYAHarvester.fork.t.sol:81",
+    "function": null,
+    "run02Id": "ADERYN-019",
+    "run02Location": "test/fork/SYAHarvester.fork.t.sol:82",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file changed at 6b862aa"
+   },
+   {
+    "row": 13,
+    "originalId": "ADERYN-014",
+    "run01Location": "test/fork/SYAHarvester.fork.t.sol:87",
+    "function": null,
+    "run02Id": "ADERYN-020",
+    "run02Location": "test/fork/SYAHarvester.fork.t.sol:88",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file changed at 6b862aa"
+   },
+   {
+    "row": 14,
+    "originalId": "SLITHER-004",
+    "run01Location": "test/mocks/MockCurveRouter.sol:11",
+    "function": "exchange",
+    "run02Id": "SLITHER-004",
+    "run02Location": "test/mocks/MockCurveRouter.sol:18",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file changed at 6b862aa"
+   },
+   {
+    "row": 15,
+    "originalId": "ADERYN-015",
+    "run01Location": "test/mocks/MockSYA.sol:100",
+    "function": null,
+    "run02Id": "ADERYN-021",
+    "run02Location": "test/mocks/MockSYA.sol:100",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 16,
+    "originalId": "ADERYN-016",
+    "run01Location": "test/mocks/MockSYA.sol:101",
+    "function": null,
+    "run02Id": "ADERYN-022",
+    "run02Location": "test/mocks/MockSYA.sol:101",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 17,
+    "originalId": "ADERYN-017",
+    "run01Location": "test/mocks/MockSYA.sol:103",
+    "function": null,
+    "run02Id": "ADERYN-023",
+    "run02Location": "test/mocks/MockSYA.sol:103",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 18,
+    "originalId": "ADERYN-018",
+    "run01Location": "test/mocks/MockSYA.sol:113",
+    "function": null,
+    "run02Id": "ADERYN-024",
+    "run02Location": "test/mocks/MockSYA.sol:113",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 19,
+    "originalId": "ADERYN-019",
+    "run01Location": "test/mocks/MockYieldStrategy.sol:45",
+    "function": null,
+    "run02Id": "ADERYN-025",
+    "run02Location": "test/mocks/MockYieldStrategy.sol:45",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 20,
+    "originalId": "ADERYN-020",
+    "run01Location": "test/utils/HarvesterFixture.sol:53",
+    "function": null,
+    "run02Id": "ADERYN-026",
+    "run02Location": "test/utils/HarvesterFixture.sol:53",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 21,
+    "originalId": "ADERYN-021",
+    "run01Location": "test/utils/HarvesterFixture.sol:54",
+    "function": null,
+    "run02Id": "ADERYN-027",
+    "run02Location": "test/utils/HarvesterFixture.sol:54",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 22,
+    "originalId": "ADERYN-022",
+    "run01Location": "test/utils/HarvesterFixture.sol:66",
+    "function": null,
+    "run02Id": "ADERYN-028",
+    "run02Location": "test/utils/HarvesterFixture.sol:66",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 23,
+    "originalId": "ADERYN-023",
+    "run01Location": "test/utils/HarvesterFixture.sol:67",
+    "function": null,
+    "run02Id": "ADERYN-029",
+    "run02Location": "test/utils/HarvesterFixture.sol:67",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 24,
+    "originalId": "ADERYN-024",
+    "run01Location": "test/utils/HarvesterFixture.sol:68",
+    "function": null,
+    "run02Id": "ADERYN-030",
+    "run02Location": "test/utils/HarvesterFixture.sol:68",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 25,
+    "originalId": "SLITHER-017",
+    "run01Location": "test/SYAHarvester.gas.t.sol:23",
+    "function": "_ethOutAtZeroPrice",
+    "run02Id": "SLITHER-024",
+    "run02Location": "test/SYAHarvester.gas.t.sol:23",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 26,
+    "originalId": "SLITHER-011",
+    "run01Location": "test/SYAHarvester.gas.t.sol:48",
+    "function": "_chargedGasUnits",
+    "run02Id": "SLITHER-019",
+    "run02Location": "test/SYAHarvester.gas.t.sol:48",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 27,
+    "originalId": "SLITHER-002",
+    "run01Location": "test/SYAHarvester.gas.t.sol:95",
+    "function": "test_gas_borderlinePrice_flipsPassFail",
+    "run02Id": "SLITHER-002",
+    "run02Location": "test/SYAHarvester.gas.t.sol:95",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 28,
+    "originalId": "SLITHER-026",
+    "run01Location": "test/SYAHarvester.gas.t.sol:101",
+    "function": "test_gas_borderlinePrice_flipsPassFail",
+    "run02Id": "SLITHER-043",
+    "run02Location": "test/SYAHarvester.gas.t.sol:101",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 29,
+    "originalId": "SLITHER-014",
+    "run01Location": "test/SYAHarvester.harvest.t.sol:51",
+    "function": "test_harvest_minEthOutAboveOutput_reverts",
+    "run02Id": "SLITHER-021",
+    "run02Location": "test/SYAHarvester.harvest.t.sol:51",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 30,
+    "originalId": "SLITHER-030",
+    "run01Location": "test/SYAHarvester.harvest.t.sol:55",
+    "function": "test_harvest_minEthOutAboveOutput_reverts",
+    "run02Id": "SLITHER-048",
+    "run02Location": "test/SYAHarvester.harvest.t.sol:55",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 31,
+    "originalId": "SLITHER-027",
+    "run01Location": "test/SYAHarvester.harvest.t.sol:67",
+    "function": "test_harvest_unroutedToken_revertsRouteNotConfigured",
+    "run02Id": "SLITHER-044",
+    "run02Location": "test/SYAHarvester.harvest.t.sol:67",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 32,
+    "originalId": "SLITHER-024",
+    "run01Location": "test/SYAHarvester.harvest.t.sol:122",
+    "function": "test_unlockCallback_directCall_revertsNotPoolManager",
+    "run02Id": "SLITHER-041",
+    "run02Location": "test/SYAHarvester.harvest.t.sol:122",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 33,
+    "originalId": "SLITHER-029",
+    "run01Location": "test/SYAHarvester.harvest.t.sol:144",
+    "function": "test_harvest_unprofitableClaim_reverts",
+    "run02Id": "SLITHER-046",
+    "run02Location": "test/SYAHarvester.harvest.t.sol:144",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 34,
+    "originalId": "SLITHER-022",
+    "run01Location": "test/SYAHarvester.harvest.t.sol:152",
+    "function": "test_harvest_nestedUnlockInSkimSurplus_reverts",
+    "run02Id": "SLITHER-040",
+    "run02Location": "test/SYAHarvester.harvest.t.sol:152",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 35,
+    "originalId": "SLITHER-016",
+    "run01Location": "test/SYAHarvester.harvest.t.sol:164",
+    "function": "test_harvest_ethPoolNotSet_reverts",
+    "run02Id": "SLITHER-023",
+    "run02Location": "test/SYAHarvester.harvest.t.sol:164",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 36,
+    "originalId": "SLITHER-021",
+    "run01Location": "test/SYAHarvester.nft.t.sol:69",
+    "function": "test_nft_ignoredBySya_heldDuringUnlock_thenRefunded",
+    "run02Id": "SLITHER-037",
+    "run02Location": "test/SYAHarvester.nft.t.sol:69",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 37,
+    "originalId": "SLITHER-020",
+    "run01Location": "test/SYAHarvester.nft.t.sol:86",
+    "function": "test_nft_refundReturnsWholeBalance_includingStrayUnits",
+    "run02Id": "SLITHER-035",
+    "run02Location": "test/SYAHarvester.nft.t.sol:86",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 38,
+    "originalId": "SLITHER-025",
+    "run01Location": "test/SYAHarvester.nft.t.sol:132",
+    "function": "test_nft_callerWithoutApproval_revertsOnPull",
+    "run02Id": "SLITHER-042",
+    "run02Location": "test/SYAHarvester.nft.t.sol:132",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 39,
+    "originalId": "SLITHER-012",
+    "run01Location": "test/SYAHarvester.nft.t.sol:141",
+    "function": "test_nft_burnNeedsNoApprovalFromHarvester",
+    "run02Id": "SLITHER-020",
+    "run02Location": "test/SYAHarvester.nft.t.sol:141",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 40,
+    "originalId": "SLITHER-019",
+    "run01Location": "test/fork/SYAHarvester.fork.t.sol:87",
+    "function": "setUp",
+    "run02Id": "SLITHER-031",
+    "run02Location": "test/fork/SYAHarvester.fork.t.sol:88",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file changed at 6b862aa"
+   },
+   {
+    "row": 41,
+    "originalId": "SLITHER-032",
+    "run01Location": "test/fork/SYAHarvester.fork.t.sol:173",
+    "function": "test_fork_addresses_verifiedOnFork",
+    "run02Id": "SLITHER-051",
+    "run02Location": "test/fork/SYAHarvester.fork.t.sol:174",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file changed at 6b862aa"
+   },
+   {
+    "row": 42,
+    "originalId": "SLITHER-008",
+    "run01Location": "test/fork/SYAHarvester.fork.t.sol:186",
+    "function": "test_fork_liveStrategies_everyNonRewardTokenHasRoute",
+    "run02Id": "SLITHER-011",
+    "run02Location": "test/fork/SYAHarvester.fork.t.sol:187",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file changed at 6b862aa"
+   },
+   {
+    "row": 43,
+    "originalId": "SLITHER-013",
+    "run01Location": "test/fork/SYAHarvester.fork.t.sol:333",
+    "function": "test_fork_harvest_eachStrategyExemptedInTurn",
+    "run02Id": "SLITHER-032",
+    "run02Location": "test/fork/SYAHarvester.fork.t.sol:334",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file changed at 6b862aa"
+   },
+   {
+    "row": 44,
+    "originalId": "SLITHER-023",
+    "run01Location": "test/fork/SYAHarvester.fork.t.sol:383",
+    "function": "test_fork_gasOverhead_coversMeasuredGap",
+    "run02Id": "SLITHER-039",
+    "run02Location": "test/fork/SYAHarvester.fork.t.sol:384",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file changed at 6b862aa"
+   },
+   {
+    "row": 45,
+    "originalId": "SLITHER-009",
+    "run01Location": "test/mocks/MockCurveRouter.sol:34",
+    "function": "exchange",
+    "status": "resolved: code removed (test mock)",
+    "reason": "MockCurveRouter.exchange rewritten to Router NG-faithful resolver; uninitialized `tokenOut` local no longer present; static run-02 notReproducedFindings"
+   },
+   {
+    "row": 46,
+    "originalId": "SLITHER-005",
+    "run01Location": "test/mocks/MockSYA.sol:108",
+    "function": "claim",
+    "run02Id": "SLITHER-005",
+    "run02Location": "test/mocks/MockSYA.sol:108",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 47,
+    "originalId": "SLITHER-010",
+    "run01Location": "test/mocks/MockSYA.sol:128",
+    "function": "calculateClaimAmount",
+    "run02Id": "SLITHER-012",
+    "run02Location": "test/mocks/MockSYA.sol:128",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 48,
+    "originalId": "SLITHER-018",
+    "run01Location": "test/mocks/MockYieldStrategy.sol:45",
+    "function": "skimSurplus",
+    "run02Id": "SLITHER-025",
+    "run02Location": "test/mocks/MockYieldStrategy.sol:45",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 49,
+    "originalId": "SLITHER-031",
+    "run01Location": "test/utils/HarvesterFixture.sol:54",
+    "function": "setUp",
+    "run02Id": "SLITHER-050",
+    "run02Location": "test/utils/HarvesterFixture.sol:54",
+    "status": "still-live-as-parked (same disposition)",
+    "reason": "test-file tool noise re-emitted by static run-02 (carried); file unchanged at 6b862aa"
+   },
+   {
+    "row": 50,
+    "originalId": "PATTERN-MR-04",
+    "run01Location": "src/SYAHarvester.sol:244",
+    "function": "harvest",
+    "status": "still-live-as-parked (refuted premise unchanged)",
+    "run02Location": "src/SYAHarvester.sol:289",
+    "reason": "harvest refund/payout untouched; stateless + msg.sender-only recipient still hold; carried here as PATTERN-MR-04"
+   }
+  ]
+ },
+ "crossRefs": {
+  "static": "reports/02/static/static-analysis-findings.json regression tags used to map run-01 manual-review rows (run01Id)",
+  "profile": "reports/02/profiles/SYAHarvester.profile.json verifiedProperties.routeValidator_* treated as axioms; LOCAL-002..007",
+  "crossRepo": "SYA semantics from ../stable-yield-accumulator/src (unchanged reliance)"
+ },
+ "errors": [],
+ "notes": [
+  "No writes to src/ or ledger.json.",
+  "work/ PoC test/poc-M-01-gap-route-strand.t.sol does not compile (name collision with upstream _gapPath); M-01 replay is owed before any human status change."
+ ]
+}

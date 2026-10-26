@@ -1,0 +1,481 @@
+{
+ "contract": "src/SYAHarvester.sol",
+ "commit": "6b862aa0af3d3182d2fd311c4402a4056b69ef42",
+ "profileTimestamp": "2026-10-25T17:30:00Z",
+ "run": "sya-harvester-02",
+ "solidityVersion": "^0.8.26 (foundry pin 0.8.26, evm cancun, via_ir off)",
+ "inheritanceChain": [
+  "Ownable (OZ 5.1.0)",
+  "ERC1155Holder (OZ 5.1.0)",
+  "IUnlockCallback (v4-core 4.0.0)"
+ ],
+ "verifiedProperties": {
+  "noUnboundedLoops": {
+   "value": "likely",
+   "note": "_sellYield loops sya.getYieldStrategies() (SYA-owner bounded); _contains is O(exempt) per strategy with caller-supplied exempt (self-DoS only); setRoute now runs fixed-bound loops only (k-while <=5, gap <=10, token <=4, hop 5x(row 5), total <= ~45 iterations)."
+  },
+  "checkedArithmetic": {
+   "value": "verified",
+   "note": "0.8.26, no unchecked/assembly. setRoute index arithmetic (2*k+1, 2*i, 2*k) is bounded by k<=5 -> max index 10, no OOB (k==5 makes the gap loop start at 11, i.e. empty). Intentional underflow at L336 (balance - owed) is the loud 'unprofitable claim' failure."
+  },
+  "reentrancyGuarded": {
+   "value": "none (no nonReentrant)",
+   "note": "harvest has no guard; re-entering harvest during the callback phase reverts AlreadyUnlocked in PoolManager, so the V4 lock acts as the guard for the borrow window. After unlock returns, re-entry is possible via the ERC1155 refund hook to msg.sender (L244) and the ETH payout (L254), but both go to msg.sender itself and the contract holds only that caller's proceeds."
+  },
+  "accessControlled": [
+   "setRoute (onlyOwner)",
+   "clearRoute (onlyOwner)",
+   "setEthPool (onlyOwner)",
+   "unlockCallback (msg.sender == poolManager)",
+   "receive (msg.sender == poolManager)",
+   "transferOwnership/renounceOwnership (OZ Ownable, single-step)"
+  ],
+  "initializerProtected": "n/a (non-upgradeable, immutables set in constructor with zero-address checks; owner zero rejected by OZ Ownable)",
+  "pauseMechanism": "none in harvester (relies on SYA whenNotPaused; owner can effectively disable by clearRoute / not setting ethPool)",
+  "weakRandomness": "none",
+  "statelessBetweenCalls": {
+   "value": "likely",
+   "note": "Holds no balances by design; violated only by donations, partial V4 fill (LOCAL-002), or non-strategy ERC20/ERC1155 sent in. No sweep function exists."
+  },
+  "approvalHygiene": {
+   "value": "verified",
+   "note": "forceApprove(sya, owed) then 0 around claim (L329-331); forceApprove(router, balance) then 0 around each exchange (L362-364). No standing allowances."
+  },
+  "routeValidator_checkOrder": {
+   "value": "verified",
+   "note": "ZeroAddress -> InvalidRouteStart -> InvalidRouteGap -> InvalidRouteToken -> InvalidRouteEnd(expected, delivered) -> per hop h=0..4: [h<k: swapParams[h][2]!=0 else InvalidRouteSwapParams(h)] / [h>=k: row all-zero else InvalidRouteSwapParams(h); pools[h]==0 else InvalidRoutePools(h)]. Matches story-007 specified order (L157-185)."
+  },
+  "routeValidator_pathLevelSoundness": {
+   "value": "verified",
+   "note": "Every route setRoute accepts with k>=1 is executed by Router NG over exactly k hops and either delivers path[2k] == sya.rewardToken() (read at set time) to the harvester or reverts; it can never deliver a non-reward token. Proof: k (validator) == k_R (router) when path[1]!=0; gap loop forces path[2k+1..10]==0 so the router breaks exactly after hop k-1 and delivers path[2k]; InvalidRouteEnd pins path[2k]==reward; InvalidRouteToken pins path[2i]!=0 for 0<i<k. Cross-checked by an exhaustive path-level model over the alphabet {0, reward, other} for all 10 non-key slots (2 x 59,049 routes, key = reward and key != reward): accepted & router-delivers-non-reward = 0; accepted & router-reverts = 1 (the k=0 reward-key route, below). Model: sya-harvester/reports/02/profiles/evidence/route-validator-model.py (path-level only; pool/param semantics abstracted).",
+   "bearsOn": "ledger M-01 004d4547d9 (root cause closed at path level)"
+  },
+  "routeValidator_acceptedEqualsExecutableSet": {
+   "value": "violated (both directions, neither yields a strand)",
+   "overRejection": "Strict superset rejection: 7,396 of 59,049 model routes (key != reward) are rejected InvalidRouteGap although Router NG would execute them and deliver the reward token, because they carry non-zero entries after the executed prefix that the router ignores. Intended hygiene (stories 006/007), no loss.",
+   "overAcceptance": [
+    "k=0: [reward, 0 x10] with all-zero rows/pools is accepted but Router NG cannot execute it (hop 0 always runs; swap address 0 -> revert, empty data). Only reachable for token == current rewardToken, which _sellYield skips (L356), so it is never executed while the reward token is unchanged. After an SYA setRewardToken (ledger L-03) the old reward token becomes a sellable strategy token whose stored k=0 route reverts with empty revert data (harvest.sh cannot name it; L-04-adjacent). Fail-loud.",
+    "swap_type upper bound: executed rows require only swapParams[h][2] != 0; Router NG v1.1 dispatches 1..8 and reverts Error(\"Bad swap type\") for 0 and >=9 (v1.2 accepts 9 = ERC4626). Rows with swap_type >= 9 are accepted and revert at harvest. Fail-loud (LOCAL-006).",
+    "Semantic row/pool errors (wrong i/j, unsupported pool_type/n_coins combination falling through swap_type 4 with no call, swap_type 8 on an unsupported token pair, swap_type 3 with pools[h]==0, a hop whose pool outputs a different token than path[2h+2]) are accepted and revert at harvest (\"Received nothing\" / pool revert / \"Swap type 8 is only for ...\"). Explicitly out of scope of story-007; all fail-loud, none delivers a non-reward token."
+   ]
+  },
+  "routeValidator_edgeCases": {
+   "value": "verified",
+   "k0": "Accepted only when path[0]==token==rewardToken and path[1..10], all 25 swapParams fields and all 5 pools are zero (delivered = path[0] must equal reward; any trailing entry -> Gap; any row -> SwapParams; any pool -> Pools). A non-reward k=0 route always fails InvalidRouteEnd(reward, token).",
+   "k5": "path[1,3,5,7,9] non-zero; gap loop empty; path[2,4,6,8] must be non-zero; delivered path[10] must be reward; all five rows need swap_type != 0; pools unconstrained. Matches router (break at i==4).",
+   "zeroIntermediate": "path[2i]==0 for 0<i<k -> InvalidRouteToken(2i), checked before End. path[2k]==0 -> InvalidRouteEnd(reward, 0). Router reverts in both cases (empty data); fork-pinned by story-007.",
+   "swapTypeRule": "h<k: only field [2] tested (i/j legitimately 0). Rejects 0; accepts any non-zero (see overAcceptance).",
+   "executedPoolsUnconstrained": "pools[h], h<k: any value accepted. Router reads it only for swap_type 3; for other types a non-zero value is inert. Matches router.",
+   "unexecutedRowsPools": "h>=k: all five row fields and pools[h] must be zero. Stricter than router (which ignores them); hygiene only.",
+   "path0VsKey": "path[0] == token enforced (InvalidRouteStart). Router pulls _route[0] via transferFrom; harvester approves `token` (L362) - consistent. token == address(0) rejected; ETH sentinel 0xEeee as key is not rejected but no ERC20 strategy token can be it (harvester never sends msg.value; router would assert msg.value == amount and revert).",
+   "duplicates": "No uniqueness constraint on tokens or pools. Cycles (T->X->T->R) and reward-as-intermediate (T->R->X->R) are accepted; router executes them and still delivers path[2k]==reward or reverts. No strand.",
+   "finalHopOutputDiffers": "If a pool emits a token other than path[2k], the router balance delta of path[2k] is 0 -> \"Received nothing\" revert; the harvester only ever receives path[2k]. No strand in the harvester (the stray output would sit in the router, and the whole tx reverts anyway).",
+   "rewardKeyNonTrivialRoute": "token == reward with k>=1 (e.g. USDC->X->USDC) accepted; never executed (_sellYield skip). Inert."
+  },
+  "routeValidator_rewardTokenReadAtSetTime": {
+   "value": "verified (unchanged)",
+   "note": "sya.rewardToken() read once in setRoute (L169). Ledger L-03 coupling unchanged."
+  }
+ },
+ "localFindings": [
+  {
+   "id": "LOCAL-001",
+   "type": "incomplete-input-validation",
+   "severity": "local-low",
+   "function": "setRoute",
+   "line": "133-140",
+   "description": "Route-end validation takes the LAST non-zero entry of path[11] anywhere in the array, but Curve Router NG stops at the first hop whose next pool slot (path[i*2+1]) is zero and pays out path[i*2] to the receiver. A path with an interior gap (e.g. [token, pool0, X, 0, ..., USDC]) passes validation yet the router delivers X, not the reward token. Consequence: X is not sold, surplus = balance - owed underflows, and every harvest reverts until the owner fixes the route (fail-loud DoS, no fund loss since the tx reverts). Also no check that the swapParams/pools agree with the path. The unit-test MockCurveRouter uses the same 'last non-zero' rule (test/mocks/MockCurveRouter.sol), so the suite cannot detect the divergence.",
+   "confidence": "likely (Router NG semantics from the deployed Vyper source; confirm on fork)",
+   "recommendation": "Require the path to be contiguous: after the first zero pool slot, all remaining slots are zero, and the token immediately following the last non-zero pool equals sya.rewardToken().",
+   "status": "resolved at 6b862aa",
+   "resolution": "setRoute now derives k from the first empty pool slot, rejects any entry after the executed prefix (InvalidRouteGap), zero intermediates (InvalidRouteToken), and checks the delivered token path[2k] (InvalidRouteEnd). swapParams/pools are now checked against k. MockCurveRouter no longer mirrors the validator. Path-level soundness verified (see verifiedProperties). Residual over-acceptance is fail-loud only (LOCAL-006, LOCAL-007)."
+  },
+  {
+   "id": "LOCAL-002",
+   "type": "residual-balance / stateless-invariant-break",
+   "severity": "local-low",
+   "function": "_swapSurplusAndSettle",
+   "line": "373-384",
+   "description": "Exact-input swap with sqrtPriceLimitX96 = MAX_SQRT_PRICE - 1 can partially fill if in-range liquidity is exhausted; debt is computed from the actual delta.amount1, so the unswapped surplus (reward token) stays in the harvester after the tx. It is then credited to the NEXT caller's surplus. The current caller is protected only by minEthOut. Practically requires a near-empty pool (owner-chosen deepest pool), so impact is small.",
+   "confidence": "verified (code path)",
+   "recommendation": "Assert -delta.amount1() == surplus or pay any reward-token residue to msg.sender."
+  },
+  {
+   "id": "LOCAL-003",
+   "type": "griefing-dos-by-donation",
+   "severity": "local-low",
+   "function": "_sellYield",
+   "line": "357-360",
+   "description": "Coverage check is keyed on the harvester's raw balanceOf, not on what SYA delivered. If a registered, non-exempt strategy token has no route (legitimately: strategy is new, empty, or its token is paused in SYA so nothing is delivered), any party can donate 1 wei of that token to the harvester and every harvest reverts RouteNotConfigured. Workaround exists: caller passes that strategy in exemptStrategies (SYA accepts any registered strategy), at the cost of not skimming it. Donation is permanent (no sweep).",
+   "confidence": "verified (code path)",
+   "recommendation": "Sell only the delta received during claim (snapshot balances before sya.claim), or skip tokens whose SYA tokenConfig is paused, or add an owner sweep."
+  },
+  {
+   "id": "LOCAL-004",
+   "type": "no-rescue-path",
+   "severity": "local-info",
+   "function": "(contract-wide)",
+   "line": "27",
+   "description": "No sweep/rescue for ERC20, ERC1155 or ETH. ERC1155Holder accepts any ERC1155 from anyone; non-strategy ERC20s and ERC1155 ids other than the one a caller passes are permanently stuck. Stray strategy tokens, reward token and ETH are swept to the next harvest caller (a gift, not a loss).",
+   "confidence": "verified"
+  },
+  {
+   "id": "LOCAL-005",
+   "type": "config-coupling-footgun",
+   "severity": "local-low",
+   "function": "setRoute / setEthPool / unlockCallback",
+   "line": "169, 219, 325",
+   "description": "Route ends and ethPool.currency1 are validated against sya.rewardToken() only at set time, while unlockCallback reads it live. If the SYA owner calls setRewardToken, every stored route and the ethPool become stale: routes output the old token (surplus underflow) or the V4 swap leaves an unsettled old-token delta (CurrencyNotSettled). Harvest bricks until the harvester owner re-registers all routes and the pool. Fail-loud, no fund loss; operational coupling between two owner roles worth documenting. Run-02 addendum: a k=0 route stored for the OLD reward token (the canonical story-006/007 form) becomes executable after setRewardToken if the old token is delivered by a strategy, and reverts inside Router NG with empty revert data (not decodable by harvest.sh).",
+   "confidence": "verified (code path)",
+   "recommendation": "In harvest, check Currency.unwrap(ethPool.currency1) == sya.rewardToken() and revert with a named error; document the re-registration step in the SYA reward-token migration runbook."
+  },
+  {
+   "id": "LOCAL-006",
+   "type": "incomplete-input-validation (defence in depth)",
+   "severity": "local-low",
+   "function": "setRoute",
+   "line": "177-180",
+   "description": "Executed swapParams rows are accepted for any non-zero swap_type, but deployed Router NG v1.1 dispatches only 1..8 and reverts Error(\"Bad swap type\") otherwise (v1.2 adds 9 = ERC4626). A route with swap_type >= 9 (e.g. copied from v1.2 docs, or a decimal/field-order slip) is stored without error and reverts every harvest that sells that token. The InvalidRouteSwapParams NatSpec says executed rows \"dispatch on a real swap_type\", which the check does not establish. Fail-loud: no strand, harvest reverts, owner re-routes or callers exempt the strategy; harvest.sh decodes Error(string) generically. MockCurveRouter also accepts swap_type >= 9, so the unit suite cannot see it.",
+   "confidence": "verified (deployed v1.1 source: `else: raise \"Bad swap type\"` after branches 1..8)",
+   "recommendation": "Require 1 <= swapParams[h][2] <= 8 for h < k (bound tied to the immutable router version), and make MockCurveRouter revert for swap_type outside 1..8.",
+   "bearsOn": "M-01 004d4547d9 not affected (fail-loud, not strand); story-007 out-of-scope list excludes i/j/pool_type/n_coins but not the swap_type range."
+  },
+  {
+   "id": "LOCAL-007",
+   "type": "documentation-semantics",
+   "severity": "local-info",
+   "function": "setRoute NatSpec / InvalidRouteEnd / InvalidRoutePools",
+   "line": "81-99, 136-149",
+   "description": "(a) InvalidRouteEnd @dev says Router NG \"delivers path[2k] at the first empty pool slot\"; for k=0 (path[1]==0) Router NG does not deliver path[0], it always executes hop 0 and reverts. The setRoute NatSpec correctly calls the k=0 reward route \"never executed\", but the general statement is wrong at k=0. (b) InvalidRoutePools says \"zap swap types use them\"; deployed v1.1 reads _pools[i] only for swap_type 3 (the interface NatSpec claims 3/5/7, see ICurveRouterNG LOCAL-IF-002). Docs only.",
+   "confidence": "verified (deployed source)",
+   "recommendation": "State that hop 0 always executes (k=0 routes are non-executable) and that pools[h] is read only for swap_type 3."
+  }
+ ],
+ "interfaceAbstraction": {
+  "externalEntryPoints": [
+   {
+    "function": "harvest(address[] exemptStrategies, uint256 nftIndex, uint256 minEthOut) returns (uint256 ethOut)",
+    "visibility": "external",
+    "stateChanges": [
+     "none persistent (token/ETH/NFT balances transit only)"
+    ],
+    "externalCalls": [
+     "sya.nftMinter()",
+     "IERC1155(nftMinter).safeTransferFrom(msg.sender -> this, nftIndex, 1) [if nftIndex!=0 && minter!=0]",
+     "poolManager.unlock(abi.encode(exempt, nftIndex)) -> unlockCallback",
+     "IERC1155(nftMinter).balanceOf / safeTransferFrom(this -> msg.sender, whole balance) [refund; onERC1155Received hook on msg.sender]",
+     "msg.sender.call{value: address(this).balance}"
+    ],
+    "accessControl": "none (public)",
+    "reentrancyGuard": false,
+    "checks": [
+     "EthPoolNotSet",
+     "InsufficientEthOut(balance < minEthOut)",
+     "Unprofitable((g0-gasleft+60000)*tx.gasprice > ethOut)",
+     "EthTransferFailed"
+    ],
+    "notes": "ethOut is the WHOLE ETH balance, not the delta produced by this call."
+   },
+   {
+    "function": "unlockCallback(bytes data) returns (bytes)",
+    "visibility": "external",
+    "stateChanges": [
+     "none persistent"
+    ],
+    "externalCalls": [
+     "sya.rewardToken()",
+     "sya.calculateClaimAmount(exempt)",
+     "poolManager.take(reward, this, owed = calc * 10100 / 10000)",
+     "reward.forceApprove(sya, owed); sya.claim(nftIndex, 0, exempt); reward.forceApprove(sya, 0)",
+     "sya.getYieldStrategies(); sya.strategyTokens(s); token.balanceOf(this)",
+     "token.forceApprove(router, bal); router.exchange(path, params, bal, 0, pools, this); forceApprove(router, 0)",
+     "poolManager.swap(ethPool, zeroForOne=false, exactIn=surplus, limit=MAX_SQRT_PRICE-1)",
+     "poolManager.sync(reward); reward.safeTransfer(poolManager, debt); poolManager.settle()",
+     "poolManager.take(ETH, this, ethAmount) -> receive()"
+    ],
+    "accessControl": "msg.sender == poolManager (V4 delivers callback only to unlock caller => only via harvest)",
+    "reentrancyGuard": "PoolManager unlock lock (nested unlock reverts AlreadyUnlocked)"
+   },
+   {
+    "function": "setRoute(address token, address[11] path, uint256[5][5] swapParams, address[5] pools)",
+    "accessControl": "onlyOwner",
+    "stateChanges": [
+     "routes[token]"
+    ],
+    "externalCalls": [
+     "sya.rewardToken() (view)"
+    ],
+    "validation": "token!=0; path[0]==token; k = #leading executed hops (while k<5 && path[2k+1]!=0); path[2k+1..10]==0 (InvalidRouteGap); path[2i]!=0 for 0<i<k (InvalidRouteToken); path[2k]==sya.rewardToken() (InvalidRouteEnd); h<k: swapParams[h][2]!=0; h>=k: row all-zero and pools[h]==0 (InvalidRouteSwapParams / InvalidRoutePools). Executed-hop pools unconstrained. k=0 reward-key route accepted (inert).",
+    "line": "151-194",
+    "notes": "Pure input validation + storage write; no value movement. Accepted routes are path-level sound vs Router NG v1.1 (see verifiedProperties.routeValidator_pathLevelSoundness)."
+   },
+   {
+    "function": "clearRoute(address token)",
+    "accessControl": "onlyOwner",
+    "stateChanges": [
+     "routes[token] deleted"
+    ]
+   },
+   {
+    "function": "setEthPool(PoolKey key)",
+    "accessControl": "onlyOwner",
+    "stateChanges": [
+     "ethPool"
+    ],
+    "externalCalls": [
+     "sya.rewardToken()"
+    ],
+    "validation": "currency0 == native; currency1 == sya.rewardToken(); fee/tickSpacing/hooks unvalidated, pool initialisation unchecked (swap reverts if not)"
+   },
+   {
+    "function": "getRoute(address) view / getEthPool() view / poolManager() / sya() / router() / owner()",
+    "accessControl": "none"
+   },
+   {
+    "function": "receive()",
+    "accessControl": "msg.sender == poolManager only"
+   },
+   {
+    "function": "onERC1155Received / onERC1155BatchReceived (ERC1155Holder)",
+    "accessControl": "none; accepts any ERC1155 from anyone"
+   }
+  ],
+  "externalCalls": [
+   {
+    "target": "IPoolManager poolManager (immutable)",
+    "methods": [
+     "unlock",
+     "take",
+     "swap",
+     "sync",
+     "settle"
+    ],
+    "trustLevel": "trusted (canonical V4)",
+    "notes": "Flash source; free flash accounting. Settlement = owed + actual reward-token spent on ETH swap; ETH taken = delta.amount0."
+   },
+   {
+    "target": "IStableYieldAccumulator sya (immutable)",
+    "methods": [
+     "rewardToken",
+     "nftMinter",
+     "calculateClaimAmount",
+     "claim",
+     "getYieldStrategies",
+     "strategyTokens"
+    ],
+    "trustLevel": "semi-trusted (protocol-owned)",
+    "notes": "claim is whenNotPaused + nonReentrant; validates exempt list, burns 1 NFT unit from msg.sender (harvester) via authorized-burner burn, pushes yield via strategy.skimSurplus(token, harvester), then pulls payment computed on ACTUAL delivered amount with safeTransferFrom (allowance = owed). Payment can exceed estimate if skimSurplus delivers > estimate; buffer is only 1% (SYA NatSpec: estimate 'can diverge')."
+   },
+   {
+    "target": "SYA yield strategies (via sya.claim -> skimSurplus)",
+    "methods": [
+     "skimSurplus"
+    ],
+    "trustLevel": "semi-trusted (SYA-owner registered)",
+    "notes": "Executed inside harvester's unlock; any nested poolManager.unlock reverts. Live USDe strategy trades on Curve pool 0xF55B... that the harvester's own route also uses (double fee / price impact)."
+   },
+   {
+    "target": "ICurveRouterNG router (immutable)",
+    "methods": [
+     "exchange(path, params, balance, 0, pools, this)"
+    ],
+    "trustLevel": "trusted (immutable Router NG)",
+    "notes": "_expected = 0 on every hop; only end-to-end minEthOut protects. Route Curve pools are owner-chosen and untrusted for price (sandwichable inside a public mempool; script submits via private relay). Router NG v1.1 always executes hop 0, stops after hop i when _route[2i+3]==0 (or i==4), delivers _route[2k] or reverts (\"Received nothing\" / \"Bad swap type\" / empty data on zero token). Combined with setRoute, the harvester can only ever receive sya.rewardToken() (as of set time) from a stored route. Router revert payloads are empty data or Error(string), not harvester custom errors.",
+    "site": "_sellYield L362-364"
+   },
+   {
+    "target": "IERC1155 nftMinter (read from sya at call time)",
+    "methods": [
+     "safeTransferFrom (pull 1)",
+     "balanceOf",
+     "safeTransferFrom (refund whole balance)"
+    ],
+    "trustLevel": "semi-trusted",
+    "notes": "Refund safeTransferFrom triggers onERC1155Received on msg.sender: inbound callback to an attacker-controlled (=caller) address after unlock but BEFORE ethOut is read and paid. Contract holds only caller's own ETH at that point."
+   },
+   {
+    "target": "ERC20 reward token (USDC) and yield tokens",
+    "methods": [
+     "forceApprove",
+     "balanceOf",
+     "safeTransfer"
+    ],
+    "trustLevel": "semi-trusted",
+    "notes": "Assumes standard ERC20; balance-based accounting (donations are absorbed into the caller's surplus)."
+   },
+   {
+    "target": "msg.sender",
+    "methods": [
+     "call{value: ethOut}"
+    ],
+    "trustLevel": "untrusted",
+    "notes": "Last operation; checks done before. Contract wallets that cannot receive ETH revert EthTransferFailed."
+   }
+  ],
+  "stateVariables": [
+   {
+    "name": "poolManager / sya / router",
+    "type": "immutable",
+    "mutators": [
+     "constructor"
+    ]
+   },
+   {
+    "name": "routes",
+    "type": "mapping(address => CurveRoute{address[11] path; uint256[5][5] swapParams; address[5] pools; bool configured})",
+    "mutators": [
+     "setRoute",
+     "clearRoute"
+    ],
+    "readers": [
+     "getRoute",
+     "_sellYield"
+    ]
+   },
+   {
+    "name": "ethPool",
+    "type": "PoolKey",
+    "mutators": [
+     "setEthPool"
+    ],
+    "readers": [
+     "harvest (currency1 != 0 gate)",
+     "_swapSurplusAndSettle",
+     "getEthPool"
+    ]
+   },
+   {
+    "name": "_owner",
+    "type": "address (Ownable)",
+    "mutators": [
+     "transferOwnership",
+     "renounceOwnership"
+    ]
+   }
+  ],
+  "constants": {
+   "BORROW_BUFFER_BPS": 100,
+   "GAS_OVERHEAD": 60000
+  },
+  "events": [
+   "RouteSet",
+   "RouteCleared",
+   "EthPoolSet",
+   "OwnershipTransferred"
+  ],
+  "errors": [
+   "ZeroAddress",
+   "InvalidRouteStart(address,address)",
+   "InvalidRouteEnd(address expected,address delivered)",
+   "InvalidRouteGap(uint256 index)",
+   "InvalidRouteToken(uint256 index)",
+   "InvalidRouteSwapParams(uint256 hop)",
+   "InvalidRoutePools(uint256 hop)",
+   "InvalidEthPool",
+   "RouteNotConfigured",
+   "InsufficientEthOut",
+   "NotPoolManager",
+   "EthPoolNotSet",
+   "EthTransferFailed",
+   "Unprofitable"
+  ],
+  "modifiers": [
+   "onlyOwner"
+  ]
+ },
+ "tokenFlow": {
+  "sequence": [
+   "1. [opt] NFT: caller -> harvester (1 unit of nftIndex)",
+   "2. PM.take reward: PM -> harvester, owed = calc*1.01 (debt +owed)",
+   "3. sya.claim: NFT burned from harvester; strategies push yield tokens -> harvester; SYA pulls payment (<= owed by allowance) reward harvester -> SYA",
+   "4. each non-exempt strategy token with balance>0 (token != reward): harvester -> router, router -> harvester reward token",
+   "5. surplus = rewardBal - owed (underflow revert if sale < borrow); PM.swap exactIn surplus reward -> ETH delta",
+   "6. sync/transfer debt (owed + actual swap input)/settle; PM.take ETH -> harvester (receive gated to PM)",
+   "7. NFT refund: whole harvester balance of nftIndex -> caller",
+   "8. ethOut = address(this).balance; minEthOut + Unprofitable checks; ETH -> caller"
+  ],
+  "invariantsClaimed": [
+   "INV-1 Post-tx zero balances: harvester holds 0 ETH, 0 reward, 0 of each strategy token, 0 of nftIndex (breakable by LOCAL-002 residue, donations of non-strategy tokens/other NFT ids).",
+   "INV-2 PoolManager deltas net to zero inside unlock (enforced by V4; any mismatch reverts CurrencyNotSettled).",
+   "INV-3 Route coverage: a non-exempt strategy token with non-zero harvester balance and no route reverts the whole harvest (never strands).",
+   "INV-4 ethOut >= max(minEthOut, (gasMeasured + 60000) * tx.gasprice) or revert.",
+   "INV-5 No standing ERC20 allowances to sya/router after a call.",
+   "INV-6 Only harvest can trigger unlockCallback with the harvester as locker."
+  ],
+  "rounding": "Borrow rounds down (calc*10100/10000); over-borrow settled back. All value accrues to msg.sender; protocol (SYA) side fixed by SYA's own pricing."
+ },
+ "trustAssumptions": [
+  "PoolManager is canonical Uniswap V4; callback delivery to locker only.",
+  "SYA payment for the delivered yield never exceeds calculateClaimAmount * 1.01; otherwise claim's safeTransferFrom reverts (insufficient allowance) and the caller must exempt the offending strategy. Unit MockSYA makes estimate == delivered exactly, so this path is untested.",
+  "No SYA strategy skimSurplus and no Curve route step calls poolManager.unlock (nested-unlock hazard, fork-tested for live USDe strategy at block 26261000 only).",
+  "Owner registers semantically correct Router NG routes (path contiguity, zero intermediates, delivered token and unexecuted rows/pools are now enforced on-chain; i/j/pool_type/n_coins, swap_type range and executed-hop pools are not) and a deep native-ETH/reward pool (no hook validation).",
+  "sya.rewardToken() is stable between setRoute/setEthPool and harvest (LOCAL-005).",
+  "Caller's only price protection is minEthOut; per-hop _expected = 0 and SYA minRewardTokenSupplied = 0 (design decision). Sandwich resistance relies on private submission (script/harvest.sh -> Flashbots Protect).",
+  "Gas check protects the caller only; Unprofitable ignores the NFT's own value consumed by the claim.",
+  "Reward token is standard ERC20 (USDC); SafeERC20 + forceApprove cover USDT-shape.",
+  "Router NG at the immutable `router` is v1.1 (0x16C6...5353) semantics: hop 0 always executes, stop after hop i when _route[2i+3]==0, deliver _route[2k] or revert. setRoute soundness is proven against this loop; a different router (constructor arg is not version-checked) would void it."
+ ],
+ "designDecisionsContext": "All 10 registry designDecisions are reflected faithfully in code: V4-only flash , nested-unlock hazard documented and tested, on-chain per-token Router NG routes swapping whole balance , single minEthOut , coverage revert , live rewardToken skip , borrow = calc + 1% inside callback , nftIndex 0 sentinel + whole-balance refund , gas check , public/stateless (no state beyond config). Context only, no suppression authority. (Line refs dropped at run-02 rebase; see diffScope.lineRebase.)",
+ "testFidelityNotes": [
+  "test/mocks/MockCurveRouter.sol (changed): now resolves output like Router NG v1.1 (hop i outputs _route[2i+2], break when i==4 || _route[2i+3]==0), reverts NoHop on _route[1]==0, ZeroIntermediateToken/ZeroOutputToken on zero tokens, BadSwapType(h) on executed swap_type 0, ignores unexecuted rows/pools. Independently written from the validator (does not reuse setRoute logic) - closes the run-01 \"mock mirrors validator\" gap (Q-06 part 2). Residual divergences: revert payloads differ (real: empty data / Error(\"Bad swap type\")); accepts swap_type >= 9 (real v1.1 reverts) so LOCAL-006 is invisible to unit tests; does not model \"Received nothing\", pool reads for swap_type 3, the amount-1 retention, or ETH legs.",
+  "Mock vs real at k=0: mock reverts NoHop; real router also reverts (call to address(0)); outcomes agree.",
+  "Fork suite (test/fork/SYAHarvester.fork.t.sol, gated on MAINNET_RPC_URL) now pins real Router NG ground truth: gapped USDe route delivers crvUSD (M-01 reproduction), zero intermediate reverts with empty data, executed swap_type 0 reverts Error(\"Bad swap type\"), setRoute rejects InvalidRouteGap(10)/InvalidRouteToken(2), shipped routes re-configure and harvest leaves the harvester empty. Story-007 reports 19/19 at block 26_261_000 (not re-run here).",
+  "Registry suite (test/SYAHarvester.registry.t.sol): 52 tests incl. k-aware fixtures _params(k)/_pools(k), every new error, check order (Token before End, End before SwapParams, params before pools, hop order), k=0 and k=5 accept/reject. Would catch reverting any single new check or restoring the last-non-zero rule. Not covered: swap_type upper bound, no fuzz/differential property (\"setRoute accepts => MockCurveRouter.resolveOutput == reward and mock does not revert\"), which would be the cheapest guard against future validator/mock drift.",
+  "test/SYAHarvester.registry.t.sol test_noHarvestFunction (now L638) is unchanged and still vacuous (calls harvest(uint256,uint256,address[]), which never existed) - Q-06 part 1 still open.",
+  "test/mocks/MockSYA.sol unchanged: delivered never exceeds estimate*1.01 (Q-06 part 3 still open).",
+  "test/SYAHarvester.routeGap.t.sol (new): harvest-level M-01 regression with a second strategy covering the borrow (the silent-strand precondition); asserts the gapped route is unstorable and the contiguous fixture leaves no balances. Defines _gapPath(); the run-01 work/ PoC test/poc-M-01-gap-route-strand.t.sol now name-collides with the fork base _gapPath() and must be renamed before replay.",
+  "HarvesterFixture unchanged (k=1 route, row 0 only, zero pools) - consistent with the new rules.",
+  "work/ audit harnesses (CodeScan01, HarvestSystem, SYAHarvesterInvariant, Symbolic) call setRoute with run-01-era inputs and may now revert in setUp under the stricter validator; a green Tier-3 run must first prove setUp still stores routes (vacuity risk)."
+ ],
+ "complexity": {
+  "loc": 402,
+  "functions": 10,
+  "externalCallSites": 22,
+  "stateVariables": 5,
+  "assembly": false,
+  "setRouteLoc": 44
+ },
+ "previousProfile": {
+  "run": "sya-harvester-01",
+  "commit": "62c19c86be1594dcf82e8af794fcd6c28f9a8fc0",
+  "path": "sya-harvester/reports/01/profiles/SYAHarvester.profile.json"
+ },
+ "diffScope": {
+  "range": "62c19c8..6b862aa",
+  "changedFunctions": [
+   "setRoute (validator rewritten)",
+   "errors: InvalidRouteEnd param rename last->delivered (selector unchanged, 0x types identical); new InvalidRouteGap/InvalidRouteToken/InvalidRouteSwapParams/InvalidRoutePools (all uint256)"
+  ],
+  "unchanged": [
+   "harvest",
+   "unlockCallback",
+   "_sellYield",
+   "_swapSurplusAndSettle",
+   "setEthPool",
+   "clearRoute",
+   "getRoute",
+   "receive",
+   "constructor"
+  ],
+  "lineRebase": "All post-setRoute line numbers shift +45 vs run-01 (errors +17, NatSpec +10, body +18). Carried-over line refs below are re-based to 6b862aa."
+ },
+ "routerNgGroundTruth": {
+  "source": "Etherscan verified source of 0x16C6521Dff6baB339122a0FE25a9116693265353 (CurveRouter v1.1, vyper 0.3.10), fetched this run (snapshot: sya-harvester/reports/02/profiles/evidence/RouterNG-v1.1-0x16C6.vy); diffed against curvefi/curve-router-ng master Router.vy (v1.2.0: only swap_type 8 token set changes and swap_type 9 = ERC4626 added; loop/termination identical).",
+  "exchangeLoop": [
+   "for i in range(5): swap=_route[2i+1]; pool=_pools[i]; output_token=_route[2i+2]; params=_swap_params[i]",
+   "Hop 0 ALWAYS executes: there is NO check that _route[1] != 0 before the swap. A zero swap address reverts (approve(0) via is_approved miss, or a call to a codeless address under vyper extcodesize check).",
+   "output_token balance is read BEFORE the swap (ERC20(output_token).balanceOf(self)): output_token == 0 reverts with empty data (call to codeless address) -> zero intermediate/zero delivered token always reverts (story-007 fork test pins empty revert data).",
+   "dispatch on params[2]: 1..8 handled (v1.1); else raise 'Bad swap type'. v1.2 additionally accepts 9.",
+   "`pool` (= _pools[i]) is consumed ONLY in the swap_type == 3 (zap) branch; types 5 and 7 call `swap` directly and never read _pools[i] (the inline Vyper comment `swap_type == 6` is stale).",
+   "assert balanceOf(output_token) - initial != 0, 'Received nothing' -> a hop whose pool actually outputs a different token than _route[2i+2] reverts (the stray output stays in the router, never reaches the harvester).",
+   "break if i == 4 or _route[2i+3] == 0; else input_token = output_token.",
+   "Rows _swap_params[h] and _pools[h] for unexecuted hops are never read.",
+   "Final: amount -= 1; assert amount >= _min_dy; transfer output_token (= _route[2k]) to _receiver."
+  ],
+  "executedHopCount": "Router executes k_R = 1 + (number of consecutive non-zero _route[3], _route[5], ... ) capped at 5, and delivers _route[2*k_R] or reverts. For _route[1] != 0, k_R equals the validator k exactly. For _route[1] == 0 the router does NOT deliver _route[0]; it attempts hop 0 against address(0) and reverts."
+ },
+ "ledgerBearing": {
+  "M-01 004d4547d9 (fix-pending)": "Root cause (validator checks last non-zero entry, Router NG stops at first empty pool) is closed at path level: no accepted route can deliver a non-reward token (verified analytically + exhaustive path-level model against deployed v1.1 loop). Remaining accepted-but-non-executable routes (k=0 reward key; swap_type >= 9; semantic row errors) all revert, so they cannot reproduce the M-01 silent strand. Recommend PROPOSE fixed after (1) renaming the work/ PoC _gapPath helper and replaying it (expect setRoute revert InvalidRouteGap), and (2) a human applies the status. Story-007 out-of-scope mitigation 3 (same last-non-zero rule in reflax vault CurveAMMAdapter.sol L73-80, and story-001 rule text) is NOT fixed by this diff - cross-repo carryover, keep visible.",
+  "Q-06 500b52898d (open)": "Partially addressed: part 2 (MockCurveRouter mirrors validator) fixed - mock is Router NG-faithful for termination, zero tokens and swap_type 0, and fork tests pin real behaviour. Parts 1 (vacuous test_noHarvestFunction) and 3 (MockSYA never over-delivers) unchanged. New residual: mock accepts swap_type >= 9; no differential/fuzz test of validator vs mock. Keep open (or re-scope title)."
+ }
+}

@@ -1,0 +1,87 @@
+{
+  "project": "sya-harvester",
+  "run": "sya-harvester-02",
+  "mode": "regression",
+  "commit": "6b862aa",
+  "baseline": "62c19c8",
+  "branch": "master",
+  "scanTimestamp": "2026-10-25T18:00:00Z",
+  "scanType": "code",
+  "contractsScanned": 2,
+  "nonSolidityReviewed": ["script/harvest.sh (diff: +4 KNOWN_ERRORS)", "test/script/harvest_anvil.sh (unchanged, not re-reviewed)"],
+  "evidence": {
+    "m01PocReplay": {
+      "file": "/home/justin/code/audits/sya-harvester/work/test/audit/CodeScan02M01Replay.fork.t.sol",
+      "how": "copy of work/test/poc-M-01-gap-route-strand.t.sol with _gapPath renamed _pocGapPath (collision with upstream fork base), imports re-pathed; forge test -j 2 --skip poc-M-01-gap-route-strand --match-path test/audit/CodeScan02M01Replay.fork.t.sol, MAINNET_RPC_URL=$RPC_MAINNET (live head ~26270476)",
+      "result": "20 passed / 2 failed. test_M01_gapRoute_strandsCrvUsd_andUnderpaysCaller and test_M01_validator_acceptsGap_rejectsHonestWrongEnd both FAIL with InvalidRouteGap(10) at setRoute (the PoC's step (1) 'does NOT revert' no longer holds). test_M01_control_contiguousRoute_leavesNoCrvUsd passes. Inherited upstream fork tests (shippedRoutes_passNewRules_andHarvestLeavesHarvesterEmpty, zeroIntermediate real-router revert 0x, swap_type 0 real-router Error('Bad swap type'), liveStrategies_everyNonRewardTokenHasRoute) all pass.",
+      "classification": "LIKELY-FIXED"
+    },
+    "liveSYA": "cast at mainnet head: rewardToken USDC; strategies aFDf->USDC (skipped), aC2e->USDe, 981c->DOLA. Both non-reward tokens have shipped routes (MainnetRoutes usde k=2, dola k=1, swap_type 1/2, pools zero) that satisfy the new validator.",
+    "selectors": "cast sig: InvalidRouteGap(uint256)=0x2ffe55f8, InvalidRouteToken(uint256)=0x7d133c02, InvalidRouteSwapParams(uint256)=0x816879ea, InvalidRoutePools(uint256)=0xc3221065, InvalidRouteEnd(address,address)=0xbbb17f7c; identical to the selectors of the compiled ABI errors in work/out/SYAHarvester.sol/SYAHarvester.json at 6b862aa. harvest.sh computes selectors at runtime with cast sig from these strings, so the entries are correct."
+  },
+  "findings": [
+    {
+      "id": "CODE-02-001",
+      "regression": "new",
+      "relatesTo": ["OBS-05", "LOCAL-006", "LOCAL-007"],
+      "type": "incomplete-route-validation (fail-loud)",
+      "rootCauseClass": "swap-type-presence-not-range-checked",
+      "severity": "qa",
+      "contract": "src/SYAHarvester.sol",
+      "function": "setRoute",
+      "line": 178,
+      "lineStart": 176,
+      "lineEnd": 185,
+      "description": "For executed hops setRoute requires only swapParams[h][2] != 0. Router NG v1.1 (0x16C6..., verified source, exchange loop) dispatches swap_type 1..8 and otherwise `raise \"Bad swap type\"`. A route with swap_type >= 9 (e.g. the ERC4626 type emitted by newer Router NG versions / routing tooling, already noted as rejected by this router in test/fork/MainnetRoutes.sol) is stored as valid and then reverts every harvest that delivers that token. i/j/pool_type/n_coins and executed-hop pools are likewise unconstrained by design (story-007 out of scope); wrong indices revert 'Received nothing'.",
+      "codeSnippet": "if (h < k) {\n    if (swapParams[h][2] == 0) revert InvalidRouteSwapParams(h);\n}",
+      "attackVector": "None adversarial. Owner footgun of low surprise: owner copies a route from tooling targeting a newer router; setRoute's new 'params consistent with path' check reads as having validated it. Consequence is a loud revert of every harvest (Error('Bad swap type'), decodable by harvest.sh's generic Error(string) path) until the owner re-sets the route or callers exempt the strategy. Atomic: no strand, no value at risk.",
+      "impact": "Liveness only; recoverable by the owner in one call.",
+      "recommendation": "Optionally bound executed swap_type to 1..8 (`swapParams[h][2] - 1 >= 8` revert) to match the immutable router; or document that setRoute validates path shape only and operators should eth_call router.exchange (audit 01 safe-config guidance).",
+      "confidence": "high"
+    }
+  ],
+  "ledgerStatusAssessments": [
+    {
+      "label": "M-01", "fingerprint": "004d4547d93b2d4431753bd11b17f2c86b50e65d1eaa37b530f34188feb739a3", "status": "fix-pending",
+      "assessment": "LIKELY-FIXED (propose fixed; human applies).",
+      "reasoning": "k = first empty pool slot (L161-162) matches Router NG's break `i == 4 or _route[i*2+3] == empty`; every slot after 2k is forced zero (L164-166 InvalidRouteGap); delivered token path[2k] must equal sya.rewardToken() (L171-173); executed intermediates non-zero (L168-170). Router NG transfers only the last executed hop's output_token = path[2k] to the receiver, so no accepted route can deliver a non-reward token (or ETH) to the harvester; intermediates never leave the router. The only accepted route that does not deliver R is the k=0 reward-token route, which _sellYield never executes (L356). PoC replay fails at setRoute with InvalidRouteGap(10). Mock now follows Router NG (stop at first empty pool), so the unit suite would catch a regression. Not an incomplete fix."
+    },
+    {
+      "label": "L-03", "fingerprint": "4994fe853f916ac91f7b79b6789e0644535a7687c65ba889481fcc0baac0d51b", "status": "open",
+      "assessment": "STILL LIVE, unchanged root; minor extension.",
+      "reasoning": "setRoute still validates delivered == sya.rewardToken() read at set time (L171) and setEthPool likewise (L219); unlockCallback reads it live (L325). After an SYA setRewardToken every stored route ends at the old token and the owner still cannot pre-stage the new set. Extension (OBS-02): a canonical k=0 route stored for the old reward token becomes reachable if a strategy then delivers that token; it reverts inside Router NG (hop 0 always executes, swap = address(0)) with a non-specific payload instead of the clearer RouteNotConfigured. Fold into L-03, no new entry."
+    },
+    {
+      "label": "L-04", "fingerprint": "8cc1530764fe5a82b97f32c17df0ca2ab803093cd8404ed11705cfb166a4adee", "status": "open",
+      "assessment": "STILL LIVE; diff touches it cosmetically only.",
+      "reasoning": "The 4 new KNOWN_ERRORS signatures are correct (selectors match compiled ABI). But they are raised only by owner-only setRoute, never on the harvest simulation the script runs, so they do not improve decoding on the script's path. Root unaddressed: SYA / strategy / oracle reverts and Router NG's own reverts (empty data, Error('Received nothing'/'Slippage'/'Bad swap type') only via generic pass-through) still give no strategy attribution; harvester-reachable SafeERC20FailedOperation(address) and SafeCastOverflowedUintToInt(uint256) are also absent from KNOWN_ERRORS. Small positive: the stricter validator removes the zero-intermediate empty-revert case from the reachable set."
+    },
+    {
+      "label": "Q-06", "fingerprint": "500b52898dea503576aef9ccf36106eb332ad4c7c39257f47305dd25fcfc8e81", "status": "open",
+      "assessment": "PARTIALLY FIXED; keep open.",
+      "reasoning": "MockCurveRouter part fixed: delivery resolved at first empty pool slot, ZeroIntermediateToken and BadSwapType(hop) reverts, unexecuted rows ignored (real-router payloads differ: empty data / Error('Bad swap type'); fork tests pin the real ones). Residual remains: MockCurveRouter still reverts NoHop on path[1]==0 rather than modelling Router NG (hop 0 always executes); does not model 'Received nothing' or swap_type > 8; test_noHarvestFunction (registry.t.sol L638-641) is still vacuous (calls a nonexistent selector); MockSYA (unchanged) still never over-delivers (DEDUP-005 / Q-01 gap)."
+    },
+    {
+      "label": "other open entries (L-01, L-02, Q-01..Q-05, Q-07)", "assessment": "Not touched by the diff (harvest, unlockCallback, _sellYield, _swapSurplusAndSettle, setEthPool unchanged); carried as-is."
+    }
+  ],
+  "clearedRows": {
+    "focusQuestions": {
+      "overRejectionOfValidRoutes": "Cleared. Accepted set = every route Router NG executes to R with swap_type != 0 and zero unexecuted rows/pools. ETH-hop intermediates (0xEeee) unconstrained; zap types 3 (uses pools) / 5 / 7 allowed, executed-hop pools unconstrained; k=5 accepted (delivered path[10], gap loop empty); shipped USDe/DOLA routes pass on fork; all live non-reward strategy tokens have a route. Rejections of nonzero unexecuted rows/pools only reject data the router ignores (owner zeroes it).",
+      "overwriteAndDelete": "Cleared. setRoute assigns whole path/swapParams/pools arrays, so overwrite leaves no stale slots; clearRoute (delete) unchanged.",
+      "exemptTokenHandling": "Unchanged (_sellYield L354-356 untouched). Reward-token skip still runtime sya.rewardToken().",
+      "deployedStaleRoutes": "No mainnet deployment recorded (registry deployed=null); the fix needs no migration of stored routes."
+    },
+    "classicSingleFn": "Cleared: harvest pays ETH last after all state; unchanged.",
+    "crossContract": "Cleared: Router NG exchange is @nonreentrant; unlockCallback gated msg.sender==poolManager and any nested unlock reverts AlreadyUnlocked; setRoute (owner) reads sya.rewardToken() only.",
+    "crossFunction": "Cleared: harvester stateless between calls; only routes/ethPool storage, owner-written.",
+    "readOnly": "Cleared: only views are getRoute/getEthPool (config), no price/share views.",
+    "erc721Hook": "N/A.",
+    "erc1155Hook": "Carried refuted (run-01 manual-review): refund safeTransferFrom to msg.sender before payout lets the caller re-enter harvest, but the beneficiary is the same caller; unchanged code.",
+    "erc777": "N/A: USDC/USDe/DOLA/crvUSD have no hooks."
+  },
+  "notes": [
+    "Tier-3 caveat: audit harnesses calling setRoute with gapped/zero-swap_type rows or nonzero unexecuted pools (CodeScan01, HarvestSystem, SYAHarvesterInvariant, Symbolic) may now revert at setUp; rebuild fixtures before trusting their results.",
+    "work/test/poc-M-01-gap-route-strand.t.sol still does not compile (_gapPath collision); the replay copy lives at work/test/audit/CodeScan02M01Replay.fork.t.sol."
+  ]
+}

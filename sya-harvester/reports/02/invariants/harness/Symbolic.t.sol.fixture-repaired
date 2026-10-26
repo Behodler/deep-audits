@@ -1,0 +1,382 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+// Tier-3 symbolic harness, audit run sya-harvester-01 (src @ 62c19c8). Audit-authored, NOT upstream.
+// External systems are AXIOMATIZED, never executed: Curve Router NG is replaced by `_routerDelivers`
+// (a transcription of the verified Vyper `exchange` loop), SYA by a stub exposing `rewardToken()`, and
+// Uniswap V4 by explicit assumptions on the swap delta. Halmos runs `check_*`; forge fuzz runs `testFuzz_*`
+// (fallback for the multi-division properties Halmos cannot decide).
+
+import {Test} from "forge-std/Test.sol";
+import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {IStableYieldAccumulator} from "stable-yield-accumulator/src/interfaces/IStableYieldAccumulator.sol";
+import {SYAHarvester} from "../../../src/SYAHarvester.sol";
+import {ICurveRouterNG} from "../../../src/interfaces/ICurveRouterNG.sol";
+
+contract RewardOnlySYA {
+    address public rewardToken;
+
+    constructor(address r) {
+        rewardToken = r;
+    }
+}
+
+contract SYAHarvesterSymbolic is Test {
+    SYAHarvester harvester;
+    RewardOnlySYA syaStub;
+    address constant REWARD = address(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48); // USDC (concrete)
+
+    function setUp() public {
+        syaStub = new RewardOnlySYA(REWARD);
+        harvester = new SYAHarvester(
+            address(this),
+            IPoolManager(address(0x1111)),
+            IStableYieldAccumulator(address(syaStub)),
+            ICurveRouterNG(address(0x2222))
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Curve Router NG model (verified source, `exchange`):
+    //   for i in range(1, 6): swap via pool _route[2i-1], output_token = _route[2i];
+    //       if i == 5 or _route[2i+1] == empty(address): break
+    //   ERC20(output_token).transfer(_receiver, amount)
+    // zero-indexed hop k: pool path[2k+1], output path[2k+2], stop if path[2k+3] == 0.
+    // `loud` = the execution is certain to revert (a hop's pool slot is empty -> call to codeless
+    // address, or the delivered token is address(0) -> transfer on empty address).
+    // ------------------------------------------------------------------------------------------
+    function _routerDelivers(address[11] memory p) internal pure returns (address out, bool loud, uint256 hops) {
+        for (uint256 k = 0; k < 5; k++) {
+            if (p[2 * k + 1] == address(0)) loud = true;
+            out = p[2 * k + 2];
+            hops = k + 1;
+            if (k == 4 || p[2 * k + 3] == address(0)) break;
+        }
+        if (out == address(0)) loud = true;
+    }
+
+    /// The fix recommended by CODE-001: contiguous prefix ending in reward, all-zero tail.
+    function _contiguous(address[11] memory p, address reward) internal pure returns (bool) {
+        uint256 k = 0;
+        while (k < 4 && p[2 * k + 3] != address(0)) k++;
+        if (p[2 * k + 2] != reward) return false;
+        for (uint256 j = 2 * k + 3; j < 11; j++) {
+            if (p[j] != address(0)) return false;
+        }
+        return true;
+    }
+
+    function _store(address token, address[11] memory path) internal returns (bool accepted, address[11] memory stored) {
+        uint256[5][5] memory sp;
+        address[5] memory pools;
+        // run-02 fixture repair (src @ 6b862aa, story-007): executed rows (h < k, k = executed hop count
+        // as Router NG counts it) need swap_type != 0, unexecuted rows must be all zero. With all-zero
+        // rows every k >= 1 route reverts InvalidRouteSwapParams(0) and every A-property is vacuous.
+        uint256 k;
+        while (k < 5 && path[2 * k + 1] != address(0)) k++;
+        for (uint256 h = 0; h < k; h++) sp[h][2] = 1;
+        try harvester.setRoute(token, path, sp, pools) {
+            accepted = true;
+            stored = harvester.getRoute(token).path;
+        } catch {}
+    }
+
+    // ---- (a) setRoute path validation, REAL contract under test ---------------------------------
+
+    /// A1: every route setRoute accepts is executed by Router NG to deliver rewardToken.
+    /// EXPECTED FAIL (CODE-001 gap route).
+    function check_A1_acceptedRouteDeliversReward(address token, address[11] memory path) public {
+        (bool accepted, address[11] memory stored) = _store(token, path);
+        vm.assume(accepted);
+        (address out,,) = _routerDelivers(stored);
+        assert(out == REWARD);
+    }
+
+    /// A2: narrowed to SILENT misroutes: every executed pool slot non-zero and a non-zero token is
+    /// delivered (so the router call cannot be a guaranteed revert). EXPECTED FAIL (gap route).
+    function check_A2_acceptedRouteNoSilentMisroute(address token, address[11] memory path) public {
+        (bool accepted, address[11] memory stored) = _store(token, path);
+        vm.assume(accepted);
+        (address out, bool loud,) = _routerDelivers(stored);
+        vm.assume(!loud);
+        assert(out == REWARD);
+    }
+
+    /// A3: the ONLY silent misroute class is an interior zero gap: if no gap exists (contiguous
+    /// prefix, all-zero tail) an accepted route delivers reward. Proves there is no OTHER accepted
+    /// silent-misroute shape (path[0]==reward, odd-index end, all-zero tail are all covered).
+    function check_A3_noGapImpliesCorrectDelivery(address token, address[11] memory path) public {
+        (bool accepted, address[11] memory stored) = _store(token, path);
+        vm.assume(accepted);
+        // no gap: once the router would stop, everything after is zero
+        (, , uint256 hops) = _routerDelivers(stored);
+        for (uint256 j = 2 * hops + 1; j < 11; j++) {
+            vm.assume(stored[j] == address(0));
+        }
+        (address out, bool loud,) = _routerDelivers(stored);
+        assert(loud || out == REWARD);
+    }
+
+    /// A4 (v2): odd-index (pool slot) end. If the last non-zero entry sits in a pool slot and the
+    /// route has NO interior gap, execution is LOUD (router delivers address(0)). Odd-end routes
+    /// WITH a gap fall into the A2/CODE-001 gap class. Index computed with concrete loop indices
+    /// (v1 used a symbolic array index -> Halmos NotConcreteError).
+    function check_A4_oddIndexEndNoGapIsLoud(address token, address[11] memory path) public {
+        (bool accepted, address[11] memory stored) = _store(token, path);
+        vm.assume(accepted);
+        uint256 lastIdx;
+        for (uint256 j = 0; j < 11; j++) {
+            if (stored[j] != address(0)) lastIdx = j;
+        }
+        vm.assume(lastIdx % 2 == 1);
+        (, , uint256 hops) = _routerDelivers(stored);
+        for (uint256 j = 2 * hops + 1; j < 11; j++) {
+            vm.assume(stored[j] == address(0));
+        }
+        (, bool loud,) = _routerDelivers(stored);
+        assert(loud);
+    }
+
+    /// A5: the CODE-001 recommended fix (contiguity) is sufficient: accepted AND contiguous => the
+    /// router delivers reward (or reverts loudly). Expected PASS.
+    function check_A5_contiguityFixSufficient(address token, address[11] memory path) public {
+        (bool accepted, address[11] memory stored) = _store(token, path);
+        vm.assume(accepted);
+        vm.assume(_contiguous(stored, REWARD));
+        (address out, bool loud,) = _routerDelivers(stored);
+        // v1 asserted (!loud && out == REWARD) and FAILED on path[1]==0: contiguity does not check
+        // pool slots, but an empty executed pool slot reverts (loud), so it is not a misroute.
+        assert(loud || out == REWARD);
+    }
+
+    /// A5b: strengthened fix = contiguity + every executed pool slot non-zero => never loud and
+    /// delivers reward.
+    function check_A5b_contiguityPlusPoolsFixSufficient(address token, address[11] memory path) public {
+        (bool accepted, address[11] memory stored) = _store(token, path);
+        vm.assume(accepted);
+        vm.assume(_contiguous(stored, REWARD));
+        (, , uint256 hops) = _routerDelivers(stored);
+        for (uint256 k = 0; k < 5; k++) {
+            if (k < hops) vm.assume(stored[2 * k + 1] != address(0));
+        }
+        (address out, bool loud,) = _routerDelivers(stored);
+        assert(!loud && out == REWARD);
+    }
+
+    /// A6: the contiguity fix is also NECESSARY-and-not-over-strict: any accepted, non-loud route
+    /// that delivers reward is contiguous OR has only junk after a reward-delivering prefix.
+    /// We assert the weaker, useful direction: correct delivery with zero tail => contiguous.
+    function check_A6_contiguityNotOverStrict(address token, address[11] memory path) public {
+        (bool accepted, address[11] memory stored) = _store(token, path);
+        vm.assume(accepted);
+        (address out, bool loud, uint256 hops) = _routerDelivers(stored);
+        vm.assume(!loud && out == REWARD);
+        for (uint256 j = 2 * hops + 1; j < 11; j++) {
+            vm.assume(stored[j] == address(0));
+        }
+        assert(_contiguous(stored, REWARD));
+    }
+
+    /// A7: stored path equals the submitted path (no truncation/corruption in the calldata->storage copy).
+    function check_A7_storedEqualsSubmitted(address token, address[11] memory path) public {
+        (bool accepted, address[11] memory stored) = _store(token, path);
+        vm.assume(accepted);
+        for (uint256 j = 0; j < 11; j++) {
+            assert(stored[j] == path[j]);
+        }
+    }
+
+    // ---- (b) gas-check arithmetic and surplus guard (models of L251-252, L291, L337-343) --------
+
+    uint256 constant GAS_OVERHEAD = 60_000;
+
+    /// B1: with gas monotone (g1 <= g0) and realistic bounds, gasCost never panics and charges at
+    /// least the measured gas plus overhead. domain: g0 < 2^64, gasprice < 2^128.
+    function check_B1_gasCostNoPanic(uint256 g0, uint256 g1, uint256 price) public pure {
+        vm.assume(g1 <= g0 && g0 < 2 ** 64 && price < 2 ** 128);
+        uint256 gasCost = (g0 - g1 + GAS_OVERHEAD) * price;
+        assert(gasCost >= (g0 - g1) * price);
+        assert(gasCost >= GAS_OVERHEAD * price);
+    }
+
+    /// B2: tx.gasprice == 0 makes the Unprofitable check vacuous (documented NatSpec hazard).
+    /// This is an identity (0 * x == 0) -- recorded as a sanity proof, NOT evidence of anything.
+    function check_B2_zeroGasPriceVacuous(uint256 g0, uint256 g1, uint256 ethOut) public pure {
+        vm.assume(g1 <= g0 && g0 < 2 ** 64);
+        uint256 gasCost = (g0 - g1 + GAS_OVERHEAD) * 0;
+        assert(!(ethOut < gasCost));
+    }
+
+    /// B3: surplus guard + settlement. Under the V4 exact-input axiom (amount1 in [-surplus, 0],
+    /// amount0 >= 0), a non-reverting callback transfers debt <= balance and the residue left in
+    /// the harvester is exactly surplus - consumed (zero iff full fill; CODE-006 partial fill).
+    function check_B3_surplusSettleConservation(uint256 bal, uint256 owed, int128 a0, int128 a1) public pure {
+        vm.assume(bal >= owed); // else L291 reverts (checked underflow) -- loud
+        uint256 surplus = bal - owed;
+        vm.assume(surplus < 2 ** 255); // SafeCast.toInt256 bound
+        uint256 debt = owed;
+        uint256 ethAmount;
+        if (surplus > 0) {
+            vm.assume(int256(a1) <= 0 && -int256(a1) <= int256(surplus) && a0 >= 0);
+            debt += uint256(int256(-a1));
+            ethAmount = uint256(int256(a0));
+        }
+        assert(debt <= bal);
+        assert(bal - debt == (surplus > 0 ? surplus - uint256(int256(-a1)) : 0));
+        assert(ethAmount < 2 ** 127);
+    }
+
+    /// B4: axiom violated by a hook returning a POSITIVE amount1 (owner-set hooked pool):
+    /// debt then wraps to >= 2^256 - 2^127 (or the add panics) -- loud, never a silent under-settle.
+    function check_B4_positiveDeltaIsLoud(uint256 bal, uint256 owed, int128 a1) public pure {
+        vm.assume(bal >= owed && bal - owed > 0 && bal < 2 ** 200);
+        vm.assume(a1 > 0);
+        uint256 add = uint256(int256(-a1));
+        unchecked {
+            uint256 debt = owed + add;
+            bool overflowed = debt < owed;
+            // either the checked add panics, or debt is absurdly large -> safeTransfer(debt) reverts
+            assert(overflowed || debt > bal);
+        }
+    }
+
+    /// B5: below-owed balance always reverts at L291 (no silent zero surplus).
+    function check_B5_underwaterReverts(uint256 bal, uint256 owed) public {
+        vm.assume(bal < owed);
+        (bool ok,) = address(this).call(abi.encodeWithSelector(this.surplusOf.selector, bal, owed));
+        assert(!ok);
+    }
+
+    function surplusOf(uint256 bal, uint256 owed) external pure returns (uint256) {
+        return bal - owed;
+    }
+
+    // ---- (c) borrow buffer vs SYA pull (L281 vs SYA.claim L613-626) ---------------------------
+
+    /// C1: owed >= estimate and the buffer is exactly floor(est/100). domain: est < 2^200.
+    function check_C1_bufferNeverBelowEstimate(uint256 est) public pure {
+        vm.assume(est < 2 ** 200);
+        uint256 owed = est * (10000 + 100) / 10000;
+        assert(owed >= est);
+        assert(owed - est == est / 100);
+    }
+
+    /// C2: the buffer is STRICTLY positive for every non-zero estimate. EXPECTED FAIL for est < 100
+    /// (floor rounding zeroes the 1% headroom on dust estimates).
+    function check_C2_bufferStrictlyPositive(uint256 est) public pure {
+        vm.assume(est > 0 && est < 2 ** 200);
+        uint256 owed = est * (10000 + 100) / 10000;
+        assert(owed > est);
+    }
+
+    /// C3a: discount step is monotone (one symbolic division, nonlinear mul). domain: x,y < 2^128.
+    function check_C3a_discountMonotone(uint256 x, uint256 y, uint256 d) public pure {
+        vm.assume(x <= y && y < 2 ** 128 && d <= 10000);
+        assert(x * (10000 - d) / 10000 <= y * (10000 - d) / 10000);
+    }
+
+    /// C3b: denormalize (decimals scale-down) is monotone. domain: x,y < 2^200, decimals <= 18.
+    function check_C3b_scaleDownMonotone(uint256 x, uint256 y, uint8 dec) public pure {
+        vm.assume(x <= y && y < 2 ** 200 && dec <= 18);
+        uint256 s = 10 ** (18 - uint256(dec));
+        assert(x / s <= y / s);
+    }
+
+    /// C3c: exchange-rate steps (normalize *r/1e18, denormalize *1e18/r) are monotone. domain: x,y,r < 2^96, r>0.
+    function check_C3c_rateMonotone(uint256 x, uint256 y, uint256 r) public pure {
+        vm.assume(x <= y && y < 2 ** 96 && r > 0 && r < 2 ** 96);
+        assert(x * r / 1e18 <= y * r / 1e18);
+        assert(x * 1e18 / r <= y * 1e18 / r);
+    }
+
+    // ---- SYA payment model (verbatim transcription of _normalizeAmount/_denormalizeAmount/claim) --
+
+    struct Cfg {
+        uint8 dec;
+        uint256 rate;
+    }
+
+    function _norm(uint256 a, Cfg memory c) internal pure returns (uint256 s) {
+        if (c.dec == 0 && c.rate == 0) return a;
+        s = a;
+        if (c.dec < 18) s = a * (10 ** (18 - c.dec));
+        else if (c.dec > 18) s = a / (10 ** (c.dec - 18));
+        if (c.rate > 0 && c.rate != 1e18) s = s * c.rate / 1e18;
+    }
+
+    function _denorm(uint256 a, Cfg memory c) internal pure returns (uint256 s) {
+        if (c.dec == 0 && c.rate == 0) return a;
+        s = a;
+        if (c.rate > 0 && c.rate != 1e18) s = s * 1e18 / c.rate;
+        if (c.dec < 18) s = s / (10 ** (18 - c.dec));
+        else if (c.dec > 18) s = s * (10 ** (c.dec - 18));
+    }
+
+    function _payment(uint256[3] memory amt, Cfg[3] memory tc, Cfg memory rc, uint256 disc)
+        internal
+        pure
+        returns (uint256)
+    {
+        uint256 tot;
+        for (uint256 i = 0; i < 3; i++) {
+            if (amt[i] > 0) tot += _norm(amt[i], tc[i]);
+        }
+        if (tot == 0) return 0;
+        return _denorm(tot * (10000 - disc) / 10000, rc);
+    }
+
+    /// C4 (Halmos attempt, live config: reward USDC 6dp rate 1e18; strategy tokens 6/18/18 dp, rate 1e18):
+    /// if every strategy delivers <= its estimate, SYA's pull <= calculateClaimAmount <= owed.
+    /// Two symbolic divisions -> expected TIMEOUT; testFuzz_C4 is the fallback.
+    function check_C4_pullWithinBorrow_liveConfig(uint256[3] memory est, uint256[3] memory del, uint256 disc)
+        public
+        pure
+    {
+        vm.assume(disc <= 10000);
+        for (uint256 i = 0; i < 3; i++) {
+            vm.assume(est[i] < 2 ** 96 && del[i] <= est[i]);
+        }
+        Cfg[3] memory tc = [Cfg(6, 1e18), Cfg(18, 1e18), Cfg(18, 1e18)];
+        Cfg memory rc = Cfg(6, 1e18);
+        uint256 e = _payment(est, tc, rc, disc);
+        uint256 p = _payment(del, tc, rc, disc);
+        uint256 owed = e * 10100 / 10000;
+        assert(p <= owed);
+    }
+
+    /// C4 fuzz fallback, GENERAL config (any decimals <= 18 per SYA's setTokenConfig guard, any rate).
+    function testFuzz_C4_pullWithinBorrow_general(
+        uint256[3] memory est,
+        uint256[3] memory del,
+        uint8[3] memory decs,
+        uint256[3] memory rates,
+        uint8 rdec,
+        uint256 rrate,
+        uint256 disc
+    ) public pure {
+        disc = bound(disc, 0, 10000);
+        Cfg[3] memory tc;
+        for (uint256 i = 0; i < 3; i++) {
+            est[i] = bound(est[i], 0, 2 ** 96);
+            del[i] = bound(del[i], 0, est[i]);
+            tc[i] = Cfg(uint8(bound(decs[i], 0, 18)), bound(rates[i], 0, 1e24));
+        }
+        Cfg memory rc = Cfg(uint8(bound(rdec, 0, 18)), bound(rrate, 0, 1e24));
+        uint256 e = _payment(est, tc, rc, disc);
+        uint256 p = _payment(del, tc, rc, disc);
+        assertLe(p, e * 10100 / 10000, "pull exceeds borrow under delivered<=estimate");
+    }
+
+    /// C6 fuzz witness search: over-delivery makes the pull exceed owed (CODE-005 DoS shape).
+    /// Asserts the NEGATION so the fuzzer prints a concrete witness; EXPECTED FAIL.
+    function testFuzz_C6_overDeliveryExceedsBorrow(uint256 est, uint256 extraBps) public pure {
+        est = bound(est, 1e6, 1e12); // 1..1e6 USDC-equivalent, 6dp strategy token
+        extraBps = bound(extraBps, 0, 500);
+        uint256[3] memory e = [est, 0, 0];
+        uint256[3] memory d = [est + est * extraBps / 10000, 0, 0];
+        Cfg[3] memory tc = [Cfg(6, 1e18), Cfg(18, 1e18), Cfg(18, 1e18)];
+        Cfg memory rc = Cfg(6, 1e18);
+        uint256 owed = _payment(e, tc, rc, 0) * 10100 / 10000;
+        assertLe(_payment(d, tc, rc, 0), owed, "over-delivery exceeds 1% buffer");
+    }
+}
