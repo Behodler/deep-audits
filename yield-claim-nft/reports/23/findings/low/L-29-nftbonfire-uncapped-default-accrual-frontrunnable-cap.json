@@ -1,0 +1,122 @@
+{
+  "id": "L-29",
+  "label": "L-29",
+  "issueId": "ycn23l29",
+  "project": "yield-claim-nft",
+  "status": "ready",
+  "severity": "low",
+  "title": "NFTBonfire maxPayout defaults to 0 (unlimited) and pause does not stop accrual, so an idle stretch, a deploy-wiring delay or a pause turns into one rate x D mint taken by the first burner; a cap applied reactively while burns are live is front-runnable and never binds",
+  "contract": "src/NFTBonfire.sol",
+  "function": "setMaxPayout / pendingPayout / burn / unpause",
+  "line": 120,
+  "lineStart": 97,
+  "lineEnd": 156,
+  "link": "https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L97-L156",
+  "entryPoint": null,
+  "branch": "master",
+  "branchesSeen": [
+    "master"
+  ],
+  "fingerprint": "589c642bd003b3c93411625096cd88a96b411ee134284d4b60cae2bd70f1ba6c",
+  "fingerprintBasis": "NFTBonfire.sol:setMaxPayout / pendingPayout / burn / unpause:uncapped-default-accrual",
+  "rootCauseClass": "uncapped-default-accrual",
+  "origin": "new",
+  "regression": false,
+  "footgun": true,
+  "faithfulness": false,
+  "channel": "qa",
+  "borderline": true,
+  "borderlineNote": "Low vs Medium. Medium would need a value leak beyond what the owner set up, and there isn't one. Total AM issued is at most ratePerDay x elapsed time (invariant_1_emissionTimeBounded holds over about 1.09M forge and Medusa calls). The hazard concentrates emission the owner already budgeted into one burner's hands. It does not enlarge that emission. Would re-rate to Medium if a deploy story ships rate>0 with maxPayout==0 and no pauser, and the expected pause or wiring delay times rate exceeds a material threshold. Flag for human review.",
+  "severityNote": "BORDERLINE Low vs Medium (flagged for human review). Low vs Medium. Medium would need a value leak beyond what the owner set up, and there isn't one. Total AM issued is at most ratePerDay x elapsed time (invariant_1_emissionTimeBounded holds over about 1.09M forge and Medusa calls). The hazard concentrates emission the owner already budgeted into one burner's hands. It does not enlarge that emission. Would re-rate to Medium if a deploy story ships rate>0 with maxPayout==0 and no pauser, and the expected pause or wiring delay times rate exceeds a material threshold. Flag for human review.",
+  "description": "setMaxPayout takes effect only from the block it lands in, and burn() is permissionless and reads the pot at its own execution time (L100-104), so a cap applied reactively while burns are live can be front-run and never binds on the pot standing at that moment. This is the core of the finding. Context: maxPayout defaults to 0 = unlimited (story-mandated) and pendingPayout() returns raw accrual when cap == 0 (NFTBonfire.sol:117-121); pause() blocks burn only and does not checkpoint or freeze accrual (L148-156). Safe owner sequences exist without the global Pauser: setRatePerDay(0) -> setMaxPayout -> restore rate (L98, L127-131), or pause -> cap -> unpause once a pauser is set.",
+  "impact": "Bounded by ratePerDay x D. No AM beyond the rate the owner configured is minted; the loss is the forfeiture the owner later intended (phUSD dilution of rate x D - cap). Cost to the winner: one NFT (marginal value about 0 for the ~772 idle unstaked V2 NFTs) plus gas.",
+  "attackPath": [
+    "1. Owner runs ratePerDay > 0 with maxPayout at its default of 0 (unlimited).",
+    "2a. Burns stop for D days: a pause (accrual continues by design), or rate enabled before setAuthorizedBurner/setApprovedMinter lands. The pot grows to rate x D.",
+    "3a. Owner unpauses, or completes the wiring, without a cap. A searcher holding any V2 NFT back-runs it with burn(id, pot-1) and takes the whole pot.",
+    "2b. Variant: the owner broadcasts setMaxPayout(cap) while burns are live. A holder front-runs it with burn() and takes the uncapped pot (PoC: 250e18 instead of 10e18)."
+  ],
+  "attackVector": "Core (CODE-001): with burns live and maxPayout == 0, the owner broadcasts setMaxPayout(cap) to shrink a large pot; any holder of a V2 NFT burns first in the same block and takes the uncapped pot. PoC parameters (the PoC's own, not the story rate): 100-day pot of 250e18 vs intended cap 10e18; work/test/audit23/BonfireCapFrontRun.t.sol test_CODE001_frontRunBurn_defeatsCap PASS (payout 250e18), control test_CODE001_capLandsFirst_payoutCapped PASS (payout 10e18). At the story-053 example rate (2.5 AM/day, about $0.89/AM) a 14-day idle stretch is about 35 AM (about $31) and 100 days about 250 AM (about $222). Context, not a separate vector: unpausing or completing wiring with no cap hands the idle-period pot to the first burner; this is documented behaviour (story-053 L77/L99/L108/L114) and is handled as safe-config guidance.",
+  "likelihood": "medium-low: needs an owner config sequence (uncapped default plus an idle stretch, or reactive capping while live). That sequence is plausible because the default is uncapped and the deploy story that would require a cap does not exist. Once the setup exists, exploitation is trivial and permissionless.",
+  "assumptions": "rate>0; maxPayout==0 at the moment burns resume, or the cap is set while live; the attacker holds one V2 NFT (about 772 idle ones exist).",
+  "externalRequirements": "Owner-side configuration sequence. No user principal at risk.",
+  "assetImpact": "Antimatter (redeemable into unbacked phUSD at about $0.89/AM) that the owner meant to forfeit through a cap is minted to the first burner. This is real phUSD dilution (ECON-005), not opportunity cost. The excess is capped at (ratePerDay x D - intended cap), and that sum sits inside the owner's own rate budget.",
+  "recommendation": "Safe config (phStaging2 deploy follow-up, which does not exist yet): (1) never change the cap while burns are live; stop first: setRatePerDay(0) (one owner tx, no pauser needed, preserves the pot) -> setMaxPayout(cap) -> restore rate; or, once a pauser is set, pause -> setMaxPayout(cap) -> unpause; or use a private relay; (2) setMaxPayout(rate x 1-2 days) BEFORE the first non-zero setRatePerDay, and enable the rate only after setAuthorizedBurner + setApprovedMinter; (3) set a cap before any planned pause or wiring delay. Deploy-story / story-amendment option (not a code deviation; maxPayout == 0 is the story-mandated default, story-053 L108/L114): amend the story so setRatePerDay reverts on a non-zero rate while maxPayout == 0, or checkpoint-and-freeze accrual on pause(). Only the pause-based variant of (1) needs a pauser (see Q-27).",
+  "evidence": [
+    "src/NFTBonfire.sol:117-121 raw accrual, cap only when != 0",
+    "src/NFTBonfire.sol:135-139 setMaxPayout checkpoints at the OLD max (0 => full pot stored uncapped; clamped on read by the new cap)",
+    "src/NFTBonfire.sol:148-156 pause/unpause do not touch accrual",
+    "story-053 L77 'This is the accrual cap that prevents a long idle period from turning into one large mint'; L99 'Accrual keeps running while the contract is paused'; L128 deploy/rate setting deferred to a phStaging2 follow-up that does not exist (whole-tree glob)",
+    "work/test/audit23/BonfireCapFrontRun.t.sol (2 tests PASS)",
+    "symbolic check_capBoundAfterRecap PASS: a stored pot above a newly lowered cap is still clamped on read (true identity, confirms the pause-first sequence binds)"
+  ],
+  "instances": [
+    {
+      "contract": "src/NFTBonfire.sol",
+      "function": "constructor / maxPayout declaration",
+      "line": 32,
+      "note": "default 0 = unlimited"
+    },
+    {
+      "contract": "src/NFTBonfire.sol",
+      "function": "pendingPayout",
+      "line": 120,
+      "note": "cap applied only when maxPayout != 0"
+    },
+    {
+      "contract": "src/NFTBonfire.sol",
+      "function": "setMaxPayout",
+      "line": 135,
+      "note": "retroactive cap is front-runnable while burns are live (CODE-001)"
+    },
+    {
+      "contract": "src/NFTBonfire.sol",
+      "function": "pause / unpause",
+      "line": 149,
+      "note": "accrual continues; first burn after unpause takes the whole paused-period pot (PATTERN-002, ECON-001)"
+    }
+  ],
+  "crossRefs": [
+    "DEDUP-004 (an unset pauser removes the pause-first safe sequence)",
+    "DEDUP-002 (winner-takes-all sniping; the unpause/setter back-run facet of PATTERN-001 is folded in here)",
+    "SLITHER-002 (timestamp in pendingPayout; removed as tool noise, see dedup-log)"
+  ],
+  "suppressionGuard": "ECON-005: bonfire AM is redeemable via annihilate into unbacked phUSD, so over-emission is phUSD dilution, NOT 'externally-derived yield = opportunity cost'. That memory rule must not be used to suppress this finding.",
+  "severityJustification": "This is a non-obvious owner footgun (Law 3). A competent owner would not expect a reactive cap to be front-runnable, or an unpause to hand out the whole pause-period accrual. So it is in scope and is not dismissed as centralization. It rates at the impact it unlocks: the distribution of an already-budgeted emission goes wrong, and nothing extra is drained. That is Low under C4. Safe-config guidance for the phStaging2 NFTBonfire deploy story: (1) set maxPayout before or in the same tx batch as the first setRatePerDay>0; (2) never change the cap while burns are live. Stop burns first with pause() or setRatePerDay(0), then setMaxPayout, then resume; (3) set a cap before any planned pause or wiring delay.",
+  "routing": "ledger L (ycn); safe-config text owed to the missing phStaging2 NFTBonfire deploy story.",
+  "sanitizerSeverityNote": "Highest source label is PATTERN-002 potential-medium (mechanical pattern mapping). Every source that assessed impact (LOCAL-001, CODE-001, ECON-001, F-01-053) lands on Low: owner-triggered, no user principal at risk, and total emission is bounded by the owner-set rate x time (invariant_1_emissionTimeBounded holds over 512k forge calls + 581k Medusa calls). The harm is a missed forfeiture: (rate x D - intended cap) is minted as phUSD dilution instead of being forfeited. Severity-classifier to rate.",
+  "poc": {
+    "file": "yield-claim-nft/work/test/audit23/BonfireCapFrontRun.t.sol",
+    "status": "passing",
+    "tests": [
+      "test_CODE001_frontRunBurn_defeatsCap (payout 250e18 instead of 10e18)",
+      "test_CODE001_capLandsFirst_payoutCapped (control, payout 10e18)"
+    ],
+    "lastRun": "2026-10-27 (re-run by severity-classifier, reproduced)"
+  },
+  "metadata": {
+    "createdAt": "2026-10-27T00:00:00Z",
+    "updatedAt": "2026-10-27T00:00:00Z",
+    "run": "yield-claim-nft-23",
+    "commit": "c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238",
+    "scanOrigin": "DEDUP-001",
+    "dedupOriginalIds": [
+      "LOCAL-001",
+      "PATTERN-002",
+      "CODE-001",
+      "ECON-001",
+      "F-01-053"
+    ],
+    "classificationOrigin": "CLASS-001"
+  },
+  "reportPath": "yield-claim-nft/reports/23/submissions/qa-report.md",
+  "faithfulnessCrossRef": "F-01-053 stays in spec-conformance.md as a cross-reference to this L entry only. Do not file it as a second finding.",
+  "spec": {
+    "crossRef": "F-01-053",
+    "storyTag": "story-053",
+    "storyState": "auto-complete",
+    "lawImpacted": 2,
+    "note": "Code matches the letter of story-053. The gap is in the story: it names maxPayout as the idle-period protection but does not require it at rate-enable time, and the deploy story that would carry the obligation does not exist. Keep F-01-053 in spec-conformance.md as a cross-reference to this finding; do not file it as a second Low."
+  },
+  "finalReviewNote": "2026-10-27 final review (validity-review.json, severity-audit.json): example restated at story-053 rate (2.5 AM/day); 25e18/day removed; PoC figures labelled as PoC parameters; owner safe sequences made explicit; hardening reframed as story-amendment option; unpause/wiring-with-no-cap reframed as context."
+}

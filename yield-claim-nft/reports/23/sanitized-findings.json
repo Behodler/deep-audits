@@ -1,0 +1,656 @@
+{
+  "run": "yield-claim-nft-23",
+  "project": "yield-claim-nft",
+  "head": "c5ad56d",
+  "baseline": "0fd6bdf",
+  "branch": "master",
+  "mode": "regression",
+  "stage": "sanitize",
+  "agent": "sanitizer",
+  "timestamp": "2026-10-27T01:11:56Z",
+  "fingerprintFormula": "sha256(<contract basename>:<function verbatim>:<rootCauseClass>) - verified by reproducing ledger L-26 b2a29359fde5; preimage recorded per finding",
+  "summary": {
+    "input": 6,
+    "passed": 6,
+    "removed": 0,
+    "new": 6,
+    "regression": 0,
+    "stillOpenInRun": 1,
+    "fixPendingLive": 0,
+    "flaggedForReview": 4
+  },
+  "findings": [
+    {
+      "id": "DEDUP-001",
+      "title": "NFTBonfire maxPayout defaults to 0 (unlimited) and pause does not stop accrual, so an idle stretch, a deploy-wiring delay or a pause turns into one rate x D mint taken by the first burner; a cap applied reactively while burns are live is front-runnable and never binds",
+      "originalIds": [
+        "LOCAL-001",
+        "PATTERN-002",
+        "CODE-001",
+        "ECON-001",
+        "F-01-053"
+      ],
+      "sources": [
+        {
+          "id": "LOCAL-001",
+          "agent": "contract-profiler",
+          "file": "profiles/NFTBonfire.json",
+          "severity": "local-low (QA)",
+          "role": "root cause: uncapped default and accrual through pause"
+        },
+        {
+          "id": "PATTERN-002",
+          "agent": "pattern-matcher",
+          "file": "pattern-matches.json",
+          "severity": "potential-medium",
+          "role": "EMISSION-WINDOW-BOUNDARY mapping: accrual through a closed claim window; unpause tx is a back-run target"
+        },
+        {
+          "id": "CODE-001",
+          "agent": "code-scanner",
+          "file": "code-findings.json",
+          "severity": "potential-low",
+          "role": "call-sequence facet: setMaxPayout on a live contract is front-run; PoC"
+        },
+        {
+          "id": "ECON-001",
+          "agent": "econ-scanner",
+          "file": "econ-findings.json",
+          "severity": "Low",
+          "role": "primary text: corrects CODE-001 (pausing first DOES bind the cap) and sizes the impact"
+        },
+        {
+          "id": "F-01-053",
+          "agent": "story-faithfulness",
+          "file": "faithfulness-findings.json",
+          "severity": "low",
+          "role": "cross-reference only: Law-2 angle for spec-conformance.md (story names the cap as the idle-period protection but never requires it at enable time; follow-up deploy story missing)"
+        }
+      ],
+      "primarySource": "ECON-001 (carries the corrected safe sequence and the sizing); CODE-001 supplies the PoC",
+      "rootCause": "maxPayout defaults to 0 = unlimited and pendingPayout() returns raw accrual when cap == 0 (NFTBonfire.sol:117-121); pause() blocks burn only and does not checkpoint or freeze accrual (L148-156); burn() is permissionless and reads the pot at its own execution time (L100-104). The cap only binds on accrual if it is in place before burns can run again.",
+      "rootCauseClass": "uncapped-default-accrual",
+      "contract": "src/NFTBonfire.sol",
+      "function": "setMaxPayout / pendingPayout / burn / unpause",
+      "line": 120,
+      "lineStart": 97,
+      "lineEnd": 156,
+      "instances": [
+        {
+          "contract": "src/NFTBonfire.sol",
+          "function": "constructor / maxPayout declaration",
+          "line": 32,
+          "note": "default 0 = unlimited"
+        },
+        {
+          "contract": "src/NFTBonfire.sol",
+          "function": "pendingPayout",
+          "line": 120,
+          "note": "cap applied only when maxPayout != 0"
+        },
+        {
+          "contract": "src/NFTBonfire.sol",
+          "function": "setMaxPayout",
+          "line": 135,
+          "note": "retroactive cap is front-runnable while burns are live (CODE-001)"
+        },
+        {
+          "contract": "src/NFTBonfire.sol",
+          "function": "pause / unpause",
+          "line": 149,
+          "note": "accrual continues; first burn after unpause takes the whole paused-period pot (PATTERN-002, ECON-001)"
+        }
+      ],
+      "severity": "Low",
+      "severityNote": "Highest source label is PATTERN-002 potential-medium (mechanical pattern mapping). Every source that assessed impact (LOCAL-001, CODE-001, ECON-001, F-01-053) lands on Low: owner-triggered, no user principal at risk, and total emission is bounded by the owner-set rate x time (invariant_1_emissionTimeBounded holds over 512k forge calls + 581k Medusa calls). The harm is a missed forfeiture: (rate x D - intended cap) is minted as phUSD dilution instead of being forfeited. Severity-classifier to rate.",
+      "correctionCarriedFromECON001": "CODE-001's statement 'pausing first does not help' is wrong. While paused, burn() reverts EnforcedPause, so setMaxPayout/setRatePerDay cannot be front-run. pause -> setMaxPayout(cap) -> unpause binds the cap on everything accrued during the pause; only the pot standing when the pause tx lands can escape (via a front-run of pause()). The real hazard is: (a) the uncapped default itself; (b) capping while live; (c) unpausing, or enabling a rate before setAuthorizedBurner/setApprovedMinter have landed so burns revert and the pot grows, without a cap already set.",
+      "attackVector": "ratePerDay = 25e18, maxPayout = 0. A 14-day pause accrues 350 AM. Owner calls unpause() without setting a cap; a searcher back-runs it in the same block with burn(id, 349e18) and receives 350 AM (about $312 at $0.89/AM). Variant (CODE-001): with the contract live, the owner broadcasts setMaxPayout(10e18) on a 250e18 pot; a holder of any NFT burns first and takes 250e18. PoC: work/test/audit23/BonfireCapFrontRun.t.sol (test_CODE001_frontRunBurn_defeatsCap PASS, payout 250e18; control test_CODE001_capLandsFirst_payoutCapped PASS, payout 10e18).",
+      "impact": "Bounded by ratePerDay x D. No AM beyond the rate the owner configured is minted; the loss is the forfeiture the owner later intended (phUSD dilution of rate x D - cap). Cost to the winner: one NFT (marginal value about 0 for the ~772 idle unstaked V2 NFTs) plus gas.",
+      "recommendation": "Safe config (phStaging2 deploy follow-up, which does not exist yet): (1) setMaxPayout(rate x 1-2 days) BEFORE the first non-zero setRatePerDay, and enable the rate only after setAuthorizedBurner + setApprovedMinter; (2) to shrink a large pot: pause -> setMaxPayout(cap) [-> setRatePerDay] -> unpause, never setMaxPayout while live (or use a private relay); (3) setRatePerDay(0) preserves the pot and does not forfeit it. Optional hardening: revert setRatePerDay(nonzero) while maxPayout == 0, or checkpoint-and-freeze accrual on pause(). Note this sequence needs a working pauser (see DEDUP-004).",
+      "evidence": [
+        "src/NFTBonfire.sol:117-121 raw accrual, cap only when != 0",
+        "src/NFTBonfire.sol:135-139 setMaxPayout checkpoints at the OLD max (0 => full pot stored uncapped; clamped on read by the new cap)",
+        "src/NFTBonfire.sol:148-156 pause/unpause do not touch accrual",
+        "story-053 L77 'This is the accrual cap that prevents a long idle period from turning into one large mint'; L99 'Accrual keeps running while the contract is paused'; L128 deploy/rate setting deferred to a phStaging2 follow-up that does not exist (whole-tree glob)",
+        "work/test/audit23/BonfireCapFrontRun.t.sol (2 tests PASS)",
+        "symbolic check_capBoundAfterRecap PASS: a stored pot above a newly lowered cap is still clamped on read (true identity, confirms the pause-first sequence binds)"
+      ],
+      "spec": {
+        "crossRef": "F-01-053",
+        "storyTag": "story-053",
+        "storyState": "auto-complete",
+        "lawImpacted": 2,
+        "note": "Code matches the letter of story-053. The gap is in the story: it names maxPayout as the idle-period protection but does not require it at rate-enable time, and the deploy story that would carry the obligation does not exist. Keep F-01-053 in spec-conformance.md as a cross-reference to this finding; do not file it as a second Low."
+      },
+      "suppressionGuard": "ECON-005: bonfire AM is redeemable via annihilate into unbacked phUSD, so over-emission is phUSD dilution, NOT 'externally-derived yield = opportunity cost'. That memory rule must not be used to suppress this finding.",
+      "crossRefs": [
+        "DEDUP-004 (an unset pauser removes the pause-first safe sequence)",
+        "DEDUP-002 (winner-takes-all sniping; the unpause/setter back-run facet of PATTERN-001 is folded in here)",
+        "SLITHER-002 (timestamp in pendingPayout; removed as tool noise, see dedup-log)"
+      ],
+      "sanitizerNote": "No NFTBonfire entries exist in the ledger (new contract, story-053). Ledger L-12 d9d8e16a04 (NudgeRatchetDelayRelease pause does not freeze custody) is the same footgun family on a different contract; not a match.",
+      "routing": "Safe-config guidance belongs on the missing phStaging2 NFTBonfire deploy story.",
+      "confidence": "high",
+      "branch": "master",
+      "newInScope": true,
+      "fingerprint": "589c642bd003b3c93411625096cd88a96b411ee134284d4b60cae2bd70f1ba6c",
+      "fingerprintPreimage": "NFTBonfire.sol:setMaxPayout / pendingPayout / burn / unpause:uncapped-default-accrual",
+      "origin": "new",
+      "branchesSeen": [
+        "master"
+      ],
+      "entryPoint": null,
+      "sanitizer": {
+        "decision": "pass",
+        "classification": "new",
+        "kiCheck": "Partial-only vs KI#4 'Owner trust assumptions for registering dispatchers, setting prices, pausing, emergency withdraw': KI covers owner powers being trusted, not a zero-default cap that accrues an unbounded pot a third party captures. Non-obvious footgun (Law 3 exception) -> NOT suppressed. Memory 'externally-derived yield = opportunity cost' must NOT be applied (suppressionGuard ECON-005: AM redeemable to unbacked phUSD => dilution).",
+        "ledger": "no match (no NFTBonfire entries; L-12 d9d8e16a04 is the same footgun family on another contract, different fingerprint)"
+      }
+    },
+    {
+      "id": "DEDUP-002",
+      "title": "NFTBonfire pot is winner-takes-all per block on a value-blind gate (hold any NFT): any holder can copy or back-run a pending burn; minPayout protects an honest burner's NFT, and the story accepts the front-runnability",
+      "originalIds": [
+        "PATTERN-001",
+        "ECON-002"
+      ],
+      "sources": [
+        {
+          "id": "PATTERN-001",
+          "agent": "pattern-matcher",
+          "file": "pattern-matches.json",
+          "severity": "potential-medium",
+          "role": "BATCH-PAYOUT-FIXED-POT conceptual match"
+        },
+        {
+          "id": "ECON-002",
+          "agent": "econ-scanner",
+          "file": "econ-findings.json",
+          "severity": "Informational (no finding)",
+          "role": "sizing and law-weighing; primary"
+        }
+      ],
+      "primarySource": "ECON-002",
+      "rootCause": "burn() pays the whole pendingPayout() to msg.sender on the gate 'holds >= 1 of any tokenId'; the payout is not tied to what the burner paid, and ordering within a block decides the winner (NFTBonfire.sol:97-112).",
+      "rootCauseClass": "pot-front-running",
+      "contract": "src/NFTBonfire.sol",
+      "function": "burn",
+      "line": 101,
+      "lineStart": 97,
+      "lineEnd": 112,
+      "severity": "Informational",
+      "severityNote": "PATTERN-001 mechanical label potential-medium preserved here for the conflict rule. Assessed: Informational. Story-053 Notes call the pot 'trivially front-runnable' and supply minPayout as the remedy; minPayout reverts before the NFT burn (L101), so a front-run victim keeps the NFT and loses gas only. The only loss is to a user who passes minPayout = 0 (documented opt-out; C4 user-input mistake). Total emission does not change. Expected per-event MEV at the story-example rate is cents to a few dollars.",
+      "impact": "Redistribution only: who receives a fixed, owner-set stream. At 2.5 AM/day, bots burn once pot > gas (about 0.085 AM, about 49 minutes of accrual).",
+      "recommendation": "UI obligation (phlimbo-ui burn-button follow-up, not yet written): always pass minPayout = pendingPayout() - tolerance, never 0. No contract change.",
+      "evidence": [
+        "src/NFTBonfire.sol:100-104",
+        "src/NFTBonfire.sol:101 PayoutBelowMinimum reverts before nftMinter.burn",
+        "test_burn_secondBurnSameBlockPaysZero / ...RevertsWithMinPayout"
+      ],
+      "facetsMovedElsewhere": {
+        "unpause/setter back-run": "DEDUP-001",
+        "cheap-NFT value-blindness (free/stale mints redeem identically)": "DEDUP-003"
+      },
+      "suppressionGuard": "ECON-005 (AM = phUSD dilution, not opportunity cost).",
+      "routing": "QA/informational; UI obligation for the phlimbo-ui follow-up story.",
+      "confidence": "high",
+      "branch": "master",
+      "newInScope": true,
+      "fingerprint": "fcb67df2d2b73c71a087342424e96d9faa7725fb4aa045b764672a18821cfe9a",
+      "fingerprintPreimage": "NFTBonfire.sol:burn:pot-front-running",
+      "origin": "new",
+      "branchesSeen": [
+        "master"
+      ],
+      "entryPoint": null,
+      "sanitizer": {
+        "decision": "pass",
+        "classification": "new",
+        "kiCheck": "No registry KI covers it. story-053 accepting front-runnability is a Law-2 statement, not a KI disposal; in-source NatSpec has no suppression authority. Cross-project analogue: phoenix-nft-staking M-01 521c20ad (wont-fix, 'MEV / first-claimer front-run of winner-take-all nudge pot', different contract BatchNFTMinterMultiToken.batchMint) - disclosed, not a match (different project/contract/fingerprint). Kept as Informational.",
+        "ledger": "no match"
+      }
+    },
+    {
+      "id": "DEDUP-003",
+      "title": "Legacy V1 -> V2 mint route still live on mainnet (V1 NFTMinter unpaused, deployed NFTMigrator 0x22c0fc1a still an authorized NFTMinterV2 minter): fresh V2 claim NFTs can be minted at stale V1 prices (about $3.6) that bypass V2 dispatchers; inert before story-053, value-bearing once NFTBonfire is wired",
+      "originalIds": [
+        "ECON-003"
+      ],
+      "sources": [
+        {
+          "id": "ECON-003",
+          "agent": "econ-scanner",
+          "file": "econ-findings.json",
+          "severity": "Low",
+          "role": "primary; fork-verified at block 26280445"
+        }
+      ],
+      "supportingContext": [
+        "CODE-002 recommendation: 'audit the NFTMinterV2 authorizedMinters set (revoke stale NFTMigrator-type grants) before enabling the bonfire rate'",
+        "code-findings manualReview[0] (confirm on-chain authorizedMinters/authorizedBurners): RESOLVED by econ chainEvidence \u2014 only one AuthorizedMinterSet(true) log on V2 (NFTMigrator, block 24923965), still true at HEAD",
+        "profiles/NFTMinterV2.burn-surface.json trustAssumptions[1]: free mints now convert into a claim on the bonfire pot",
+        "PATTERN-001 value-blindness facet (cheap NFTs redeem identically)"
+      ],
+      "primarySource": "ECON-003",
+      "rootCause": "Deployment state: NFTMinterV2.authorizedMinters[NFTMigrator] == true and V1 NFTMinter unpaused with dispatchers 1/2/3/5/6 enabled. NFTMinterV2.mintFor (L206-215) takes no payment and does not update price. story-053 makes every V2 NFT redeemable at the bonfire.",
+      "rootCauseClass": "stale-authorized-minter",
+      "contract": "src/NFTMinterV2.sol",
+      "function": "mintFor",
+      "line": 206,
+      "lineStart": 206,
+      "lineEnd": 215,
+      "severity": "Low",
+      "severityNote": "Non-obvious deployment-state footgun (owner removed NFTMigrator from mainnet-addresses.ts in phStaging2 story-059 and would not expect it to mint bonfire tickets). Does not raise total emission and the idle V2 inventory already undercuts it as a burn source; diverts mint revenue from V2 dispatchers and lowers the NFT cost floor from about $10 to about $3.6.",
+      "attackVector": "Mint V1 idx2 for 1.0786 SCX (about $3.68) or idx1 for 288.28 EYE (about $3.56); NFTMigrator.migrate() yields a V2 NFT of the same index (fork: V2 balanceOf(user,5)==1, V1 idx5 price 17,624 -> 19,738 sats); burn at NFTBonfire for the pot. Cost escalates 10% per mint per index.",
+      "impact": "Bounded and small; unmonitored mint path into a now value-bearing token; revenue diversion from Uniboost/UniPoolerV2.",
+      "recommendation": "NFTMinterV2.setAuthorizedMinter(0x22c0fc1aae66873abd029448eaf15a2fd7eed140, false) and/or pause V1 NFTMinter 0xd936461f, ideally in the same phStaging2 story that wires NFTBonfire; then confirm no other authorizedMinters exist.",
+      "evidence": [
+        "econ chainEvidence.authorizedMinters / V1_minter",
+        "fork simulation at block 26280445 (V1.mint status 1, migrate status 1)",
+        "src/NFTMinterV2.sol:206-215",
+        "historical NFTMigrator source: git show df4d590 (src/V2/NFTMigrator.sol no longer exists at c5ad56d)"
+      ],
+      "sanitizerNote": "Fingerprint key src/NFTMinterV2.sol:mintFor shares contract:function with L-04 674c799b2058 (mintFor/burn ignore pause) but the rootCauseClass differs (stale-authorized-minter vs pause bypass), so they do not collide and are not the same root. Ledger M-02 49fb985f (NFTMigrator migrate brick, fixed) and Q-01 98c9fc45 (fixed) anchor on the deleted src/V2/NFTMigrator.sol; different roots.",
+      "routing": "Fix locus is deployment state: route the revoke to phStaging2 (the missing NFTBonfire deploy story).",
+      "suppressionGuard": "ECON-005.",
+      "confidence": "high (fork-verified)",
+      "branch": "master",
+      "newInScope": false,
+      "fingerprint": "694537414c335970d296308c154fadd471a015100231351505f55219a3ee57c3",
+      "fingerprintPreimage": "NFTMinterV2.sol:mintFor:stale-authorized-minter",
+      "origin": "new",
+      "branchesSeen": [
+        "master"
+      ],
+      "entryPoint": null,
+      "sanitizer": {
+        "decision": "pass",
+        "classification": "new",
+        "kiCheck": "Partial-only vs KI#4 (owner trust for registering dispatchers): the hazard is a non-obvious consequence of a stale grant (NFTMigrator 0x22c0fc1a still an authorized minter, V1 NFTMinter unpaused) that becomes value-bearing only once NFTBonfire is wired -> footgun, NOT suppressed.",
+        "ledger": "no match. Fingerprint 69453741 (NFTMinterV2.sol:mintFor:stale-authorized-minter) shares contract:function with L-04 674c799b2058 but rootCauseClass differs -> no collision (hashes differ). Searched ledger titles+full entries for migrator/V1/mintFor/authorized minter/0x22c0: only M-01 c43398d5 (fixed), M-02 49fb985f (fixed), Q-01 98c9fc45 (fixed) on deleted src/V2/NFTMigrator.sol (different roots: gas DoS / late-registration brick / ctor zero-address) and L-04 (open, pause bypass). NO wont-fix/acknowledged/false-positive entry re-raised -> no prior owner wont-fix to disclose. Not a regression of M-01/M-02 (different root cause)."
+      }
+    },
+    {
+      "id": "DEDUP-004",
+      "title": "NFTBonfire is unpausable at deploy (pauser defaults to address(0)) and pausing NFTMinterV2 does not stop bonfire burns, so until setPauser + Pauser.register(bonfire) land, the global incident stop does not reach the burn/Antimatter-mint path and the pause-first cap sequence of DEDUP-001 is unavailable",
+      "originalIds": [
+        "LOCAL-002",
+        "MANUAL-002"
+      ],
+      "sources": [
+        {
+          "id": "LOCAL-002",
+          "agent": "contract-profiler",
+          "file": "profiles/NFTBonfire.json",
+          "severity": "local-low (QA)",
+          "role": "primary"
+        },
+        {
+          "id": "MANUAL-002",
+          "agent": "pattern-matcher",
+          "file": "pattern-matches.json (manualReview)",
+          "severity": "potential-low",
+          "role": "duplicate; record preserved verbatim in manual-review.json"
+        }
+      ],
+      "primarySource": "LOCAL-002",
+      "rootCause": "pauser is unset at construction (onlyPauser L74-77 reverts for everyone until setPauser), and the global Pauser can reach NFTBonfire only after setPauser(globalPauser) AND Pauser.register(bonfire). NFTMinterV2.burn has no pause check (NFTMinterV2.sol:341-345), so NFTMinterV2's pause does not cover this path.",
+      "rootCauseClass": "pauser-unset-default",
+      "contract": "src/NFTBonfire.sol",
+      "function": "setPauser / pause / unpause",
+      "line": 42,
+      "lineStart": 42,
+      "lineEnd": 156,
+      "severity": "Low (borderline QA)",
+      "severityNote": "On its own this is story-documented (story-053 L102 'NFTBonfire's own pause is the only stop'; L21/L128 assign Pauser registration to the phStaging2 follow-up), which leans QA. It is kept as a distinct footgun because of the interaction a competent owner would not expect: without a pauser, the only way to cap a large pot is setMaxPayout on a live contract, which DEDUP-001/CODE-001 shows is front-runnable, and an owner who pauses 'the NFT system' via the global Pauser leaves bonfire burns and Antimatter mints running. Flagged for review; severity-classifier to decide Low vs QA.",
+      "decision": "KEPT DISTINCT from L-04 and from DEDUP-001. Facet (a) 'NFTMinterV2.burn has no pause check' is the root of ledger L-04 674c799b2058 (open; 'Privileged mintFor()/burn() ignore global paused + per-index disabled flags') \u2014 sanitizer should reconcile that facet to L-04 (bump lastSeenRun, add NFTBonfire as a new consumer in the note) and must NOT re-file it. Facet (b) 'NFTBonfire pauser unset by default + register required' is a different contract, different fix (setPauser + register in the deploy story) and different root cause class, so it does not collapse into L-04. It does not collapse into DEDUP-001 either: different fix locus (pause wiring vs maxPayout), though the two compound.",
+      "impact": "During an incident the global Pauser does not stop bonfire burns/AM mints; the owner's remaining stop is setRatePerDay(0), which preserves (does not forfeit) the pot. No user funds at risk.",
+      "recommendation": "Deploy story: setPauser(globalPauser) and Pauser.register(bonfire) BEFORE setRatePerDay(nonzero); add both to the phStaging2 verifier. Document that NFTMinterV2 pause does not cover NFTBonfire.",
+      "evidence": [
+        "src/NFTBonfire.sol:42 pauser default",
+        "src/NFTBonfire.sol:74-77 onlyPauser",
+        "src/NFTBonfire.sol:143-156",
+        "src/NFTMinterV2.sol:341-345 burn has no pause check (profiles/NFTMinterV2.burn-surface.json)",
+        "story-053 L21, L93, L102, L128"
+      ],
+      "crossRefs": [
+        "L-04 674c799b2058 (ledger, open) \u2014 facet (a)",
+        "DEDUP-001 \u2014 compounding interaction",
+        "F-02-048 49c7408c94 (UniPoolerV2 Pauser-registration plan conflict) \u2014 same family, different contract, not a match"
+      ],
+      "sanitizerNote": "Reconcile facet (a) to L-04; treat facet (b) as new (no NFTBonfire ledger entries exist).",
+      "routing": "phStaging2 NFTBonfire deploy story (missing).",
+      "confidence": "high",
+      "branch": "master",
+      "newInScope": true,
+      "fingerprint": "92648eecb135f4bbc55e1f02f4514f48a828578b3763adffed70d390639fc4ce",
+      "fingerprintPreimage": "NFTBonfire.sol:setPauser / pause / unpause:pauser-unset-default",
+      "origin": "new",
+      "branchesSeen": [
+        "master"
+      ],
+      "entryPoint": null,
+      "sanitizer": {
+        "decision": "pass",
+        "classification": "new",
+        "kiCheck": "Partial-only vs KI#5 'Pauser trust assumptions (designated pauser can pause/unpause)': KI trusts a designated pauser; this finding is that no pauser is designated at deploy. NOT suppressed.",
+        "ledger": "facet (a) 'pausing NFTMinterV2 does not stop bonfire burns' = root cause of L-04 674c799b2058 (open; NFTMinterV2.burn privileged path ignores paused; NFTBonfire.burn calls nftMinter.burn at NFTBonfire.sol:106; NFTMinterV2.sol unchanged in range) -> reconciled as still-open L-04, NOT filed. Facet (b) 'NFTBonfire pauser defaults to address(0)' -> new (fingerprint 92648eec).",
+        "facetReconciliation": {
+          "facet_a": {
+            "label": "L-04",
+            "fingerprint": "674c799b2058057e89e6a3bc06a4870e2fe2beac766487902439f78fb164a580",
+            "origin": "still-open"
+          },
+          "facet_b": {
+            "origin": "new"
+          }
+        }
+      }
+    },
+    {
+      "id": "DEDUP-005",
+      "title": "Cross-project expired premise: NFTBonfire gives every NFTMinterV2 claim NFT a holder-callable redemption, falsifying the 'NFT has no realizable redemption value' basis of phoenix-nft-staking 858e9e80 (wont-fix) and 521c20ad (open); the quantitative margin survives at sane rates, so re-anchor the rationale and install a numeric re-arm trigger",
+      "originalIds": [
+        "CODE-002",
+        "MANUAL-001",
+        "ECON-004"
+      ],
+      "sources": [
+        {
+          "id": "CODE-002",
+          "agent": "code-scanner",
+          "file": "code-findings.json",
+          "severity": "informational (re-weigh trigger)",
+          "role": "premise-expiry identification"
+        },
+        {
+          "id": "MANUAL-001",
+          "agent": "pattern-matcher",
+          "file": "pattern-matches.json (manualReview)",
+          "severity": "potential-medium",
+          "role": "expired-closure candidate; preserved verbatim in manual-review.json"
+        },
+        {
+          "id": "ECON-004",
+          "agent": "econ-scanner",
+          "file": "econ-findings.json",
+          "severity": "Informational here",
+          "role": "primary; numeric re-arm thresholds"
+        }
+      ],
+      "primarySource": "ECON-004",
+      "rootCause": "story-053 adds a permissionless holder-callable burn-for-pot path (NFTBonfire.burn L97-112) to NFTMinterV2 claim NFTs, which phoenix-nft-staking run-21 had verified as non-existent when closing 858e9e80.",
+      "rootCauseClass": "nft-redemption-value-premise-expired",
+      "contract": "src/NFTBonfire.sol",
+      "function": "burn",
+      "line": 106,
+      "lineStart": 97,
+      "lineEnd": 112,
+      "crossProjectTargets": [
+        {
+          "project": "phoenix-nft-staking",
+          "fingerprintPrefix": "858e9e80",
+          "status": "wont-fix",
+          "contract": "src/BatchNFTMinterMultiToken.sol",
+          "function": "batchMint"
+        },
+        {
+          "project": "phoenix-nft-staking",
+          "fingerprintPrefix": "521c20ad",
+          "status": "open"
+        }
+      ],
+      "severity": "Informational (in yield-claim-nft)",
+      "severityNote": "MANUAL-001 potential-medium is the conflict-rule maximum and describes the phoenix-nft-staking side if the re-arm trigger fires. In this project: Informational. Expired-closure bucket, not a regression (memory expired-closure-vs-regression).",
+      "rearmTrigger": "Re-arm 858e9e80 to Medium in phoenix-nft-staking when, over a 7-day horizon, ratePerDay x 7d x v_AM >= (nudgeSize x price - typical nudge pot) AND (maxPayout == 0 OR maxPayout x nudgeSize x v_AM >= the same bound). Live numbers (econ, v_AM about $0.89 at phUSD $0.947): BatchNFTMinter idx4 (0x068395, nudgeSize 40, price 18.32 USDS, qualifying cost about $733, pot <= about $366) => ratePerDay >= about 59 AM/day AND (maxPayout == 0 OR maxPayout >= about 10.3 AM). RatchetBatchNFTMinter idx7 (0x81896f, about $2,800) => thresholds about 4x higher. Story-example 2.5 AM/day is about 24x below break-even (about 165 days at 100% capture).",
+      "recommendation": "Route to phoenix-nft-staking: rewrite the 858e9e80 triageReason off 'no realizable value' onto the quantitative bound; attach the re-arm trigger to 858e9e80 and the shared 521c20ad watch; note the frozen mainnet BatchNFTMinter 0x068395 has no ledger entry of its own. Re-evaluate when the phStaging2 deploy story picks the live rate/cap.",
+      "routing": "Visible routed channel: manual-review.json entry MR23-001. Recommend NOT filing a yield-claim-nft ledger entry; the actionable item is a phoenix-nft-staking triage note (human-applied; never auto-flip 858e9e80).",
+      "confidence": "medium (owner-reported nudge-pot history; current phUSD price)",
+      "branch": "master",
+      "newInScope": true,
+      "fingerprint": "2a0f5d68bec595b692d7f1972f1f519ba39c2e865a454e85a3b2d3c6467c73e2",
+      "fingerprintPreimage": "NFTBonfire.sol:burn:nft-redemption-value-premise-expired",
+      "origin": "new",
+      "branchesSeen": [
+        "master"
+      ],
+      "entryPoint": null,
+      "sanitizer": {
+        "decision": "pass",
+        "classification": "new",
+        "kiCheck": "No KI match. Cross-project disclosure (memory: disclose when re-filing an owner wont-fix): it challenges the premise of phoenix-nft-staking H-01 858e9e80 (status wont-fix; title 'Value-blind nudge gate: full nudgePaymentToken pot paid on count-only gate regardless of value paid'). triageReason field is null; operator rationale lives in severityNote: '[2026-07-21, OPERATOR TRIAGE] WONT-FIX at HEAD c881a42. Severity at HEAD: Medium ... Re-closed against HEAD's premises, NOT the dead owner-driven premise: the residual value-blindness is accepted as a bounded operational property, not eliminated.' The 'NFT has no redemption value' basis is recorded in project memory. CORRECTION to dedup: 521c20ad (phoenix-nft-staking M-01) is status wont-fix, NOT open (severityNote: 'The 2026-06-09 owner acceptance of the race is UPHELD, not overridden - only its rationale is corrected.'). Neither entry is flipped; human must re-anchor.",
+        "ledger": "no ycn match; routed per dedup to manual-review MR23-001 + phoenix-nft-staking triage note. Passed through (not suppressed) so it stays visible; finding-manager may elect not to open a ycn ledger entry per dedup routing - human decision."
+      }
+    },
+    {
+      "id": "DEDUP-006",
+      "title": "story-053 checklist item 'forge fmt --check, forge build --sizes and forge test -vvv all pass (the whole suite)' is ticked but not true repo-wide (10 pre-existing fmt diffs; EIP-170 failure on PromotionUniV2_Eth per the story's own review)",
+      "originalIds": [
+        "F-02-053"
+      ],
+      "sources": [
+        {
+          "id": "F-02-053",
+          "agent": "story-faithfulness",
+          "file": "faithfulness-findings.json",
+          "severity": "informational",
+          "role": "primary"
+        }
+      ],
+      "rootCauseClass": "story-checklist-not-literally-true",
+      "contract": "repo-wide (CI)",
+      "function": "n/a",
+      "line": null,
+      "severity": "Informational (spec-conformance)",
+      "severityNote": "Law-2 process deviation, disclosed by the executor (Autonomous Decision 2). No contract behaviour impact. Not tool noise: keep for spec-conformance.md.",
+      "recommendation": "Housekeeping story (does not exist yet): forge fmt the drifted files; resolve the PromotionUniV2_Eth size failure or a [profile.ci] optimizer setting.",
+      "routing": "spec-conformance.md",
+      "confidence": "high",
+      "branch": "master",
+      "newInScope": true,
+      "fingerprint": "67ed3c0bc203efd7b86b570f665a41759c81772a1fc1a6f39093d2cf94645498",
+      "fingerprintPreimage": "repo-wide (CI):n/a:story-checklist-not-literally-true",
+      "origin": "new",
+      "branchesSeen": [
+        "master"
+      ],
+      "entryPoint": null,
+      "sanitizer": {
+        "decision": "pass",
+        "classification": "new",
+        "kiCheck": "No KI match. Spec-conformance (Law 2) only.",
+        "ledger": "no match"
+      }
+    }
+  ],
+  "stillOpenObservedThisRun": [
+    {
+      "label": "L-04",
+      "fingerprint": "674c799b2058057e89e6a3bc06a4870e2fe2beac766487902439f78fb164a580",
+      "via": "DEDUP-004 facet (a)",
+      "action": "bump lastSeenRun to yield-claim-nft-23; no new report"
+    }
+  ],
+  "ledgerProposals": {
+    "source": "faithfulness-findings.json story050LedgerAssessment",
+    "note": "Passed through unchanged for the sanitizer/finding-manager. These are proposals for a HUMAN to apply via /ledger; never auto-flip. Not counted as findings.",
+    "proposal": "close as wont-fix (obsolete: contract deleted in story-050; deployed BalancerPoolerV2 0x7f687433 unregistered, paused and drained, verified at block 26280480). Not 'fixed' (no fix made) and not 'abandoned' (merged code, not a discarded branch).",
+    "entries": [
+      {
+        "label": "L-05",
+        "fp": "e527a71211",
+        "status": "open",
+        "anchor": "setBatchDonationSize",
+        "assessment": "obsolete: no dispatch reaches the pooler; batchDonationSize = 0"
+      },
+      {
+        "label": "Q-05",
+        "fp": "13fe448d0e",
+        "status": "open",
+        "anchor": "pool",
+        "assessment": "obsolete: paused, and BPT and sUSDS are both 0"
+      },
+      {
+        "label": "L-17",
+        "fp": "79a2cd4a79",
+        "status": "open",
+        "anchor": "_dispatch",
+        "assessment": "obsolete: unregistered, and parked USDS is 0"
+      },
+      {
+        "label": "L-18",
+        "fp": "482cefc33e",
+        "status": "open",
+        "anchor": "_psmDonate",
+        "assessment": "obsolete: reachable only from _dispatch"
+      },
+      {
+        "label": "Q-18",
+        "fp": "11d8b8656f",
+        "status": "open",
+        "anchor": "_psmDonate",
+        "assessment": "obsolete: the streamer allowance is now 0 for both USDS and USDC"
+      },
+      {
+        "label": "F-01-047",
+        "fp": "5d6538f76f",
+        "status": "open",
+        "anchor": "_psmDonate",
+        "assessment": "obsolete: the documentation target was deleted"
+      },
+      {
+        "label": "Q-02",
+        "fp": "261859a435",
+        "status": "qa-bundled",
+        "anchor": "_dispatch",
+        "assessment": "obsolete: unregistered"
+      }
+    ],
+    "relatedStaticKeysGone": 68
+  },
+  "unverifiedProperties": {
+    "symbolicTimeouts": [
+      {
+        "testName": "check_monotonicInTime",
+        "result": "TIMEOUT",
+        "status": "UNVERIFIED (not proven, not a finding)",
+        "domain": "rate < 2^64, dt1,dt2 < 2^40, cap any",
+        "coveredBy": "invariant-results.json fuzz + manual argument in symbolic-results.json",
+        "log": "reports/23/tier3/halmos-bonfire.log"
+      },
+      {
+        "testName": "check_monotonicSmall",
+        "result": "TIMEOUT",
+        "status": "UNVERIFIED (not proven, not a finding)",
+        "domain": "bounded retry: uncapped, rate < 2^16, dt1,dt2 < 2^24",
+        "coveredBy": "invariant-results.json fuzz + manual argument in symbolic-results.json",
+        "log": "reports/23/tier3/halmos-bonfire-bounded-retry.log"
+      },
+      {
+        "testName": "check_splitIntervalRounding",
+        "result": "TIMEOUT",
+        "status": "UNVERIFIED (not proven, not a finding)",
+        "domain": "axiomatised floors (x = q*D + m, m < D); r < 2^128, e1,e2 < 2^64",
+        "coveredBy": "invariant-results.json fuzz + manual argument in symbolic-results.json",
+        "log": "reports/23/tier3/halmos-bonfire.log"
+      },
+      {
+        "testName": "check_splitRoundingSmall",
+        "result": "TIMEOUT",
+        "status": "UNVERIFIED (not proven, not a finding)",
+        "domain": "bounded retry: r < 2^16, e1,e2 < 2^24, q* < 2^48",
+        "coveredBy": "invariant-results.json fuzz + manual argument in symbolic-results.json",
+        "log": "reports/23/tier3/halmos-bonfire-bounded-retry.log"
+      },
+      {
+        "testName": "check_splitIntervalContract",
+        "result": "TIMEOUT",
+        "status": "UNVERIFIED (not proven, not a finding)",
+        "domain": "real contract, uncapped; r < 2^64, e1,e2 < 2^32",
+        "coveredBy": "invariant-results.json fuzz + manual argument in symbolic-results.json",
+        "log": "reports/23/tier3/halmos-bonfire.log"
+      },
+      {
+        "testName": "check_noOverflowRealistic",
+        "result": "TIMEOUT",
+        "status": "UNVERIFIED (not proven, not a finding)",
+        "domain": "rate < 2^128, dt0,dt1 < 2^64, carried pot",
+        "coveredBy": "invariant-results.json fuzz + manual argument in symbolic-results.json",
+        "log": "reports/23/tier3/halmos-bonfire.log"
+      }
+    ],
+    "symbolicPasses": "5 PASS (true identities/structural; none is a finding)",
+    "invariants": "9/9 PASS forge (512x100) + Medusa (581,400 calls); mutation sanity 2/2 killed; 0 counterexamples. PASS = no counterexample within depth, not proof."
+  },
+  "carryOversStatic": {
+    "static": {
+      "count": 62,
+      "ids": [
+        "ADERYN-001",
+        "ADERYN-002",
+        "SLITHER-003",
+        "SLITHER-004",
+        "SLITHER-005",
+        "SLITHER-006",
+        "ADERYN-003",
+        "SLITHER-007",
+        "SLITHER-008",
+        "SLITHER-009",
+        "ADERYN-004",
+        "ADERYN-005",
+        "ADERYN-006",
+        "ADERYN-007",
+        "SLITHER-010",
+        "SLITHER-011",
+        "SLITHER-012",
+        "ADERYN-008",
+        "ADERYN-009",
+        "ADERYN-010",
+        "SLITHER-013",
+        "ADERYN-011",
+        "ADERYN-012",
+        "ADERYN-013",
+        "ADERYN-014",
+        "SLITHER-014",
+        "SLITHER-015",
+        "SLITHER-016",
+        "SLITHER-017",
+        "SLITHER-018",
+        "SLITHER-019",
+        "ADERYN-015",
+        "SLITHER-020",
+        "SLITHER-021",
+        "SLITHER-022",
+        "SLITHER-023",
+        "SLITHER-024",
+        "SLITHER-025",
+        "ADERYN-016",
+        "ADERYN-017",
+        "ADERYN-018",
+        "ADERYN-019",
+        "ADERYN-020",
+        "ADERYN-021",
+        "ADERYN-022",
+        "ADERYN-023",
+        "ADERYN-024",
+        "ADERYN-025",
+        "ADERYN-026",
+        "ADERYN-027",
+        "ADERYN-028",
+        "SLITHER-026",
+        "SLITHER-027",
+        "ADERYN-029",
+        "ADERYN-030",
+        "SLITHER-028",
+        "ADERYN-031",
+        "ADERYN-032",
+        "SLITHER-029",
+        "SLITHER-030",
+        "SLITHER-031",
+        "SLITHER-032"
+      ],
+      "disposition": "carriedUnchangedFromRun22 \u2014 already reconciled in prior runs; not re-raised. Sanitizer reconciles by existing keys only.",
+      "note": "ADERYN-017 (non-reentrant-not-first, src/hooks/BalancerPoolerMintDebtHook.sol) stays carried: the hook is untouched by story-050. 72 run-22 static keys disappeared with the BalancerPoolerV2/balancer-interface deletions (run22KeysGone) \u2014 code gone, not a fix signal."
+    }
+  }
+}

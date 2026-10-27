@@ -1,0 +1,120 @@
+{
+  "contract": "src/NFTBonfire.sol",
+  "run": "yield-claim-nft-23",
+  "commit": "c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238",
+  "profileTimestamp": "2026-10-27T00:00:00Z",
+  "profileKind": "cold, full (NEW contract, story-053)",
+  "story": {"tag": "story-053", "state": "auto-complete", "doc": "/home/justin/code/product-owner/stories/yield-claim-nft/auto-complete/yield-claim-nft-nft-bonfire/053-nft-bonfire-burn-for-antimatter.md"},
+  "solidityVersion": "^0.8.20",
+  "ozVersion": "5.5.0",
+
+  "verifiedProperties": {
+    "callerOnlyBurn": {"value": true, "confidence": "verified", "evidence": "NFTBonfire.sol:106 `nftMinter.burn(msg.sender, tokenId, 1);` is the ONLY call to nftMinter in the contract; no function takes an address parameter except constructor and owner-only setPauser. burn selector is burn(uint256,uint256)."},
+    "noUnboundedLoops": {"value": true, "confidence": "verified", "evidence": "no loops"},
+    "checkedArithmetic": {"value": true, "confidence": "verified", "evidence": "0.8.x, no unchecked/assembly. Only overflow surface is `(block.timestamp - lastUpdate) * ratePerDay` (requires ratePerDay > ~1e68 for decades of dt; absurd owner input)"},
+    "timestampSubtractionSafe": {"value": true, "confidence": "verified", "evidence": "lastUpdate only ever set to block.timestamp (constructor, burn, _checkpoint) so block.timestamp - lastUpdate >= 0"},
+    "roundingDirection": {"value": "floor, protocol-favouring", "confidence": "verified", "evidence": "`/ 1 days` floors; each checkpoint/burn loses < 1 wei of accrual. Matches story."},
+    "checksEffectsInteractions": {"value": true, "confidence": "verified", "evidence": "accruedStored=0, lastUpdate=now (L103-104) before nftMinter.burn and antimatter.mint (L106-108)"},
+    "reentrancyGuarded": ["burn"],
+    "accessControlled": {"onlyOwner": ["setRatePerDay", "setMaxPayout", "setPauser", "transferOwnership", "renounceOwnership"], "onlyPauser": ["pause", "unpause"]},
+    "pauseCoverage": {"value": "burn only (whenNotPaused); setters callable while paused; accrual continues while paused", "confidence": "verified"},
+    "inertAtDeploy": {"value": true, "confidence": "verified", "evidence": "ratePerDay defaults 0; burn reverts NFTBonfire__BurningDisabled at L98; pendingPayout()==0 since accruedStored==0"},
+    "setterCheckpointAtOldValues": {"value": true, "confidence": "verified", "evidence": "setRatePerDay/setMaxPayout call _checkpoint() (accruedStored = pendingPayout() under OLD rate and OLD cap; lastUpdate=now) before writing the new value"},
+    "capForfeitsExcess": {"value": true, "confidence": "verified", "evidence": "pendingPayout caps at maxPayout when != 0; burn resets pot to 0 regardless; setMaxPayout persists the capped pot so lower-then-uncap forfeits excess permanently (story Decision 3, test_setMaxPayout_loweringCapsStoredPot)"},
+    "minPayoutSlippageGuard": {"value": true, "confidence": "verified", "evidence": "L101 reverts PayoutBelowMinimum(payout,minPayout) before any state change"},
+    "zeroPayoutNoMintCall": {"value": true, "confidence": "verified", "evidence": "L107 `if (payout > 0)`"},
+    "atomicBurnAndPay": {"value": true, "confidence": "verified", "evidence": "if antimatter.mint reverts (bonfire not approved minter) the whole tx including the NFT burn reverts"},
+    "noInboundCallbackOnBurn": {"value": true, "confidence": "verified", "evidence": "NFTMinterV2.burn -> OZ 5.5 ERC1155._burn -> _updateWithAcceptanceCheck(from, address(0), ...): acceptance check only runs when to != address(0), so no onERC1155Received to anyone. NFTMinterV2 does not override _update."},
+    "initializerProtected": {"value": "n/a", "note": "not upgradeable; immutables set in constructor"},
+    "weakRandomness": {"value": "none", "note": "block.timestamp used only as a linear accrual clock, not as entropy"},
+    "storageLayout": {"value": "n/a (non-proxy)"},
+    "transientStorage": {"value": "none (OZ 5.5 ReentrancyGuard uses ERC-7201 namespaced storage slot)"}
+  },
+
+  "localFindings": [
+    {
+      "id": "LOCAL-001",
+      "type": "unsafe-default / owner-footgun",
+      "rootCauseClass": "uncapped-default-accrual",
+      "severity": "local-low (QA)",
+      "function": "constructor / setRatePerDay / pendingPayout",
+      "line": "32, 118-121",
+      "description": "maxPayout defaults to 0 = unlimited, so enabling a rate via setRatePerDay without also setting maxPayout leaves the pot uncapped. The story's own rationale for maxPayout is to stop 'a long idle period from turning into one large mint', and pause explicitly does NOT halt accrual — so a pause of N days (e.g. global Pauser incident) or a stretch with no burner accrues ratePerDay*N into a single winner-takes-all mint of an uncapped, unsupplied-capped token (Antimatter has no supply cap). Behaviour is as specified (default-0 unlimited is tested), so this is an operational hazard / safe-config guidance item: set maxPayout in the same transaction/script that enables ratePerDay, and consider lowering ratePerDay (not just pausing) during a long incident.",
+      "recommendation": "Deployment script (phStaging follow-up) should set maxPayout before/with the first non-zero setRatePerDay; optionally require maxPayout != 0 when enabling a rate."
+    },
+    {
+      "id": "LOCAL-002",
+      "type": "pause-coverage gap at deploy (operational)",
+      "rootCauseClass": "pauser-unset-default",
+      "severity": "local-low (QA)",
+      "function": "pause / unpause / setPauser",
+      "line": "42, 74-77, 143-156",
+      "description": "pauser defaults to address(0), so the contract is unpausable until the owner calls setPauser. Per the story, NFTMinterV2.burn has no pause check, so pausing NFTMinterV2 (via the global Pauser) does NOT stop burns through NFTBonfire; NFTBonfire's own pause is the sole emergency stop on this burn/mint path. The global Pauser can only reach it if setPauser(globalPauser) is called AND the bonfire is register()ed with the Pauser. A competent owner pausing 'the NFT system' via NFTMinterV2 could be surprised that bonfire burns (and antimatter mints) continue.",
+      "recommendation": "Deployment must setPauser + Pauser.register(bonfire) before setRatePerDay != 0; add to the phStaging deployment story's verifier. ratePerDay=0 is the owner-side de facto stop."
+    },
+    {
+      "id": "LOCAL-003",
+      "type": "permanent-brick on absurd rate (informational)",
+      "rootCauseClass": "checkpoint-overflow-blocks-setter",
+      "severity": "local-info",
+      "function": "setRatePerDay / setMaxPayout / _checkpoint",
+      "line": "118, 128, 136, 160",
+      "description": "Both setters call _checkpoint() -> pendingPayout() first. If (block.timestamp - lastUpdate) * ratePerDay or accruedStored + accrual ever overflows, burn AND both setters revert permanently, so the rate can never be corrected. Requires ratePerDay on the order of 1e68+ (obvious misconfiguration); recorded only so downstream agents need not re-derive it. Not reportable under Law 3 (harm is obvious).",
+      "recommendation": "None required; optionally bound newRate in setRatePerDay."
+    }
+  ],
+
+  "nonFindingsVerified": [
+    "Caller-only invariant holds: no path burns from an address other than msg.sender (story's 'single most important invariant').",
+    "Re-entry via antimatter.mint into burn is blocked by nonReentrant; even without the guard, pot is zeroed before interactions.",
+    "minPayout reverts before the NFT burn, so a front-run victim keeps their NFT (only loses gas).",
+    "Rate/cap changes cannot retroactively reprice elapsed time (checkpoint at old values).",
+    "pendingPayout() is exactly what burn pays in the same block (same function); no view/exec divergence.",
+    "Ownable (single-step) and renounceOwnership freeze the rate — owner-trusted, not reported.",
+    "Two burns in the same block: second pays 0; with minPayout>0 reverts (tested)."
+  ],
+
+  "interfaceAbstraction": {
+    "externalEntryPoints": [
+      {"function": "burn(uint256 tokenId, uint256 minPayout) returns (uint256 payout)", "visibility": "external", "stateChanges": ["accruedStored := 0", "lastUpdate := block.timestamp"], "externalCalls": ["nftMinter.burn(msg.sender, tokenId, 1)", "antimatter.mint(msg.sender, payout) [if payout > 0]"], "accessControl": "none (permissionless; must hold >=1 of tokenId)", "reentrancyGuard": true, "pause": "whenNotPaused", "reverts": ["EnforcedPause", "NFTBonfire__BurningDisabled (rate==0)", "NFTBonfire__PayoutBelowMinimum", "NFTMinterV2 string revert if bonfire not authorized burner", "ERC1155InsufficientBalance", "antimatter mint revert if bonfire not approved minter"], "events": ["NFTMinterV2.ClaimBurned(msg.sender,tokenId,1)", "Burned(msg.sender,tokenId,payout)"]},
+      {"function": "pendingPayout() view returns (uint256)", "visibility": "public view", "stateChanges": [], "externalCalls": [], "accessControl": "none"},
+      {"function": "setRatePerDay(uint256 newRate)", "visibility": "external", "stateChanges": ["accruedStored", "lastUpdate", "ratePerDay"], "externalCalls": [], "accessControl": "onlyOwner", "reentrancyGuard": false, "pause": "callable while paused"},
+      {"function": "setMaxPayout(uint256 newMax)", "visibility": "external", "stateChanges": ["accruedStored", "lastUpdate", "maxPayout"], "externalCalls": [], "accessControl": "onlyOwner", "reentrancyGuard": false, "pause": "callable while paused"},
+      {"function": "setPauser(address newPauser)", "visibility": "external", "stateChanges": ["pauser"], "externalCalls": [], "accessControl": "onlyOwner", "notes": "no zero check by design (0 disables pausing)"},
+      {"function": "pause() / unpause()", "visibility": "external", "stateChanges": ["Pausable._paused"], "externalCalls": [], "accessControl": "onlyPauser"},
+      {"function": "transferOwnership / renounceOwnership", "visibility": "public", "accessControl": "onlyOwner (OZ Ownable, single-step)"},
+      {"function": "nftMinter / antimatter / ratePerDay / maxPayout / accruedStored / lastUpdate / pauser / paused / owner", "visibility": "public view"}
+    ],
+    "externalCalls": [
+      {"target": "INFTMinterV2 nftMinter (immutable)", "methods": ["burn(address holder,uint256 tokenId,uint256 quantity)"], "trustLevel": "trusted (in-repo, owner-deployed)", "notes": "holder hard-wired to msg.sender, quantity 1. NFTMinterV2.burn checks ONLY authorizedBurners[msg.sender]; no holder approval, no pause check. No inbound callback on burn (to == address(0)). See NFTMinterV2.burn-surface.json."},
+      {"target": "IMintable antimatter (immutable)", "methods": ["mint(address recipient,uint256 amount)"], "trustLevel": "trusted (separate antimatter repo, owner-deployed)", "notes": "Story: gated by onlyApprovedMinters; Antimatter pause does NOT block mint; no supply cap. Called after state is finalized and only when payout>0. Not verified locally (antimatter source not in this repo) — trust boundary."}
+    ],
+    "inboundCallbackSurface": "none — no ERC721/1155 safe transfer/mint to a user, no ETH send, no ERC777. The only external calls are to the two immutable trusted contracts.",
+    "stateVariables": [
+      {"name": "nftMinter", "type": "INFTMinterV2 immutable", "mutators": ["constructor"], "readers": ["burn"]},
+      {"name": "antimatter", "type": "IMintable immutable", "mutators": ["constructor"], "readers": ["burn"]},
+      {"name": "ratePerDay", "type": "uint256", "mutators": ["setRatePerDay"], "readers": ["burn", "pendingPayout"]},
+      {"name": "maxPayout", "type": "uint256", "mutators": ["setMaxPayout"], "readers": ["pendingPayout"]},
+      {"name": "accruedStored", "type": "uint256", "mutators": ["burn", "_checkpoint"], "readers": ["pendingPayout"]},
+      {"name": "lastUpdate", "type": "uint256", "mutators": ["constructor", "burn", "_checkpoint"], "readers": ["pendingPayout"]},
+      {"name": "pauser", "type": "address", "mutators": ["setPauser"], "readers": ["onlyPauser"]}
+    ],
+    "events": ["Burned", "RatePerDayUpdated", "MaxPayoutUpdated", "PauserChanged", "Paused", "Unpaused", "OwnershipTransferred"],
+    "errors": ["NFTBonfire__ZeroAddress", "NFTBonfire__BurningDisabled", "NFTBonfire__PayoutBelowMinimum", "NFTBonfire__NotPauser"],
+    "modifiers": ["nonReentrant", "whenNotPaused", "onlyOwner", "onlyPauser"]
+  },
+
+  "trustAssumptions": [
+    "NFTBonfire is granted NFTMinterV2.setAuthorizedBurner(bonfire,true) — this grant is what makes the caller-only invariant load-bearing (NFTMinterV2 itself lets any authorized burner burn from any holder).",
+    "NFTBonfire is granted Antimatter.setApprovedMinter(bonfire,true); Antimatter mint is unpausable and uncapped, so ratePerDay*time (bounded by maxPayout per burn when set) is the only issuance bound on this path.",
+    "Owner sets ratePerDay only after both permissions are wired (story: deploys inert).",
+    "Owner sets maxPayout alongside ratePerDay (LOCAL-001) and wires the pauser + Pauser registration (LOCAL-002).",
+    "All tokenIds are treated as equal value: an NFT minted cheaply (low-price dispatcher, or free via NFTMinterV2.mintFor by an authorized minter) earns the same pot as an expensive one. Which minters/dispatchers exist is cross-contract — DEFERRED to econ/interaction analysis.",
+    "Pot is winner-takes-all per block; MEV/sniping dynamics around the break-even point are economic — DEFERRED (minPayout bounds only the payout floor, not ordering).",
+    "Other authorized burners on NFTMinterV2 (e.g. SYA, until the yield-accumulator follow-up revokes it) remain able to burn from arbitrary holders under their own rules — out of NFTBonfire's control, cross-contract."
+  ],
+
+  "inheritanceChain": ["Ownable", "Pausable", "ReentrancyGuard", "IPausable"],
+
+  "complexity": {"loc": 163, "functions": 8, "externalCalls": 2, "stateVariables": 7}
+}

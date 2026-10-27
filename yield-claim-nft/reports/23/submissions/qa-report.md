@@ -1,0 +1,6740 @@
+# QA Report for yield-claim-nft (audit run 23)
+
+| | |
+|---|---|
+| Project | `yield-claim-nft` (`git@github.com:Behodler/yield-claim-nft.git`) |
+| Commit | `c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238` (branch `master`) |
+| Mode | Regression, baseline `0fd6bdf` → head `c5ad56d` |
+| Primary change in range | `src/NFTBonfire.sol` (story-053, state `auto-complete`); `src/dispatchers/BalancerPoolerV2.sol` deleted (story-050) |
+| Date | 2026-10-27 |
+
+This bundle holds only the Low, QA and Centralization findings first seen in **this run**. Findings still open from earlier runs are carried in their own per-audit files (see [Carryover index](#carryover-index)) and are not restated or renumbered here. Story-faithfulness items (F-XX) belong in `spec-conformance.md`, not here.
+
+## Summary
+
+| Severity | Count | Labels |
+|----------|-------|--------|
+| Low Risk | 2 | L-29, L-30 |
+| QA | 2 | Q-26, Q-27 |
+| Centralization | 0 | none |
+| **Total** | **4** | |
+
+Two findings are flagged **borderline** for human review: L-29 (Low vs Medium) and Q-27 (QA vs Low).
+
+---
+
+## Low Risk Findings
+
+### [L-29] NFTBonfire `maxPayout` defaults to unlimited and pause does not stop accrual, so an idle stretch becomes one large mint for the first burner, and a reactive cap is front-runnable <!-- id: ycn23l29 -->
+
+**Fingerprint**: `589c642bd003b3c93411625096cd88a96b411ee134284d4b60cae2bd70f1ba6c`
+**Type**: Owner footgun (Law 3, non-obvious consequence)
+**Borderline**: **Low vs Medium. Flagged for human review.**
+
+**Location**: [NFTBonfire.sol#L97-L156](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L97-L156)
+
+The cap is off by default ([L30-L32](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L30-L32)):
+
+```solidity
+/// @notice Cap on the accrued pot, and therefore on any single payout. `0` = unlimited.
+///         Accrual above the cap is forfeited.
+uint256 public maxPayout;
+```
+
+The pot only binds to the cap when the cap is non-zero ([L117-L122](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L117-L122)):
+
+```solidity
+function pendingPayout() public view returns (uint256) {
+    uint256 raw = accruedStored + ((block.timestamp - lastUpdate) * ratePerDay) / 1 days;
+    uint256 cap = maxPayout;
+    if (cap != 0 && raw > cap) return cap;
+    return raw;
+}
+```
+
+Pause blocks `burn` but leaves accrual running ([L148-L156](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L148-L156)):
+
+```solidity
+/// @notice Pause burns. Only callable by `pauser`. Accrual continues.
+function pause() external override onlyPauser {
+    _pause();
+}
+```
+
+`burn` is permissionless and pays the whole pot as it stands when the burn executes ([L97-L104](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L97-L104)):
+
+```solidity
+function burn(uint256 tokenId, uint256 minPayout) external nonReentrant whenNotPaused returns (uint256 payout) {
+    if (ratePerDay == 0) revert NFTBonfire__BurningDisabled();
+
+    payout = pendingPayout();
+    if (payout < minPayout) revert NFTBonfire__PayoutBelowMinimum(payout, minPayout);
+
+    accruedStored = 0;
+    lastUpdate = block.timestamp;
+```
+
+**Root cause**: `setMaxPayout` takes effect only from the block it lands in, and `burn` reads the pot at its own execution time. A cap the owner applies reactively, while burns are live, can therefore be front-run by any holder who burns first and takes the uncapped pot. Nothing in the setter's NatSpec or in story-053 warns about this. A competent owner would expect a protective setter to protect. This front-runnable live cap change is the core of the finding.
+
+Context: the cap ships disabled (`maxPayout == 0` is the story-mandated default, story-053 L108/L114), and pause does not checkpoint or freeze accrual (story-053 L99). story-053 L77 names `maxPayout` as "the accrual cap that prevents a long idle period from turning into one large mint". An owner who unpauses, or completes wiring, with no cap in place hands the whole idle-period pot to the first burner. This behaviour is documented, so it is treated here as context and safe-config guidance, not as a second vector.
+
+**Impact**: The reactive-cap front-run pays the uncapped pot to one burner. The PoC uses its own parameters: a 100-day pot of 250e18 against an intended cap of 10e18. At the story-053 example rate of 2.5 AM/day (about $0.89/AM), a 14-day idle stretch is about 35 AM (about $31) and 100 days is about 250 AM (about $222). Bonfire AM can be redeemed into unbacked phUSD through `annihilate`, so the excess (`rate x D - intended cap`) is real phUSD dilution and not opportunity cost (ECON-005 suppression guard). The excess is bounded. Total AM issued never exceeds `ratePerDay x elapsed time` (`invariant_1_emissionTimeBounded` held over about 1.09M forge and Medusa calls). The harm is that emission the owner meant to forfeit goes to one burner instead. It does not create new emission.
+
+**The owner has safe sequences that need no global Pauser.** `setRatePerDay(0)` is a one-transaction owner stop: it checkpoints and preserves the pot, and `burn` then reverts `NFTBonfire__BurningDisabled` (L98, L127-L131). The sequence `setRatePerDay(0)`, then `setMaxPayout(cap)`, then restore the rate cannot be front-run. Once a pauser is set, `pause()`, then `setMaxPayout(cap)`, then `unpause()` also works. The hazard is only the cap change sent while burns are live.
+
+**Proof of Concept**: `yield-claim-nft/work/test/audit23/BonfireCapFrontRun.t.sol` (re-run 2026-10-27, both tests pass):
+
+| Test | Ordering | Payout |
+|---|---|---|
+| `test_CODE001_capLandsFirst_payoutCapped` (control) | `setMaxPayout(10e18)` lands, then `burn` | **10e18** |
+| `test_CODE001_frontRunBurn_defeatsCap` | `burn` front-runs `setMaxPayout(10e18)` in the same block | **250e18** |
+
+```solidity
+function test_CODE001_frontRunBurn_defeatsCap() public {
+    bonfire.setRatePerDay(RATE);
+    vm.warp(block.timestamp + 100 days);
+    // searcher sees owner's pending setMaxPayout(10e18) and burns first (same block)
+    vm.prank(alice);
+    uint256 p = bonfire.burn(ID1, 0);
+    bonfire.setMaxPayout(10e18); // lands after: cap is now moot
+    assertEq(p, 250e18, "uncapped pot taken despite owner's cap tx");
+}
+```
+
+Run: `cd yield-claim-nft/work && forge test --match-path test/audit23/BonfireCapFrontRun.t.sol --match-test CODE001`.
+
+**Borderline note (Low vs Medium)**: Medium would require a value leak beyond what the owner configured, and there is none. The hazard concentrates emission the owner already budgeted into one burner's hands, and does not enlarge it. **Re-rate to Medium** if a deploy story ships `ratePerDay > 0` with `maxPayout == 0` and no pauser, and the expected pause or wiring delay multiplied by the rate exceeds a material threshold. Likelihood is medium-low, because an owner configuration sequence is needed. That sequence is plausible because the uncapped state is the default. Once it exists, exploitation is permissionless and trivial: the attacker needs one V2 NFT, and about 772 idle unstaked ones exist.
+
+**Recommended Mitigation / safe-config guidance** (owed to the missing phStaging2 NFTBonfire deploy story):
+
+1. Never change the cap while burns are live. To shrink a large pot, stop burns first: `setRatePerDay(0)` (no pauser needed), then `setMaxPayout(cap)`, then restore the rate. Once a pauser is set, `pause()`, then `setMaxPayout(cap)`, then `unpause()` is equivalent. Alternatively, submit through a private relay. (Symbolic `check_capBoundAfterRecap` PASS: a stored pot above a newly lowered cap is still clamped on read, so the stop-first sequence binds.)
+2. Call `setMaxPayout(rate x 1-2 days)` **before** the first non-zero `setRatePerDay`. Enable the rate only after `setAuthorizedBurner` and `setApprovedMinter` have landed.
+3. Set a cap before any planned pause or wiring delay. `setRatePerDay(0)` preserves the pot and does not forfeit it.
+4. Deploy-story / story-amendment option, not a code deviation: `maxPayout == 0` by default is what story-053 specifies (L108/L114), so the current code is faithful. If the owner wants the ordering enforced on chain rather than by runbook, amend the story to have `setRatePerDay` reject a non-zero rate while the cap is unset (or to checkpoint and freeze accrual on `pause()`). Sketch:
+
+```solidity
+function setRatePerDay(uint256 newRate) external onlyOwner {
+    if (newRate != 0 && maxPayout == 0) revert NFTBonfire__CapRequired();
+    _checkpoint();
+    emit RatePerDayUpdated(ratePerDay, newRate);
+    ratePerDay = newRate;
+}
+```
+
+The pause-based variant of item 1 needs a pauser (see Q-27). The `setRatePerDay(0)` variant does not. Cross-reference: F-01-053 stays in `spec-conformance.md` only as a pointer to this finding and is not a second filing.
+
+---
+
+### [L-30] Legacy V1 → V2 mint route is still live on mainnet: the retired NFTMigrator can mint V2 claim NFTs (now redeemable at NFTBonfire) at stale V1 prices <!-- id: ycn23l30 -->
+
+**Fingerprint**: `694537414c335970d296308c154fadd471a015100231351505f55219a3ee57c3`
+**Type**: Deployment-state footgun (Law 3). **Fix is routed to phStaging2 deployment state, not to this repo's source.**
+
+**Location**: [NFTMinterV2.sol#L206-L215](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTMinterV2.sol#L206-L215)
+
+```solidity
+function mintFor(uint256 index, address recipient) external {
+    require(authorizedMinters[msg.sender], "NFTMinterV2: caller is not authorized minter");
+    require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+    // Mint 1 claim NFT to recipient — no payment, no dispatch, no price update
+    _mint(recipient, index, 1, "");
+
+    emit ClaimMintedFor(recipient, index, msg.sender);
+}
+```
+
+**Root cause**: On mainnet, `NFTMinterV2.authorizedMinters[NFTMigrator 0x22c0fc1aae66873abd029448eaf15a2fd7eed140] == true`. The V1 `NFTMinter` (`0xd936461f…`) is still unpaused, with dispatchers 1/2/3/5/6 enabled. `mintFor` takes no payment and does not advance the V2 price. The route was already live before story-053. On mainnet (block 26280769) the live StableYieldAccumulator `0x0cD353bf` reads `nftMinter() == NFTMinterV2 0x39Af0884` and is an authorised burner on it (`authorizedBurners(SYA) == true`; SYA NatSpec L76: "exactly 1 NFT is burned per claim"). So stale-price V2 tickets obtained through the migrator could already be used as SYA claim gates. story-053 makes every NFTMinterV2 token burnable at NFTBonfire as well, which adds a second consumer for the same cheap tickets. The owner removed NFTMigrator from `mainnet-addresses.ts` in phStaging2 story-059 and would not expect a retired migrator to keep minting claim-gate tickets.
+
+**Impact**: Evidence status. The on-chain state is verified by live reads: `NFTMinterV2.authorizedMinters(0x22c0fc1a) == true` and V1 `NFTMinter(0xd936461f).paused() == false` (blocks 26280753 and 26280769). The full mint → migrate → V2 NFT sequence below comes from a fork run at block 26280445 that is recorded as narrative only, with **no saved artifact** (no cast trace or forge fork test):
+1. Mint V1 index 2 for about 1.0786 SCX (about $3.68), or index 1 for about 288.28 EYE (about $3.56).
+2. Call `NFTMigrator(0x22c0…).migrate()`, which calls `NFTMinterV2.mintFor` and returns a V2 NFT of the same index (`V2.balanceOf(user, 5) == 1`; V1 index-5 price 17,624 → 19,738 sats).
+3. Use the NFT as an SYA claim gate today, or burn it at NFTBonfire for the pot once NFTBonfire is wired.
+
+The NFT cost floor drops from about $10 (V2 price) to about $3.6. The impact is misrouted revenue, not extractable value. Mint revenue goes to the V1 dispatchers instead of the V2 dispatchers (Uniboost / UniPoolerV2), and V2 price growth is bypassed. The payer still pays real assets to protocol-owned V1 dispatchers. In both consumers the NFT is only a cost gate, so a cheaper ticket does not increase what SYA or NFTBonfire distributes (bonfire emission is time-bounded and does not depend on ticket cost). Likelihood is low. The route is profitable only when the pot exceeds about $3.6 and the attacker beats the holders of about 772 idle V2 NFTs. It is never profitable with `maxPayout` below about 4 AM. V1 prices rise 10% per mint per index.
+
+**Recommended Mitigation**: An owner transaction, ideally in the same phStaging2 story that wires NFTBonfire:
+
+```solidity
+NFTMinterV2.setAuthorizedMinter(0x22c0fc1aae66873abd029448eaf15a2fd7eed140, false);
+// and/or pause the V1 NFTMinter at 0xd936461f…
+```
+
+Then enumerate `authorizedMinters` to confirm no other stale minter remains. **Fix-verification prerequisite**: save a fork reproduction of the V1 mint → `migrate()` → V2 NFT sequence (a cast trace or a forge fork test under `yield-claim-nft/work/`) before the fix is verified, so that the post-fix revert can be shown against the same sequence. **Ledger handling**: `NFTMinterV2.sol` will not change when this is fixed, so a later yield-claim-nft rescan that still reports L-30 is **not** an incomplete fix. Verify on chain or through the phStaging2 script audit (same handling as L-27).
+
+---
+
+## QA Findings
+
+### [Q-26] NFTBonfire pot is winner-takes-all per block on a value-blind gate, so any NFT holder can copy or back-run a pending burn <!-- id: ycn23q26 -->
+
+**Fingerprint**: `fcb67df2d2b73c71a087342424e96d9faa7725fb4aa045b764672a18821cfe9a`
+
+**Location**: [NFTBonfire.sol#L97-L112](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L97-L112)
+
+```solidity
+payout = pendingPayout();
+if (payout < minPayout) revert NFTBonfire__PayoutBelowMinimum(payout, minPayout);
+
+accruedStored = 0;
+lastUpdate = block.timestamp;
+
+nftMinter.burn(msg.sender, tokenId, 1);
+```
+
+**Root cause**: `burn` pays the entire `pendingPayout()` to `msg.sender`, gated only on holding one unit of any token ID. The payout is unrelated to what the burner paid for the NFT, so ordering within a block decides the winner.
+
+**Impact**: Redistribution only. Who receives a fixed, owner-set stream changes, but total emission does not. At 2.5 AM/day, bots burn once the pot exceeds gas cost (about 0.085 AM, roughly 49 minutes of accrual). A front-run honest burner keeps the NFT, because the `minPayout` check (L101) reverts before `nftMinter.burn`, and loses only gas. A user who passes `minPayout = 0` and is front-run can lose the NFT, but that is a user choice against a documented opt-out (NatSpec L95, story-053 L136; C4 user-input mistake) and is not counted as this finding's impact. story-053 explicitly accepts that the pot is "trivially front-runnable" and provides `minPayout` as the remedy, so the code matches the story. The mechanical PATTERN-001 "potential-medium" label is overruled.
+
+**Recommended Mitigation**: No contract change. The phlimbo-ui burn button exists so far only as a mock: phlimbo-ui story 090 (`~/code/product-owner/stories/phlimbo-ui/incomplete/forge/090-forge-nft-bonfire-mock.md`) builds a mocked row with `FORGE_BONFIRE_MIN_PAYOUT_BPS = 9800` (`minPayout` = pot × 98%). No story wires the live contract yet. The live-wiring story must keep a non-zero `minPayout`: always submit `minPayout = pendingPayout() - tolerance`, never `0`.
+
+---
+
+### [Q-27] NFTBonfire is unpausable at deploy, and the global incident stop does not reach the burn / Antimatter-mint path until `setPauser` and `Pauser.register(bonfire)` land <!-- id: ycn23q27 -->
+
+**Fingerprint**: `92648eecb135f4bbc55e1f02f4514f48a828578b3763adffed70d390639fc4ce`
+**Borderline**: **QA vs Low. Flagged for human review.**
+
+**Location**: [NFTBonfire.sol#L42](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L40-L42), [L74-L77](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L74-L77), [L143-L156](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTBonfire.sol#L143-L156); [NFTMinterV2.sol#L341-L345](https://github.com/Behodler/yield-claim-nft/blob/c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238/src/NFTMinterV2.sol#L341-L345)
+
+```solidity
+/// @notice Address authorised to pause/unpause (typically the global Pauser).
+///         `address(0)` disables pausing.
+address public pauser;
+
+modifier onlyPauser() {
+    if (msg.sender != pauser) revert NFTBonfire__NotPauser();
+    _;
+}
+```
+
+```solidity
+// NFTMinterV2 — no pause check on the burn path NFTBonfire uses
+function burn(address holder, uint256 tokenId, uint256 quantity) external {
+    require(authorizedBurners[msg.sender], "NFTMinterV2: caller is not authorized burner");
+    _burn(holder, tokenId, quantity);
+    emit ClaimBurned(holder, tokenId, quantity);
+}
+```
+
+**Root cause**: `pauser` is `address(0)` at construction, so nobody can pause until the owner calls `setPauser`. The global Pauser reaches NFTBonfire only after both `setPauser(globalPauser)` and `Pauser.register(bonfire)`. Pausing NFTMinterV2 does not cover this path, because `NFTMinterV2.burn` has no pause check. That facet is already ledger **L-04** `674c799b2058` (open, carried in `carryover/qa-report-10.md`) and is not re-filed here.
+
+**Impact**: An operator who pauses "the NFT system" through the global Pauser during an incident leaves bonfire burns and Antimatter mints running until the wiring lands. No user funds are at risk. The owner keeps immediate stops that do not need the pauser:
+- `setRatePerDay(0)` is a one-transaction stop. It checkpoints and keeps the pot, and `burn` then reverts `NFTBonfire__BurningDisabled`. The owner can then `setMaxPayout(cap)` with no burn able to front-run it.
+- `setPauser(self)` followed by `pause()` also works, and is atomic if the owner is a Safe that batches both calls.
+
+**Borderline note (QA vs Low)**: Classed QA. The lack of a pauser does not leave the owner without a safe cap sequence for L-29: `setRatePerDay(0)` is a one-transaction owner stop that needs no pauser, so stop-then-cap is always available. What remains is that the global incident stop does not reach the bonfire, an operational gap that story-053 already documents (L21, L102, L128) and assigns to the phStaging2 follow-up. **Re-rate trigger (not applied):** re-rate to Low if the phStaging2 deploy story omits `setPauser` and `Pauser.register(bonfire)`. That story does not exist yet, so the trigger cannot fire in this run.
+
+**Recommended Mitigation**: In the deploy story, call `setPauser(globalPauser)` and `Pauser.register(bonfire)` **before** `setRatePerDay(nonzero)`, and add both to the phStaging2 verifier. Document in the runbook that pausing NFTMinterV2 does not stop NFTBonfire, and that `setRatePerDay(0)` is the owner stop that needs no pauser.
+
+---
+
+## Centralization Risks
+
+None new this run. Under Law 3, owner-trust items are reported only as non-obvious footguns, and the footguns found this run (L-29, L-30, Q-27) are rated above at their own severity. The 4naly3er bot's `[M-1] Centralization Risk for trusted owners` (77 instances, see appendix) is generic owner-privilege enumeration and is not promoted.
+
+---
+
+## Carryover index
+
+Still-open QA from earlier audits is **not** merged into this bundle. Each originating audit has its own file, pruned to live entries by finding-manager. Files are under `yield-claim-nft/reports/23/submissions/carryover/`.
+
+| File | Live entries carried | Also parked (pending the triage proposals below) |
+|---|---|---|
+| [`qa-report-08.md`](carryover/qa-report-08.md) | L-01, L-02, Q-03, Q-04, Q-09, C-01 | Q-02 |
+| [`qa-report-10.md`](carryover/qa-report-10.md) | L-04, L-07 | L-05, Q-05 |
+| [`qa-report-13.md`](carryover/qa-report-13.md) | L-09, L-10, Q-10 | |
+| [`qa-report-14.md`](carryover/qa-report-14.md) | L-11 | |
+| [`qa-report-15.md`](carryover/qa-report-15.md) | L-12, Q-11 | |
+| [`qa-report-17.md`](carryover/qa-report-17.md) | Q-13, Q-14, Q-15 | |
+| [`qa-report-18.md`](carryover/qa-report-18.md) | Q-16 | Q-17 |
+| [`qa-report-19.md`](carryover/qa-report-19.md) | M-06 (severity now low), L-16, L-19, L-20 | Q-18, L-17, L-18 |
+| [`qa-report-20.md`](carryover/qa-report-20.md) | Q-21 (run-20 original missing on disk; sourced from run-22 carryover) | |
+| [`qa-report-21.md`](carryover/qa-report-21.md) | Q-22, Q-23 | |
+| [`qa-report-22.md`](carryover/qa-report-22.md) | L-28, Q-24, Q-25 | |
+
+The spec-conformance carryovers (`spec-conformance-15/18/19/20/21/22.md`) sit in the same directory and are indexed by `spec-conformance.md`. There are no High/Medium carryovers this run.
+
+---
+
+## Human triage proposals
+
+These are proposals only. **None has been applied** (`humanTriageProposals.applied = false`). Each status change needs a human `/ledger yield-claim-nft …` command. Every entry below remains carried until then.
+
+### 1. BalancerPoolerV2 deleted: propose `wont-fix (obsolete)` for 7 entries
+
+`src/dispatchers/BalancerPoolerV2.sol` was deleted by story-050 in the `0fd6bdf..c5ad56d` range. Faithfulness chain evidence shows the deployed instance `0x7f687433…` unregistered, paused and drained.
+
+| Label | Fingerprint | Current status | Carried in |
+|---|---|---|---|
+| Q-02 | `261859a435e7…` | qa-bundled | `qa-report-08.md` |
+| L-05 | `e527a712118b…` | open | `qa-report-10.md` |
+| Q-05 | `13fe448d0eb0…` | open | `qa-report-10.md` |
+| L-17 | `79a2cd4a791f…` | open | `qa-report-19.md` |
+| L-18 | `482cefc33e7c…` | open | `qa-report-19.md` |
+| Q-18 | `11d8b8656fc8…` | open | `qa-report-19.md` |
+| F-01-047 | `5d6538f76fbe…` | open | `spec-conformance-19.md` |
+
+> **Re-key caveat (Law 1, do not bulk-close)**: Three of these entries also carry facets on contracts that are still **live**. Re-key each facet to its live contract **before** closing the BalancerPoolerV2 entry as obsolete, or the live facet is silently suppressed:
+> - **Q-02**: re-observed in run-21 on `UniPoolerV2._dispatch` (L366).
+> - **Q-05**: run-17 instance on `PromotionUniV2_Eth.pool`.
+> - **L-05**: run-13 instance on `Uniboost`.
+>
+> L-17, L-18, Q-18 and F-01-047 have no live-contract facet recorded and can be closed directly.
+
+### 2. Q-17: propose `false-positive` / `wont-fix (obsolete)`
+
+Fingerprint `696cc3452e1c247e3e8eaff37e543a5ec9e9278c8379fbbf20db9d33bbc474c5`. The flagged file is an audit-authored harness with no upstream history (memory: never file audit-authored test files).
+
+### 3. Cutover-lifetime entries: propose `wont-fix (obsolete)` once the mainnet cutover is confirmed
+
+| Label | Fingerprint | Current status | Proposal |
+|---|---|---|---|
+| L-28 | `d77a482de757…` | fix-pending | wont-fix (obsolete). The closure condition in its `triageReason` is a successful cutover. Never re-raise after the cutover. |
+| Q-21 | `4c2f9c705c39…` | fix-pending | Same. It concerns pre-cutover plan sizing. |
+| Q-24, Q-25, F-01-052, F-03-052, F-04-052 | (see `qa-report-22.md` / `spec-conformance-22.md`) | open | Candidates for the same review. |
+
+**Cutover evidence**: probably complete, but **not verified on chain by the sanitizer**. story-050 states that the cutover ran through `UniPoolerCutoverEscrow` (yield-claim-nft:052), consumed by phStaging2:103. The gate cleared on 2026-10-24 at mainnet block 26260804 (pooler paused, BPT = 0). Chain evidence at block 26280480 shows BalancerPoolerV2 drained. Confirm on chain before applying. L-28 and Q-21 are `fix-pending` and stay carried until a human changes them.
+
+---
+
+## Appendix A: Automated QA / gas report (4naly3er)
+
+**Status**: **Succeeded.** No import-resolution errors (0 `error` / `not found` lines in the run log).
+
+| | |
+|---|---|
+| Tool | `tools/4naly3er` (`yarn analyze`) |
+| Invocation | `yarn analyze /home/justin/code/audits/yield-claim-nft/work/ <scope.txt>` |
+| basePath | `yield-claim-nft/work/`. The submodule-root basePath fails on the `pauser/` import because `src/` has no `remappings.txt`. `work/src` was confirmed byte-identical to `src/src` at `c5ad56d` (`diff -rq`, no differences). |
+| Scope (arg 3) | All 33 first-party `.sol` under `src/` (default-in-scope denylist: the 17 registry focus contracts, including `NFTBonfire.sol`, plus the 16 `src/interfaces/**` files). |
+| Standalone copy | `yield-claim-nft/reports/23/submissions/4naly3er-report.md` |
+
+**Totals**: 20 Gas · 32 NC · 15 Low · 1 Medium categories.
+
+**Triage of bot output**: The bot items are generic tool findings. Under C4 rules, none is promoted without a demonstrated exploit path, and none duplicates a manual finding above. Categories that hit `NFTBonfire.sol`: GAS-2/7/11/12/19; NC-1/6/7/9/10/11/12/15/19/23/24/29; L-1, L-3, L-11, L-13, L-14; M-1. The bot `[L-11]/[NC-23] Owner can renounce while system is paused` against NFTBonfire is noted, and falls under Law 3 (obvious owner action). The bot `[M-1] Centralization Risk for trusted owners` is owner-privilege enumeration and is suppressed under Law 3. Bot labels (`L-1`, `M-1`, …) are 4naly3er's own numbering and are unrelated to this run's L-XX / Q-XX labels.
+
+The full 4naly3er output follows verbatim. Headings are demoted one level to nest under this appendix.
+
+### 4naly3er Report
+
+
+### Gas Optimizations
+
+
+| |Issue|Instances|
+|-|:-|:-:|
+| [GAS-1](#GAS-1) | `a = a + b` is more gas effective than `a += b` for state variables (excluding arrays and mappings) | 7 |
+| [GAS-2](#GAS-2) | Use assembly to check for `address(0)` | 73 |
+| [GAS-3](#GAS-3) | Using bools for storage incurs overhead | 7 |
+| [GAS-4](#GAS-4) | Cache array length outside of loop | 1 |
+| [GAS-5](#GAS-5) | State variables should be cached in stack variables rather than re-reading them from storage | 92 |
+| [GAS-6](#GAS-6) | Use calldata instead of memory for function arguments that do not get mutated | 3 |
+| [GAS-7](#GAS-7) | For Operations that will not overflow, you could use unchecked | 166 |
+| [GAS-8](#GAS-8) | Use Custom Errors instead of Revert Strings to save Gas | 112 |
+| [GAS-9](#GAS-9) | Avoid contract existence checks by using low level calls | 28 |
+| [GAS-10](#GAS-10) | Stack variable used as a cheaper cache for a state variable is only used once | 18 |
+| [GAS-11](#GAS-11) | State variables only set in the constructor should be declared `immutable` | 32 |
+| [GAS-12](#GAS-12) | Functions guaranteed to revert when called by normal users can be marked `payable` | 74 |
+| [GAS-13](#GAS-13) | `++i` costs less gas compared to `i++` or `i += 1` (same for `--i` vs `i--` or `i -= 1`) | 4 |
+| [GAS-14](#GAS-14) | Using `private` rather than `public` for constants, saves gas | 15 |
+| [GAS-15](#GAS-15) | Use shift right/left instead of division/multiplication if possible | 2 |
+| [GAS-16](#GAS-16) | Superfluous event fields | 1 |
+| [GAS-17](#GAS-17) | Use of `this` instead of marking as `public` an `external` function | 1 |
+| [GAS-18](#GAS-18) | Increments/decrements can be unchecked in for-loops | 2 |
+| [GAS-19](#GAS-19) | Use != 0 instead of > 0 for unsigned integer comparison | 16 |
+| [GAS-20](#GAS-20) | WETH address definition can be use directly | 1 |
+#### <a name="GAS-1"></a>[GAS-1] `a = a + b` is more gas effective than `a += b` for state variables (excluding arrays and mappings)
+This saves **16 gas per instance.**
+
+*Instances (7)*:
+```solidity
+File: src/BurnRecorder.sol
+
+51:         totalBurnt[token] += amount;
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+363:         authVersion += 1;
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+281:         authVersion += 1;
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+328:         authVersion += 1;
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+113:         mintDebt += added;
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+129:         mintDebt += added;
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+134:         mintDebt += added;
+
+```
+
+#### <a name="GAS-2"></a>[GAS-2] Use assembly to check for `address(0)`
+*Saves 6 gas per instance*
+
+*Instances (73)*:
+```solidity
+File: src/NFTBonfire.sol
+
+84:         if (nftMinter_ == address(0) || antimatter_ == address(0)) revert NFTBonfire__ZeroAddress();
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+129:         require(dispatcher != address(0), "NFTMinterV2: zero dispatcher address");
+
+153:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+173:         require(config.dispatcher != address(0), "NFTMinterV2: index not registered");
+
+208:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+228:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+254:         if (dispatcher == address(0)) {
+
+277:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+283:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+291:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+95:         require(address(newHook) != address(0), "ATokenDispatcherV2: zero hook");
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+27:         require(recipient_ != address(0), "GatherV2: zero recipient address");
+
+45:         require(newRecipient != address(0), "GatherV2: zero recipient address");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+82:         require(batchMinter_ != address(0), "NudgeRatchet: zero batchMinter");
+
+97:         require(newBatchMinter != address(0), "NudgeRatchet: zero batchMinter");
+
+106:         require(newStreamer != address(0), "NudgeRatchet: zero nudgeStreamer");
+
+158:             require(streamer != address(0), "NudgeRatchet: nudgeStreamer unset");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+73:         require(batchMinter_ != address(0), "NudgeRatchetDelayRelease: zero batchMinter");
+
+90:         require(newBatchMinter != address(0), "NudgeRatchetDelayRelease: zero batchMinter");
+
+119:         require(to != address(0), "NudgeRatchetDelayRelease: zero recipient");
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+204:         require(promotionToken_ != address(0), "PromotionUniV2_Eth: zero promotion token");
+
+266:         address token0 = IUniswapV2Pair(newPair).token0();
+
+300:         insurer = newInsurer;
+
+308:         IERC20(WBTC).safeTransfer(to, amount);
+
+315:         psm = newPSM;
+
+343:         require(newStreamer != address(0), "PromotionUniV2_Eth: zero nudgeStreamer");
+
+352:         if (authorized) {
+
+379:         uint256 donationAmount = donationEnabled ? (amount * donationSplit) / 100 : 0;
+
+389:             IERC20(USDC).forceApprove(streamer, donationAmount);
+
+551:         require(token != WBTC, "PromotionUniV2_Eth: WBTC is insurer-only");
+
+559:         require(ok, "PromotionUniV2_Eth: eth rescue failed");
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+210:         require(sUSDS_ != address(0), "UniPoolerV2: zero sUSDS");
+
+211:         require(phUSD_ != address(0), "UniPoolerV2: zero phUSD");
+
+212:         require(router_ != address(0), "UniPoolerV2: zero router");
+
+213:         require(pair_ != address(0), "UniPoolerV2: zero pair");
+
+268:         require(pooler != address(0), "UniPoolerV2: zero pooler");
+
+306:         require(newPSM != address(0), "UniPoolerV2: zero psm");
+
+325:         require(newStreamer != address(0), "UniPoolerV2: zero nudgeStreamer");
+
+358:         bool donationEnabled = batchMinter != address(0) && psm != address(0) && batchDonationSize > 0;
+
+432:             require(streamer != address(0), "UniPoolerV2: nudgeStreamer unset");
+
+557:         require(to != address(0), "UniPoolerV2: zero recipient");
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+122:         require(primeToken_ != address(0), "Uniboost: zero prime");
+
+123:         require(router_ != address(0), "Uniboost: zero router");
+
+124:         require(targetToken_ != address(0), "Uniboost: zero target token");
+
+161:         require(newPool != address(0), "Uniboost: zero pool");
+
+191:         require(newStreamer != address(0), "Uniboost: zero nudgeStreamer");
+
+238:         bool donationEnabled = recipient != address(0) && donationSplit > 0;
+
+248:             require(streamer != address(0), "Uniboost: nudgeStreamer unset");
+
+316:         require(pooler != address(0), "Uniboost: zero pooler");
+
+339:         require(to != address(0), "Uniboost: zero recipient");
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+67:         require(dispatcher_ != address(0), "dispatcher=0");
+
+68:         require(phUSD_ != address(0), "phUSD=0");
+
+99:         require(newDispatcher != address(0), "dispatcher=0");
+
+121:         if (recipient == address(0)) revert RecipientUnset();
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+79:         require(dispatcher_ != address(0), "dispatcher=0");
+
+80:         require(phUSD_ != address(0), "phUSD=0");
+
+112:         require(newDispatcher != address(0), "dispatcher=0");
+
+137:         if (recipient == address(0)) revert RecipientUnset();
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+82:         require(dispatcher_ != address(0), "dispatcher=0");
+
+83:         require(phUSD_ != address(0), "phUSD=0");
+
+84:         require(primeToken_ != address(0), "primeToken=0");
+
+118:         require(newDispatcher != address(0), "dispatcher=0");
+
+142:         if (recipient == address(0)) revert RecipientUnset();
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+190:         require(operator_ != address(0), "UniPoolerCutoverEscrow: zero operator");
+
+191:         require(newPooler_ != address(0), "UniPoolerCutoverEscrow: zero newPooler");
+
+192:         require(oldPooler_ != address(0), "UniPoolerCutoverEscrow: zero oldPooler");
+
+193:         require(v3Router_ != address(0), "UniPoolerCutoverEscrow: zero v3Router");
+
+201:         require(pair_ != address(0), "UniPoolerCutoverEscrow: zero pair");
+
+202:         require(uniRouter_ != address(0), "UniPoolerCutoverEscrow: zero router");
+
+203:         require(sUSDS_ != address(0), "UniPoolerCutoverEscrow: zero sUSDS");
+
+204:         require(phUSD_ != address(0), "UniPoolerCutoverEscrow: zero phUSD");
+
+205:         require(bpt_ != address(0), "UniPoolerCutoverEscrow: zero pool");
+
+206:         require(usds_ != address(0), "UniPoolerCutoverEscrow: zero USDS");
+
+```
+
+#### <a name="GAS-3"></a>[GAS-3] Using bools for storage incurs overhead
+Use uint256(1) and uint256(2) for true/false to avoid a Gwarmaccess (100 gas), and to avoid Gsset (20000 gas) when changing from ‘false’ to ‘true’, after having been ‘true’ in the past. See [source](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/58f635312aa21f947cae5f8578638a85aa2519f5/contracts/security/ReentrancyGuard.sol#L23-L27).
+
+*Instances (7)*:
+```solidity
+File: src/BurnRecorder.sol
+
+13:     mapping(address => bool) private _burners;
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+40:     mapping(address => bool) public authorizedBurners;
+
+43:     mapping(address => bool) public authorizedMinters;
+
+98:     bool public paused;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+47:     mapping(address => bool) public releasers;
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+113:     bool private immutable _sUSDSIsToken0;
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+115:     bool private immutable _sUSDSIsToken0;
+
+```
+
+#### <a name="GAS-4"></a>[GAS-4] Cache array length outside of loop
+If not cached, the solidity compiler will always read the length of the array during each iteration. That is, if it is a storage array, this is an extra sload operation (100 additional extra gas for each iteration except for the first) and if it is a memory array, this is an extra mload operation (3 additional gas for each iteration except for the first).
+
+*Instances (1)*:
+```solidity
+File: src/MultiPooler.sol
+
+62:         for (uint256 i = 0; i < calls.length; i++) {
+
+```
+
+#### <a name="GAS-5"></a>[GAS-5] State variables should be cached in stack variables rather than re-reading them from storage
+The instances below point to the second+ access of a state variable within a function. Caching of a state variable replaces each Gwarmaccess (100 gas) with a much cheaper stack read. Other less obvious fixes/optimizations include having local memory caches of state variable structs, or having local caches of state variable contracts/addresses.
+
+*Saves 100 gas per instance*
+
+*Instances (92)*:
+```solidity
+File: src/dispatchers/BurnerV2.sol
+
+38:         _burnRecorder.burn(_token, amount);
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+159:             IERC20(_token).forceApprove(streamer, bal);
+
+160:             INudgeStreamer(streamer).collectNudge(batchMinter, _token, bal);
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+356:             delete poolerAuthVersion[pooler];
+
+464:         (,, liquidity) = IUniswapV2Router02(UNIV2_ROUTER).addLiquidity(
+
+466:         );
+
+472:     /// @dev Leg A: USDC →(PSM sellGem)→ USDS →(ERC4626 deposit)→ sUSDS →(UniV2 swap)→ phUSD.
+
+480:         uint256 usdsOut = ISkyPSM(psm).sellGem(address(this), usdcAmount);
+
+483:         // Step 2: USDS -> sUSDS (the phUSD/sUSDS V2 pair pairs against sUSDS, not USDS).
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+272:         } else {
+
+366:             IERC4626(_sUSDS).deposit(poolingUSDS, address(this));
+
+372:             uint256 remainingUSDS = IERC20(_primeToken).balanceOf(address(this));
+
+409:         uint256 gemAmt = (usdsAmount * WAD) / (conv * (WAD + tout));
+
+422:             // Story 047: USDC lands HERE, not on the batch-minter — it is streamed on below.
+
+423:             ISkyPSM(psm).buyGem(address(this), gemAmt);
+
+424:             IERC20(_primeToken).forceApprove(psm, 0); // tidy allowance.
+
+426:             // Push the freshly-bought USDC through the streamer, which buffers it and releases
+
+434:             IERC20(gem).forceApprove(streamer, gemAmt);
+
+469:         path[1] = _phUSD;
+
+470:         IERC20(_sUSDS).forceApprove(_router, s);
+
+472:             IUniswapV2Router02(_router).swapExactTokensForTokens(s, minPhusdOut, path, address(this), block.timestamp);
+
+473:         IERC20(_sUSDS).forceApprove(_router, 0);
+
+474:         uint256 phusdOut = amounts[1];
+
+478:         IERC20(_sUSDS).forceApprove(_router, sUSDSRemaining);
+
+479:         IERC20(_phUSD).forceApprove(_router, phusdOut);
+
+479:         IERC20(_phUSD).forceApprove(_router, phusdOut);
+
+480:         (,, uint256 liquidity) = IUniswapV2Router02(_router)
+
+481:             .addLiquidity(_sUSDS, _phUSD, sUSDSRemaining, phusdOut, 0, 0, address(this), block.timestamp);
+
+481:             .addLiquidity(_sUSDS, _phUSD, sUSDSRemaining, phusdOut, 0, 0, address(this), block.timestamp);
+
+481:             .addLiquidity(_sUSDS, _phUSD, sUSDSRemaining, phusdOut, 0, 0, address(this), block.timestamp);
+
+483:         IERC20(_sUSDS).forceApprove(_router, 0);
+
+484:         IERC20(_phUSD).forceApprove(_router, 0);
+
+484:         IERC20(_phUSD).forceApprove(_router, 0);
+
+486:         emit Pooled(msg.sender, sUSDSIn, s, phusdOut, liquidity);
+
+534:         if (bS == 0 || bP == 0) revert UniPoolerV2__EmptyPair();
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+250:             INudgeStreamer(streamer).collectNudge(recipient, _primeToken, donationAmount);
+
+275:         IERC20(_primeToken).forceApprove(_router, amountIn);
+
+276:         IUniswapV2Router02(_router).swapExactTokensForTokens(
+
+279:         IERC20(_primeToken).forceApprove(_router, 0);
+
+279:         IERC20(_primeToken).forceApprove(_router, 0);
+
+286:             pairToTargetPath[0] = _pairToken;
+
+288:             IERC20(_pairToken).forceApprove(_router, half);
+
+288:             IERC20(_pairToken).forceApprove(_router, half);
+
+289:             IUniswapV2Router02(_router).swapExactTokensForTokens(
+
+292:             IERC20(_pairToken).forceApprove(_router, 0);
+
+292:             IERC20(_pairToken).forceApprove(_router, 0);
+
+298:         uint256 targetBal = IERC20(targetToken).balanceOf(address(this));
+
+299:         uint256 pairRemaining = IERC20(_pairToken).balanceOf(address(this));
+
+300:         IERC20(targetToken).forceApprove(_router, targetBal);
+
+300:         IERC20(targetToken).forceApprove(_router, targetBal);
+
+301:         IERC20(_pairToken).forceApprove(_router, pairRemaining);
+
+301:         IERC20(_pairToken).forceApprove(_router, pairRemaining);
+
+302:         (,, uint256 liquidity) = IUniswapV2Router02(_router).addLiquidity(
+
+303:             targetToken, _pairToken, targetBal, pairRemaining, 0, 0, address(this), block.timestamp
+
+303:             targetToken, _pairToken, targetBal, pairRemaining, 0, 0, address(this), block.timestamp
+
+306:         IERC20(targetToken).forceApprove(_router, 0);
+
+306:         IERC20(targetToken).forceApprove(_router, 0);
+
+307:         IERC20(_pairToken).forceApprove(_router, 0);
+
+307:         IERC20(_pairToken).forceApprove(_router, 0);
+
+319:             emit PoolerAuthorized(pooler, authVersion);
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+277:         emit Seeded(bptIn, s, p, liquidity, mode);
+
+280:     /// @notice Wraps the escrow's whole USDS balance into sUSDS, crediting the shares to
+
+288:         IERC20(_usds).forceApprove(_sUSDS, 0);
+
+290:         emit UsdsWrapped(amt, shares);
+
+293:     /// @notice Returns the escrow's whole BPT, sUSDS, phUSD and USDS balances to `oldPooler`, the
+
+293:     /// @notice Returns the escrow's whole BPT, sUSDS, phUSD and USDS balances to `oldPooler`, the
+
+368:             (r0, r1,) = IUniswapV2Pair(_pair).getReserves();
+
+369:             b0 = IERC20(t0).balanceOf(_pair);
+
+370:             b1 = IERC20(t1).balanceOf(_pair);
+
+372:         if (r0 != 0 || r1 != 0 || b0 != 0 || b1 != 0) {
+
+374:         }
+
+377:     /// @dev Exact-approves the V3 Router for `bptIn`, exits by `mode`, resets the approval and
+
+378:     ///      requires every BPT to be gone.
+
+379:     function _exit(ExitMode mode, uint256 bptIn, uint256[] calldata minAmountsOut) internal {
+
+388:         if (remaining != 0) revert UniPoolerCutoverEscrow__BPTRemaining(remaining);
+
+391:     /// @dev Adds `s` sUSDS and `p` phUSD to the empty pair via Router02 (mins == desired), LP to
+
+391:     /// @dev Adds `s` sUSDS and `p` phUSD to the empty pair via Router02 (mins == desired), LP to
+
+392:     ///      `newPooler`, and verifies exact consumption, the LP credit and the resulting reserves.
+
+393:     function _seed(uint256 s, uint256 p, uint256 deadline) internal returns (uint256 liquidity) {
+
+393:     function _seed(uint256 s, uint256 p, uint256 deadline) internal returns (uint256 liquidity) {
+
+405:         uint256 lpReceived = IERC20(_pair).balanceOf(_newPooler) - lpBefore;
+
+406:         if (liq == 0 || lpReceived != liq) revert UniPoolerCutoverEscrow__LPNotMinted(liq, lpReceived);
+
+406:         if (liq == 0 || lpReceived != liq) revert UniPoolerCutoverEscrow__LPNotMinted(liq, lpReceived);
+
+406:         if (liq == 0 || lpReceived != liq) revert UniPoolerCutoverEscrow__LPNotMinted(liq, lpReceived);
+
+406:         if (liq == 0 || lpReceived != liq) revert UniPoolerCutoverEscrow__LPNotMinted(liq, lpReceived);
+
+408:         (uint112 r0, uint112 r1,) = IUniswapV2Pair(_pair).getReserves();
+
+408:         (uint112 r0, uint112 r1,) = IUniswapV2Pair(_pair).getReserves();
+
+408:         (uint112 r0, uint112 r1,) = IUniswapV2Pair(_pair).getReserves();
+
+409:         (uint256 rS, uint256 rP) = _sUSDSIsToken0 ? (uint256(r0), uint256(r1)) : (uint256(r1), uint256(r0));
+
+410:         if (rS != s || rP != p) revert UniPoolerCutoverEscrow__ReserveMismatch(rS, rP);
+
+410:         if (rS != s || rP != p) revert UniPoolerCutoverEscrow__ReserveMismatch(rS, rP);
+
+415:     function _returnAll(address token) internal returns (uint256 amount) {
+
+```
+
+#### <a name="GAS-6"></a>[GAS-6] Use calldata instead of memory for function arguments that do not get mutated
+When a function with a `memory` array is called externally, the `abi.decode()` step has to use a for-loop to copy each index of the `calldata` to the `memory` index. Each iteration of this for-loop costs at least 60 gas (i.e. `60 * <mem_array>.length`). Using `calldata` directly bypasses this loop. 
+
+If the array is passed to an `internal` function which passes the array to another internal function where the array is modified and therefore `memory` is used in the `external` call, it's still more gas-efficient to use `calldata` when the `external` function uses modifiers, since the modifiers may prevent the internal functions from being called. Structs have the same overhead as an array of length one. 
+
+ *Saves 60 gas per instance*
+
+*Instances (3)*:
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+31:         uint256[] memory minAmountsOut,
+
+33:         bytes memory userData
+
+36:     function removeLiquidityRecovery(address pool, uint256 exactBptAmountIn, uint256[] memory minAmountsOut)
+
+```
+
+#### <a name="GAS-7"></a>[GAS-7] For Operations that will not overflow, you could use unchecked
+
+*Instances (166)*:
+```solidity
+File: src/BurnRecorder.sol
+
+4: import {IBurnRecorder} from "./interfaces/IBurnRecorder.sol";
+
+5: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+51:         totalBurnt[token] += amount;
+
+67:         _latestIndex++;
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+4: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+5: import {IUniboostPooler} from "./interfaces/IUniboostPooler.sol";
+
+62:         for (uint256 i = 0; i < calls.length; i++) {
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+4: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+5: import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+
+6: import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+7: import {IPausable} from "pauser/interfaces/IPausable.sol";
+
+8: import {INFTMinterV2} from "./interfaces/INFTMinterV2.sol";
+
+9: import {IMintable} from "./interfaces/IMintable.sol";
+
+118:         uint256 raw = accruedStored + ((block.timestamp - lastUpdate) * ratePerDay) / 1 days;
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+4: import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+
+5: import {ERC1155Supply} from "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
+
+6: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+7: import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+8: import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+9: import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+
+10: import {ITokenDispatcherV2} from "./interfaces/ITokenDispatcherV2.sol";
+
+11: import {ATokenDispatcherV2} from "./dispatchers/ATokenDispatcherV2.sol";
+
+12: import {INFTMinterV2} from "./interfaces/INFTMinterV2.sol";
+
+13: import {ITokenMinterV2} from "./interfaces/ITokenMinterV2.sol";
+
+14: import {IPausable} from "pauser/interfaces/IPausable.sol";
+
+21:         address dispatcher; // TokenDispatcher contract address
+
+22:         uint256 price; // current mint price in token units (18 decimals)
+
+23:         uint256 growthBasisPoints; // price growth per mint in basis points (100 = 1%)
+
+24:         bool disabled; // if true, new mints are blocked but existing NFTs remain valid
+
+133:         nextIndex++;
+
+184:         uint256 actualReceived = IERC20(token).balanceOf(config.dispatcher) - balanceBefore;
+
+188:         config.price = price + (price * config.growthBasisPoints) / 10000;
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+4: import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
+
+5: import {IDispatchHook} from "../interfaces/IDispatchHook.sol";
+
+6: import {DefaultDispatchHook} from "../hooks/DefaultDispatchHook.sol";
+
+7: import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+
+8: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+9: import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+```
+
+```solidity
+File: src/dispatchers/BurnerV2.sol
+
+4: import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+
+5: import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
+
+6: import {IBurnable} from "../interfaces/IBurnable.sol";
+
+7: import {IBurnRecorder} from "../interfaces/IBurnRecorder.sol";
+
+32:         bytes calldata /* extraData */
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+4: import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+5: import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+6: import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+
+7: import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
+
+56:         bytes calldata /* extraData */
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+4: import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+5: import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+
+6: import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+7: import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+
+8: import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
+
+9: import {INudgeRatchetMintDebtHook} from "../interfaces/INudgeRatchetMintDebtHook.sol";
+
+10: import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
+
+84:         require(IERC20Metadata(token_).decimals() == 6, "NudgeRatchet: token must be 6-decimal USDC");
+
+134:     function _dispatch(address, uint256 amount, bytes calldata /* extraData */) internal override {
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+4: import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+5: import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+
+6: import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+7: import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+
+8: import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
+
+9: import {INudgeRatchetMintDebtHook} from "../interfaces/INudgeRatchetMintDebtHook.sol";
+
+77:             "NudgeRatchetDelayRelease: token must be 6-decimal USDC"
+
+131:     function _dispatch(address, uint256 /* amount */, bytes calldata /* extraData */)
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+4: import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+5: import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+6: import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+
+7: import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+
+8: import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
+
+9: import {ISkyPSM} from "../interfaces/ISkyPSM.sol";
+
+10: import {IPhusdBurnable} from "../interfaces/IPhusdBurnable.sol";
+
+11: import {IUniswapV2Router02} from "../interfaces/uniswap/IUniswapV2Router02.sol";
+
+12: import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
+
+13: import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
+
+170:         uint256 primeSpent, // amountIn (USDC)
+
+171:         uint256 phusdAcquired, // gross phUSD out of Leg A (pre-burn)
+
+172:         uint256 phusdBurned, // = phusdAcquired / 2
+
+173:         uint256 wbtcAcquired, // WBTC out of Leg C (8dp)
+
+174:         uint256 liquidity // LP minted into the phUSD/promotion pair
+
+280:         require(path[path.length - 1] == promotionToken, "PromotionUniV2_Eth: path end not promotion");
+
+291:         require(path[path.length - 1] == WBTC, "PromotionUniV2_Eth: path end not WBTC");
+
+363:         authVersion += 1;
+
+377:     function _dispatch(address, uint256 amount, bytes calldata /* extraData */ ) internal override {
+
+379:         uint256 donationAmount = donationEnabled ? (amount * donationSplit) / 100 : 0;
+
+435:             uint256 amountA = (amountIn * 60) / 100; // phUSD leg
+
+436:             uint256 amountB = (amountIn * 30) / 100; // promotion leg
+
+437:             uint256 amountC = amountIn - amountA - amountB; // WBTC leg (~10% + rounding dust → reserve)
+
+447:         uint256 phusdBurned = phusdAcquired / 2;
+
+523:         wbtcOut = amounts[amounts.length - 1];
+
+538:         return amounts[amounts.length - 1];
+
+551:         require(token != WBTC, "PromotionUniV2_Eth: WBTC is insurer-only");
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+4: import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+5: import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+6: import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+
+7: import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+
+8: import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+
+9: import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
+
+10: import {ISkyPSM} from "../interfaces/ISkyPSM.sol";
+
+11: import {IUniswapV2Router02} from "../interfaces/uniswap/IUniswapV2Router02.sol";
+
+12: import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
+
+13: import {IUniswapV2Factory} from "../interfaces/uniswap/IUniswapV2Factory.sol";
+
+14: import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
+
+281:         authVersion += 1;
+
+351:         bytes calldata /*extraData*/
+
+360:         uint256 donationUSDS = donationEnabled ? (amount * batchDonationSize) / 100 : 0;
+
+361:         uint256 poolingUSDS = amount - donationUSDS;
+
+409:         uint256 gemAmt = (usdsAmount * WAD) / (conv * (WAD + tout));
+
+419:             uint256 usdsSpent = gemAmt * conv * (WAD + tout) / WAD;
+
+424:             IERC20(_primeToken).forceApprove(psm, 0); // tidy allowance.
+
+477:         uint256 sUSDSRemaining = sUSDSIn - s;
+
+505:         uint256 inWithFee = swapIn * 997;
+
+506:         phusdOut = (inWithFee * rP) / (rS * 1000 + inWithFee);
+
+509:         uint256 rS2 = rS + swapIn;
+
+510:         uint256 rP2 = rP - phusdOut;
+
+511:         uint256 amtS = sUSDSIn - swapIn;
+
+512:         uint256 amtP = (amtS * rP2) / rS2;
+
+515:             amtS = (phusdOut * rS2) / rP2;
+
+518:         expectedLP = Math.min((amtS * ts) / rS2, (amtP * ts) / rP2);
+
+542:         s = (Math.sqrt(r * (r * 3988009 + a * 3988000)) - r * 1997) / 1994;
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+4: import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+5: import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+6: import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+
+7: import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
+
+8: import {IUniswapV2Router02} from "../interfaces/uniswap/IUniswapV2Router02.sol";
+
+9: import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
+
+10: import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
+
+205:         require(path[path.length - 1] == _pairToken, "Uniboost: path end not pair");
+
+233:         bytes calldata /* extraData */
+
+239:         uint256 donationAmount = donationEnabled ? (amount * donationSplit) / 100 : 0;
+
+283:         uint256 half = pairBal / 2;
+
+328:         authVersion += 1;
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+4: import {IDispatchHook} from "../interfaces/IDispatchHook.sol";
+
+5: import {IBalancerPoolerMintDebtHook} from "../interfaces/IBalancerPoolerMintDebtHook.sol";
+
+6: import {IMintable} from "../interfaces/IMintable.sol";
+
+7: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+8: import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+111:         uint256 added = (amount * ratio) / 100;
+
+113:         mintDebt += added;
+
+```
+
+```solidity
+File: src/hooks/DefaultDispatchHook.sol
+
+4: import {IDispatchHook} from "../interfaces/IDispatchHook.sol";
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+4: import {IDispatchHook} from "../interfaces/IDispatchHook.sol";
+
+5: import {INudgeRatchetMintDebtHook} from "../interfaces/INudgeRatchetMintDebtHook.sol";
+
+6: import {IMintable} from "../interfaces/IMintable.sol";
+
+7: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+8: import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+127:         uint256 added = (amount * USDC_TO_PHUSD_SCALE * ratio) / 100;
+
+129:         mintDebt += added;
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+4: import {IDispatchHook} from "../interfaces/IDispatchHook.sol";
+
+5: import {IUniboostMintDebtHook} from "../interfaces/IUniboostMintDebtHook.sol";
+
+6: import {IMintable} from "../interfaces/IMintable.sol";
+
+7: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+8: import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+9: import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+
+89:         scale = 10 ** (18 - d);
+
+132:         uint256 added = (amount * scale * ratio) / 100;
+
+134:         mintDebt += added;
+
+```
+
+```solidity
+File: src/interfaces/INFTMinterV2.sol
+
+4: import {ITokenMinterV2} from "./ITokenMinterV2.sol";
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+4: import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+5: import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+6: import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+
+7: import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+8: import {IUniswapV2Router02} from "../interfaces/uniswap/IUniswapV2Router02.sol";
+
+9: import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
+
+257:         for (uint256 i = 0; i < 2; i++) {
+
+260:         if (deadline <= block.timestamp || deadline > block.timestamp + MAX_DEADLINE_WINDOW) {
+
+405:         uint256 lpReceived = IERC20(_pair).balanceOf(_newPooler) - lpBefore;
+
+```
+
+#### <a name="GAS-8"></a>[GAS-8] Use Custom Errors instead of Revert Strings to save Gas
+Custom errors are available from solidity version 0.8.4. Custom errors save [**~50 gas**](https://gist.github.com/IllIllI000/ad1bd0d29a0101b25e57c293b4b0c746) each time they're hit by [avoiding having to allocate and store the revert string](https://blog.soliditylang.org/2021/04/21/custom-errors/#errors-in-depth). Not defining the strings also save deployment gas
+
+Additionally, custom errors can be used inside and outside of contracts (including interfaces and libraries).
+
+Source: <https://blog.soliditylang.org/2021/04/21/custom-errors/>:
+
+> Starting from [Solidity v0.8.4](https://github.com/ethereum/solidity/releases/tag/v0.8.4), there is a convenient and gas-efficient way to explain to users why an operation failed through the use of custom errors. Until now, you could already use strings to give more information about failures (e.g., `revert("Insufficient funds.");`), but they are rather expensive, especially when it comes to deploy cost, and it is difficult to use dynamic information in them.
+
+Consider replacing **all revert strings** with custom errors in the solution, and particularly those that have multiple occurrences:
+
+*Instances (112)*:
+```solidity
+File: src/BurnRecorder.sol
+
+32:         require(_burners[msg.sender], "BurnRecorder: caller is not burner");
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+39:         require(msg.sender == pooler, "MultiPooler: caller not pooler");
+
+61:         require(calls.length > 0, "MultiPooler: empty batch");
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+112:         require(msg.sender == pauser, "Only pauser");
+
+119:         require(msg.sender == pauser, "Only pauser");
+
+129:         require(dispatcher != address(0), "NFTMinterV2: zero dispatcher address");
+
+130:         require(dispatcherToIndex[dispatcher] == 0, "NFTMinterV2: dispatcher already registered");
+
+153:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+171:         require(!paused, "Contract is paused");
+
+173:         require(config.dispatcher != address(0), "NFTMinterV2: index not registered");
+
+174:         require(!config.disabled, "NFTMinterV2: dispatcher is disabled");
+
+207:         require(authorizedMinters[msg.sender], "NFTMinterV2: caller is not authorized minter");
+
+208:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+228:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+277:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+283:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+291:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+301:         require(balance > 0, "NFTMinterV2: no tokens to withdraw");
+
+310:         require(dispatcherToIndex[dispatcher] != 0, "NFTMinterV2: dispatcher not registered");
+
+342:         require(authorizedBurners[msg.sender], "NFTMinterV2: caller is not authorized burner");
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+45:         require(msg.sender == _minter, "ATokenDispatcherV2: caller is not minter");
+
+95:         require(address(newHook) != address(0), "ATokenDispatcherV2: zero hook");
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+27:         require(recipient_ != address(0), "GatherV2: zero recipient address");
+
+45:         require(newRecipient != address(0), "GatherV2: zero recipient address");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+82:         require(batchMinter_ != address(0), "NudgeRatchet: zero batchMinter");
+
+84:         require(IERC20Metadata(token_).decimals() == 6, "NudgeRatchet: token must be 6-decimal USDC");
+
+97:         require(newBatchMinter != address(0), "NudgeRatchet: zero batchMinter");
+
+106:         require(newStreamer != address(0), "NudgeRatchet: zero nudgeStreamer");
+
+148:         require(bal >= amount, "NudgeRatchet: insufficient balance for dispatch");
+
+158:             require(streamer != address(0), "NudgeRatchet: nudgeStreamer unset");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+63:         require(releasers[msg.sender], "NudgeRatchetDelayRelease: caller is not releaser");
+
+73:         require(batchMinter_ != address(0), "NudgeRatchetDelayRelease: zero batchMinter");
+
+90:         require(newBatchMinter != address(0), "NudgeRatchetDelayRelease: zero batchMinter");
+
+119:         require(to != address(0), "NudgeRatchetDelayRelease: zero recipient");
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+189:         require(poolerAuthVersion[msg.sender] == authVersion, "PromotionUniV2_Eth: caller not authorized pooler");
+
+194:         require(msg.sender == insurer, "PromotionUniV2_Eth: not insurer");
+
+204:         require(promotionToken_ != address(0), "PromotionUniV2_Eth: zero promotion token");
+
+265:         require(newPair != address(0), "PromotionUniV2_Eth: zero pool");
+
+269:         require(ok, "PromotionUniV2_Eth: pair missing token");
+
+278:         require(path.length >= 2, "PromotionUniV2_Eth: path too short");
+
+279:         require(path[0] == WETH, "PromotionUniV2_Eth: path start not WETH");
+
+280:         require(path[path.length - 1] == promotionToken, "PromotionUniV2_Eth: path end not promotion");
+
+289:         require(path.length >= 2, "PromotionUniV2_Eth: path too short");
+
+290:         require(path[0] == USDC, "PromotionUniV2_Eth: path start not USDC");
+
+291:         require(path[path.length - 1] == WBTC, "PromotionUniV2_Eth: path end not WBTC");
+
+299:         require(newInsurer != address(0), "PromotionUniV2_Eth: zero insurer");
+
+307:         require(to != address(0), "PromotionUniV2_Eth: zero recipient");
+
+314:         require(newPSM != address(0), "PromotionUniV2_Eth: zero psm");
+
+328:         require(newSplit <= 100, "PromotionUniV2_Eth: split > 100");
+
+343:         require(newStreamer != address(0), "PromotionUniV2_Eth: zero nudgeStreamer");
+
+351:         require(pooler != address(0), "PromotionUniV2_Eth: zero pooler");
+
+388:             require(streamer != address(0), "PromotionUniV2_Eth: nudgeStreamer unset");
+
+426:         require(amountIn > 0, "PromotionUniV2_Eth: nothing to pool");
+
+427:         require(amountIn <= IERC20(USDC).balanceOf(address(this)), "PromotionUniV2_Eth: insufficient prime");
+
+428:         require(minPhusdOut > 0, "PromotionUniV2_Eth: zero phUSD floor");
+
+467:         require(liquidity >= minLP, "PromotionUniV2_Eth: insufficient LP");
+
+478:         require(ISkyPSM(psm).tin() <= maxTin, "PromotionUniV2_Eth: tin too high");
+
+550:         require(to != address(0), "PromotionUniV2_Eth: zero recipient");
+
+551:         require(token != WBTC, "PromotionUniV2_Eth: WBTC is insurer-only");
+
+557:         require(to != address(0), "PromotionUniV2_Eth: zero recipient");
+
+559:         require(ok, "PromotionUniV2_Eth: eth rescue failed");
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+194:         require(poolerAuthVersion[msg.sender] == authVersion, "UniPoolerV2: caller not authorized pooler");
+
+210:         require(sUSDS_ != address(0), "UniPoolerV2: zero sUSDS");
+
+211:         require(phUSD_ != address(0), "UniPoolerV2: zero phUSD");
+
+212:         require(router_ != address(0), "UniPoolerV2: zero router");
+
+213:         require(pair_ != address(0), "UniPoolerV2: zero pair");
+
+268:         require(pooler != address(0), "UniPoolerV2: zero pooler");
+
+289:         require(newSize <= 100, "UniPoolerV2: size > 100");
+
+306:         require(newPSM != address(0), "UniPoolerV2: zero psm");
+
+325:         require(newStreamer != address(0), "UniPoolerV2: zero nudgeStreamer");
+
+397:         require(msg.sender == address(this), "UniPoolerV2: only self");
+
+400:         require(tout <= maxTout, "UniPoolerV2: tout too high");
+
+432:             require(streamer != address(0), "UniPoolerV2: nudgeStreamer unset");
+
+557:         require(to != address(0), "UniPoolerV2: zero recipient");
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+106:         require(poolerAuthVersion[msg.sender] == authVersion, "Uniboost: caller not authorized pooler");
+
+122:         require(primeToken_ != address(0), "Uniboost: zero prime");
+
+123:         require(router_ != address(0), "Uniboost: zero router");
+
+124:         require(targetToken_ != address(0), "Uniboost: zero target token");
+
+161:         require(newPool != address(0), "Uniboost: zero pool");
+
+164:         require(targetToken == token0 || targetToken == token1, "Uniboost: pool missing target token");
+
+175:         require(newSplit <= 100, "Uniboost: split > 100");
+
+191:         require(newStreamer != address(0), "Uniboost: zero nudgeStreamer");
+
+203:         require(path.length >= 2, "Uniboost: path too short");
+
+204:         require(path[0] == _primeToken, "Uniboost: path start not prime");
+
+205:         require(path[path.length - 1] == _pairToken, "Uniboost: path end not pair");
+
+248:             require(streamer != address(0), "Uniboost: nudgeStreamer unset");
+
+273:         require(amountIn > 0, "Uniboost: nothing to pool");
+
+274:         require(amountIn <= IERC20(_primeToken).balanceOf(address(this)), "Uniboost: insufficient prime");
+
+305:         require(liquidity >= minLP, "Uniboost: insufficient LP");
+
+316:         require(pooler != address(0), "Uniboost: zero pooler");
+
+339:         require(to != address(0), "Uniboost: zero recipient");
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+67:         require(dispatcher_ != address(0), "dispatcher=0");
+
+68:         require(phUSD_ != address(0), "phUSD=0");
+
+99:         require(newDispatcher != address(0), "dispatcher=0");
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+79:         require(dispatcher_ != address(0), "dispatcher=0");
+
+80:         require(phUSD_ != address(0), "phUSD=0");
+
+112:         require(newDispatcher != address(0), "dispatcher=0");
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+82:         require(dispatcher_ != address(0), "dispatcher=0");
+
+83:         require(phUSD_ != address(0), "phUSD=0");
+
+84:         require(primeToken_ != address(0), "primeToken=0");
+
+86:         require(d <= 18, "decimals>18");
+
+118:         require(newDispatcher != address(0), "dispatcher=0");
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+190:         require(operator_ != address(0), "UniPoolerCutoverEscrow: zero operator");
+
+191:         require(newPooler_ != address(0), "UniPoolerCutoverEscrow: zero newPooler");
+
+192:         require(oldPooler_ != address(0), "UniPoolerCutoverEscrow: zero oldPooler");
+
+193:         require(v3Router_ != address(0), "UniPoolerCutoverEscrow: zero v3Router");
+
+201:         require(pair_ != address(0), "UniPoolerCutoverEscrow: zero pair");
+
+202:         require(uniRouter_ != address(0), "UniPoolerCutoverEscrow: zero router");
+
+203:         require(sUSDS_ != address(0), "UniPoolerCutoverEscrow: zero sUSDS");
+
+204:         require(phUSD_ != address(0), "UniPoolerCutoverEscrow: zero phUSD");
+
+205:         require(bpt_ != address(0), "UniPoolerCutoverEscrow: zero pool");
+
+206:         require(usds_ != address(0), "UniPoolerCutoverEscrow: zero USDS");
+
+```
+
+#### <a name="GAS-9"></a>[GAS-9] Avoid contract existence checks by using low level calls
+Prior to 0.8.10 the compiler inserted extra code, including `EXTCODESIZE` (**100 gas**), to check for contract existence for external function calls. In more recent solidity versions, the compiler will not insert these checks if the external call has a return value. Similar behavior can be achieved in earlier versions by using low-level calls, since low level calls never check for contract existence
+
+*Instances (28)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+182:         uint256 balanceBefore = IERC20(token).balanceOf(config.dispatcher);
+
+184:         uint256 actualReceived = IERC20(token).balanceOf(config.dispatcher) - balanceBefore;
+
+300:         uint256 balance = IERC20(token).balanceOf(address(this));
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+142:         uint256 bal = IERC20(_token).balanceOf(address(this));
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+427:         require(amountIn <= IERC20(USDC).balanceOf(address(this)), "PromotionUniV2_Eth: insufficient prime");
+
+460:         uint256 phusdBal = IERC20(phUSD).balanceOf(address(this));
+
+461:         uint256 promoBal = IERC20(promotionToken).balanceOf(address(this));
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+372:             uint256 remainingUSDS = IERC20(_primeToken).balanceOf(address(this));
+
+458:         uint256 available = IERC20(_sUSDS).balanceOf(address(this));
+
+532:         bS = IERC20(_sUSDS).balanceOf(_pair);
+
+533:         bP = IERC20(_phUSD).balanceOf(_pair);
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+274:         require(amountIn <= IERC20(_primeToken).balanceOf(address(this)), "Uniboost: insufficient prime");
+
+282:         uint256 pairBal = IERC20(_pairToken).balanceOf(address(this));
+
+298:         uint256 targetBal = IERC20(targetToken).balanceOf(address(this));
+
+299:         uint256 pairRemaining = IERC20(_pairToken).balanceOf(address(this));
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+252:         uint256 bptIn = IERC20(_bpt).balanceOf(address(this));
+
+268:         uint256 s = IERC20(_sUSDS).balanceOf(address(this));
+
+269:         uint256 p = IERC20(_phUSD).balanceOf(address(this));
+
+284:         uint256 amt = IERC20(_usds).balanceOf(address(this));
+
+363:         uint256 b0 = IERC20(t0).balanceOf(_pair);
+
+364:         uint256 b1 = IERC20(t1).balanceOf(_pair);
+
+369:             b0 = IERC20(t0).balanceOf(_pair);
+
+370:             b1 = IERC20(t1).balanceOf(_pair);
+
+387:         uint256 remaining = IERC20(_bpt).balanceOf(address(this));
+
+395:         uint256 lpBefore = IERC20(_pair).balanceOf(_newPooler);
+
+405:         uint256 lpReceived = IERC20(_pair).balanceOf(_newPooler) - lpBefore;
+
+416:         amount = IERC20(token).balanceOf(address(this));
+
+422:         uint256 remaining = IERC20(token).balanceOf(address(this));
+
+```
+
+#### <a name="GAS-10"></a>[GAS-10] Stack variable used as a cheaper cache for a state variable is only used once
+If the variable is only accessed once, it's cheaper to use the state variable directly that one time, and save the **3 gas** the extra stack assignment would spend
+
+*Instances (18)*:
+```solidity
+File: src/MultiPooler.sol
+
+51:         address oldPooler = pooler;
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+105:         address oldPauser = pauser;
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+46:         address oldRecipient = _recipient;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+98:         address old = batchMinter;
+
+107:         address old = nudgeStreamer;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+91:         address old = batchMinter;
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+346:         emit NudgeStreamerUpdated(old, newStreamer);
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+326:         address old = nudgeStreamer;
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+192:         address old = nudgeStreamer;
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+79:         uint8 old = ratio;
+
+88:         address old = recipient;
+
+100:         address old = dispatcher;
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+92:         uint8 old = ratio;
+
+101:         address old = recipient;
+
+113:         address old = dispatcher;
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+98:         uint8 old = ratio;
+
+107:         address old = recipient;
+
+119:         address old = dispatcher;
+
+```
+
+#### <a name="GAS-11"></a>[GAS-11] State variables only set in the constructor should be declared `immutable`
+Variables only set in the constructor and never edited afterwards should be marked as immutable, as it would avoid the expensive storage-writing operation in the constructor (around **20 000 gas** per variable) and replace the expensive storage-reading operations (around **2100 gas** per reading) to a less expensive value reading (**3 gas**)
+
+*Instances (32)*:
+```solidity
+File: src/NFTBonfire.sol
+
+85:         nftMinter = INFTMinterV2(nftMinter_);
+
+86:         antimatter = IMintable(antimatter_);
+
+```
+
+```solidity
+File: src/dispatchers/BurnerV2.sol
+
+18:         _token = token_;
+
+19:         _burnRecorder = IBurnRecorder(burnRecorder_);
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+28:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+85:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+79:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+206:         authVersion = 1;
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+223:         _sUSDS = sUSDS_;
+
+224:         _primeToken = IERC4626(sUSDS_).asset();
+
+225:         _phUSD = phUSD_;
+
+226:         _router = router_;
+
+228:         _sUSDSIsToken0 = sFirst;
+
+230:         _defaultHook = address(hook);
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+125:         _primeToken = primeToken_;
+
+126:         _router = router_;
+
+127:         targetToken = targetToken_;
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+70:         phUSD = IMintable(phUSD_);
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+82:         phUSD = IMintable(phUSD_);
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+88:         phUSD = IMintable(phUSD_);
+
+89:         scale = 10 ** (18 - d);
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+213:         _operator = operator_;
+
+214:         _newPooler = newPooler_;
+
+215:         _oldPooler = oldPooler_;
+
+216:         _v3Router = v3Router_;
+
+217:         _bpt = bpt_;
+
+218:         _usds = usds_;
+
+219:         _sUSDS = sUSDS_;
+
+220:         _phUSD = phUSD_;
+
+221:         _pair = pair_;
+
+222:         _uniRouter = uniRouter_;
+
+223:         _sUSDSIsToken0 = IUniswapV2Pair(pair_).token0() == sUSDS_;
+
+```
+
+#### <a name="GAS-12"></a>[GAS-12] Functions guaranteed to revert when called by normal users can be marked `payable`
+If a function modifier such as `onlyOwner` is used, the function will revert if a normal user tries to pay the function. Marking the function as `payable` will lower the gas cost for legitimate callers because the compiler will not include checks for whether a payment was provided.
+
+*Instances (74)*:
+```solidity
+File: src/BurnRecorder.sol
+
+42:     function setBurner(address burner_, bool approved_) external onlyOwner {
+
+50:     function burn(address token, uint256 amount) external onlyBurner {
+
+65:     function registerToken(address token) external onlyOwner {
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+50:     function setPooler(address newPooler) external onlyOwner {
+
+60:     function pool(PoolCall[] calldata calls) external onlyPooler {
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+127:     function setRatePerDay(uint256 newRate) external onlyOwner {
+
+135:     function setMaxPayout(uint256 newMax) external onlyOwner {
+
+143:     function setPauser(address newPauser) external onlyOwner {
+
+149:     function pause() external override onlyPauser {
+
+154:     function unpause() external override onlyPauser {
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+104:     function setPauser(address newPauser) external onlyOwner {
+
+152:     function setDispatcherDisabled(uint256 index, bool disabled) external onlyOwner {
+
+219:     function setAuthorizedMinter(address minter, bool authorized) external onlyOwner {
+
+227:     function replaceDispatcher(uint256 index, address newDispatcher) external onlyOwner {
+
+282:     function setPrice(uint256 index, uint256 newPrice) external onlyOwner {
+
+290:     function setGrowthFactor(uint256 index, uint256 newGrowthBasisPoints) external onlyOwner {
+
+299:     function emergencyWithdraw(address token) external onlyOwner {
+
+309:     function setDispatcherActive(address dispatcher, bool active) external onlyOwner {
+
+332:     function setAuthorizedBurner(address burner, bool authorized) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+85:     function setMinter(address minter_) external onlyOwner {
+
+94:     function setHook(IDispatchHook newHook) external onlyOwner {
+
+102:     function pause() external onlyMinter {
+
+107:     function unpause() external onlyMinter {
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+44:     function setRecipient(address newRecipient) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+96:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+105:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+89:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+97:     function setReleaser(address releaser, bool approved) external onlyOwner {
+
+108:     function release(uint256 amount) external onlyReleaser nonReentrant {
+
+118:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+258:     function setPool(address newPair) external onlyOwner {
+
+277:     function setEthToPromotionPath(address[] calldata path) external onlyOwner {
+
+288:     function setUsdcToWbtcPath(address[] calldata path) external onlyOwner {
+
+298:     function setInsurer(address newInsurer) external onlyOwner {
+
+306:     function withdrawWBTC(address to, uint256 amount) external onlyInsurer {
+
+313:     function setPSM(address newPSM) external onlyOwner {
+
+320:     function setMaxTin(uint256 newMaxTin) external onlyOwner {
+
+327:     function setDonationSplit(uint256 newSplit) external onlyOwner {
+
+335:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+342:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+350:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+
+362:     function incrementAuthVersion() external onlyOwner {
+
+549:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+556:     function rescueETH(address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+267:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+
+280:     function incrementAuthVersion() external onlyOwner {
+
+288:     function setBatchDonationSize(uint256 newSize) external onlyOwner {
+
+297:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+305:     function setPSM(address newPSM) external onlyOwner {
+
+313:     function setMaxTout(uint256 newMaxTout) external onlyOwner {
+
+324:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+556:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+154:     function setPool(address newPool) external onlyOwner {
+
+174:     function setDonationSplit(uint256 newSplit) external onlyOwner {
+
+183:     function setRecipient(address newRecipient) external onlyOwner {
+
+190:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+202:     function setPrimeToPairPath(address[] calldata path) external onlyOwner {
+
+315:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+
+327:     function incrementAuthVersion() external onlyOwner {
+
+338:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+77:     function setRatio(uint8 newRatio) external onlyOwner {
+
+87:     function setRecipient(address newRecipient) external onlyOwner {
+
+98:     function setDispatcher(address newDispatcher) external onlyOwner {
+
+120:     function pull() external onlyOwnerOrRecipient nonReentrant {
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+90:     function setRatio(uint8 newRatio) external onlyOwner {
+
+100:     function setRecipient(address newRecipient) external onlyOwner {
+
+111:     function setDispatcher(address newDispatcher) external onlyOwner {
+
+136:     function pull() external onlyOwnerOrRecipient nonReentrant {
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+96:     function setRatio(uint8 newRatio) external onlyOwner {
+
+106:     function setRecipient(address newRecipient) external onlyOwner {
+
+117:     function setDispatcher(address newDispatcher) external onlyOwner {
+
+141:     function pull() external onlyOwnerOrRecipient nonReentrant {
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+283:     function wrapUsds() external onlyOperator nonReentrant returns (uint256 shares) {
+
+295:     function abort() external onlyOperator nonReentrant {
+
+```
+
+#### <a name="GAS-13"></a>[GAS-13] `++i` costs less gas compared to `i++` or `i += 1` (same for `--i` vs `i--` or `i -= 1`)
+Pre-increments and pre-decrements are cheaper.
+
+For a `uint256 i` variable, the following is true with the Optimizer enabled at 10k:
+
+**Increment:**
+
+- `i += 1` is the most expensive form
+- `i++` costs 6 gas less than `i += 1`
+- `++i` costs 5 gas less than `i++` (11 gas less than `i += 1`)
+
+**Decrement:**
+
+- `i -= 1` is the most expensive form
+- `i--` costs 11 gas less than `i -= 1`
+- `--i` costs 5 gas less than `i--` (16 gas less than `i -= 1`)
+
+Note that post-increments (or post-decrements) return the old value before incrementing or decrementing, hence the name *post-increment*:
+
+```solidity
+uint i = 1;  
+uint j = 2;
+require(j == i++, "This will be false as i is incremented after the comparison");
+```
+  
+However, pre-increments (or pre-decrements) return the new value:
+  
+```solidity
+uint i = 1;  
+uint j = 2;
+require(j == ++i, "This will be true as i is incremented before the comparison");
+```
+
+In the pre-increment case, the compiler has to create a temporary variable (when used) for returning `1` instead of `2`.
+
+Consider using pre-increments and pre-decrements where they are relevant (meaning: not where post-increments/decrements logic are relevant).
+
+*Saves 5 gas per instance*
+
+*Instances (4)*:
+```solidity
+File: src/BurnRecorder.sol
+
+67:         _latestIndex++;
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+62:         for (uint256 i = 0; i < calls.length; i++) {
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+133:         nextIndex++;
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+257:         for (uint256 i = 0; i < 2; i++) {
+
+```
+
+#### <a name="GAS-14"></a>[GAS-14] Using `private` rather than `public` for constants, saves gas
+If needed, the values can be read from the verified contract source code, or if there are multiple values there can be a single getter function that [returns a tuple](https://github.com/code-423n4/2022-08-frax/blob/90f55a9ce4e25bceed3a74290b854341d8de6afa/src/contracts/FraxlendPair.sol#L156-L178) of the values of all currently-public constants. Saves **3406-3606 gas** in deployment gas due to the compiler not having to create non-payable getter functions for deployment calldata, not having to store the bytes of the value outside of where it's used, and not adding another entry to the method ID table
+
+*Instances (15)*:
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+80:     address public constant phUSD = 0xf3B5B661b92B75C71fA5Aba8Fd95D7514A9CD605;
+
+82:     address public constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+
+84:     address public constant USDS = 0xdC035D45d973E3EC169d2276DDab16f1e407384F;
+
+86:     address public constant sUSDS = 0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD;
+
+88:     address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+
+90:     address public constant UNIV2_ROUTER = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
+
+94:     address public constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+24:     uint8 public constant MAX_RATIO = 50;
+
+27:     uint8 public constant DEFAULT_RATIO = 50;
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+25:     uint8 public constant MAX_RATIO = 200;
+
+28:     uint8 public constant DEFAULT_RATIO = 100;
+
+31:     bytes32 public constant HOOK_TYPE_ID = keccak256("NudgeRatchetMintDebtHook.v1");
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+31:     uint8 public constant MAX_RATIO = 50;
+
+34:     uint8 public constant DEFAULT_RATIO = 50;
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+92:     uint256 public constant MAX_DEADLINE_WINDOW = 1 days;
+
+```
+
+#### <a name="GAS-15"></a>[GAS-15] Use shift right/left instead of division/multiplication if possible
+While the `DIV` / `MUL` opcode uses 5 gas, the `SHR` / `SHL` opcode only uses 3 gas. Furthermore, beware that Solidity's division operation also includes a division-by-0 prevention which is bypassed using shifting. Eventually, overflow checks are never performed for shift operations as they are done for arithmetic operations. Instead, the result is always truncated, so the calculation can be unchecked in Solidity version `0.8+`
+- Use `>> 1` instead of `/ 2`
+- Use `>> 2` instead of `/ 4`
+- Use `<< 3` instead of `* 8`
+- ...
+- Use `>> 5` instead of `/ 2^5 == / 32`
+- Use `<< 6` instead of `* 2^6 == * 64`
+
+TL;DR:
+- Shifting left by N is like multiplying by 2^N (Each bits to the left is an increased power of 2)
+- Shifting right by N is like dividing by 2^N (Each bits to the right is a decreased power of 2)
+
+*Saves around 2 gas + 20 for unchecked per instance*
+
+*Instances (2)*:
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+447:         uint256 phusdBurned = phusdAcquired / 2;
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+283:         uint256 half = pairBal / 2;
+
+```
+
+#### <a name="GAS-16"></a>[GAS-16] Superfluous event fields
+`block.timestamp` and `block.number` are added to event information by default so adding them manually wastes gas
+
+*Instances (1)*:
+```solidity
+File: src/BurnRecorder.sol
+
+28:     event tokenBurnt(address indexed token, uint256 quantity, uint256 timestamp);
+
+```
+
+#### <a name="GAS-17"></a>[GAS-17] Use of `this` instead of marking as `public` an `external` function
+Using `this.` is like making an expensive external call. Consider marking the called function as public
+
+*Saves around 2000 gas per instance*
+
+*Instances (1)*:
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+374:                 try this._psmDonate(remainingUSDS) {}
+
+```
+
+#### <a name="GAS-18"></a>[GAS-18] Increments/decrements can be unchecked in for-loops
+In Solidity 0.8+, there's a default overflow check on unsigned integers. It's possible to uncheck this in for-loops and save some gas at each iteration, but at the cost of some code readability, as this uncheck cannot be made inline.
+
+[ethereum/solidity#10695](https://github.com/ethereum/solidity/issues/10695)
+
+The change would be:
+
+```diff
+- for (uint256 i; i < numIterations; i++) {
++ for (uint256 i; i < numIterations;) {
+ // ...  
++   unchecked { ++i; }
+}  
+```
+
+These save around **25 gas saved** per instance.
+
+The same can be applied with decrements (which should use `break` when `i == 0`).
+
+The risk of overflow is non-existent for `uint256`.
+
+*Instances (2)*:
+```solidity
+File: src/MultiPooler.sol
+
+62:         for (uint256 i = 0; i < calls.length; i++) {
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+257:         for (uint256 i = 0; i < 2; i++) {
+
+```
+
+#### <a name="GAS-19"></a>[GAS-19] Use != 0 instead of > 0 for unsigned integer comparison
+
+*Instances (16)*:
+```solidity
+File: src/MultiPooler.sol
+
+61:         require(calls.length > 0, "MultiPooler: empty batch");
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+107:         if (payout > 0) {
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+301:         require(balance > 0, "NFTMinterV2: no tokens to withdraw");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+156:         if (bal > 0) {
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+378:         bool donationEnabled = batchMinter != address(0) && donationSplit > 0;
+
+386:         if (donationAmount > 0) {
+
+426:         require(amountIn > 0, "PromotionUniV2_Eth: nothing to pool");
+
+428:         require(minPhusdOut > 0, "PromotionUniV2_Eth: zero phUSD floor");
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+358:         bool donationEnabled = batchMinter != address(0) && psm != address(0) && batchDonationSize > 0;
+
+364:         if (poolingUSDS > 0) {
+
+373:             if (remainingUSDS > 0) {
+
+417:         if (gemAmt > 0) {
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+238:         bool donationEnabled = recipient != address(0) && donationSplit > 0;
+
+246:         if (donationAmount > 0) {
+
+273:         require(amountIn > 0, "Uniboost: nothing to pool");
+
+284:         if (half > 0) {
+
+```
+
+#### <a name="GAS-20"></a>[GAS-20] WETH address definition can be use directly
+WETH is a wrap Ether contract with a specific address in the Ethereum network, giving the option to define it may cause false recognition, it is healthier to define it directly.
+
+    Advantages of defining a specific contract directly:
+    
+    It saves gas,
+    Prevents incorrect argument definition,
+    Prevents execution on a different chain and re-signature issues,
+    WETH Address : 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+
+*Instances (1)*:
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+88:     address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+
+```
+
+
+### Non Critical Issues
+
+
+| |Issue|Instances|
+|-|:-|:-:|
+| [NC-1](#NC-1) | Missing checks for `address(0)` when assigning values to address state variables | 10 |
+| [NC-2](#NC-2) | Array indices should be referenced via `enum`s rather than via numeric literals | 17 |
+| [NC-3](#NC-3) | Use `string.concat()` or `bytes.concat()` instead of `abi.encodePacked` | 1 |
+| [NC-4](#NC-4) | Constants should be in CONSTANT_CASE | 2 |
+| [NC-5](#NC-5) | `constant`s should be defined rather than using magic numbers | 27 |
+| [NC-6](#NC-6) | Control structures do not follow the Solidity Style Guide | 45 |
+| [NC-7](#NC-7) | Consider disabling `renounceOwnership()` | 8 |
+| [NC-8](#NC-8) | Duplicated `require()`/`revert()` Checks Should Be Refactored To A Modifier Or Function | 26 |
+| [NC-9](#NC-9) | Event missing indexed field | 26 |
+| [NC-10](#NC-10) | Events that mark critical parameter changes should contain both the old and the new value | 50 |
+| [NC-11](#NC-11) | Function ordering does not follow the Solidity style guide | 6 |
+| [NC-12](#NC-12) | Functions should not be longer than 50 lines | 185 |
+| [NC-13](#NC-13) | Change int to int256 | 2 |
+| [NC-14](#NC-14) | Interfaces should be defined in separate files from their usage | 4 |
+| [NC-15](#NC-15) | Lack of checks in setters | 21 |
+| [NC-16](#NC-16) | Missing Event for critical parameters change | 4 |
+| [NC-17](#NC-17) | NatSpec is completely non-existent on functions that should have them | 3 |
+| [NC-18](#NC-18) | Incomplete NatSpec: `@param` is missing on actually documented functions | 13 |
+| [NC-19](#NC-19) | Use a `modifier` instead of a `require/if` statement for a special `msg.sender` actor | 21 |
+| [NC-20](#NC-20) | Constant state variables defined more than once | 10 |
+| [NC-21](#NC-21) | Consider using named mappings | 12 |
+| [NC-22](#NC-22) | `address`s shouldn't be hard-coded | 8 |
+| [NC-23](#NC-23) | Owner can renounce while system is paused | 2 |
+| [NC-24](#NC-24) | Take advantage of Custom Error's return value property | 23 |
+| [NC-25](#NC-25) | Strings should use double quotes rather than single quotes | 4 |
+| [NC-26](#NC-26) | Contract does not follow the Solidity style guide's suggested layout ordering | 7 |
+| [NC-27](#NC-27) | Use Underscores for Number Literals (add an underscore every 3 digits) | 3 |
+| [NC-28](#NC-28) | Internal and private variables and functions names should begin with an underscore | 2 |
+| [NC-29](#NC-29) | Event is missing `indexed` fields | 56 |
+| [NC-30](#NC-30) | Constants should be defined rather than using magic numbers | 2 |
+| [NC-31](#NC-31) | `public` functions not called by the contract should be declared `external` instead | 3 |
+| [NC-32](#NC-32) | Variables need not be initialized to zero | 2 |
+#### <a name="NC-1"></a>[NC-1] Missing checks for `address(0)` when assigning values to address state variables
+
+*Instances (10)*:
+```solidity
+File: src/NFTBonfire.sol
+
+145:         pauser = newPauser;
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+106:         pauser = newPauser;
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+86:         _minter = minter_;
+
+```
+
+```solidity
+File: src/dispatchers/BurnerV2.sol
+
+18:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+28:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+85:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+79:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+337:         emit BatchMinterSet(newBatchMinter);
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+167:         _pairToken = pairToken_;
+
+184:         recipient = newRecipient;
+
+```
+
+#### <a name="NC-2"></a>[NC-2] Array indices should be referenced via `enum`s rather than via numeric literals
+
+*Instances (17)*:
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+235:             return path;
+
+236:         }
+
+247:             return path;
+
+249:         return _usdcToWbtcPath;
+
+280:         require(path[path.length - 1] == promotionToken, "PromotionUniV2_Eth: path end not promotion");
+
+291:         require(path[path.length - 1] == WBTC, "PromotionUniV2_Eth: path end not WBTC");
+
+499:         IERC20(USDC).forceApprove(UNIV2_ROUTER, usdcAmount);
+
+500:         IUniswapV2Router02(UNIV2_ROUTER).swapExactTokensForETH(
+
+534:         uint256[] memory amounts = IUniswapV2Router02(UNIV2_ROUTER).swapExactTokensForTokens(
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+469:         path[1] = _phUSD;
+
+470:         IERC20(_sUSDS).forceApprove(_router, s);
+
+476:         // Add (a - s) sUSDS + phusdOut phUSD; LP is minted to this contract (LP custody: pooler).
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+204:         require(path[0] == _primeToken, "Uniboost: path start not prime");
+
+215:             path[0] = _primeToken;
+
+216:             path[1] = _pairToken;
+
+286:             pairToTargetPath[0] = _pairToken;
+
+287:             pairToTargetPath[1] = targetToken;
+
+```
+
+#### <a name="NC-3"></a>[NC-3] Use `string.concat()` or `bytes.concat()` instead of `abi.encodePacked`
+Solidity version 0.8.4 introduces `bytes.concat()` (vs `abi.encodePacked(<bytes>,<bytes>)`)
+
+Solidity version 0.8.12 introduces `string.concat()` (vs `abi.encodePacked(<str>,<str>), which catches concatenation errors (in the event of a `bytes` data mixed in the concatenation)`)
+
+*Instances (1)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+263:             abi.encodePacked(
+
+```
+
+#### <a name="NC-4"></a>[NC-4] Constants should be in CONSTANT_CASE
+For `constant` variable names, each word should use all capital letters, with underscores separating each word (CONSTANT_CASE)
+
+*Instances (2)*:
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+80:     address public constant phUSD = 0xf3B5B661b92B75C71fA5Aba8Fd95D7514A9CD605;
+
+86:     address public constant sUSDS = 0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD;
+
+```
+
+#### <a name="NC-5"></a>[NC-5] `constant`s should be defined rather than using magic numbers
+Even [assembly](https://github.com/code-423n4/2022-05-opensea-seaport/blob/9d7ce4d08bf3c3010304a0476a785c70c0e90ae7/contracts/lib/TokenTransferrer.sol#L35-L39) can benefit from using readable constants instead of hex/numeric literals
+
+*Instances (27)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+188:         config.price = price + (price * config.growthBasisPoints) / 10000;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+84:         require(IERC20Metadata(token_).decimals() == 6, "NudgeRatchet: token must be 6-decimal USDC");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+76:             IERC20Metadata(token_).decimals() == 6,
+
+77:             "NudgeRatchetDelayRelease: token must be 6-decimal USDC"
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+278:         require(path.length >= 2, "PromotionUniV2_Eth: path too short");
+
+289:         require(path.length >= 2, "PromotionUniV2_Eth: path too short");
+
+328:         require(newSplit <= 100, "PromotionUniV2_Eth: split > 100");
+
+379:         uint256 donationAmount = donationEnabled ? (amount * donationSplit) / 100 : 0;
+
+435:             uint256 amountA = (amountIn * 60) / 100; // phUSD leg
+
+436:             uint256 amountB = (amountIn * 30) / 100; // promotion leg
+
+447:         uint256 phusdBurned = phusdAcquired / 2;
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+289:         require(newSize <= 100, "UniPoolerV2: size > 100");
+
+360:         uint256 donationUSDS = donationEnabled ? (amount * batchDonationSize) / 100 : 0;
+
+505:         uint256 inWithFee = swapIn * 997;
+
+506:         phusdOut = (inWithFee * rP) / (rS * 1000 + inWithFee);
+
+542:         s = (Math.sqrt(r * (r * 3988009 + a * 3988000)) - r * 1997) / 1994;
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+175:         require(newSplit <= 100, "Uniboost: split > 100");
+
+203:         require(path.length >= 2, "Uniboost: path too short");
+
+239:         uint256 donationAmount = donationEnabled ? (amount * donationSplit) / 100 : 0;
+
+283:         uint256 half = pairBal / 2;
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+111:         uint256 added = (amount * ratio) / 100;
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+127:         uint256 added = (amount * USDC_TO_PHUSD_SCALE * ratio) / 100;
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+86:         require(d <= 18, "decimals>18");
+
+89:         scale = 10 ** (18 - d);
+
+132:         uint256 added = (amount * scale * ratio) / 100;
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+256:         if (minAmountsOut.length != 2) revert UniPoolerCutoverEscrow__BadMinAmountsLength(minAmountsOut.length);
+
+257:         for (uint256 i = 0; i < 2; i++) {
+
+```
+
+#### <a name="NC-6"></a>[NC-6] Control structures do not follow the Solidity Style Guide
+See the [control structures](https://docs.soliditylang.org/en/latest/style-guide.html#control-structures) section of the Solidity Style Guide
+
+*Instances (45)*:
+```solidity
+File: src/NFTBonfire.sol
+
+75:         if (msg.sender != pauser) revert NFTBonfire__NotPauser();
+
+84:         if (nftMinter_ == address(0) || antimatter_ == address(0)) revert NFTBonfire__ZeroAddress();
+
+98:         if (ratePerDay == 0) revert NFTBonfire__BurningDisabled();
+
+101:         if (payout < minPayout) revert NFTBonfire__PayoutBelowMinimum(payout, minPayout);
+
+120:         if (cap != 0 && raw > cap) return cap;
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+24:         bool disabled; // if true, new mints are blocked but existing NFTs remain valid
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+218:         if (!sFirst && !(t0 == phUSD_ && t1 == sUSDS_)) revert UniPoolerV2__PairTokenMismatch(t0, t1);
+
+221:         if (canonical != pair_) revert UniPoolerV2__PairNotCanonical(canonical, pair_);
+
+356:         if (address(hook) == _defaultHook) revert UniPoolerV2__HookNotSet();
+
+456:         if (minPhusdOut == 0 || minLP == 0) revert UniPoolerV2__ZeroMinimum();
+
+457:         if (sUSDSIn == 0) revert UniPoolerV2__NothingToPool();
+
+459:         if (sUSDSIn > available) revert UniPoolerV2__InsufficientSUSDS(sUSDSIn, available);
+
+482:         if (liquidity < minLP) revert UniPoolerV2__InsufficientLP(liquidity, minLP);
+
+526:         if (rS == 0 || rP == 0) revert UniPoolerV2__EmptyPair();
+
+534:         if (bS == 0 || bP == 0) revert UniPoolerV2__EmptyPair();
+
+543:         if (s == 0) revert UniPoolerV2__AmountTooSmall();
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+78:         if (newRatio > MAX_RATIO) revert RatioTooHigh();
+
+110:         if (msg.sender != dispatcher) revert OnlyDispatcher();
+
+112:         if (added == 0) return;
+
+121:         if (recipient == address(0)) revert RecipientUnset();
+
+123:         if (debt == 0) return;
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+91:         if (newRatio > MAX_RATIO) revert RatioTooHigh();
+
+123:         if (msg.sender != dispatcher) revert OnlyDispatcher();
+
+128:         if (added == 0) return;
+
+137:         if (recipient == address(0)) revert RecipientUnset();
+
+139:         if (debt == 0) return;
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+97:         if (newRatio > MAX_RATIO) revert RatioTooHigh();
+
+129:         if (msg.sender != dispatcher) revert OnlyDispatcher();
+
+133:         if (added == 0) return;
+
+142:         if (recipient == address(0)) revert RecipientUnset();
+
+144:         if (debt == 0) return;
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+177:         if (msg.sender != _operator) revert UniPoolerCutoverEscrow__NotOperator(msg.sender);
+
+209:         if (oldSUSDS != sUSDS_) revert UniPoolerCutoverEscrow__SUSDSMismatch(oldSUSDS, sUSDS_);
+
+211:         if (asset != usds_) revert UniPoolerCutoverEscrow__UsdsMismatch(usds_, asset);
+
+253:         if (bptIn == 0) revert UniPoolerCutoverEscrow__NoBPT();
+
+256:         if (minAmountsOut.length != 2) revert UniPoolerCutoverEscrow__BadMinAmountsLength(minAmountsOut.length);
+
+258:             if (minAmountsOut[i] == 0) revert UniPoolerCutoverEscrow__ZeroMinAmountOut(i);
+
+285:         if (amt == 0) revert UniPoolerCutoverEscrow__NoUSDS();
+
+388:         if (remaining != 0) revert UniPoolerCutoverEscrow__BPTRemaining(remaining);
+
+394:         if (s == 0 || p == 0) revert UniPoolerCutoverEscrow__NothingToSeed(s, p);
+
+404:         if (a != s || b != p) revert UniPoolerCutoverEscrow__SeedNotExact(a, b);
+
+406:         if (liq == 0 || lpReceived != liq) revert UniPoolerCutoverEscrow__LPNotMinted(liq, lpReceived);
+
+410:         if (rS != s || rP != p) revert UniPoolerCutoverEscrow__ReserveMismatch(rS, rP);
+
+417:         if (amount != 0) IERC20(token).safeTransfer(_oldPooler, amount);
+
+423:         if (remaining != 0) revert UniPoolerCutoverEscrow__BalanceRemaining(token, remaining);
+
+```
+
+#### <a name="NC-7"></a>[NC-7] Consider disabling `renounceOwnership()`
+If the plan for your project does not include eventually giving up all ownership control, consider overwriting OpenZeppelin's `Ownable`'s `renounceOwnership()` function in order to disable it.
+
+*Instances (8)*:
+```solidity
+File: src/BurnRecorder.sol
+
+11: contract BurnRecorder is IBurnRecorder, Ownable {
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+18: contract MultiPooler is Ownable {
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+20: contract NFTBonfire is Ownable, Pausable, ReentrancyGuard, IPausable {
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+16: contract NFTMinterV2 is ERC1155Supply, Ownable, INFTMinterV2, IPausable {
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+23: abstract contract ATokenDispatcherV2 is ITokenDispatcherV2, Pausable, Ownable, ReentrancyGuard {
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+22: contract BalancerPoolerMintDebtHook is IDispatchHook, IBalancerPoolerMintDebtHook, Ownable, ReentrancyGuard {
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+22: contract NudgeRatchetMintDebtHook is IDispatchHook, INudgeRatchetMintDebtHook, Ownable, ReentrancyGuard {
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+29: contract UniboostMintDebtHook is IDispatchHook, IUniboostMintDebtHook, Ownable, ReentrancyGuard {
+
+```
+
+#### <a name="NC-8"></a>[NC-8] Duplicated `require()`/`revert()` Checks Should Be Refactored To A Modifier Or Function
+
+*Instances (26)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+112:         require(msg.sender == pauser, "Only pauser");
+
+119:         require(msg.sender == pauser, "Only pauser");
+
+153:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+173:         require(config.dispatcher != address(0), "NFTMinterV2: index not registered");
+
+208:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+228:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+277:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+283:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+291:         require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+27:         require(recipient_ != address(0), "GatherV2: zero recipient address");
+
+45:         require(newRecipient != address(0), "GatherV2: zero recipient address");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+82:         require(batchMinter_ != address(0), "NudgeRatchet: zero batchMinter");
+
+97:         require(newBatchMinter != address(0), "NudgeRatchet: zero batchMinter");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+73:         require(batchMinter_ != address(0), "NudgeRatchetDelayRelease: zero batchMinter");
+
+90:         require(newBatchMinter != address(0), "NudgeRatchetDelayRelease: zero batchMinter");
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+278:         require(path.length >= 2, "PromotionUniV2_Eth: path too short");
+
+290:         require(path[0] == USDC, "PromotionUniV2_Eth: path start not USDC");
+
+308:         IERC20(WBTC).safeTransfer(to, amount);
+
+551:         require(token != WBTC, "PromotionUniV2_Eth: WBTC is insurer-only");
+
+558:         (bool ok,) = to.call{value: amount}("");
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+67:         require(dispatcher_ != address(0), "dispatcher=0");
+
+99:         require(newDispatcher != address(0), "dispatcher=0");
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+79:         require(dispatcher_ != address(0), "dispatcher=0");
+
+112:         require(newDispatcher != address(0), "dispatcher=0");
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+82:         require(dispatcher_ != address(0), "dispatcher=0");
+
+118:         require(newDispatcher != address(0), "dispatcher=0");
+
+```
+
+#### <a name="NC-9"></a>[NC-9] Event missing indexed field
+Index event fields make the field more quickly accessible [to off-chain tools](https://ethereum.stackexchange.com/questions/40396/can-somebody-please-explain-the-concept-of-event-indexing) that parse events. This is especially useful when it comes to filtering based on an address. However, note that each index field costs extra gas during emission, so it's not necessarily best to index the maximum allowed per event (three fields). Where applicable, each `event` should use three `indexed` fields if there are three or more fields, and gas usage is not particularly of concern for the events in question. If there are fewer than three applicable fields, all of the applicable fields should be indexed.
+
+*Instances (26)*:
+```solidity
+File: src/NFTBonfire.sol
+
+63:     event RatePerDayUpdated(uint256 oldRate, uint256 newRate);
+
+67:     event MaxPayoutUpdated(uint256 oldMax, uint256 newMax);
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+38:     event MetadataUpdated(string name, string image, string description);
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+167:     /// @notice Emitted once per `pool()`. Consolidates the full 60/30/10 outcome.
+
+179:     event BatchMinterSet(address newBatchMinter);
+
+180:     event NudgeStreamerUpdated(address indexed oldStreamer, address indexed newStreamer);
+
+182:     event MaxTinSet(uint256 newMaxTin);
+
+183:     event EthToPromotionPathSet(address[] path);
+
+184:     event UsdcToWbtcPathSet(address[] path);
+
+185:     event InsurerSet(address newInsurer);
+
+186:     event WBTCWithdrawn(address indexed to, uint256 amount);
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+149:     event AuthVersionIncremented(uint256 newAuthVersion);
+
+154:     event BatchDonationSizeSet(uint256 newSize);
+
+155:     event BatchMinterSet(address newBatchMinter);
+
+156:     event PSMSet(address newPSM);
+
+157:     event MaxToutSet(uint256 newMaxTout);
+
+172:     event DonationSkipped(uint256 usdsParked);
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+96:     event AuthVersionIncremented(uint256 newAuthVersion);
+
+100:     event DonationSplitSet(uint256 newSplit);
+
+101:     event RecipientSet(address newRecipient);
+
+103:     event PrimeToPairPathSet(address[] path);
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+45:     event RatioUpdated(uint8 oldRatio, uint8 newRatio);
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+57:     event RatioUpdated(uint8 oldRatio, uint8 newRatio);
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+58:     event RatioUpdated(uint8 oldRatio, uint8 newRatio);
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+123:     event Seeded(uint256 bptIn, uint256 sUSDSSeeded, uint256 phUSDSeeded, uint256 liquidity, ExitMode mode);
+
+134:     event UsdsWrapped(uint256 usdsWrapped, uint256 shares);
+
+```
+
+#### <a name="NC-10"></a>[NC-10] Events that mark critical parameter changes should contain both the old and the new value
+This should especially be done if the new value is not required to be different from the old value
+
+*Instances (50)*:
+```solidity
+File: src/MultiPooler.sol
+
+50:     function setPooler(address newPooler) external onlyOwner {
+            address oldPooler = pooler;
+            pooler = newPooler;
+            emit PoolerSet(oldPooler, newPooler);
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+127:     function setRatePerDay(uint256 newRate) external onlyOwner {
+             _checkpoint();
+             emit RatePerDayUpdated(ratePerDay, newRate);
+
+135:     function setMaxPayout(uint256 newMax) external onlyOwner {
+             _checkpoint();
+             emit MaxPayoutUpdated(maxPayout, newMax);
+
+143:     function setPauser(address newPauser) external onlyOwner {
+             emit PauserChanged(pauser, newPauser);
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+104:     function setPauser(address newPauser) external onlyOwner {
+             address oldPauser = pauser;
+             pauser = newPauser;
+             emit PauserChanged(oldPauser, newPauser);
+
+152:     function setDispatcherDisabled(uint256 index, bool disabled) external onlyOwner {
+             require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+             configs[index].disabled = disabled;
+             emit DispatcherDisabledChanged(index, disabled);
+
+219:     function setAuthorizedMinter(address minter, bool authorized) external onlyOwner {
+             authorizedMinters[minter] = authorized;
+             emit AuthorizedMinterSet(minter, authorized);
+
+282:     function setPrice(uint256 index, uint256 newPrice) external onlyOwner {
+             require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+             uint256 oldPrice = configs[index].price;
+             configs[index].price = newPrice;
+             emit PriceUpdated(index, oldPrice, newPrice);
+
+290:     function setGrowthFactor(uint256 index, uint256 newGrowthBasisPoints) external onlyOwner {
+             require(configs[index].dispatcher != address(0), "NFTMinterV2: index not registered");
+             uint256 oldGrowthBasisPoints = configs[index].growthBasisPoints;
+             configs[index].growthBasisPoints = newGrowthBasisPoints;
+             emit GrowthFactorUpdated(index, oldGrowthBasisPoints, newGrowthBasisPoints);
+
+309:     function setDispatcherActive(address dispatcher, bool active) external onlyOwner {
+             require(dispatcherToIndex[dispatcher] != 0, "NFTMinterV2: dispatcher not registered");
+     
+             ATokenDispatcherV2 dispatcherContract = ATokenDispatcherV2(dispatcher);
+     
+             if (active) {
+                 // Only unpause if currently paused, to avoid revert from ExpectedPause()
+                 if (dispatcherContract.paused()) {
+                     dispatcherContract.unpause();
+                 }
+             } else {
+                 // Only pause if currently not paused, to avoid revert from EnforcedPause()
+                 if (!dispatcherContract.paused()) {
+                     dispatcherContract.pause();
+                 }
+             }
+     
+             emit DispatcherActiveChanged(dispatcher, active);
+
+332:     function setAuthorizedBurner(address burner, bool authorized) external onlyOwner {
+             authorizedBurners[burner] = authorized;
+             emit AuthorizedBurnerSet(burner, authorized);
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+58:     function setMetadata(string calldata name_, string calldata image_, string calldata description_)
+            external
+            onlyOwner
+        {
+            _name = name_;
+            _image = image_;
+            _description = description_;
+            emit MetadataUpdated(name_, image_, description_);
+
+94:     function setHook(IDispatchHook newHook) external onlyOwner {
+            require(address(newHook) != address(0), "ATokenDispatcherV2: zero hook");
+            address oldHook = address(hook);
+            hook = newHook;
+            emit HookUpdated(oldHook, address(newHook));
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+44:     function setRecipient(address newRecipient) external onlyOwner {
+            require(newRecipient != address(0), "GatherV2: zero recipient address");
+            address oldRecipient = _recipient;
+            _recipient = newRecipient;
+            emit RecipientUpdated(oldRecipient, newRecipient);
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+96:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+            require(newBatchMinter != address(0), "NudgeRatchet: zero batchMinter");
+            address old = batchMinter;
+            batchMinter = newBatchMinter;
+            emit BatchMinterUpdated(old, newBatchMinter);
+
+105:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+             require(newStreamer != address(0), "NudgeRatchet: zero nudgeStreamer");
+             address old = nudgeStreamer;
+             nudgeStreamer = newStreamer;
+             emit NudgeStreamerUpdated(old, newStreamer);
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+89:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+            require(newBatchMinter != address(0), "NudgeRatchetDelayRelease: zero batchMinter");
+            address old = batchMinter;
+            batchMinter = newBatchMinter;
+            emit BatchMinterUpdated(old, newBatchMinter);
+
+97:     function setReleaser(address releaser, bool approved) external onlyOwner {
+            releasers[releaser] = approved;
+            emit ReleaserUpdated(releaser, approved);
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+277:     function setEthToPromotionPath(address[] calldata path) external onlyOwner {
+             require(path.length >= 2, "PromotionUniV2_Eth: path too short");
+             require(path[0] == WETH, "PromotionUniV2_Eth: path start not WETH");
+             require(path[path.length - 1] == promotionToken, "PromotionUniV2_Eth: path end not promotion");
+             _ethToPromotionPath = path;
+             emit EthToPromotionPathSet(path);
+         }
+     
+         /// @notice Sets a custom routing path for the USDC → WBTC swap performed in `pool()` (Leg C).
+
+288:     function setUsdcToWbtcPath(address[] calldata path) external onlyOwner {
+             require(path.length >= 2, "PromotionUniV2_Eth: path too short");
+             require(path[0] == USDC, "PromotionUniV2_Eth: path start not USDC");
+             require(path[path.length - 1] == WBTC, "PromotionUniV2_Eth: path end not WBTC");
+             _usdcToWbtcPath = path;
+             emit UsdcToWbtcPathSet(path);
+         }
+     
+         /// @notice Sets the insurance-reserve role permitted to withdraw WBTC. Must be non-zero.
+
+299:         require(newInsurer != address(0), "PromotionUniV2_Eth: zero insurer");
+             insurer = newInsurer;
+             emit InsurerSet(newInsurer);
+         }
+     
+         /// @notice Withdraws `amount` (WBTC, 8dp) of the insurance reserve to `to`. Insurer only.
+
+314:         require(newPSM != address(0), "PromotionUniV2_Eth: zero psm");
+             psm = newPSM;
+             emit PSMSet(newPSM);
+         }
+     
+         /// @notice Sets the WAD-scaled ceiling on the PSM `tin` accepted for Leg A. Only callable by owner.
+
+321:         maxTin = newMaxTin;
+             emit MaxTinSet(newMaxTin);
+         }
+     
+         /// @notice Sets the donation percentage (0..100) of each dispatched USDC forwarded to
+
+328:         require(newSplit <= 100, "PromotionUniV2_Eth: split > 100");
+             donationSplit = newSplit;
+             emit DonationSplitSet(newSplit);
+         }
+     
+         /// @notice Sets the donation recipient. address(0) is allowed and disables the donation even if
+
+335:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+             batchMinter = newBatchMinter;
+             emit BatchMinterSet(newBatchMinter);
+         }
+     
+         /// @notice Updates the NudgeStreamer donations are routed through. Only callable by owner.
+
+343:         require(newStreamer != address(0), "PromotionUniV2_Eth: zero nudgeStreamer");
+             address old = nudgeStreamer;
+             nudgeStreamer = newStreamer;
+             emit NudgeStreamerUpdated(old, newStreamer);
+         }
+     
+         /// @notice Sets or revokes an authorized pooler. Only callable by owner.
+
+350:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+             require(pooler != address(0), "PromotionUniV2_Eth: zero pooler");
+             if (authorized) {
+                 poolerAuthVersion[pooler] = authVersion;
+                 emit PoolerAuthorized(pooler, authVersion);
+             } else {
+                 delete poolerAuthVersion[pooler];
+                 emit PoolerDeauthorized(pooler);
+             }
+         }
+     
+         /// @notice Increments the auth version, mass-revoking all current pooler authorizations.
+
+350:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+             require(pooler != address(0), "PromotionUniV2_Eth: zero pooler");
+             if (authorized) {
+                 poolerAuthVersion[pooler] = authVersion;
+                 emit PoolerAuthorized(pooler, authVersion);
+             } else {
+                 delete poolerAuthVersion[pooler];
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+267:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+             require(pooler != address(0), "UniPoolerV2: zero pooler");
+             if (authorized) {
+                 poolerAuthVersion[pooler] = authVersion;
+                 emit PoolerAuthorized(pooler, authVersion);
+             } else {
+                 delete poolerAuthVersion[pooler];
+                 emit PoolerDeauthorized(pooler);
+
+267:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+             require(pooler != address(0), "UniPoolerV2: zero pooler");
+             if (authorized) {
+                 poolerAuthVersion[pooler] = authVersion;
+                 emit PoolerAuthorized(pooler, authVersion);
+
+288:     function setBatchDonationSize(uint256 newSize) external onlyOwner {
+             require(newSize <= 100, "UniPoolerV2: size > 100");
+             batchDonationSize = newSize;
+             emit BatchDonationSizeSet(newSize);
+
+297:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+             batchMinter = newBatchMinter;
+             emit BatchMinterSet(newBatchMinter);
+
+305:     function setPSM(address newPSM) external onlyOwner {
+             require(newPSM != address(0), "UniPoolerV2: zero psm");
+             psm = newPSM;
+             emit PSMSet(newPSM);
+
+313:     function setMaxTout(uint256 newMaxTout) external onlyOwner {
+             maxTout = newMaxTout;
+             emit MaxToutSet(newMaxTout);
+
+324:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+             require(newStreamer != address(0), "UniPoolerV2: zero nudgeStreamer");
+             address old = nudgeStreamer;
+             nudgeStreamer = newStreamer;
+             emit NudgeStreamerUpdated(old, newStreamer);
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+174:     function setDonationSplit(uint256 newSplit) external onlyOwner {
+             require(newSplit <= 100, "Uniboost: split > 100");
+             donationSplit = newSplit;
+             emit DonationSplitSet(newSplit);
+
+183:     function setRecipient(address newRecipient) external onlyOwner {
+             recipient = newRecipient;
+             emit RecipientSet(newRecipient);
+
+190:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+             require(newStreamer != address(0), "Uniboost: zero nudgeStreamer");
+             address old = nudgeStreamer;
+             nudgeStreamer = newStreamer;
+             emit NudgeStreamerUpdated(old, newStreamer);
+
+202:     function setPrimeToPairPath(address[] calldata path) external onlyOwner {
+             require(path.length >= 2, "Uniboost: path too short");
+             require(path[0] == _primeToken, "Uniboost: path start not prime");
+             require(path[path.length - 1] == _pairToken, "Uniboost: path end not pair");
+             _primeToPairPath = path;
+             emit PrimeToPairPathSet(path);
+
+315:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+             require(pooler != address(0), "Uniboost: zero pooler");
+             if (authorized) {
+                 poolerAuthVersion[pooler] = authVersion;
+                 emit PoolerAuthorized(pooler, authVersion);
+             } else {
+                 delete poolerAuthVersion[pooler];
+                 emit PoolerDeauthorized(pooler);
+
+315:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+             require(pooler != address(0), "Uniboost: zero pooler");
+             if (authorized) {
+                 poolerAuthVersion[pooler] = authVersion;
+                 emit PoolerAuthorized(pooler, authVersion);
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+77:     function setRatio(uint8 newRatio) external onlyOwner {
+            if (newRatio > MAX_RATIO) revert RatioTooHigh();
+            uint8 old = ratio;
+            ratio = newRatio;
+            emit RatioUpdated(old, newRatio);
+
+87:     function setRecipient(address newRecipient) external onlyOwner {
+            address old = recipient;
+            recipient = newRecipient;
+            emit RecipientUpdated(old, newRecipient);
+
+98:     function setDispatcher(address newDispatcher) external onlyOwner {
+            require(newDispatcher != address(0), "dispatcher=0");
+            address old = dispatcher;
+            dispatcher = newDispatcher;
+            emit DispatcherUpdated(old, newDispatcher);
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+90:     function setRatio(uint8 newRatio) external onlyOwner {
+            if (newRatio > MAX_RATIO) revert RatioTooHigh();
+            uint8 old = ratio;
+            ratio = newRatio;
+            emit RatioUpdated(old, newRatio);
+
+100:     function setRecipient(address newRecipient) external onlyOwner {
+             address old = recipient;
+             recipient = newRecipient;
+             emit RecipientUpdated(old, newRecipient);
+
+111:     function setDispatcher(address newDispatcher) external onlyOwner {
+             require(newDispatcher != address(0), "dispatcher=0");
+             address old = dispatcher;
+             dispatcher = newDispatcher;
+             emit DispatcherUpdated(old, newDispatcher);
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+96:     function setRatio(uint8 newRatio) external onlyOwner {
+            if (newRatio > MAX_RATIO) revert RatioTooHigh();
+            uint8 old = ratio;
+            ratio = newRatio;
+            emit RatioUpdated(old, newRatio);
+
+106:     function setRecipient(address newRecipient) external onlyOwner {
+             address old = recipient;
+             recipient = newRecipient;
+             emit RecipientUpdated(old, newRecipient);
+
+117:     function setDispatcher(address newDispatcher) external onlyOwner {
+             require(newDispatcher != address(0), "dispatcher=0");
+             address old = dispatcher;
+             dispatcher = newDispatcher;
+             emit DispatcherUpdated(old, newDispatcher);
+
+```
+
+#### <a name="NC-11"></a>[NC-11] Function ordering does not follow the Solidity style guide
+According to the [Solidity style guide](https://docs.soliditylang.org/en/v0.8.17/style-guide.html#order-of-functions), functions should be laid out in the following order :`constructor()`, `receive()`, `fallback()`, `external`, `public`, `internal`, `private`, but the cases below do not follow this pattern
+
+*Instances (6)*:
+```solidity
+File: src/BurnRecorder.sol
+
+1: 
+   Current order:
+   external setBurner
+   external burn
+   public getTotalBurnt
+   external registerToken
+   public getTokenCount
+   public getTokenAtIndex
+   
+   Suggested order:
+   external setBurner
+   external burn
+   external registerToken
+   public getTotalBurnt
+   public getTokenCount
+   public getTokenAtIndex
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+1: 
+   Current order:
+   external burn
+   public pendingPayout
+   external setRatePerDay
+   external setMaxPayout
+   external setPauser
+   external pause
+   external unpause
+   internal _checkpoint
+   
+   Suggested order:
+   external burn
+   external setRatePerDay
+   external setMaxPayout
+   external setPauser
+   external pause
+   external unpause
+   public pendingPayout
+   internal _checkpoint
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+1: 
+   Current order:
+   external setPauser
+   external pause
+   external unpause
+   external registerDispatcher
+   external setDispatcherDisabled
+   external mint
+   external mint
+   internal _executeMint
+   external mintFor
+   external setAuthorizedMinter
+   external replaceDispatcher
+   public uri
+   external getPrice
+   external setPrice
+   external setGrowthFactor
+   external emergencyWithdraw
+   external setDispatcherActive
+   external setAuthorizedBurner
+   external burn
+   
+   Suggested order:
+   external setPauser
+   external pause
+   external unpause
+   external registerDispatcher
+   external setDispatcherDisabled
+   external mint
+   external mint
+   external mintFor
+   external setAuthorizedMinter
+   external replaceDispatcher
+   external getPrice
+   external setPrice
+   external setGrowthFactor
+   external emergencyWithdraw
+   external setDispatcherActive
+   external setAuthorizedBurner
+   external burn
+   public uri
+   internal _executeMint
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+1: 
+   Current order:
+   external primeToken
+   external targetPool
+   public ethToPromotionPath
+   public usdcToWbtcPath
+   external setPool
+   internal _setPool
+   external setEthToPromotionPath
+   external setUsdcToWbtcPath
+   external setInsurer
+   external withdrawWBTC
+   external setPSM
+   external setMaxTin
+   external setDonationSplit
+   external setBatchMinter
+   external setNudgeStreamer
+   external setAuthorizedPooler
+   external incrementAuthVersion
+   internal _dispatch
+   external pool
+   internal _addPhusdPromoLiquidity
+   internal _legA
+   internal _legB
+   internal _legC
+   internal _swapSusdsForPhusd
+   external rescueERC20
+   external rescueETH
+   
+   Suggested order:
+   external primeToken
+   external targetPool
+   external setPool
+   external setEthToPromotionPath
+   external setUsdcToWbtcPath
+   external setInsurer
+   external withdrawWBTC
+   external setPSM
+   external setMaxTin
+   external setDonationSplit
+   external setBatchMinter
+   external setNudgeStreamer
+   external setAuthorizedPooler
+   external incrementAuthVersion
+   external pool
+   external rescueERC20
+   external rescueETH
+   public ethToPromotionPath
+   public usdcToWbtcPath
+   internal _setPool
+   internal _dispatch
+   internal _addPhusdPromoLiquidity
+   internal _legA
+   internal _legB
+   internal _legC
+   internal _swapSusdsForPhusd
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+1: 
+   Current order:
+   external primeToken
+   external sUSDS
+   external phUSD
+   external router
+   external pair
+   external sUSDSIsToken0
+   external setAuthorizedPooler
+   external incrementAuthVersion
+   external setBatchDonationSize
+   external setBatchMinter
+   external setPSM
+   external setMaxTout
+   external setNudgeStreamer
+   internal _dispatch
+   external _psmDonate
+   external pool
+   external quotePool
+   internal _reserves
+   internal _balances
+   internal _swapAmount
+   external rescueERC20
+   
+   Suggested order:
+   external primeToken
+   external sUSDS
+   external phUSD
+   external router
+   external pair
+   external sUSDSIsToken0
+   external setAuthorizedPooler
+   external incrementAuthVersion
+   external setBatchDonationSize
+   external setBatchMinter
+   external setPSM
+   external setMaxTout
+   external setNudgeStreamer
+   external _psmDonate
+   external pool
+   external quotePool
+   external rescueERC20
+   internal _dispatch
+   internal _reserves
+   internal _balances
+   internal _swapAmount
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+1: 
+   Current order:
+   external primeToken
+   external router
+   external targetPool
+   external pairToken
+   external setPool
+   internal _setPool
+   external setDonationSplit
+   external setRecipient
+   external setNudgeStreamer
+   external setPrimeToPairPath
+   public primeToPairPath
+   internal _dispatch
+   external pool
+   external setAuthorizedPooler
+   external incrementAuthVersion
+   external rescueERC20
+   
+   Suggested order:
+   external primeToken
+   external router
+   external targetPool
+   external pairToken
+   external setPool
+   external setDonationSplit
+   external setRecipient
+   external setNudgeStreamer
+   external setPrimeToPairPath
+   external pool
+   external setAuthorizedPooler
+   external incrementAuthVersion
+   external rescueERC20
+   public primeToPairPath
+   internal _setPool
+   internal _dispatch
+
+```
+
+#### <a name="NC-12"></a>[NC-12] Functions should not be longer than 50 lines
+Overly complex code can make understanding functionality more difficult, try to further modularize your code to ensure readability 
+
+*Instances (185)*:
+```solidity
+File: src/BurnRecorder.sol
+
+42:     function setBurner(address burner_, bool approved_) external onlyOwner {
+
+50:     function burn(address token, uint256 amount) external onlyBurner {
+
+58:     function getTotalBurnt(address token) public view returns (uint256) {
+
+65:     function registerToken(address token) external onlyOwner {
+
+72:     function getTokenCount() public view returns (uint256) {
+
+79:     function getTokenAtIndex(uint256 index) public view returns (address) {
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+50:     function setPooler(address newPooler) external onlyOwner {
+
+60:     function pool(PoolCall[] calldata calls) external onlyPooler {
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+97:     function burn(uint256 tokenId, uint256 minPayout) external nonReentrant whenNotPaused returns (uint256 payout) {
+
+117:     function pendingPayout() public view returns (uint256) {
+
+127:     function setRatePerDay(uint256 newRate) external onlyOwner {
+
+135:     function setMaxPayout(uint256 newMax) external onlyOwner {
+
+143:     function setPauser(address newPauser) external onlyOwner {
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+104:     function setPauser(address newPauser) external onlyOwner {
+
+125:     function registerDispatcher(address dispatcher, uint256 initialPrice, uint256 growthBasisPoints)
+
+152:     function setDispatcherDisabled(uint256 index, bool disabled) external onlyOwner {
+
+159:     function mint(uint256 index, address recipient) external returns (bool) {
+
+164:     function mint(uint256 index, address recipient, bytes calldata extraData) external returns (bool) {
+
+170:     function _executeMint(uint256 index, address recipient, bytes memory extraData) internal returns (bool) {
+
+206:     function mintFor(uint256 index, address recipient) external {
+
+219:     function setAuthorizedMinter(address minter, bool authorized) external onlyOwner {
+
+227:     function replaceDispatcher(uint256 index, address newDispatcher) external onlyOwner {
+
+252:     function uri(uint256 id) public view override returns (string memory) {
+
+276:     function getPrice(uint256 index) external view returns (uint256) {
+
+282:     function setPrice(uint256 index, uint256 newPrice) external onlyOwner {
+
+290:     function setGrowthFactor(uint256 index, uint256 newGrowthBasisPoints) external onlyOwner {
+
+299:     function emergencyWithdraw(address token) external onlyOwner {
+
+309:     function setDispatcherActive(address dispatcher, bool active) external onlyOwner {
+
+332:     function setAuthorizedBurner(address burner, bool authorized) external onlyOwner {
+
+341:     function burn(address holder, uint256 tokenId, uint256 quantity) external {
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+58:     function setMetadata(string calldata name_, string calldata image_, string calldata description_)
+
+69:     function name() external view returns (string memory) {
+
+74:     function image() external view returns (string memory) {
+
+79:     function description() external view returns (string memory) {
+
+85:     function setMinter(address minter_) external onlyOwner {
+
+94:     function setHook(IDispatchHook newHook) external onlyOwner {
+
+118:     function dispatch(address minter, uint256 amount, bytes calldata extraData)
+
+132:     function _dispatch(address minter, uint256 amount, bytes calldata extraData) internal virtual {}
+
+```
+
+```solidity
+File: src/dispatchers/BurnerV2.sol
+
+23:     function primeToken() external view returns (address) {
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+33:     function primeToken() external view returns (address) {
+
+38:     function recipient() external view returns (address) {
+
+44:     function setRecipient(address newRecipient) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+90:     function primeToken() external view returns (address) {
+
+96:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+105:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+134:     function _dispatch(address, uint256 amount, bytes calldata /* extraData */) internal override {
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+84:     function primeToken() external view returns (address) {
+
+89:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+97:     function setReleaser(address releaser, bool approved) external onlyOwner {
+
+108:     function release(uint256 amount) external onlyReleaser nonReentrant {
+
+118:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+131:     function _dispatch(address, uint256 /* amount */, bytes calldata /* extraData */)
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+220:     function primeToken() external pure override returns (address) {
+
+225:     function targetPool() external view returns (address) {
+
+230:     function ethToPromotionPath() public view returns (address[] memory) {
+
+242:     function usdcToWbtcPath() public view returns (address[] memory) {
+
+258:     function setPool(address newPair) external onlyOwner {
+
+277:     function setEthToPromotionPath(address[] calldata path) external onlyOwner {
+
+288:     function setUsdcToWbtcPath(address[] calldata path) external onlyOwner {
+
+298:     function setInsurer(address newInsurer) external onlyOwner {
+
+306:     function withdrawWBTC(address to, uint256 amount) external onlyInsurer {
+
+313:     function setPSM(address newPSM) external onlyOwner {
+
+320:     function setMaxTin(uint256 newMaxTin) external onlyOwner {
+
+327:     function setDonationSplit(uint256 newSplit) external onlyOwner {
+
+335:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+342:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+350:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+
+362:     function incrementAuthVersion() external onlyOwner {
+
+377:     function _dispatch(address, uint256 amount, bytes calldata /* extraData */ ) internal override {
+
+459:     function _addPhusdPromoLiquidity(uint256 minLP) internal returns (uint256 liquidity) {
+
+476:     function _legA(uint256 usdcAmount, uint256 minPhusdOut) internal returns (uint256 phusdOut) {
+
+495:     function _legB(uint256 usdcAmount, uint256 minEthOut, uint256 minPromoOut) internal {
+
+517:     function _legC(uint256 usdcAmount, uint256 minWbtcOut) internal returns (uint256 wbtcOut) {
+
+529:     function _swapSusdsForPhusd(uint256 sharesIn, uint256 minPhusdOut) internal returns (uint256) {
+
+549:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+556:     function rescueETH(address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+235:     function primeToken() external view override returns (address) {
+
+240:     function sUSDS() external view returns (address) {
+
+245:     function phUSD() external view returns (address) {
+
+250:     function router() external view returns (address) {
+
+260:     function sUSDSIsToken0() external view returns (bool) {
+
+267:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+
+280:     function incrementAuthVersion() external onlyOwner {
+
+288:     function setBatchDonationSize(uint256 newSize) external onlyOwner {
+
+297:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+305:     function setPSM(address newPSM) external onlyOwner {
+
+313:     function setMaxTout(uint256 newMaxTout) external onlyOwner {
+
+324:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+396:     function _psmDonate(uint256 usdsAmount) external {
+
+450:     function pool(uint256 sUSDSIn, uint256 minPhusdOut, uint256 minLP)
+
+501:     function quotePool(uint256 sUSDSIn) external view returns (uint256 swapIn, uint256 phusdOut, uint256 expectedLP) {
+
+523:     function _reserves() internal view returns (uint256 rS, uint256 rP) {
+
+531:     function _balances() internal view returns (uint256 bS, uint256 bP) {
+
+541:     function _swapAmount(uint256 r, uint256 a) internal pure returns (uint256 s) {
+
+556:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+133:     function primeToken() external view override returns (address) {
+
+138:     function router() external view returns (address) {
+
+143:     function targetPool() external view returns (address) {
+
+148:     function pairToken() external view returns (address) {
+
+154:     function setPool(address newPool) external onlyOwner {
+
+174:     function setDonationSplit(uint256 newSplit) external onlyOwner {
+
+183:     function setRecipient(address newRecipient) external onlyOwner {
+
+190:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+202:     function setPrimeToPairPath(address[] calldata path) external onlyOwner {
+
+212:     function primeToPairPath() public view returns (address[] memory) {
+
+266:     function pool(uint256 amountIn, uint256 minPairOut, uint256 minTargetOut, uint256 minLP)
+
+315:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+
+327:     function incrementAuthVersion() external onlyOwner {
+
+338:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+77:     function setRatio(uint8 newRatio) external onlyOwner {
+
+87:     function setRecipient(address newRecipient) external onlyOwner {
+
+98:     function setDispatcher(address newDispatcher) external onlyOwner {
+
+109:     function onDispatch(address minter, uint256 amount, bytes calldata) external {
+
+120:     function pull() external onlyOwnerOrRecipient nonReentrant {
+
+```
+
+```solidity
+File: src/hooks/DefaultDispatchHook.sol
+
+12:     function onDispatch(address, uint256, bytes calldata) external {}
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+90:     function setRatio(uint8 newRatio) external onlyOwner {
+
+100:     function setRecipient(address newRecipient) external onlyOwner {
+
+111:     function setDispatcher(address newDispatcher) external onlyOwner {
+
+122:     function onDispatch(address minter, uint256 amount, bytes calldata) external {
+
+136:     function pull() external onlyOwnerOrRecipient nonReentrant {
+
+146:     function hookTypeId() external pure returns (bytes32) {
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+96:     function setRatio(uint8 newRatio) external onlyOwner {
+
+106:     function setRecipient(address newRecipient) external onlyOwner {
+
+117:     function setDispatcher(address newDispatcher) external onlyOwner {
+
+128:     function onDispatch(address minter, uint256 amount, bytes calldata) external {
+
+141:     function pull() external onlyOwnerOrRecipient nonReentrant {
+
+```
+
+```solidity
+File: src/interfaces/IBalancerPoolerMintDebtHook.sol
+
+10:     function mintDebt() external view returns (uint256);
+
+```
+
+```solidity
+File: src/interfaces/IBurnRecorder.sol
+
+8:     function burn(address token, uint256 amount) external;
+
+13:     function setBurner(address burner_, bool approved_) external;
+
+```
+
+```solidity
+File: src/interfaces/IDispatchHook.sol
+
+11:     function onDispatch(address minter, uint256 amount, bytes calldata extraData) external;
+
+```
+
+```solidity
+File: src/interfaces/IMintable.sol
+
+5:     function mint(address recipient, uint256 amount) external;
+
+```
+
+```solidity
+File: src/interfaces/INFTMinterV2.sol
+
+16:     function burn(address holder, uint256 tokenId, uint256 quantity) external;
+
+21:     function authorizedBurners(address burner) external view returns (bool);
+
+26:     function setAuthorizedBurner(address burner, bool authorized) external;
+
+33:     function authorizedMinters(address minter) external view returns (bool);
+
+38:     function setAuthorizedMinter(address minter, bool authorized) external;
+
+43:     function mintFor(uint256 index, address recipient) external;
+
+50:     function replaceDispatcher(uint256 index, address newDispatcher) external;
+
+61:     function setDispatcherDisabled(uint256 index, bool disabled) external;
+
+65:     function emergencyWithdraw(address token) external;
+
+70:     function setDispatcherActive(address dispatcher, bool active) external;
+
+78:     function nextIndex() external view returns (uint256);
+
+94:     function dispatcherToIndex(address dispatcher) external view returns (uint256);
+
+99:     function tokenIdToDispatcher(uint256 tokenId) external view returns (address);
+
+```
+
+```solidity
+File: src/interfaces/INudgeRatchetMintDebtHook.sol
+
+10:     function mintDebt() external view returns (uint256);
+
+20:     function hookTypeId() external pure returns (bytes32);
+
+```
+
+```solidity
+File: src/interfaces/IPhusdBurnable.sol
+
+7:     function burn(address holder, uint256 amount) external;
+
+```
+
+```solidity
+File: src/interfaces/ISkyPSM.sol
+
+32:     function buyGem(address usr, uint256 gemAmt) external returns (uint256 usdsInWad);
+
+36:     function sellGem(address usr, uint256 gemAmt) external returns (uint256 usdsOutWad);
+
+45:     function to18ConversionFactor() external view returns (uint256);
+
+```
+
+```solidity
+File: src/interfaces/ITokenDispatcherV2.sol
+
+6:     function primeToken() external view returns (address);
+
+9:     function name() external view returns (string memory);
+
+12:     function image() external view returns (string memory);
+
+15:     function description() external view returns (string memory);
+
+```
+
+```solidity
+File: src/interfaces/ITokenMinterV2.sol
+
+9:     function mint(uint256 index, address recipient) external returns (bool);
+
+16:     function mint(uint256 index, address recipient, bytes calldata extraData) external returns (bool);
+
+22:     function registerDispatcher(address dispatcher, uint256 initialPrice, uint256 growthBasisPoints) external;
+
+27:     function getPrice(uint256 index) external view returns (uint256);
+
+32:     function setPrice(uint256 index, uint256 newPrice) external;
+
+37:     function setGrowthFactor(uint256 index, uint256 newGrowthBasisPoints) external;
+
+```
+
+```solidity
+File: src/interfaces/IUniboostMintDebtHook.sol
+
+10:     function mintDebt() external view returns (uint256);
+
+```
+
+```solidity
+File: src/interfaces/IUniboostPooler.sol
+
+12:     function pool(uint256 amountIn, uint256 minPairOut, uint256 minTargetOut, uint256 minLP) external;
+
+```
+
+```solidity
+File: src/interfaces/uniswap/IUniswapV2Factory.sol
+
+9:     function getPair(address tokenA, address tokenB) external view returns (address pair);
+
+```
+
+```solidity
+File: src/interfaces/uniswap/IUniswapV2Pair.sol
+
+10:     function token0() external view returns (address);
+
+11:     function token1() external view returns (address);
+
+12:     function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+
+13:     function totalSupply() external view returns (uint256);
+
+```
+
+```solidity
+File: src/interfaces/uniswap/IUniswapV2Router02.sol
+
+11:     function factory() external view returns (address);
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+14:     function router() external view returns (address);
+
+22:     function primeToken() external view returns (address);
+
+36:     function removeLiquidityRecovery(address pool, uint256 exactBptAmountIn, uint256[] memory minAmountsOut)
+
+242:     function exitAndSeed(ExitMode mode, uint256[] calldata minAmountsOut, uint256 deadline)
+
+283:     function wrapUsds() external onlyOperator nonReentrant returns (uint256 shares) {
+
+295:     function abort() external onlyOperator nonReentrant {
+
+306:     function operator() external view returns (address) {
+
+311:     function newPooler() external view returns (address) {
+
+316:     function oldPooler() external view returns (address) {
+
+321:     function v3Router() external view returns (address) {
+
+336:     function sUSDS() external view returns (address) {
+
+341:     function phUSD() external view returns (address) {
+
+351:     function uniRouter() external view returns (address) {
+
+379:     function _exit(ExitMode mode, uint256 bptIn, uint256[] calldata minAmountsOut) internal {
+
+393:     function _seed(uint256 s, uint256 p, uint256 deadline) internal returns (uint256 liquidity) {
+
+415:     function _returnAll(address token) internal returns (uint256 amount) {
+
+421:     function _requireNoBalance(address token) internal view {
+
+```
+
+#### <a name="NC-13"></a>[NC-13] Change int to int256
+Throughout the code base, some variables are declared as `int`. To favor explicitness, consider changing all instances of `int` to `int256`
+
+*Instances (2)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+22:         uint256 price; // current mint price in token units (18 decimals)
+
+23:         uint256 growthBasisPoints; // price growth per mint in basis points (100 = 1%)
+
+```
+
+#### <a name="NC-14"></a>[NC-14] Interfaces should be defined in separate files from their usage
+The interfaces below should be defined in separate files, so that it's easier for future projects to import them, and to avoid duplication later on if they need to be used elsewhere in the project
+
+*Instances (4)*:
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+12: interface ICutoverNewPooler {
+
+20: interface ICutoverOldPooler {
+
+27: interface IV3RouterExit {
+
+43: interface ICutoverPairSkim {
+
+```
+
+#### <a name="NC-15"></a>[NC-15] Lack of checks in setters
+Be it sanity checks (like checks against `0`-values) or initial setting checks: it's best for Setter functions to have them
+
+*Instances (21)*:
+```solidity
+File: src/BurnRecorder.sol
+
+42:     function setBurner(address burner_, bool approved_) external onlyOwner {
+            _burners[burner_] = approved_;
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+50:     function setPooler(address newPooler) external onlyOwner {
+            address oldPooler = pooler;
+            pooler = newPooler;
+            emit PoolerSet(oldPooler, newPooler);
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+127:     function setRatePerDay(uint256 newRate) external onlyOwner {
+             _checkpoint();
+             emit RatePerDayUpdated(ratePerDay, newRate);
+             ratePerDay = newRate;
+
+135:     function setMaxPayout(uint256 newMax) external onlyOwner {
+             _checkpoint();
+             emit MaxPayoutUpdated(maxPayout, newMax);
+             maxPayout = newMax;
+
+143:     function setPauser(address newPauser) external onlyOwner {
+             emit PauserChanged(pauser, newPauser);
+             pauser = newPauser;
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+104:     function setPauser(address newPauser) external onlyOwner {
+             address oldPauser = pauser;
+             pauser = newPauser;
+             emit PauserChanged(oldPauser, newPauser);
+
+219:     function setAuthorizedMinter(address minter, bool authorized) external onlyOwner {
+             authorizedMinters[minter] = authorized;
+             emit AuthorizedMinterSet(minter, authorized);
+
+332:     function setAuthorizedBurner(address burner, bool authorized) external onlyOwner {
+             authorizedBurners[burner] = authorized;
+             emit AuthorizedBurnerSet(burner, authorized);
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+58:     function setMetadata(string calldata name_, string calldata image_, string calldata description_)
+            external
+            onlyOwner
+        {
+            _name = name_;
+            _image = image_;
+            _description = description_;
+            emit MetadataUpdated(name_, image_, description_);
+
+85:     function setMinter(address minter_) external onlyOwner {
+            _minter = minter_;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+97:     function setReleaser(address releaser, bool approved) external onlyOwner {
+            releasers[releaser] = approved;
+            emit ReleaserUpdated(releaser, approved);
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+259:         _setPool(newPair);
+         }
+     
+         /// @dev Validates the pair's token set equals `{phUSD, promotionToken}` (order-agnostic),
+
+321:         maxTin = newMaxTin;
+             emit MaxTinSet(newMaxTin);
+         }
+     
+         /// @notice Sets the donation percentage (0..100) of each dispatched USDC forwarded to
+
+335:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+             batchMinter = newBatchMinter;
+             emit BatchMinterSet(newBatchMinter);
+         }
+     
+         /// @notice Updates the NudgeStreamer donations are routed through. Only callable by owner.
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+297:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+             batchMinter = newBatchMinter;
+             emit BatchMinterSet(newBatchMinter);
+
+313:     function setMaxTout(uint256 newMaxTout) external onlyOwner {
+             maxTout = newMaxTout;
+             emit MaxToutSet(newMaxTout);
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+154:     function setPool(address newPool) external onlyOwner {
+             _setPool(newPool);
+
+183:     function setRecipient(address newRecipient) external onlyOwner {
+             recipient = newRecipient;
+             emit RecipientSet(newRecipient);
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+87:     function setRecipient(address newRecipient) external onlyOwner {
+            address old = recipient;
+            recipient = newRecipient;
+            emit RecipientUpdated(old, newRecipient);
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+100:     function setRecipient(address newRecipient) external onlyOwner {
+             address old = recipient;
+             recipient = newRecipient;
+             emit RecipientUpdated(old, newRecipient);
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+106:     function setRecipient(address newRecipient) external onlyOwner {
+             address old = recipient;
+             recipient = newRecipient;
+             emit RecipientUpdated(old, newRecipient);
+
+```
+
+#### <a name="NC-16"></a>[NC-16] Missing Event for critical parameters change
+Events help non-contract tools to track changes, and events prevent users from being surprised by changes.
+
+*Instances (4)*:
+```solidity
+File: src/BurnRecorder.sol
+
+42:     function setBurner(address burner_, bool approved_) external onlyOwner {
+            _burners[burner_] = approved_;
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+85:     function setMinter(address minter_) external onlyOwner {
+            _minter = minter_;
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+259:         _setPool(newPair);
+         }
+     
+         /// @dev Validates the pair's token set equals `{phUSD, promotionToken}` (order-agnostic),
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+154:     function setPool(address newPool) external onlyOwner {
+             _setPool(newPool);
+
+```
+
+#### <a name="NC-17"></a>[NC-17] NatSpec is completely non-existent on functions that should have them
+Public and external functions that aren't view or pure should have NatSpec comments
+
+*Instances (3)*:
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+28:     function removeLiquidityProportional(
+
+36:     function removeLiquidityRecovery(address pool, uint256 exactBptAmountIn, uint256[] memory minAmountsOut)
+
+44:     function skim(address to) external;
+
+```
+
+#### <a name="NC-18"></a>[NC-18] Incomplete NatSpec: `@param` is missing on actually documented functions
+The following functions are missing `@param` NatSpec comments.
+
+*Instances (13)*:
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+88:     /// @notice Updates the batchMinter sink. Only callable by the owner.
+        function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+96:     /// @notice Adds (`approved == true`) or removes (`approved == false`) a releaser. Owner only.
+        function setReleaser(address releaser, bool approved) external onlyOwner {
+
+102:     /// @notice Releases `amount` of held USDC to the batchMinter. Only callable by a releaser.
+         /// @dev Reverts (via SafeERC20) if `amount` exceeds the held balance. KNOWN/ACCEPTED (not a
+         ///      finding): the mint-debt backing this USDC was already accrued in the hook at DISPATCH
+         ///      time and may already have been realised as phUSD by the downstream staker. This call
+         ///      only RELOCATES already-held backing to the sink at an admin-controlled rate; it is
+         ///      intentionally independent of phUSD realisation and creates no unbacked phUSD.
+         function release(uint256 amount) external onlyReleaser nonReentrant {
+
+113:     /// @notice Owner escape hatch to recover ERC20s held by this contract. Mirrors
+         ///         UniPoolerV2/Uniboost. NOT pause-gated, by design.
+         /// @dev NOTE: this CAN withdraw held `_token` (USDC), which is backing for already-accrued
+         ///      mint-debt. Using it on `_token` can leave debt under-backed and is an owner
+         ///      responsibility; intended use is recovering non-`_token` assets sent here by mistake.
+         function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+296:     /// @notice Sets the insurance-reserve role permitted to withdraw WBTC. Must be non-zero.
+         ///         Only callable by owner.
+         function setInsurer(address newInsurer) external onlyOwner {
+             require(newInsurer != address(0), "PromotionUniV2_Eth: zero insurer");
+
+304:     /// @notice Withdraws `amount` (WBTC, 8dp) of the insurance reserve to `to`. Insurer only.
+         ///         Not pause-gated (escape-hatch convention); insurer-gated instead.
+         function withdrawWBTC(address to, uint256 amount) external onlyInsurer {
+             require(to != address(0), "PromotionUniV2_Eth: zero recipient");
+
+312:     /// @notice Sets the Sky USDS↔USDC PSM used by Leg A. Must be non-zero. Only callable by owner.
+         function setPSM(address newPSM) external onlyOwner {
+             require(newPSM != address(0), "PromotionUniV2_Eth: zero psm");
+
+319:     /// @notice Sets the WAD-scaled ceiling on the PSM `tin` accepted for Leg A. Only callable by owner.
+         function setMaxTin(uint256 newMaxTin) external onlyOwner {
+             maxTin = newMaxTin;
+             emit MaxTinSet(newMaxTin);
+
+325:     /// @notice Sets the donation percentage (0..100) of each dispatched USDC forwarded to
+         ///         `batchMinter`. Setting 0 disables the donation. Only callable by owner.
+         function setDonationSplit(uint256 newSplit) external onlyOwner {
+             require(newSplit <= 100, "PromotionUniV2_Eth: split > 100");
+
+333:     /// @notice Sets the donation recipient. address(0) is allowed and disables the donation even if
+         ///         `donationSplit > 0`. Only callable by owner.
+         function setBatchMinter(address newBatchMinter) external onlyOwner {
+             batchMinter = newBatchMinter;
+
+349:     /// @notice Sets or revokes an authorized pooler. Only callable by owner.
+         function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+             require(pooler != address(0), "PromotionUniV2_Eth: zero pooler");
+
+546:     ///         Also the LP-withdrawal mechanism (the LP token is the pair ERC20). WBTC is excluded:
+         ///         the insurance reserve leaves only via the insurer-gated `withdrawWBTC`, never the
+         ///         owner escape hatch. Not pause-gated.
+         function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+             require(to != address(0), "PromotionUniV2_Eth: zero recipient");
+
+556:     function rescueETH(address to, uint256 amount) external onlyOwner {
+             require(to != address(0), "PromotionUniV2_Eth: zero recipient");
+
+```
+
+#### <a name="NC-19"></a>[NC-19] Use a `modifier` instead of a `require/if` statement for a special `msg.sender` actor
+If a function is supposed to be access-controlled, a `modifier` should be used instead of a `require/if` statement for more readability.
+
+*Instances (21)*:
+```solidity
+File: src/BurnRecorder.sol
+
+32:         require(_burners[msg.sender], "BurnRecorder: caller is not burner");
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+39:         require(msg.sender == pooler, "MultiPooler: caller not pooler");
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+75:         if (msg.sender != pauser) revert NFTBonfire__NotPauser();
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+112:         require(msg.sender == pauser, "Only pauser");
+
+119:         require(msg.sender == pauser, "Only pauser");
+
+207:         require(authorizedMinters[msg.sender], "NFTMinterV2: caller is not authorized minter");
+
+342:         require(authorizedBurners[msg.sender], "NFTMinterV2: caller is not authorized burner");
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+45:         require(msg.sender == _minter, "ATokenDispatcherV2: caller is not minter");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+63:         require(releasers[msg.sender], "NudgeRatchetDelayRelease: caller is not releaser");
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+189:         require(poolerAuthVersion[msg.sender] == authVersion, "PromotionUniV2_Eth: caller not authorized pooler");
+
+194:         require(msg.sender == insurer, "PromotionUniV2_Eth: not insurer");
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+194:         require(poolerAuthVersion[msg.sender] == authVersion, "UniPoolerV2: caller not authorized pooler");
+
+397:         require(msg.sender == address(this), "UniPoolerV2: only self");
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+106:         require(poolerAuthVersion[msg.sender] == authVersion, "Uniboost: caller not authorized pooler");
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+57:         if (msg.sender != owner() && msg.sender != recipient) {
+
+110:         if (msg.sender != dispatcher) revert OnlyDispatcher();
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+69:         if (msg.sender != owner() && msg.sender != recipient) {
+
+123:         if (msg.sender != dispatcher) revert OnlyDispatcher();
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+70:         if (msg.sender != owner() && msg.sender != recipient) {
+
+129:         if (msg.sender != dispatcher) revert OnlyDispatcher();
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+177:         if (msg.sender != _operator) revert UniPoolerCutoverEscrow__NotOperator(msg.sender);
+
+```
+
+#### <a name="NC-20"></a>[NC-20] Constant state variables defined more than once
+Rather than redefining state variable constant, consider using a library to store all constants as this will prevent data redundancy
+
+*Instances (10)*:
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+68:     bytes32 private constant EXPECTED_HOOK_TYPE_ID = keccak256("NudgeRatchetMintDebtHook.v1");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+52:     bytes32 private constant EXPECTED_HOOK_TYPE_ID = keccak256("NudgeRatchetMintDebtHook.v1");
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+99:     // ---------------------------------------------------------------------
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+106:     uint256 internal constant WAD = 1e18;
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+24:     uint8 public constant MAX_RATIO = 50;
+
+27:     uint8 public constant DEFAULT_RATIO = 50;
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+25:     uint8 public constant MAX_RATIO = 200;
+
+28:     uint8 public constant DEFAULT_RATIO = 100;
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+31:     uint8 public constant MAX_RATIO = 50;
+
+34:     uint8 public constant DEFAULT_RATIO = 50;
+
+```
+
+#### <a name="NC-21"></a>[NC-21] Consider using named mappings
+Consider moving to solidity version 0.8.18 or later, and using [named mappings](https://ethereum.stackexchange.com/questions/51629/how-to-name-the-arguments-in-mapping/145555#145555) to make it easier to understand the purpose of each mapping
+
+*Instances (12)*:
+```solidity
+File: src/BurnRecorder.sol
+
+13:     mapping(address => bool) private _burners;
+
+16:     mapping(address => uint256) private totalBurnt;
+
+19:     mapping(uint256 => address) private tokenIndex;
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+31:     mapping(uint256 => DispatcherConfig) public configs;
+
+34:     mapping(address => uint256) public dispatcherToIndex;
+
+37:     mapping(uint256 => address) public tokenIdToDispatcher;
+
+40:     mapping(address => bool) public authorizedBurners;
+
+43:     mapping(address => bool) public authorizedMinters;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+47:     mapping(address => bool) public releasers;
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+157:     mapping(address => uint256) public poolerAuthVersion;
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+120:     mapping(address => uint256) public poolerAuthVersion;
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+92:     mapping(address => uint256) public poolerAuthVersion;
+
+```
+
+#### <a name="NC-22"></a>[NC-22] `address`s shouldn't be hard-coded
+It is often better to declare `address`es as `immutable`, and assign them via constructor arguments. This allows the code to remain the same across deployments on different networks, and avoids recompilation when addresses need to change.
+
+*Instances (8)*:
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+80:     address public constant phUSD = 0xf3B5B661b92B75C71fA5Aba8Fd95D7514A9CD605;
+
+82:     address public constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+
+84:     address public constant USDS = 0xdC035D45d973E3EC169d2276DDab16f1e407384F;
+
+86:     address public constant sUSDS = 0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD;
+
+88:     address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+
+90:     address public constant UNIV2_ROUTER = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
+
+94:     address public constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+
+104:     address public psm = 0xA188EEC8F81263234dA3622A406892F3D630f98c;
+
+```
+
+#### <a name="NC-23"></a>[NC-23] Owner can renounce while system is paused
+The contract owner or single user with a role is not prevented from renouncing the role/ownership while the contract is paused, which would cause any user assets stored in the protocol, to be locked indefinitely.
+
+*Instances (2)*:
+```solidity
+File: src/NFTBonfire.sol
+
+143:     function setPauser(address newPauser) external onlyOwner {
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+104:     function setPauser(address newPauser) external onlyOwner {
+
+```
+
+#### <a name="NC-24"></a>[NC-24] Take advantage of Custom Error's return value property
+An important feature of Custom Error is that values such as address, tokenID, msg.value can be written inside the () sign, this kind of approach provides a serious advantage in debugging and examining the revert details of dapps such as tenderly.
+
+*Instances (23)*:
+```solidity
+File: src/NFTBonfire.sol
+
+75:         if (msg.sender != pauser) revert NFTBonfire__NotPauser();
+
+84:         if (nftMinter_ == address(0) || antimatter_ == address(0)) revert NFTBonfire__ZeroAddress();
+
+98:         if (ratePerDay == 0) revert NFTBonfire__BurningDisabled();
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+356:         if (address(hook) == _defaultHook) revert UniPoolerV2__HookNotSet();
+
+456:         if (minPhusdOut == 0 || minLP == 0) revert UniPoolerV2__ZeroMinimum();
+
+457:         if (sUSDSIn == 0) revert UniPoolerV2__NothingToPool();
+
+526:         if (rS == 0 || rP == 0) revert UniPoolerV2__EmptyPair();
+
+534:         if (bS == 0 || bP == 0) revert UniPoolerV2__EmptyPair();
+
+543:         if (s == 0) revert UniPoolerV2__AmountTooSmall();
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+58:             revert OnlyOwnerOrRecipient();
+
+78:         if (newRatio > MAX_RATIO) revert RatioTooHigh();
+
+110:         if (msg.sender != dispatcher) revert OnlyDispatcher();
+
+121:         if (recipient == address(0)) revert RecipientUnset();
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+70:             revert OnlyOwnerOrRecipient();
+
+91:         if (newRatio > MAX_RATIO) revert RatioTooHigh();
+
+123:         if (msg.sender != dispatcher) revert OnlyDispatcher();
+
+137:         if (recipient == address(0)) revert RecipientUnset();
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+71:             revert OnlyOwnerOrRecipient();
+
+97:         if (newRatio > MAX_RATIO) revert RatioTooHigh();
+
+129:         if (msg.sender != dispatcher) revert OnlyDispatcher();
+
+142:         if (recipient == address(0)) revert RecipientUnset();
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+253:         if (bptIn == 0) revert UniPoolerCutoverEscrow__NoBPT();
+
+285:         if (amt == 0) revert UniPoolerCutoverEscrow__NoUSDS();
+
+```
+
+#### <a name="NC-25"></a>[NC-25] Strings should use double quotes rather than single quotes
+See the Solidity Style Guide: https://docs.soliditylang.org/en/v0.8.20/style-guide.html#other-recommendations
+
+*Instances (4)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+264:                 '{"name":"',
+
+266:                 '","image":"',
+
+268:                 '","description":"',
+
+270:                 '"}'
+
+```
+
+#### <a name="NC-26"></a>[NC-26] Contract does not follow the Solidity style guide's suggested layout ordering
+The [style guide](https://docs.soliditylang.org/en/v0.8.16/style-guide.html#order-of-layout) says that, within a contract, the ordering should be:
+
+1) Type declarations
+2) State variables
+3) Events
+4) Modifiers
+5) Functions
+
+However, the contract(s) below do not follow this ordering
+
+*Instances (7)*:
+```solidity
+File: src/MultiPooler.sol
+
+1: 
+   Current order:
+   StructDefinition.PoolCall
+   VariableDeclaration.pooler
+   EventDefinition.PoolerSet
+   EventDefinition.BatchPooled
+   ModifierDefinition.onlyPooler
+   FunctionDefinition.constructor
+   FunctionDefinition.setPooler
+   FunctionDefinition.pool
+   
+   Suggested order:
+   VariableDeclaration.pooler
+   StructDefinition.PoolCall
+   EventDefinition.PoolerSet
+   EventDefinition.BatchPooled
+   ModifierDefinition.onlyPooler
+   FunctionDefinition.constructor
+   FunctionDefinition.setPooler
+   FunctionDefinition.pool
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+1: 
+   Current order:
+   UsingForDirective.IERC20
+   StructDefinition.DispatcherConfig
+   VariableDeclaration.nextIndex
+   VariableDeclaration.configs
+   VariableDeclaration.dispatcherToIndex
+   VariableDeclaration.tokenIdToDispatcher
+   VariableDeclaration.authorizedBurners
+   VariableDeclaration.authorizedMinters
+   EventDefinition.DispatcherRegistered
+   EventDefinition.ClaimMinted
+   EventDefinition.ClaimMintedFor
+   EventDefinition.PriceUpdated
+   EventDefinition.GrowthFactorUpdated
+   EventDefinition.EmergencyWithdraw
+   EventDefinition.DispatcherActiveChanged
+   EventDefinition.PauserChanged
+   EventDefinition.Paused
+   EventDefinition.Unpaused
+   EventDefinition.DispatcherDisabledChanged
+   EventDefinition.AuthorizedBurnerSet
+   EventDefinition.AuthorizedMinterSet
+   EventDefinition.ClaimBurned
+   EventDefinition.DispatcherReplaced
+   VariableDeclaration.pauser
+   VariableDeclaration.paused
+   FunctionDefinition.constructor
+   FunctionDefinition.setPauser
+   FunctionDefinition.pause
+   FunctionDefinition.unpause
+   FunctionDefinition.registerDispatcher
+   FunctionDefinition.setDispatcherDisabled
+   FunctionDefinition.mint
+   FunctionDefinition.mint
+   FunctionDefinition._executeMint
+   FunctionDefinition.mintFor
+   FunctionDefinition.setAuthorizedMinter
+   FunctionDefinition.replaceDispatcher
+   FunctionDefinition.uri
+   FunctionDefinition.getPrice
+   FunctionDefinition.setPrice
+   FunctionDefinition.setGrowthFactor
+   FunctionDefinition.emergencyWithdraw
+   FunctionDefinition.setDispatcherActive
+   FunctionDefinition.setAuthorizedBurner
+   FunctionDefinition.burn
+   
+   Suggested order:
+   UsingForDirective.IERC20
+   VariableDeclaration.nextIndex
+   VariableDeclaration.configs
+   VariableDeclaration.dispatcherToIndex
+   VariableDeclaration.tokenIdToDispatcher
+   VariableDeclaration.authorizedBurners
+   VariableDeclaration.authorizedMinters
+   VariableDeclaration.pauser
+   VariableDeclaration.paused
+   StructDefinition.DispatcherConfig
+   EventDefinition.DispatcherRegistered
+   EventDefinition.ClaimMinted
+   EventDefinition.ClaimMintedFor
+   EventDefinition.PriceUpdated
+   EventDefinition.GrowthFactorUpdated
+   EventDefinition.EmergencyWithdraw
+   EventDefinition.DispatcherActiveChanged
+   EventDefinition.PauserChanged
+   EventDefinition.Paused
+   EventDefinition.Unpaused
+   EventDefinition.DispatcherDisabledChanged
+   EventDefinition.AuthorizedBurnerSet
+   EventDefinition.AuthorizedMinterSet
+   EventDefinition.ClaimBurned
+   EventDefinition.DispatcherReplaced
+   FunctionDefinition.constructor
+   FunctionDefinition.setPauser
+   FunctionDefinition.pause
+   FunctionDefinition.unpause
+   FunctionDefinition.registerDispatcher
+   FunctionDefinition.setDispatcherDisabled
+   FunctionDefinition.mint
+   FunctionDefinition.mint
+   FunctionDefinition._executeMint
+   FunctionDefinition.mintFor
+   FunctionDefinition.setAuthorizedMinter
+   FunctionDefinition.replaceDispatcher
+   FunctionDefinition.uri
+   FunctionDefinition.getPrice
+   FunctionDefinition.setPrice
+   FunctionDefinition.setGrowthFactor
+   FunctionDefinition.emergencyWithdraw
+   FunctionDefinition.setDispatcherActive
+   FunctionDefinition.setAuthorizedBurner
+   FunctionDefinition.burn
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+1: 
+   Current order:
+   UsingForDirective.IERC20
+   VariableDeclaration.WAD
+   VariableDeclaration._sUSDS
+   VariableDeclaration._primeToken
+   VariableDeclaration._phUSD
+   VariableDeclaration._router
+   VariableDeclaration._pair
+   VariableDeclaration._sUSDSIsToken0
+   VariableDeclaration._defaultHook
+   VariableDeclaration.authVersion
+   VariableDeclaration.poolerAuthVersion
+   VariableDeclaration.batchDonationSize
+   VariableDeclaration.batchMinter
+   VariableDeclaration.psm
+   VariableDeclaration.maxTout
+   VariableDeclaration.nudgeStreamer
+   EventDefinition.PoolerAuthorized
+   EventDefinition.PoolerDeauthorized
+   EventDefinition.AuthVersionIncremented
+   EventDefinition.Pooled
+   EventDefinition.BatchDonationSizeSet
+   EventDefinition.BatchMinterSet
+   EventDefinition.PSMSet
+   EventDefinition.MaxToutSet
+   EventDefinition.NudgeStreamerUpdated
+   EventDefinition.BatchDonatedViaPSM
+   EventDefinition.DonationSkipped
+   ErrorDefinition.UniPoolerV2__PairTokenMismatch
+   ErrorDefinition.UniPoolerV2__ZeroMinimum
+   ErrorDefinition.UniPoolerV2__NothingToPool
+   ErrorDefinition.UniPoolerV2__InsufficientSUSDS
+   ErrorDefinition.UniPoolerV2__EmptyPair
+   ErrorDefinition.UniPoolerV2__AmountTooSmall
+   ErrorDefinition.UniPoolerV2__InsufficientLP
+   ErrorDefinition.UniPoolerV2__HookNotSet
+   ErrorDefinition.UniPoolerV2__PairNotCanonical
+   ModifierDefinition.onlyAuthorizedPooler
+   FunctionDefinition.constructor
+   FunctionDefinition.primeToken
+   FunctionDefinition.sUSDS
+   FunctionDefinition.phUSD
+   FunctionDefinition.router
+   FunctionDefinition.pair
+   FunctionDefinition.sUSDSIsToken0
+   FunctionDefinition.setAuthorizedPooler
+   FunctionDefinition.incrementAuthVersion
+   FunctionDefinition.setBatchDonationSize
+   FunctionDefinition.setBatchMinter
+   FunctionDefinition.setPSM
+   FunctionDefinition.setMaxTout
+   FunctionDefinition.setNudgeStreamer
+   FunctionDefinition._dispatch
+   FunctionDefinition._psmDonate
+   FunctionDefinition.pool
+   FunctionDefinition.quotePool
+   FunctionDefinition._reserves
+   FunctionDefinition._balances
+   FunctionDefinition._swapAmount
+   FunctionDefinition.rescueERC20
+   
+   Suggested order:
+   UsingForDirective.IERC20
+   VariableDeclaration.WAD
+   VariableDeclaration._sUSDS
+   VariableDeclaration._primeToken
+   VariableDeclaration._phUSD
+   VariableDeclaration._router
+   VariableDeclaration._pair
+   VariableDeclaration._sUSDSIsToken0
+   VariableDeclaration._defaultHook
+   VariableDeclaration.authVersion
+   VariableDeclaration.poolerAuthVersion
+   VariableDeclaration.batchDonationSize
+   VariableDeclaration.batchMinter
+   VariableDeclaration.psm
+   VariableDeclaration.maxTout
+   VariableDeclaration.nudgeStreamer
+   ErrorDefinition.UniPoolerV2__PairTokenMismatch
+   ErrorDefinition.UniPoolerV2__ZeroMinimum
+   ErrorDefinition.UniPoolerV2__NothingToPool
+   ErrorDefinition.UniPoolerV2__InsufficientSUSDS
+   ErrorDefinition.UniPoolerV2__EmptyPair
+   ErrorDefinition.UniPoolerV2__AmountTooSmall
+   ErrorDefinition.UniPoolerV2__InsufficientLP
+   ErrorDefinition.UniPoolerV2__HookNotSet
+   ErrorDefinition.UniPoolerV2__PairNotCanonical
+   EventDefinition.PoolerAuthorized
+   EventDefinition.PoolerDeauthorized
+   EventDefinition.AuthVersionIncremented
+   EventDefinition.Pooled
+   EventDefinition.BatchDonationSizeSet
+   EventDefinition.BatchMinterSet
+   EventDefinition.PSMSet
+   EventDefinition.MaxToutSet
+   EventDefinition.NudgeStreamerUpdated
+   EventDefinition.BatchDonatedViaPSM
+   EventDefinition.DonationSkipped
+   ModifierDefinition.onlyAuthorizedPooler
+   FunctionDefinition.constructor
+   FunctionDefinition.primeToken
+   FunctionDefinition.sUSDS
+   FunctionDefinition.phUSD
+   FunctionDefinition.router
+   FunctionDefinition.pair
+   FunctionDefinition.sUSDSIsToken0
+   FunctionDefinition.setAuthorizedPooler
+   FunctionDefinition.incrementAuthVersion
+   FunctionDefinition.setBatchDonationSize
+   FunctionDefinition.setBatchMinter
+   FunctionDefinition.setPSM
+   FunctionDefinition.setMaxTout
+   FunctionDefinition.setNudgeStreamer
+   FunctionDefinition._dispatch
+   FunctionDefinition._psmDonate
+   FunctionDefinition.pool
+   FunctionDefinition.quotePool
+   FunctionDefinition._reserves
+   FunctionDefinition._balances
+   FunctionDefinition._swapAmount
+   FunctionDefinition.rescueERC20
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+1: 
+   Current order:
+   VariableDeclaration.MAX_RATIO
+   VariableDeclaration.DEFAULT_RATIO
+   VariableDeclaration.dispatcher
+   VariableDeclaration.phUSD
+   VariableDeclaration.recipient
+   VariableDeclaration.mintDebt
+   VariableDeclaration.ratio
+   EventDefinition.RatioUpdated
+   EventDefinition.RecipientUpdated
+   EventDefinition.DebtAccrued
+   EventDefinition.DebtPulled
+   EventDefinition.DispatcherUpdated
+   ErrorDefinition.OnlyDispatcher
+   ErrorDefinition.OnlyOwnerOrRecipient
+   ErrorDefinition.RecipientUnset
+   ErrorDefinition.RatioTooHigh
+   ModifierDefinition.onlyOwnerOrRecipient
+   FunctionDefinition.constructor
+   FunctionDefinition.setRatio
+   FunctionDefinition.setRecipient
+   FunctionDefinition.setDispatcher
+   FunctionDefinition.onDispatch
+   FunctionDefinition.pull
+   
+   Suggested order:
+   VariableDeclaration.MAX_RATIO
+   VariableDeclaration.DEFAULT_RATIO
+   VariableDeclaration.dispatcher
+   VariableDeclaration.phUSD
+   VariableDeclaration.recipient
+   VariableDeclaration.mintDebt
+   VariableDeclaration.ratio
+   ErrorDefinition.OnlyDispatcher
+   ErrorDefinition.OnlyOwnerOrRecipient
+   ErrorDefinition.RecipientUnset
+   ErrorDefinition.RatioTooHigh
+   EventDefinition.RatioUpdated
+   EventDefinition.RecipientUpdated
+   EventDefinition.DebtAccrued
+   EventDefinition.DebtPulled
+   EventDefinition.DispatcherUpdated
+   ModifierDefinition.onlyOwnerOrRecipient
+   FunctionDefinition.constructor
+   FunctionDefinition.setRatio
+   FunctionDefinition.setRecipient
+   FunctionDefinition.setDispatcher
+   FunctionDefinition.onDispatch
+   FunctionDefinition.pull
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+1: 
+   Current order:
+   VariableDeclaration.MAX_RATIO
+   VariableDeclaration.DEFAULT_RATIO
+   VariableDeclaration.HOOK_TYPE_ID
+   VariableDeclaration.USDC_TO_PHUSD_SCALE
+   VariableDeclaration.dispatcher
+   VariableDeclaration.phUSD
+   VariableDeclaration.recipient
+   VariableDeclaration.mintDebt
+   VariableDeclaration.ratio
+   EventDefinition.RatioUpdated
+   EventDefinition.RecipientUpdated
+   EventDefinition.DebtAccrued
+   EventDefinition.DebtPulled
+   EventDefinition.DispatcherUpdated
+   ErrorDefinition.OnlyDispatcher
+   ErrorDefinition.OnlyOwnerOrRecipient
+   ErrorDefinition.RecipientUnset
+   ErrorDefinition.RatioTooHigh
+   ModifierDefinition.onlyOwnerOrRecipient
+   FunctionDefinition.constructor
+   FunctionDefinition.setRatio
+   FunctionDefinition.setRecipient
+   FunctionDefinition.setDispatcher
+   FunctionDefinition.onDispatch
+   FunctionDefinition.pull
+   FunctionDefinition.hookTypeId
+   
+   Suggested order:
+   VariableDeclaration.MAX_RATIO
+   VariableDeclaration.DEFAULT_RATIO
+   VariableDeclaration.HOOK_TYPE_ID
+   VariableDeclaration.USDC_TO_PHUSD_SCALE
+   VariableDeclaration.dispatcher
+   VariableDeclaration.phUSD
+   VariableDeclaration.recipient
+   VariableDeclaration.mintDebt
+   VariableDeclaration.ratio
+   ErrorDefinition.OnlyDispatcher
+   ErrorDefinition.OnlyOwnerOrRecipient
+   ErrorDefinition.RecipientUnset
+   ErrorDefinition.RatioTooHigh
+   EventDefinition.RatioUpdated
+   EventDefinition.RecipientUpdated
+   EventDefinition.DebtAccrued
+   EventDefinition.DebtPulled
+   EventDefinition.DispatcherUpdated
+   ModifierDefinition.onlyOwnerOrRecipient
+   FunctionDefinition.constructor
+   FunctionDefinition.setRatio
+   FunctionDefinition.setRecipient
+   FunctionDefinition.setDispatcher
+   FunctionDefinition.onDispatch
+   FunctionDefinition.pull
+   FunctionDefinition.hookTypeId
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+1: 
+   Current order:
+   VariableDeclaration.MAX_RATIO
+   VariableDeclaration.DEFAULT_RATIO
+   VariableDeclaration.dispatcher
+   VariableDeclaration.phUSD
+   VariableDeclaration.scale
+   VariableDeclaration.recipient
+   VariableDeclaration.mintDebt
+   VariableDeclaration.ratio
+   EventDefinition.RatioUpdated
+   EventDefinition.RecipientUpdated
+   EventDefinition.DebtAccrued
+   EventDefinition.DebtPulled
+   EventDefinition.DispatcherUpdated
+   ErrorDefinition.OnlyDispatcher
+   ErrorDefinition.OnlyOwnerOrRecipient
+   ErrorDefinition.RecipientUnset
+   ErrorDefinition.RatioTooHigh
+   ModifierDefinition.onlyOwnerOrRecipient
+   FunctionDefinition.constructor
+   FunctionDefinition.setRatio
+   FunctionDefinition.setRecipient
+   FunctionDefinition.setDispatcher
+   FunctionDefinition.onDispatch
+   FunctionDefinition.pull
+   
+   Suggested order:
+   VariableDeclaration.MAX_RATIO
+   VariableDeclaration.DEFAULT_RATIO
+   VariableDeclaration.dispatcher
+   VariableDeclaration.phUSD
+   VariableDeclaration.scale
+   VariableDeclaration.recipient
+   VariableDeclaration.mintDebt
+   VariableDeclaration.ratio
+   ErrorDefinition.OnlyDispatcher
+   ErrorDefinition.OnlyOwnerOrRecipient
+   ErrorDefinition.RecipientUnset
+   ErrorDefinition.RatioTooHigh
+   EventDefinition.RatioUpdated
+   EventDefinition.RecipientUpdated
+   EventDefinition.DebtAccrued
+   EventDefinition.DebtPulled
+   EventDefinition.DispatcherUpdated
+   ModifierDefinition.onlyOwnerOrRecipient
+   FunctionDefinition.constructor
+   FunctionDefinition.setRatio
+   FunctionDefinition.setRecipient
+   FunctionDefinition.setDispatcher
+   FunctionDefinition.onDispatch
+   FunctionDefinition.pull
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+1: 
+   Current order:
+   FunctionDefinition.pair
+   FunctionDefinition.router
+   FunctionDefinition.sUSDS
+   FunctionDefinition.phUSD
+   FunctionDefinition.pool
+   FunctionDefinition.primeToken
+   FunctionDefinition.sUSDS
+   FunctionDefinition.removeLiquidityProportional
+   FunctionDefinition.removeLiquidityRecovery
+   FunctionDefinition.skim
+   UsingForDirective.IERC20
+   EnumDefinition.ExitMode
+   VariableDeclaration.MAX_DEADLINE_WINDOW
+   VariableDeclaration._operator
+   VariableDeclaration._newPooler
+   VariableDeclaration._oldPooler
+   VariableDeclaration._v3Router
+   VariableDeclaration._bpt
+   VariableDeclaration._usds
+   VariableDeclaration._sUSDS
+   VariableDeclaration._phUSD
+   VariableDeclaration._pair
+   VariableDeclaration._uniRouter
+   VariableDeclaration._sUSDSIsToken0
+   EventDefinition.Seeded
+   EventDefinition.PairSkimmed
+   EventDefinition.UsdsWrapped
+   EventDefinition.Aborted
+   ErrorDefinition.UniPoolerCutoverEscrow__NotOperator
+   ErrorDefinition.UniPoolerCutoverEscrow__SUSDSMismatch
+   ErrorDefinition.UniPoolerCutoverEscrow__UsdsMismatch
+   ErrorDefinition.UniPoolerCutoverEscrow__PairNotEmpty
+   ErrorDefinition.UniPoolerCutoverEscrow__NoBPT
+   ErrorDefinition.UniPoolerCutoverEscrow__BadMinAmountsLength
+   ErrorDefinition.UniPoolerCutoverEscrow__ZeroMinAmountOut
+   ErrorDefinition.UniPoolerCutoverEscrow__BadDeadline
+   ErrorDefinition.UniPoolerCutoverEscrow__BPTRemaining
+   ErrorDefinition.UniPoolerCutoverEscrow__NothingToSeed
+   ErrorDefinition.UniPoolerCutoverEscrow__SeedNotExact
+   ErrorDefinition.UniPoolerCutoverEscrow__LPNotMinted
+   ErrorDefinition.UniPoolerCutoverEscrow__ReserveMismatch
+   ErrorDefinition.UniPoolerCutoverEscrow__BalanceRemaining
+   ErrorDefinition.UniPoolerCutoverEscrow__NoUSDS
+   ModifierDefinition.onlyOperator
+   FunctionDefinition.constructor
+   FunctionDefinition.exitAndSeed
+   FunctionDefinition.wrapUsds
+   FunctionDefinition.abort
+   FunctionDefinition.operator
+   FunctionDefinition.newPooler
+   FunctionDefinition.oldPooler
+   FunctionDefinition.v3Router
+   FunctionDefinition.bpt
+   FunctionDefinition.usds
+   FunctionDefinition.sUSDS
+   FunctionDefinition.phUSD
+   FunctionDefinition.pair
+   FunctionDefinition.uniRouter
+   FunctionDefinition._requireEmptyPair
+   FunctionDefinition._exit
+   FunctionDefinition._seed
+   FunctionDefinition._returnAll
+   FunctionDefinition._requireNoBalance
+   
+   Suggested order:
+   UsingForDirective.IERC20
+   VariableDeclaration.MAX_DEADLINE_WINDOW
+   VariableDeclaration._operator
+   VariableDeclaration._newPooler
+   VariableDeclaration._oldPooler
+   VariableDeclaration._v3Router
+   VariableDeclaration._bpt
+   VariableDeclaration._usds
+   VariableDeclaration._sUSDS
+   VariableDeclaration._phUSD
+   VariableDeclaration._pair
+   VariableDeclaration._uniRouter
+   VariableDeclaration._sUSDSIsToken0
+   EnumDefinition.ExitMode
+   ErrorDefinition.UniPoolerCutoverEscrow__NotOperator
+   ErrorDefinition.UniPoolerCutoverEscrow__SUSDSMismatch
+   ErrorDefinition.UniPoolerCutoverEscrow__UsdsMismatch
+   ErrorDefinition.UniPoolerCutoverEscrow__PairNotEmpty
+   ErrorDefinition.UniPoolerCutoverEscrow__NoBPT
+   ErrorDefinition.UniPoolerCutoverEscrow__BadMinAmountsLength
+   ErrorDefinition.UniPoolerCutoverEscrow__ZeroMinAmountOut
+   ErrorDefinition.UniPoolerCutoverEscrow__BadDeadline
+   ErrorDefinition.UniPoolerCutoverEscrow__BPTRemaining
+   ErrorDefinition.UniPoolerCutoverEscrow__NothingToSeed
+   ErrorDefinition.UniPoolerCutoverEscrow__SeedNotExact
+   ErrorDefinition.UniPoolerCutoverEscrow__LPNotMinted
+   ErrorDefinition.UniPoolerCutoverEscrow__ReserveMismatch
+   ErrorDefinition.UniPoolerCutoverEscrow__BalanceRemaining
+   ErrorDefinition.UniPoolerCutoverEscrow__NoUSDS
+   EventDefinition.Seeded
+   EventDefinition.PairSkimmed
+   EventDefinition.UsdsWrapped
+   EventDefinition.Aborted
+   ModifierDefinition.onlyOperator
+   FunctionDefinition.pair
+   FunctionDefinition.router
+   FunctionDefinition.sUSDS
+   FunctionDefinition.phUSD
+   FunctionDefinition.pool
+   FunctionDefinition.primeToken
+   FunctionDefinition.sUSDS
+   FunctionDefinition.removeLiquidityProportional
+   FunctionDefinition.removeLiquidityRecovery
+   FunctionDefinition.skim
+   FunctionDefinition.constructor
+   FunctionDefinition.exitAndSeed
+   FunctionDefinition.wrapUsds
+   FunctionDefinition.abort
+   FunctionDefinition.operator
+   FunctionDefinition.newPooler
+   FunctionDefinition.oldPooler
+   FunctionDefinition.v3Router
+   FunctionDefinition.bpt
+   FunctionDefinition.usds
+   FunctionDefinition.sUSDS
+   FunctionDefinition.phUSD
+   FunctionDefinition.pair
+   FunctionDefinition.uniRouter
+   FunctionDefinition._requireEmptyPair
+   FunctionDefinition._exit
+   FunctionDefinition._seed
+   FunctionDefinition._returnAll
+   FunctionDefinition._requireNoBalance
+
+```
+
+#### <a name="NC-27"></a>[NC-27] Use Underscores for Number Literals (add an underscore every 3 digits)
+
+*Instances (3)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+188:         config.price = price + (price * config.growthBasisPoints) / 10000;
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+506:         phusdOut = (inWithFee * rP) / (rS * 1000 + inWithFee);
+
+542:         s = (Math.sqrt(r * (r * 3988009 + a * 3988000)) - r * 1997) / 1994;
+
+```
+
+#### <a name="NC-28"></a>[NC-28] Internal and private variables and functions names should begin with an underscore
+According to the Solidity Style Guide, Non-`external` variable and function names should begin with an [underscore](https://docs.soliditylang.org/en/latest/style-guide.html#underscore-prefix-for-non-external-functions-and-variables)
+
+*Instances (2)*:
+```solidity
+File: src/BurnRecorder.sol
+
+16:     mapping(address => uint256) private totalBurnt;
+
+19:     mapping(uint256 => address) private tokenIndex;
+
+```
+
+#### <a name="NC-29"></a>[NC-29] Event is missing `indexed` fields
+Index event fields make the field more quickly accessible to off-chain tools that parse events. However, note that each index field costs extra gas during emission, so it's not necessarily best to index the maximum allowed per event (three fields). Each event should use three indexed fields if there are three or more fields, and gas usage is not particularly of concern for the events in question. If there are fewer than three fields, all of the fields should be indexed.
+
+*Instances (56)*:
+```solidity
+File: src/BurnRecorder.sol
+
+28:     event tokenBurnt(address indexed token, uint256 quantity, uint256 timestamp);
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+35:     event BatchPooled(address indexed pooler, uint256 count);
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+59:     event Burned(address indexed burner, uint256 indexed tokenId, uint256 payout);
+
+63:     event RatePerDayUpdated(uint256 oldRate, uint256 newRate);
+
+67:     event MaxPayoutUpdated(uint256 oldMax, uint256 newMax);
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+46:     event DispatcherRegistered(
+
+59:     event PriceUpdated(uint256 indexed index, uint256 oldPrice, uint256 newPrice);
+
+62:     event GrowthFactorUpdated(uint256 indexed index, uint256 oldGrowthBasisPoints, uint256 newGrowthBasisPoints);
+
+65:     event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
+
+68:     event DispatcherActiveChanged(address indexed dispatcher, bool active);
+
+80:     event DispatcherDisabledChanged(uint256 indexed index, bool disabled);
+
+83:     event AuthorizedBurnerSet(address indexed burner, bool authorized);
+
+86:     event AuthorizedMinterSet(address indexed minter, bool authorized);
+
+89:     event ClaimBurned(address indexed holder, uint256 indexed tokenId, uint256 quantity);
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+38:     event MetadataUpdated(string name, string image, string description);
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+57:     event ReleaserUpdated(address indexed releaser, bool approved);
+
+59:     event Released(address indexed releaser, uint256 amount);
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+163:     event PoolerAuthorized(address indexed pooler, uint256 atAuthVersion);
+
+167:     /// @notice Emitted once per `pool()`. Consolidates the full 60/30/10 outcome.
+
+170:         uint256 primeSpent, // amountIn (USDC)
+
+179:     event BatchMinterSet(address newBatchMinter);
+
+180:     event NudgeStreamerUpdated(address indexed oldStreamer, address indexed newStreamer);
+
+182:     event MaxTinSet(uint256 newMaxTin);
+
+183:     event EthToPromotionPathSet(address[] path);
+
+184:     event UsdcToWbtcPathSet(address[] path);
+
+185:     event InsurerSet(address newInsurer);
+
+186:     event WBTCWithdrawn(address indexed to, uint256 amount);
+
+188:     modifier onlyAuthorizedPooler() {
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+147:     event PoolerAuthorized(address indexed pooler, uint256 atAuthVersion);
+
+149:     event AuthVersionIncremented(uint256 newAuthVersion);
+
+152:     event Pooled(address indexed pooler, uint256 sUSDSIn, uint256 swapIn, uint256 phusdOut, uint256 liquidity);
+
+154:     event BatchDonationSizeSet(uint256 newSize);
+
+155:     event BatchMinterSet(address newBatchMinter);
+
+156:     event PSMSet(address newPSM);
+
+157:     event MaxToutSet(uint256 newMaxTout);
+
+165:     event BatchDonatedViaPSM(uint256 usdsSpent, uint256 usdcDonated, address indexed batchMinter);
+
+172:     event DonationSkipped(uint256 usdsParked);
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+94:     event PoolerAuthorized(address indexed pooler, uint256 atAuthVersion);
+
+96:     event AuthVersionIncremented(uint256 newAuthVersion);
+
+97:     event Pooled(address indexed pooler, uint256 primeSpent, uint256 liquidity, uint256 minLP);
+
+100:     event DonationSplitSet(uint256 newSplit);
+
+101:     event RecipientSet(address newRecipient);
+
+103:     event PrimeToPairPathSet(address[] path);
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+45:     event RatioUpdated(uint8 oldRatio, uint8 newRatio);
+
+47:     event DebtAccrued(address indexed minter, uint256 dispatchedAmount, uint256 debtAdded, uint256 newTotalDebt);
+
+48:     event DebtPulled(address indexed recipient, uint256 amount);
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+57:     event RatioUpdated(uint8 oldRatio, uint8 newRatio);
+
+59:     event DebtAccrued(address indexed minter, uint256 dispatchedAmount, uint256 debtAdded, uint256 newTotalDebt);
+
+60:     event DebtPulled(address indexed recipient, uint256 amount);
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+58:     event RatioUpdated(uint8 oldRatio, uint8 newRatio);
+
+60:     event DebtAccrued(address indexed minter, uint256 dispatchedAmount, uint256 debtAdded, uint256 newTotalDebt);
+
+61:     event DebtPulled(address indexed recipient, uint256 amount);
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+123:     event Seeded(uint256 bptIn, uint256 sUSDSSeeded, uint256 phUSDSeeded, uint256 liquidity, ExitMode mode);
+
+129:     event PairSkimmed(address indexed recipient, uint256 amount0, uint256 amount1);
+
+134:     event UsdsWrapped(uint256 usdsWrapped, uint256 shares);
+
+142:     event Aborted(address indexed recipient, uint256 bpt, uint256 sUSDSAmount, uint256 phUSDAmount, uint256 usdsAmount);
+
+```
+
+#### <a name="NC-30"></a>[NC-30] Constants should be defined rather than using magic numbers
+
+*Instances (2)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+22:         uint256 price; // current mint price in token units (18 decimals)
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+89:         scale = 10 ** (18 - d);
+
+```
+
+#### <a name="NC-31"></a>[NC-31] `public` functions not called by the contract should be declared `external` instead
+
+*Instances (3)*:
+```solidity
+File: src/BurnRecorder.sol
+
+58:     function getTotalBurnt(address token) public view returns (uint256) {
+
+72:     function getTokenCount() public view returns (uint256) {
+
+79:     function getTokenAtIndex(uint256 index) public view returns (address) {
+
+```
+
+#### <a name="NC-32"></a>[NC-32] Variables need not be initialized to zero
+The default value for variables is zero, so initializing them to zero is superfluous.
+
+*Instances (2)*:
+```solidity
+File: src/MultiPooler.sol
+
+62:         for (uint256 i = 0; i < calls.length; i++) {
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+257:         for (uint256 i = 0; i < 2; i++) {
+
+```
+
+
+### Low Issues
+
+
+| |Issue|Instances|
+|-|:-|:-:|
+| [L-1](#L-1) | Use a 2-step ownership transfer pattern | 11 |
+| [L-2](#L-2) | Some tokens may revert when zero value transfers are made | 10 |
+| [L-3](#L-3) | Missing checks for `address(0)` when assigning values to address state variables | 10 |
+| [L-4](#L-4) | `abi.encodePacked()` should not be used with dynamic types when passing the result to a hash function such as `keccak256()` | 7 |
+| [L-5](#L-5) | `decimals()` is not a part of the ERC-20 standard | 3 |
+| [L-6](#L-6) | Division by zero not prevented | 5 |
+| [L-7](#L-7) | Empty `receive()/payable fallback()` function does not authenticate requests | 1 |
+| [L-8](#L-8) | External call recipient may consume all transaction gas | 1 |
+| [L-9](#L-9) | Signature use at deadlines should be allowed | 1 |
+| [L-10](#L-10) | Prevent accidentally burning tokens | 14 |
+| [L-11](#L-11) | Owner can renounce while system is paused | 2 |
+| [L-12](#L-12) | Loss of precision | 3 |
+| [L-13](#L-13) | Solidity version 0.8.20+ may not work on other chains due to `PUSH0` | 15 |
+| [L-14](#L-14) | Use `Ownable2Step.transferOwnership` instead of `Ownable.transferOwnership` | 8 |
+| [L-15](#L-15) | Sweeping may break accounting if tokens with multiple addresses are used | 4 |
+#### <a name="L-1"></a>[L-1] Use a 2-step ownership transfer pattern
+Recommend considering implementing a two step process where the owner or admin nominates an account and the nominated account needs to call an `acceptOwnership()` function for the transfer of ownership to fully succeed. This ensures the nominated EOA account is a valid and active account. Lack of two-step procedure for critical operations leaves them error-prone. Consider adding two step procedure on the critical functions.
+
+*Instances (11)*:
+```solidity
+File: src/BurnRecorder.sol
+
+11: contract BurnRecorder is IBurnRecorder, Ownable {
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+18: contract MultiPooler is Ownable {
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+20: contract NFTBonfire is Ownable, Pausable, ReentrancyGuard, IPausable {
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+16: contract NFTMinterV2 is ERC1155Supply, Ownable, INFTMinterV2, IPausable {
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+23: abstract contract ATokenDispatcherV2 is ITokenDispatcherV2, Pausable, Ownable, ReentrancyGuard {
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+22: contract BalancerPoolerMintDebtHook is IDispatchHook, IBalancerPoolerMintDebtHook, Ownable, ReentrancyGuard {
+
+66:     constructor(address initialOwner, address dispatcher_, address phUSD_) Ownable(initialOwner) {
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+22: contract NudgeRatchetMintDebtHook is IDispatchHook, INudgeRatchetMintDebtHook, Ownable, ReentrancyGuard {
+
+78:     constructor(address initialOwner, address dispatcher_, address phUSD_) Ownable(initialOwner) {
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+29: contract UniboostMintDebtHook is IDispatchHook, IUniboostMintDebtHook, Ownable, ReentrancyGuard {
+
+81:     constructor(address initialOwner, address dispatcher_, address phUSD_, address primeToken_) Ownable(initialOwner) {
+
+```
+
+#### <a name="L-2"></a>[L-2] Some tokens may revert when zero value transfers are made
+Example: https://github.com/d-xo/weird-erc20#revert-on-zero-value-transfers.
+
+In spite of the fact that EIP-20 [states](https://github.com/ethereum/EIPs/blob/46b9b698815abbfa628cd1097311deee77dd45c5/EIPS/eip-20.md?plain=1#L116) that zero-valued transfers must be accepted, some tokens, such as LEND will revert if this is attempted, which may cause transactions that involve other tokens (such as batch operations) to fully revert. Consider skipping the transfer if the amount is zero, which will also save gas.
+
+*Instances (10)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+183:         IERC20(token).safeTransferFrom(msg.sender, config.dispatcher, price);
+
+302:         IERC20(token).safeTransfer(msg.sender, balance);
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+61:         IERC20(_token).safeTransfer(_recipient, amount);
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+109:         IERC20(_token).safeTransfer(batchMinter, amount);
+
+120:         IERC20(token).safeTransfer(to, amount);
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+309:         emit WBTCWithdrawn(to, amount);
+
+555:     /// @notice Owner escape hatch for native ETH left by a failed/partial Leg B. Not pause-gated.
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+559:     }
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+340:         IERC20(token).safeTransfer(to, amount);
+
+```
+
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+426: 
+
+```
+
+#### <a name="L-3"></a>[L-3] Missing checks for `address(0)` when assigning values to address state variables
+
+*Instances (10)*:
+```solidity
+File: src/NFTBonfire.sol
+
+145:         pauser = newPauser;
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+106:         pauser = newPauser;
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+86:         _minter = minter_;
+
+```
+
+```solidity
+File: src/dispatchers/BurnerV2.sol
+
+18:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+28:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+85:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+79:         _token = token_;
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+337:         emit BatchMinterSet(newBatchMinter);
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+167:         _pairToken = pairToken_;
+
+184:         recipient = newRecipient;
+
+```
+
+#### <a name="L-4"></a>[L-4] `abi.encodePacked()` should not be used with dynamic types when passing the result to a hash function such as `keccak256()`
+Use `abi.encode()` instead which will pad items to 32 bytes, which will [prevent hash collisions](https://docs.soliditylang.org/en/v0.8.13/abi-spec.html#non-standard-packed-mode) (e.g. `abi.encodePacked(0x123,0x456)` => `0x123456` => `abi.encodePacked(0x1,0x23456)`, but `abi.encode(0x123,0x456)` => `0x0...1230...456`). "Unless there is a compelling reason, `abi.encode` should be preferred". If there is only one argument to `abi.encodePacked()` it can often be cast to `bytes()` or `bytes32()` [instead](https://ethereum.stackexchange.com/questions/30912/how-to-compare-strings-in-solidity#answer-82739).
+If all arguments are strings and or bytes, `bytes.concat()` should be used instead
+
+*Instances (7)*:
+```solidity
+File: src/NFTMinterV2.sol
+
+264:                 '{"name":"',
+
+265:                 dispatcherName,
+
+266:                 '","image":"',
+
+267:                 dispatcherImage,
+
+268:                 '","description":"',
+
+269:                 dispatcherDescription,
+
+270:                 '"}'
+
+```
+
+#### <a name="L-5"></a>[L-5] `decimals()` is not a part of the ERC-20 standard
+The `decimals()` function is not a part of the [ERC-20 standard](https://eips.ethereum.org/EIPS/eip-20), and was added later as an [optional extension](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/extensions/IERC20Metadata.sol). As such, some valid ERC20 tokens do not support this interface, so it is unsafe to blindly cast all tokens to this interface, and then call this function.
+
+*Instances (3)*:
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+84:         require(IERC20Metadata(token_).decimals() == 6, "NudgeRatchet: token must be 6-decimal USDC");
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+76:             IERC20Metadata(token_).decimals() == 6,
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+85:         uint8 d = IERC20Metadata(primeToken_).decimals();
+
+```
+
+#### <a name="L-6"></a>[L-6] Division by zero not prevented
+The divisions below take an input parameter which does not have any zero-value checks, which may lead to the functions reverting when zero is passed.
+
+*Instances (5)*:
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+409:         uint256 gemAmt = (usdsAmount * WAD) / (conv * (WAD + tout));
+
+506:         phusdOut = (inWithFee * rP) / (rS * 1000 + inWithFee);
+
+512:         uint256 amtP = (amtS * rP2) / rS2;
+
+515:             amtS = (phusdOut * rS2) / rP2;
+
+518:         expectedLP = Math.min((amtS * ts) / rS2, (amtP * ts) / rP2);
+
+```
+
+#### <a name="L-7"></a>[L-7] Empty `receive()/payable fallback()` function does not authenticate requests
+If the intention is for the Ether to be used, the function should call another function, otherwise it should revert (e.g. require(msg.sender == address(weth))). Having no access control on the function means that someone may send Ether to the contract, and have no way to get anything back out, which is a loss of funds. If the concern is having to spend a small amount of gas to check the sender against an immutable address, the code should at least have a function to rescue unused Ether.
+
+*Instances (1)*:
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+565: 
+
+```
+
+#### <a name="L-8"></a>[L-8] External call recipient may consume all transaction gas
+There is no limit specified on the amount of gas used, so the recipient can use up all of the transaction's gas, causing it to revert. Use `addr.call{gas: <amount>}("")` or [this](https://github.com/nomad-xyz/ExcessivelySafeCall) library instead.
+
+*Instances (1)*:
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+558:         (bool ok,) = to.call{value: amount}("");
+
+```
+
+#### <a name="L-9"></a>[L-9] Signature use at deadlines should be allowed
+According to [EIP-2612](https://github.com/ethereum/EIPs/blob/71dc97318013bf2ac572ab63fab530ac9ef419ca/EIPS/eip-2612.md?plain=1#L58), signatures used on exactly the deadline timestamp are supposed to be allowed. While the signature may or may not be used for the exact EIP-2612 use case (transfer approvals), for consistency's sake, all deadlines should follow this semantic. If the timestamp is an expiration rather than a deadline, consider whether it makes more sense to include the expiration timestamp as a valid timestamp, as is done for deadlines.
+
+*Instances (1)*:
+```solidity
+File: src/migration/UniPoolerCutoverEscrow.sol
+
+260:         if (deadline <= block.timestamp || deadline > block.timestamp + MAX_DEADLINE_WINDOW) {
+
+```
+
+#### <a name="L-10"></a>[L-10] Prevent accidentally burning tokens
+Minting and burning tokens to address(0) prevention
+
+*Instances (14)*:
+```solidity
+File: src/BurnRecorder.sol
+
+32:         require(_burners[msg.sender], "BurnRecorder: caller is not burner");
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+196:         _mint(recipient, resolvedTokenId, 1, "");
+
+211:         _mint(recipient, index, 1, "");
+
+221:         emit AuthorizedMinterSet(minter, authorized);
+
+334:         emit AuthorizedBurnerSet(burner, authorized);
+
+343:         _burn(holder, tokenId, quantity);
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+45:         require(msg.sender == _minter, "ATokenDispatcherV2: caller is not minter");
+
+124:         _dispatch(minter, amount, extraData);
+
+125:         hook.onDispatch(minter, amount, extraData);
+
+```
+
+```solidity
+File: src/dispatchers/BurnerV2.sol
+
+19:         _burnRecorder = IBurnRecorder(burnRecorder_);
+
+38:         _burnRecorder.burn(_token, amount);
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+114:         emit DebtAccrued(minter, amount, added, mintDebt);
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+130:         emit DebtAccrued(minter, amount, added, mintDebt);
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+135:         emit DebtAccrued(minter, amount, added, mintDebt);
+
+```
+
+#### <a name="L-11"></a>[L-11] Owner can renounce while system is paused
+The contract owner or single user with a role is not prevented from renouncing the role/ownership while the contract is paused, which would cause any user assets stored in the protocol, to be locked indefinitely.
+
+*Instances (2)*:
+```solidity
+File: src/NFTBonfire.sol
+
+143:     function setPauser(address newPauser) external onlyOwner {
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+104:     function setPauser(address newPauser) external onlyOwner {
+
+```
+
+#### <a name="L-12"></a>[L-12] Loss of precision
+Division by large numbers may result in the result being zero, due to solidity not supporting fractions. Consider requiring a minimum amount for the numerator to ensure that it is always larger than the denominator
+
+*Instances (3)*:
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+435:             uint256 amountA = (amountIn * 60) / 100; // phUSD leg
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+409:         uint256 gemAmt = (usdsAmount * WAD) / (conv * (WAD + tout));
+
+419:             uint256 usdsSpent = gemAmt * conv * (WAD + tout) / WAD;
+
+```
+
+#### <a name="L-13"></a>[L-13] Solidity version 0.8.20+ may not work on other chains due to `PUSH0`
+The compiler for Solidity 0.8.20 switches the default target EVM version to [Shanghai](https://blog.soliditylang.org/2023/05/10/solidity-0.8.20-release-announcement/#important-note), which includes the new `PUSH0` op code. This op code may not yet be implemented on all L2s, so deployment on these chains will fail. To work around this issue, use an earlier [EVM](https://docs.soliditylang.org/en/v0.8.20/using-the-compiler.html?ref=zaryabs.com#setting-the-evm-version-to-target) [version](https://book.getfoundry.sh/reference/config/solidity-compiler#evm_version). While the project itself may or may not compile with 0.8.20, other projects with which it integrates, or which extend this project may, and those projects will have problems deploying these contracts/libraries.
+
+*Instances (15)*:
+```solidity
+File: src/BurnRecorder.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/dispatchers/BurnerV2.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/hooks/DefaultDispatchHook.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+2: pragma solidity ^0.8.20;
+
+```
+
+#### <a name="L-14"></a>[L-14] Use `Ownable2Step.transferOwnership` instead of `Ownable.transferOwnership`
+Use [Ownable2Step.transferOwnership](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/access/Ownable2Step.sol) which is safer. Use it as it is more secure due to 2-stage ownership transfer.
+
+**Recommended Mitigation Steps**
+
+Use <a href="https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/access/Ownable2Step.sol">Ownable2Step.sol</a>
+  
+  ```solidity
+      function acceptOwnership() external {
+          address sender = _msgSender();
+          require(pendingOwner() == sender, "Ownable2Step: caller is not the new owner");
+          _transferOwnership(sender);
+      }
+```
+
+*Instances (8)*:
+```solidity
+File: src/BurnRecorder.sol
+
+5: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+4: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+4: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+6: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+8: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+7: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+7: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+7: import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+```
+
+#### <a name="L-15"></a>[L-15] Sweeping may break accounting if tokens with multiple addresses are used
+There have been [cases](https://blog.openzeppelin.com/compound-tusd-integration-issue-retrospective/) in the past where a token mistakenly had two addresses that could control its balance, and transfers using one address impacted the balance of the other. To protect against this potential scenario, sweep functions should ensure that the balance of the non-sweepable token does not change after the transfer of the swept tokens.
+
+*Instances (4)*:
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+118:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+549:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+556:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+338:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+
+### Medium Issues
+
+
+| |Issue|Instances|
+|-|:-|:-:|
+| [M-1](#M-1) | Centralization Risk for trusted owners | 77 |
+#### <a name="M-1"></a>[M-1] Centralization Risk for trusted owners
+
+##### Impact:
+Contracts have owners with privileged rights to perform admin tasks and need to be trusted to not perform malicious updates or drain funds.
+
+*Instances (77)*:
+```solidity
+File: src/BurnRecorder.sol
+
+11: contract BurnRecorder is IBurnRecorder, Ownable {
+
+37:     constructor(address initialOwner) Ownable(initialOwner) {}
+
+42:     function setBurner(address burner_, bool approved_) external onlyOwner {
+
+65:     function registerToken(address token) external onlyOwner {
+
+```
+
+```solidity
+File: src/MultiPooler.sol
+
+18: contract MultiPooler is Ownable {
+
+45:     constructor(address initialOwner) Ownable(initialOwner) {}
+
+50:     function setPooler(address newPooler) external onlyOwner {
+
+```
+
+```solidity
+File: src/NFTBonfire.sol
+
+20: contract NFTBonfire is Ownable, Pausable, ReentrancyGuard, IPausable {
+
+83:     constructor(address initialOwner, address nftMinter_, address antimatter_) Ownable(initialOwner) {
+
+127:     function setRatePerDay(uint256 newRate) external onlyOwner {
+
+135:     function setMaxPayout(uint256 newMax) external onlyOwner {
+
+143:     function setPauser(address newPauser) external onlyOwner {
+
+```
+
+```solidity
+File: src/NFTMinterV2.sol
+
+16: contract NFTMinterV2 is ERC1155Supply, Ownable, INFTMinterV2, IPausable {
+
+100:     constructor(address initialOwner) ERC1155("") Ownable(initialOwner) {}
+
+104:     function setPauser(address newPauser) external onlyOwner {
+
+152:     function setDispatcherDisabled(uint256 index, bool disabled) external onlyOwner {
+
+219:     function setAuthorizedMinter(address minter, bool authorized) external onlyOwner {
+
+227:     function replaceDispatcher(uint256 index, address newDispatcher) external onlyOwner {
+
+282:     function setPrice(uint256 index, uint256 newPrice) external onlyOwner {
+
+290:     function setGrowthFactor(uint256 index, uint256 newGrowthBasisPoints) external onlyOwner {
+
+299:     function emergencyWithdraw(address token) external onlyOwner {
+
+309:     function setDispatcherActive(address dispatcher, bool active) external onlyOwner {
+
+332:     function setAuthorizedBurner(address burner, bool authorized) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/ATokenDispatcherV2.sol
+
+23: abstract contract ATokenDispatcherV2 is ITokenDispatcherV2, Pausable, Ownable, ReentrancyGuard {
+
+50:     constructor(address initialOwner) Ownable(initialOwner) {
+
+85:     function setMinter(address minter_) external onlyOwner {
+
+94:     function setHook(IDispatchHook newHook) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/GatherV2.sol
+
+44:     function setRecipient(address newRecipient) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchet.sol
+
+96:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+105:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/NudgeRatchetDelayRelease.sol
+
+89:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+97:     function setReleaser(address releaser, bool approved) external onlyOwner {
+
+118:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/PromotionUniV2_Eth.sol
+
+258:     function setPool(address newPair) external onlyOwner {
+
+277:     function setEthToPromotionPath(address[] calldata path) external onlyOwner {
+
+288:     function setUsdcToWbtcPath(address[] calldata path) external onlyOwner {
+
+298:     function setInsurer(address newInsurer) external onlyOwner {
+
+313:     function setPSM(address newPSM) external onlyOwner {
+
+320:     function setMaxTin(uint256 newMaxTin) external onlyOwner {
+
+327:     function setDonationSplit(uint256 newSplit) external onlyOwner {
+
+335:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+342:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+350:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+
+362:     function incrementAuthVersion() external onlyOwner {
+
+549:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+556:     function rescueETH(address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/UniPoolerV2.sol
+
+267:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+
+280:     function incrementAuthVersion() external onlyOwner {
+
+288:     function setBatchDonationSize(uint256 newSize) external onlyOwner {
+
+297:     function setBatchMinter(address newBatchMinter) external onlyOwner {
+
+305:     function setPSM(address newPSM) external onlyOwner {
+
+313:     function setMaxTout(uint256 newMaxTout) external onlyOwner {
+
+324:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+556:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/dispatchers/Uniboost.sol
+
+154:     function setPool(address newPool) external onlyOwner {
+
+174:     function setDonationSplit(uint256 newSplit) external onlyOwner {
+
+183:     function setRecipient(address newRecipient) external onlyOwner {
+
+190:     function setNudgeStreamer(address newStreamer) external onlyOwner {
+
+202:     function setPrimeToPairPath(address[] calldata path) external onlyOwner {
+
+315:     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
+
+327:     function incrementAuthVersion() external onlyOwner {
+
+338:     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+
+```
+
+```solidity
+File: src/hooks/BalancerPoolerMintDebtHook.sol
+
+22: contract BalancerPoolerMintDebtHook is IDispatchHook, IBalancerPoolerMintDebtHook, Ownable, ReentrancyGuard {
+
+66:     constructor(address initialOwner, address dispatcher_, address phUSD_) Ownable(initialOwner) {
+
+77:     function setRatio(uint8 newRatio) external onlyOwner {
+
+87:     function setRecipient(address newRecipient) external onlyOwner {
+
+98:     function setDispatcher(address newDispatcher) external onlyOwner {
+
+```
+
+```solidity
+File: src/hooks/NudgeRatchetMintDebtHook.sol
+
+22: contract NudgeRatchetMintDebtHook is IDispatchHook, INudgeRatchetMintDebtHook, Ownable, ReentrancyGuard {
+
+78:     constructor(address initialOwner, address dispatcher_, address phUSD_) Ownable(initialOwner) {
+
+90:     function setRatio(uint8 newRatio) external onlyOwner {
+
+100:     function setRecipient(address newRecipient) external onlyOwner {
+
+111:     function setDispatcher(address newDispatcher) external onlyOwner {
+
+```
+
+```solidity
+File: src/hooks/UniboostMintDebtHook.sol
+
+29: contract UniboostMintDebtHook is IDispatchHook, IUniboostMintDebtHook, Ownable, ReentrancyGuard {
+
+81:     constructor(address initialOwner, address dispatcher_, address phUSD_, address primeToken_) Ownable(initialOwner) {
+
+96:     function setRatio(uint8 newRatio) external onlyOwner {
+
+106:     function setRecipient(address newRecipient) external onlyOwner {
+
+117:     function setDispatcher(address newDispatcher) external onlyOwner {
+
+```
+

@@ -1,0 +1,81 @@
+{
+  "project": "yield-claim-nft",
+  "run": "yield-claim-nft-23",
+  "scanTimestamp": "2026-10-27T00:00:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "range": "0fd6bdf..c5ad56d",
+  "branch": "master",
+  "contractsScanned": 3,
+  "contractsConsidered": ["src/NFTBonfire.sol (new)", "src/NFTMinterV2.sol (burn/mintFor surface, unchanged)", "src/hooks/BalancerPoolerMintDebtHook.sol + src/migration/UniPoolerCutoverEscrow.sol (story-050 dangling-reference check)", "cross-repo read-only: antimatter/src/src/Antimatter.sol (mint path), stable-yield-accumulator/src/src/StableYieldAccumulator.sol (_validateAndBurnNFT), phoenix-nft-staking/src/src/{NFTStaker*,BatchNFTMinter*,INFTSupply}.sol"],
+  "findings": [
+    {
+      "id": "CODE-001",
+      "title": "Lowering maxPayout to cap an already-large uncapped pot is front-runnable: a mempool-watching NFT holder burns first and takes the full pot, so a retroactive cap never binds",
+      "type": "call-sequence / transaction-ordering (owner footgun)",
+      "rootCauseClass": "frontrunnable-retroactive-cap",
+      "severity": "potential-low",
+      "contract": "src/NFTBonfire.sol",
+      "function": "setMaxPayout / burn",
+      "line": 135,
+      "lineStart": 97,
+      "lineEnd": 139,
+      "description": "maxPayout defaults to 0 (unlimited) and pause does not stop accrual. The natural owner reaction to a pot that has grown large (long idle stretch, or a multi-day pause) is setMaxPayout(cap), which _checkpoint()s and would forfeit the excess. But burn() is permissionless and reads the pot at its own execution time, so any NFT holder who sees the owner's setMaxPayout in the public mempool can burn in the same block ahead of it and receive the entire uncapped pot (minted as antimatter, which is unpausable and has no supply cap). The cap only ever binds if it was set BEFORE accrual exceeded it. Pausing first does not help: the pause() tx is equally front-runnable and pause only blocks future burns. A competent owner reading the story ('maxPayout ... prevents a long idle period from turning into one large mint'; 'Admin setters stay callable while paused') could reasonably believe a cap applied after the fact protects the pot - it does not. Same mechanism applies to the first burn after unpause() (back-run of the unpause tx collects everything accrued during the pause).",
+      "attackVector": "1) setRatePerDay(2.5e18) with maxPayout==0; 100 days pass (or contract is paused for a long incident). Pot = 250e18. 2) Owner broadcasts setMaxPayout(10e18). 3) Searcher holding any claim NFT (all tokenIds equal; cheapest-index NFT suffices) sees it and submits burn(id, 0) with higher priority in the same block. 4) Searcher receives 250e18 antimatter; owner's cap tx lands afterwards on an empty pot. PoC: work/test/audit23/BonfireCapFrontRun.t.sol (test_CODE001_frontRunBurn_defeatsCap PASS: payout 250e18; control test_CODE001_capLandsFirst_payoutCapped PASS: payout 10e18).",
+      "evidence": [
+        {"file": "src/NFTBonfire.sol", "lines": "100-104", "code": "payout = pendingPayout();\nif (payout < minPayout) revert NFTBonfire__PayoutBelowMinimum(payout, minPayout);\naccruedStored = 0;\nlastUpdate = block.timestamp;"},
+        {"file": "src/NFTBonfire.sol", "lines": "117-121", "code": "uint256 raw = accruedStored + ((block.timestamp - lastUpdate) * ratePerDay) / 1 days;\nuint256 cap = maxPayout;\nif (cap != 0 && raw > cap) return cap;\nreturn raw;"},
+        {"file": "src/NFTBonfire.sol", "lines": "135-139", "code": "function setMaxPayout(uint256 newMax) external onlyOwner {\n    _checkpoint();\n    emit MaxPayoutUpdated(maxPayout, newMax);\n    maxPayout = newMax;\n}"},
+        {"file": "src/NFTBonfire.sol", "lines": "148-151", "code": "/// @notice Pause burns. Only callable by `pauser`. Accrual continues."}
+      ],
+      "impact": "Bounded by ratePerDay x elapsed time: an over-mint of antimatter (convertible to phUSD via Antimatter.annihilate) relative to the owner's intended cap. No user principal at risk; issuance-policy leak. Quantification of antimatter value is econ-scanner's lane.",
+      "recommendation": "Operational (no code change needed): set a non-zero maxPayout BEFORE or in the same tx/bundle as the first non-zero setRatePerDay, and treat it as a standing cap, never a reactive one; send any later cap reduction via a private relay. Optional code hardening: have setRatePerDay revert when enabling a rate while maxPayout==0, or make pause() also checkpoint-and-freeze accrual.",
+      "relatedIds": ["profile LOCAL-001 (uncapped-default-accrual)", "PATTERN-002", "PATTERN-001 (winner-takes-all front-run, econ)"],
+      "dedupHint": "Same root as LOCAL-001/PATTERN-002 (default-unlimited cap + accrual through pause). Merge into that finding as its 'retroactive cap is unenforceable' facet unless dedup prefers a separate call-sequence entry. Not in ledger (no NFTBonfire entries exist).",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-002",
+      "title": "Cross-project premise expiry: NFTBonfire gives every NFTMinterV2 claim NFT a permissionless holder-callable redemption (pot of antimatter), invalidating the 'NFT has no realizable redemption value' basis of phoenix-nft-staking wont-fix 858e9e80 and the conditional-harm reasoning on 521c20ad",
+      "type": "trust-chain / cross-contract invariant change",
+      "rootCauseClass": "nft-redemption-value-premise-expired",
+      "severity": "informational (re-weigh trigger; possible Low/Medium in phoenix-nft-staking after econ quantification)",
+      "contract": "src/NFTBonfire.sol",
+      "function": "burn",
+      "line": 106,
+      "lineStart": 97,
+      "lineEnd": 112,
+      "description": "Before story-053 the only burn paths on NFTMinterV2 were authorised-burner contracts (SYA claim). phoenix-nft-staking run-21 closed the BatchNFTMinter nudge-gate finding 858e9e80 as wont-fix on the explicit verified premise that 'NFTMinterV2 has no holder-callable redeem/claim/withdraw path', so the freshly-minted NFTs a nudge snatcher receives are sunk cost. NFTBonfire, once wired (setAuthorizedBurner + Antimatter.setApprovedMinter + non-zero rate), is exactly such a path: any holder of any tokenId can convert 1 NFT into the current pot. Every authorised NFTMinterV2.mintFor caller (e.g. the NFTMigrator granted setAuthorizedMinter in phStaging deploy scripts) and every cheap mint route therefore now mints a redeemable ticket. The realisable value per NFT is bounded by the winner-takes-all pot per accrual interval (the Nth NFT in one interval is worth ~0), so this does NOT by itself prove the nudge gate is now profitable - it moves the bound from 0 to ~ratePerDay x inter-burn interval (capped by maxPayout). The run-21 closure rationale must be re-evaluated against that number; per the expired-closure rule this is its own bucket, not a regression.",
+      "attackVector": "Conditional: BatchNFTMinter(MultiToken) nudge pot P is claimed by a searcher who receives nudgeSize NFTs; previously value 0, now at least one of them can be bonfired for the pot whenever pot > 0. If P + bonfirePot > qualifying cost, the run-21 '~6.7x sunk-cost margin' argument no longer holds. Also: mintFor-authorised contracts become antimatter faucets bounded only by the pot rate.",
+      "evidence": [
+        {"file": "src/NFTBonfire.sol", "lines": "106-109", "code": "nftMinter.burn(msg.sender, tokenId, 1);\nif (payout > 0) {\n    antimatter.mint(msg.sender, payout);\n}"},
+        {"file": "src/NFTMinterV2.sol", "lines": "206-213", "code": "function mintFor(uint256 index, address recipient) external {\n    require(authorizedMinters[msg.sender], \"NFTMinterV2: caller is not authorized minter\");\n    ...\n    // Mint 1 claim NFT to recipient — no payment, no dispatch, no price update\n    _mint(recipient, index, 1, \"\");"},
+        {"file": "~/code/audits/antimatter/src/src/Antimatter.sol", "lines": "192-194", "code": "function mint(address to, uint256 amount) external onlyApprovedMinters {\n    _mint(to, amount);\n}"},
+        {"file": "memory phoenix-nft-staking-batchminter-nudge.md (run-21)", "lines": "-", "code": "RESOLVED: the NFT has NO realizable redemption value ... ledger 858e9e80 flipped fixed -> wont-fix"}
+      ],
+      "recommendation": "Route to phoenix-nft-staking: re-weigh 858e9e80 (gate) and 521c20ad (race) with bonfire pot economics once phStaging sets the live ratePerDay/maxPayout; record the bonfire rate/cap as a live re-arm trigger. Owner should audit the NFTMinterV2 authorizedMinters set (revoke stale NFTMigrator-type grants) before enabling the bonfire rate.",
+      "relatedIds": ["phoenix-nft-staking 858e9e80 (wont-fix)", "phoenix-nft-staking 521c20ad (open)", "ycn L-04 674c799b2058 (mintFor/burn ignore pause)"],
+      "confidence": "medium"
+    }
+  ],
+  "clearedChecks": {
+    "reentrancyChecklist": {
+      "classicSingleFn": "cleared - CEI at L103-104 before calls L106-108, plus nonReentrant (profile verified).",
+      "crossContract": "cleared - NFTMinterV2.burn makes no external call (OZ 5.5 _burn skips acceptance check, to==0); Antimatter.mint is plain OZ ERC20 _mint (antimatter/src/src/Antimatter.sol:192-194), no hooks. No A->B->A path exists.",
+      "crossFunction": "cleared - only burn mutates pot from untrusted context; setters are onlyOwner. Re-entering burn from NFTMinterV2._executeMint's onERC1155Received callback (recipient hook after price update at NFTMinterV2.sol:188 and dispatch) is equivalent to mint-then-burn in sequence; NFTMinterV2 state is settled by then.",
+      "readOnly": "cleared - pendingPayout() has no window of inconsistency: state is zeroed before both external calls, and no in-repo or sibling contract consumes it. No in-repo/sibling consumer reads NFTMinterV2.totalSupply(id) (grep: phoenix-nft-staking stakers read only configs(index).price), so bonfire supply reduction affects no oracle.",
+      "erc721Hook": "n/a",
+      "erc1155Hook": "cleared - bonfire never transfers/mints ERC1155 to a user; burn path has no receiver hook.",
+      "erc777": "n/a - Antimatter is plain ERC20."
+    },
+    "callerOnlyInvariantAcrossBurners": "holds. NFTBonfire burns only msg.sender (verified). Other live authorised burner SYA burns only msg.sender (stable-yield-accumulator StableYieldAccumulator.sol:575 _validateAndBurnNFT(msg.sender, nftIndex); :661-662). SYA burns do not touch bonfire pot/lastUpdate; no pot-timing interaction. phStaging scripts also grant setAuthorizedBurner(OWNER_ADDRESS) in a deploy script - owner-trusted (Law 3), not reported.",
+    "sameBlockMultipleBurns": "cleared - second burn in same block/tx pays 0 (pot zeroed, dt=0); minPayout reverts before NFT burn so victim keeps NFT.",
+    "setterInterleavings": "setRatePerDay checkpoints at old rate (rate 0 -> X at enable gives pot 0, no retroactive accrual since deploy); setRatePerDay front-run is harmless (non-retroactive). Only setMaxPayout is retroactive -> CODE-001. pause/unpause: accrual continues; global Pauser reaches bonfire only if setPauser+register done; NFTMinterV2 pause does not cover bonfire (profile LOCAL-002; ledger L-04 674c799b2058 already covers mintFor/burn ignoring pause - not re-filed).",
+    "story050DanglingReferences": "clean. Story acceptance grep over src+test returns nothing (exit 1). git diff 0fd6bdf..c5ad56d is empty for src/hooks/**, src/migration/**, src/interfaces/IBalancerPoolerMintDebtHook.sol, src/NFTMinterV2.sol, src/MultiPooler.sol. BalancerPoolerMintDebtHook imports only IDispatchHook/IBalancerPoolerMintDebtHook/IMintable/OZ; BalancerPoolerV2 appears only in its NatSpec. UniPoolerCutoverEscrow declares local interfaces (ICutoverNewPooler, ICutoverOldPooler, IV3RouterExit, ICutoverPairSkim) and imports only OZ + uniswap interfaces. Uniboost/NudgeRatchetDelayRelease/IUniboostPooler diffs are NatSpec-only (carryforward profile). No behaviour change. Deployed BalancerPoolerMintDebtHook's dispatcher pointer is an on-chain fact unaffected by source deletion. Ledger entries anchored solely on src/dispatchers/BalancerPoolerV2.sol are code-gone -> human disposition (not auto-closed)."
+  },
+  "manualReview": [
+    "Confirm on-chain which addresses currently hold NFTMinterV2.authorizedMinters (mintFor) and authorizedBurners before the phStaging follow-up enables a non-zero bonfire rate (feeds CODE-002).",
+    "Econ-scanner: quantify antimatter value (annihilate -> phUSD) to size CODE-001 and CODE-002."
+  ],
+  "artifacts": ["/home/justin/code/audits/yield-claim-nft/work/test/audit23/BonfireCapFrontRun.t.sol"]
+}

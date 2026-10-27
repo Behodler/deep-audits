@@ -1,0 +1,125 @@
+# Carryover QA report — originating audit 18 (carried into yield-claim-nft-23)
+
+> **Carryover QA report — audit 18** (pruned copy of `yield-claim-nft/reports/18/submissions/qa-report.md`, taken from the run-22 pruned carryover `reports/22/submissions/carryover/qa-report-18.md` — whose finding text is itself the verbatim original — re-checked against the ledger at run 23). Carried at `c5ad56d` (`c5ad56df5b5dc3f68a6f6a5e4e5f95ef532a2238`), run 23, branch `master`.
+> Retained (still live in the ledger: `open` / `qa-bundled` / `fix-pending`): **Q-16**.
+> Removed as no longer live: **none since run 22** (no ledger status changed). Parked for human triage (still live in the ledger, not shown in the body): **Q-17** — see § Human triage proposals at the end of this file.
+> Labels are the originals — gaps in the sequence are removals (named above or in the originating/earlier carryover headers), not omissions. Global issue IDs in `<!-- id: -->` stamps are the originating run's, copied verbatim (never restamped).
+> **Why still valid:** the source changes in this run's range `0fd6bdf..c5ad56d` are the new `src/NFTBonfire.sol` (story-053), the deletion of `src/dispatchers/BalancerPoolerV2.sol` and the Balancer interfaces (story-050), and comment/NatSpec-only renames in `NudgeRatchetDelayRelease.sol`, `Uniboost.sol` and `IUniboostPooler.sol`. No retained entry's code logic changed (`NFTMinterV2.sol`, `src/hooks/**` and `src/migration/**` are unchanged), no fix landed for any of them, and no human triage disposed of them, so each is still live exactly as last reported. Not being re-observed by a run-23 tool is **not** a fix.
+> Line numbers and links are as written at the originating commit; relative links resolve from the **original** report's directory (`reports/18/submissions/`), not from this `carryover/` folder. Original report: [`reports/18/submissions/qa-report.md`](../../../18/submissions/qa-report.md). Re-verify every location against `c5ad56d` before acting.
+> *The finding text below is a verbatim copy of the originating report. `Carryover status (run 21 …)` blocks are kept as history; the run-23 status of every entry is the table below.*
+>
+> | Ledger label | issueId | Fingerprint | Status | First seen | Last seen (after run 23) | Re-observed in run 23 | Contract |
+> |---|---|---|---|---|---|---|---|
+> | Q-16 | — | `78164abf6f5f86df8777996396174cf5dfd8bdebc88ad1f77c58910e3e9c38d2` | `open` | yield-claim-nft-18 | yield-claim-nft-18 | no (carried; code unchanged) | `src/dispatchers/PromotionUniV2_Eth.sol` |
+
+<details><summary>Provenance: run-22 carryover header (kept verbatim, including the nested run-21 provenance notes)</summary>
+
+> **Carryover QA report — audit 18** (pruned copy of `yield-claim-nft/reports/18/submissions/qa-report.md`, taken from the run-21 pruned carryover `reports/21/submissions/carryover/qa-report-18.md` — whose finding text is itself the verbatim original — re-checked against the ledger at run 22). Carried at `0fd6bdf` (`0fd6bdfd386c6cd3a6a2b565ed2ef5b363879630`), run 22, branch `master`.
+> Retained (still live in the ledger: `open` / `qa-bundled` / `fix-pending`): **Q-16, Q-17**.
+> Removed as no longer live: **none since run 21** (the retained set is unchanged; entries disposed before run 21 are named in the provenance notes below).
+> Labels are the originals — gaps in the sequence are removals (named above or in the originating/earlier carryover headers), not omissions. Global issue IDs in `<!-- id: -->` stamps are the originating run's, copied verbatim (never restamped).
+> **Why still valid:** the only source change in this run's range `267660b..0fd6bdf` is the new file `src/migration/UniPoolerCutoverEscrow.sol` (plus its tests and `test/mocks/MockV3ExitRouter.sol`). None of the contracts under the entries below changed, no fix landed for any of them, and no human triage has disposed of them, so each is still live exactly as last reported. Not being re-observed by a run-22 tool is **not** a fix.
+> Line numbers and links are as written at the originating commit; relative links resolve from the **original** report's directory (`reports/NN/submissions/`), not from this `carryover/` folder. Re-verify every location against `0fd6bdf` before acting.
+> *The finding text below is a verbatim copy of the originating report. `Carryover status (run 21 …)` blocks were added by the run-21 qa-bundler and are kept as history; the run-22 status of every entry is the table below.*
+>
+> | Ledger label | issueId | Fingerprint | Status | First seen | Last seen (after run 22) | Re-observed in run 22 | Contract |
+> |---|---|---|---|---|---|---|---|
+> | Q-16 | — | `78164abf6f5f86df8777996396174cf5dfd8bdebc88ad1f77c58910e3e9c38d2` | `open` | yield-claim-nft-18 | yield-claim-nft-18 | no (carried; code unchanged) | `src/dispatchers/PromotionUniV2_Eth.sol` |
+> | Q-17 | — | `696cc3452e1c247e3e8eaff37e543a5ec9e9278c8379fbbf20db9d33bbc474c5` | `open` | yield-claim-nft-18 | yield-claim-nft-19 | no (carried; code unchanged) | `test/Tier3PromotionInvariants.t.sol` |
+
+<details><summary>Provenance notes from the run-21 carryover header (kept verbatim: label-collision warnings, facet and instance notes)</summary>
+
+> **Carryover QA report — audit 18** (pruned copy of `yield-claim-nft/reports/18/submissions/qa-report.md`; originating commit `e4de393`; carried at `267660b`, run 21).
+> Retained (still `open`): **Q-16, Q-17**.
+> Removed as disposed: **L-15** (`e64f73d629`, `wont-fix`), the re-confirmed **L-06** (`wont-fix`), **Q-12** (`wont-fix`), and the "Carryover (wont-fix)" block (L-13, F-01-044, both `wont-fix`). The run-18 Q-13/Q-14/Q-15 sections are carried under their run-17 parents in `qa-report-17.md`. The 4naly3er appendix is not copied.
+> Line numbers and links are as written at the originating commit; relative links resolve from the **original** report's directory (`reports/NN/submissions/`), not from this `carryover/` folder, and many point at the retired `lib/yield-claim-nft/...` reference tree. Re-verify every location against `267660b` before acting.
+> Global issue IDs in the `<!-- id: -->` stamps are the originating run's, copied verbatim (never restamped). Where an originating report minted an ID inconsistently (run 08 stamped QA items with `l`), the original stamp is kept and the discrepancy is noted, not corrected.
+> *The finding text below each heading is a verbatim copy of the originating report; the `Carryover status` block after each section is added by the run-21 qa-bundler.*
+
+</details>
+
+</details>
+
+---
+
+## QA / Hardening Findings
+
+### [Q-16] `PromotionUniV2_Eth.pool()` NatSpec under-explains the half-phUSD burn — correct on value-matching, silent on the deflationary-spend half of its role <!-- id: ycn18q16 -->
+
+**Status:** new this run (QA). Surfaced as ECON-01 / L-14 by the econ-scanner, downgraded Low → QA
+by the sanitizer (documentation-vs-effect transparency nit; no asset/value/availability impact).
+
+**Location:** `src/dispatchers/PromotionUniV2_Eth.sol#L349-L353`, `#L392-L394` (`pool`)
+
+**Description:** The `pool()` NatSpec states that the half-phUSD burn is required so the pooled-phUSD
+value (~30%) value-matches the pooled-promotion value (~30%). That statement is **correct**, not a
+misstatement: because Leg A is deliberately over-sized to **60%** of capital, burning half of it is
+**precisely** what pulls the pooled phUSD from 60% down to the ~30% that matches Leg B — so the burn
+genuinely **is** part of the value-match mechanism. What the NatSpec **omits** is the burn's dual
+role: given the 60% over-sizing, that same burn is simultaneously an intentional
+**~30%-of-`pool()`-capital permanent deflationary spend** that produces zero LP. The defect is an
+**under-explanation** (the deflationary-spend half of the burn's role is undocumented), **not** a
+mischaracterization of the value-match half.
+
+**Impact:** No asset, value-leak, or availability impact. The behavior is story-045-faithful and
+Law-1 clean: the burn is backing-accretive (supply-reducing, intra-protocol), there is no theft,
+and fork verification confirmed a 5000e6 USDC input burns 1359e18 phUSD as designed. The QA value
+is preserving the burn's **dual-role clarity** — value-match rebalance **and** ~30%-of-capital
+deflationary spend — so that no future maintainer, reading only the value-match half of the
+rationale, deletes or resizes the burn as "redundant to the leg sizing." Removing it would leave
+the pooled phUSD at 60% (breaking the value-match the NatSpec **does** document) and silently drop
+the intended deflationary economics. Retained (not dropped) precisely to prevent that.
+(Cross-ref: F-01-045 spec-conformance.)
+
+**Recommendation:** Augment (do not rewrite) the NatSpec at L349-353 and L392-394: keep the
+existing correct statement that the burn brings the 60%-sized phUSD leg down to the ~30% that
+value-matches Leg B, and **add** that this same burn is by design a permanent
+~30%-of-`pool()`-capital deflationary spend that produces no LP — so a maintainer understands the
+burn carries **both** roles and must not be removed or resized.
+
+> **Carryover status (run 21, `267660b`).** Ledger **Q-16** · fingerprint `78164abf6f5f86df8777996396174cf5dfd8bdebc88ad1f77c58910e3e9c38d2` · status **`open`** · severity `qa` · first seen `yield-claim-nft-18` · last seen `yield-claim-nft-18` · re-observed by run-21 inputs: **no (not re-raised; absence of a re-raise is not a fix)**.
+
+---
+
+_[Q-17] (ledger **Q-17**) is not shown here: parked for human triage — see § Human triage proposals at the end of this file. Still live in the ledger._
+
+---
+
+## Human triage proposals (parked — NOT live carryover)
+
+> The entries below are still **live in the ledger** (status unchanged). They are moved out of the live carryover body because the sanitizer proposes a closure that only a human may apply with `/ledger yield-claim-nft`. Their full text is kept verbatim below so nothing is silently dropped (Law 1).
+
+| Ledger label | Run-scoped heading | Fingerprint | Ledger status | Proposal |
+|---|---|---|---|---|
+| Q-17 | Q-17 | `696cc3452e` | `open` | close `false-positive` / `wont-fix` (obsolete): `test/Tier3PromotionInvariants.t.sol` has no upstream git history (`git log --all` empty) — an audit-authored harness, not project code. **Human-applied only; status unchanged in the ledger (still live).** |
+
+<details><summary>Q-17 (Q-17) — verbatim text as carried at run 22</summary>
+
+### [Q-17] Tier-3 stateful-fuzz harness calls the pre-story-045 5-arg `pool()`; fails to compile, so the reworked flow is not fuzzed <!-- id: ycn18q17 -->
+
+**Status:** new this run (QA). Test-infrastructure coverage gap (Law-1 adjacent — recall risk, not
+a live vulnerability).
+
+**Location:** `test/Tier3PromotionInvariants.t.sol`
+
+**Description:** The run-16 stateful-fuzz harness invokes the old 5-argument signature
+`pool(amountIn, 0, 0, 0, 0)`. story-045 changed `PromotionUniV2_Eth.pool` to a 6-argument
+signature (added `minWbtcOut` for the WBTC insurer-reserve leg). The harness therefore fails to
+compile, so the Medusa/Foundry invariant campaigns do **not** exercise the reworked split / burn /
+WBTC value flow. This is the vacuous-harness / silent-coverage-gap pattern: a green-looking suite
+that no longer touches the changed path.
+
+**Impact:** Stateful-fuzz coverage of the exact code story-045 reworked is silently dropped. Actual
+coverage this run is provided by the deterministic fork unit tests (70/70 pass) and the 4
+empirically-confirmed Tier-3 fork invariants; the fuzz harness needs a refresh to restore the
+stateful campaigns.
+
+**Recommendation:** Refresh `Tier3PromotionInvariants.t.sol` to the 6-arg
+`pool(amountIn, minPhusdOut, minPromoOut, minLp, minWbtcOut, …)` signature (match the current
+story-045 ABI) so the invariant campaigns compile and re-exercise the reworked split/burn/WBTC
+flow.
+
+> **Carryover status (run 21, `267660b`).** Ledger **Q-17** · fingerprint `696cc3452e1c247e3e8eaff37e543a5ec9e9278c8379fbbf20db9d33bbc474c5` · status **`open`** · severity `qa` · first seen `yield-claim-nft-18` · last seen `yield-claim-nft-19` · re-observed by run-21 inputs: **no (not re-raised; absence of a re-raise is not a fix)**.
+
+</details>
+

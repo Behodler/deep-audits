@@ -1,0 +1,214 @@
+{
+  "project": "yield-claim-nft",
+  "run": "yield-claim-nft-23",
+  "commit": "c5ad56d",
+  "baseline": "0fd6bdf",
+  "scanTimestamp": "2026-10-27T00:00:00Z",
+  "scanType": "pattern-matching",
+  "scopeScanned": [
+    "src/NFTBonfire.sol"
+  ],
+  "patternsChecked": 35,
+  "patternsSkipped": [
+    {
+      "id": "CENTRALIZATION-ADMIN",
+      "reason": "note: C4 Low/QA; owner trusted (Law 3); onlyOwner hit on setRatePerDay/setMaxPayout/setPauser - no HM twist"
+    },
+    {
+      "id": "FRONTRUN-APPROVE",
+      "reason": "note: C4 QA/known-issue; no approve() in scope"
+    }
+  ],
+  "matchesCount": 2,
+  "findingsCount": 2,
+  "matches": [
+    {
+      "id": "PATTERN-001",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT",
+      "type": "winner-takes-all-pot-front-run",
+      "severity": "potential-medium",
+      "contract": "src/NFTBonfire.sol",
+      "function": "burn",
+      "line": "97-112, 117-122",
+      "description": "Conceptual match (no literal DB signature hit: the DB signatures are BatchNFTMinter-specific). burn() pays the WHOLE accrued pot to msg.sender on a value-blind gate: holding >=1 unit of ANY tokenId. Payout is never compared to what the burner paid for the NFT (all tokenIds equal; NFTs minted cheaply via a low-price dispatcher or free via NFTMinterV2.mintFor by an authorized minter redeem identically). Pot is winner-takes-all per block, so any NFT holder/searcher can copy or back-run a pending burn (or the pauser's unpause / owner's setRatePerDay tx) and take the pot; the second burner in the block gets 0.",
+      "confidence": "medium",
+      "matchedSignatures": [],
+      "matchedConditions": [
+        "full pot paid out on a non-value (hold-any-NFT) gate",
+        "payout not compared to the value the caller contributed"
+      ],
+      "unmatchedConditions": [
+        "recipient is msg.sender, not arbitrary caller-chosen (moot: attacker burns its own NFT)",
+        "no external mint/transfer loop before the pot read"
+      ],
+      "mitigationsPresent": [
+        "minPayout slippage floor reverts BEFORE the NFT burn (L101), so a front-run victim with minPayout>0 keeps the NFT and loses only gas",
+        "pot zeroed before interactions + nonReentrant"
+      ],
+      "missingMitigations": [
+        "minPayout=0 is a documented opt-out: a front-run victim using it burns its NFT for ~0",
+        "no ordering protection (commit-reveal / per-holder accrual) - by design"
+      ],
+      "triageContext": "Story-053 Notes declare the pot 'trivially front-runnable' and add minPayout as the answer; pot is newly-minted Antimatter (memory externally-derived-yield-opportunity-cost-not-loss => misallocation, not value leak). Pattern note: permissionless front-run of a legitimately-funded pot is a valid MEV finding (Law 1). Expect Low/QA unless econ-scanner shows a victim-loss path beyond the minPayout=0 opt-out. Cross-contract value-blindness (mintFor free NFTs) DEFERRED to econ-scanner.",
+      "references": [
+        "memory: phoenix-nft-staking-batchminter-nudge",
+        "story-053 Notes 'Front-running'",
+        "profile trustAssumptions[4],[5]"
+      ]
+    },
+    {
+      "id": "PATTERN-002",
+      "source": "pattern-db",
+      "patternId": "EMISSION-WINDOW-BOUNDARY",
+      "type": "pause-not-covering-accrual / uncapped-default-pot",
+      "severity": "potential-medium",
+      "contract": "src/NFTBonfire.sol",
+      "function": "pause / unpause / pendingPayout / constructor (maxPayout default 0)",
+      "line": "32, 117-122, 148-156",
+      "description": "Accrual continues across a window in which claims are impossible (paused), and maxPayout defaults to 0 = unlimited. A pause of N days (e.g. a global-Pauser incident) accrues ratePerDay*N into one pot that the first burner after unpause takes in a single Antimatter mint (Antimatter mint is uncapped/unpausable). The unpause tx is a deterministic MEV back-run target. The story states maxPayout exists to stop 'a long idle period from turning into one large mint', but the default leaves it off and pause does not checkpoint/freeze.",
+      "confidence": "medium",
+      "matchedSignatures": [
+        "block.timestamp"
+      ],
+      "matchedConditions": [
+        "emissions continue through a period where the claim window is closed (pause analogue of 'after windowEnd')"
+      ],
+      "mitigationsPresent": [
+        "maxPayout caps the pot when set (excess forfeited)",
+        "setRatePerDay(0) checkpoints and freezes accrual (documented economic lever)",
+        "inert at deploy (ratePerDay=0)"
+      ],
+      "missingMitigations": [
+        "maxPayout not required when enabling a rate",
+        "pause does not checkpoint or stop accrual"
+      ],
+      "triageContext": "Spec-conformant (story-053: 'Pause does not freeze accrual'). Law-3 footgun candidate: a competent owner pausing during an incident may be surprised the pot balloons into one back-runnable mint when maxPayout is unset. Duplicates profile LOCAL-001; safe-config guidance belongs on the phStaging2 deployment follow-up. Expect Low.",
+      "references": [
+        "profile LOCAL-001",
+        "story-053 Notes lines 77, 99, 141"
+      ]
+    }
+  ],
+  "manualReviewCount": 2,
+  "manualReview": [
+    {
+      "id": "MANUAL-001",
+      "source": "pattern-db",
+      "patternId": "BATCH-PAYOUT-FIXED-POT (cross-project expired-closure)",
+      "type": "expired-closure-candidate",
+      "severity": "potential-medium",
+      "contract": "phoenix-nft-staking: src/BatchNFTMinterMultiToken.sol (and frozen mainnet src/BatchNFTMinter.sol)",
+      "function": "batchMint",
+      "line": "352-461 (per ledger anchor)",
+      "description": "phoenix-nft-staking ledger 858e9e80 (H-01 value-blind nudge gate, wont-fix) and the race 521c20ad rest on the run-21 premise 'the claim NFT has NO realizable redemption value'. NFTBonfire creates exactly such a value: any NFTMinterV2 claim NFT can now be burned for the accrued Antimatter pot. If BatchNFTMinter mints from the same NFTMinterV2 that NFTBonfire is authorized on, a nudge snatcher nets nudge pot + bonfire redemption, so the 'keep pot < nudgeSize*mintPrice' bound may no longer contain the gate. Depends on deployment wiring (phStaging2 follow-up, not landed) and Antimatter value vs pot.",
+      "confidence": "low",
+      "priority": "high - closure premise invalidated by new code; must not be silently dropped (memory: expired-closure-vs-regression)",
+      "matchedSignatures": [],
+      "references": [
+        "phoenix-nft-staking/ledger.json fingerprint 858e9e80 (wont-fix)",
+        "memory: phoenix-nft-staking-batchminter-nudge",
+        "memory: expired-closure-vs-regression",
+        "memory: externally-derived-yield-opportunity-cost-not-loss (funding-source caveat)"
+      ]
+    },
+    {
+      "id": "MANUAL-002",
+      "source": "ad-hoc (no DB pattern for pause-coverage / authorized-burner)",
+      "patternId": null,
+      "type": "pause-coverage-gap",
+      "severity": "potential-low",
+      "contract": "src/NFTBonfire.sol",
+      "function": "pause / setPauser; cross: NFTMinterV2.burn",
+      "line": "42, 74-77, 143-156; NFTMinterV2.sol:341-345",
+      "description": "pauser defaults to address(0) so NFTBonfire is unpausable until setPauser + Pauser.register(); NFTMinterV2.burn has no pause check, so pausing NFTMinterV2 does not stop bonfire burns/Antimatter mints. Bonfire's own pause is the sole stop on this path.",
+      "confidence": "low",
+      "matchedSignatures": [],
+      "triageContext": "Story-053 line 102 states this explicitly; Law-3 footgun only if the deploy script omits pauser wiring. Duplicates profile LOCAL-002."
+    }
+  ],
+  "checkedNoMatch": [
+    {
+      "patternId": "REWARD-ACCRUAL-ORDER",
+      "result": "no-match",
+      "note": "No signature hits. Verified: setRatePerDay/setMaxPayout call _checkpoint() (pendingPayout under OLD rate+cap, lastUpdate=now) before writing new value (L127-139); no retroactive repricing; burn zeroes pot and resets lastUpdate. Lower-then-uncap forfeiture is spec Decision 3."
+    },
+    {
+      "patternId": "MINT-ON-DEMAND-OVERMINT",
+      "result": "signatures-hit, conditions-not-met",
+      "note": "mint( / IMintable hit. Single mint site (L108) mints exactly pendingPayout(), zeroed before the call; no second mint path; issuance bounded by ratePerDay*elapsed (and maxPayout per burn when set). Free mintFor NFTs redirect, not increase, issuance (folded into PATTERN-001)."
+    },
+    {
+      "patternId": "REENTRANCY-CROSS-FUNCTION",
+      "result": "signatures-hit, conditions-not-met",
+      "note": "nonReentrant on burn; CEI before both external calls; other writers onlyOwner; pendingPayout reads already-zeroed state during any callback."
+    },
+    {
+      "patternId": "REENTRANCY-ERC721-RECEIVE",
+      "result": "no-match",
+      "note": "No safe-mint; OZ 5.5 ERC1155._burn skips acceptance check (to==0)."
+    },
+    {
+      "patternId": "WEAK-PRNG",
+      "result": "signatures-hit, conditions-not-met",
+      "note": "block.timestamp is a linear accrual clock, not entropy."
+    },
+    {
+      "patternId": "TWO-STEP-COMMIT-WINDOW",
+      "result": "signatures-hit (false positive)",
+      "note": "'pending' matched only identifier pendingPayout; no two-step commit."
+    },
+    {
+      "patternId": "INCORRECT-OPERATOR",
+      "result": "no-match",
+      "note": "`cap != 0 && raw > cap` and `payout < minPayout` match documented semantics."
+    },
+    {
+      "patternId": "ROUNDING-DIRECTION",
+      "result": "no-match",
+      "note": "Single floor `/ 1 days` after multiply, protocol-favouring; <1 wei per checkpoint."
+    },
+    {
+      "patternId": "DIVISION-PRECISION",
+      "result": "no-match",
+      "note": "mul-before-div."
+    },
+    {
+      "patternId": "REWARD-RUNWAY-DEPLETION",
+      "result": "no-match",
+      "note": "mint-on-demand, no funded budget/solvency invariant."
+    },
+    {
+      "patternId": "UNSAFE-DOWNCAST",
+      "result": "no-match"
+    },
+    {
+      "patternId": "UNPROTECTED-INIT",
+      "result": "no-match",
+      "note": "non-upgradeable"
+    },
+    {
+      "patternId": "remaining 21 patterns (oracle x2, ERC4626, first-depositor, signatures, permit, proxy x2, swap-slippage, FoT, yield-principal skew, governance x2, cross-chain, loops, selfdestruct, return-value, flash-loan, ERC777, read-only reentrancy, approve)",
+      "result": "no-match",
+      "note": "zero signature hits; no relevant constructs"
+    }
+  ],
+  "changedFilesConfirmation": {
+    "commentOnly": [
+      "src/dispatchers/NudgeRatchetDelayRelease.sol",
+      "src/dispatchers/Uniboost.sol",
+      "src/interfaces/IUniboostPooler.sol"
+    ],
+    "deletedNotCommentOnly": [
+      "src/dispatchers/BalancerPoolerV2.sol",
+      "src/interfaces/balancer/BalancerTypes.sol",
+      "src/interfaces/balancer/IBalancerRouter.sol",
+      "src/interfaces/balancer/IBalancerVault.sol",
+      "src/interfaces/balancer/IUnlockCallback.sol",
+      "test/BalancerPoolerV2.t.sol",
+      "test/mocks/MockERC4626Wrapper.sol"
+    ],
+    "note": "Deletions remove code (not comment-only). No remaining src file imports the deleted files (BalancerPoolerMintDebtHook references BalancerPoolerV2 in NatSpec only). Registry/CLAUDE.md focus list still names src/dispatchers/BalancerPoolerV2.sol - scope refresh needed; open ledger entries on BalancerPoolerV2 now anchor on deleted source (deployed mainnet instance may still exist)."
+  },
+  "errors": []
+}
