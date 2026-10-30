@@ -76,7 +76,7 @@ Custom Claude Code commands orchestrate specialized agents in tiers:
 1. **Tier 1 (local + deterministic)** - contract-profiler, static-analyzer (Slither + Aderyn + Semgrep), pattern-matcher
 2. **Tier 2 (interaction)** - code-scanner, econ-scanner (LLM reasoning over profiles)
 3. **Tier 3 (verification)** - invariant-generator (forge + Medusa/Echidna), symbolic-analyzer (Halmos)
-4. **Filtering** - deduplicator, then sanitizer (known issues + ledger reconciliation)
+4. **Filtering** - deduplicator, then sanitizer (known issues + ledger reconciliation), then — after severity classification — precedent-triager (applies `precedents.md`)
 5. **Output** - severity-classifier, finding-manager (writes run dir + upserts ledger), poc-generator, report-writer, qa-bundler
 
 ### Reading a ledger — never read the whole file
@@ -140,6 +140,15 @@ Two consequences follow, both authoritative in `registered-projects.json` → `b
 - **Findings carry their branch.** Every finding and ledger entry records `branch` (write-once: where it was first discovered) and `branchesSeen` (append-only: every branch a scan has observed it on). Branch is **not** part of the fingerprint, so the same defect found on a branch and then on the trunk stays one entry that gained a second `branchesSeen` value.
 
 **Discarding a branch → `abandoned`.** When a branch is thrown away upstream, `/ledger <project> abandon-branch <branch>` retires the findings whose `branchesSeen` is *exactly* that branch — their code no longer exists anywhere — as status `abandoned`. Findings also seen on another branch are left untouched and named in the output. `abandoned` is a disposal for scan purposes (suppressed, not carried over, hidden by `/open-issues`) but it is **not** a judgement about the bug the way `wont-fix` is: nobody chose to live with it, the code just went away. It is human-set only, fully reversible via `/ledger … reopen`, and never applied to a branch that was **merged** into the trunk — merging makes those findings trunk findings, so abandoning them would bury live bugs. If a scan finds an `abandoned` finding again on a live branch, that is a regression, not a suppression.
+
+### Triage precedents (`precedents.md`)
+Human triage decisions that generalize — "1-wei floors are a UI concern", "over-payment funded by external yield is opportunity cost, not loss" — are codified as numbered precedents in **`precedents.md`** at the audit root. It is the common law of this audit: the record of how classes of finding have been judged, so the same question is not re-litigated every run. Project-specific dispositions stay in each ledger's `triageReason`; tooling and method lessons stay in memory.
+
+- **Every precedent states its premise.** Premises expire (the BatchNFTMinter "no redemption value" premise died when NFTBonfire landed; the minter-cushion premise is void for StableStakerV2). The **precedent-triager** agent re-checks each premise at HEAD before applying it, and flags a failed one as **⚠ EXPIRED PRECEDENT**, leaving the finding at full severity.
+- **Effects:** `suppress`, `downgrade`, `escalate` (a class worse than it looks), `annotate`. Suppression writes the ledger status **`precedent-suppressed`** — the only disposal a scan may set. It is re-checked every time the finding is seen again and is never confused with a human status.
+- **Law-1 limits:** a precedent never suppresses a High, never touches a regression, `fix-pending` or incomplete-fix finding, never overrides a human status, and only *proposes* changes to entries already `open`.
+- **Every run records its decisions** in `<project>/reports/NN/triage-decisions.md` and names them, with override commands, in the run summary. Override with `/ledger <project> reopen <id>`; confirm with `/ledger … wontfix <id>`.
+- **Precedents are made by humans.** After a `/ledger` triage whose reason sounds general, the command drafts a precedent and asks before adding it. `/ledger <project> precedents | precedent add | narrow | retire` manage the register. The model never writes a precedent on its own judgement.
 
 ### Re-verifying a single finding (`/recheck`)
 `/recheck <project> <label-or-fingerprint>` re-proves **one** finding against the current submodule HEAD without running discovery. It is **PoC-replay first**: it syncs the writable `<project>/work/` source to the target commit (preserving the PoC), re-runs the finding's PoC, and classifies the result as **STILL-LIVE** / **LIKELY-FIXED** / **INCONCLUSIVE** (a PoC that no longer *compiles* is inconclusive bit-rot, not a fix). Use it for a localized post-fix re-check; the command itself bounces you to `/full-audit` when the change is broader than the finding's contract.

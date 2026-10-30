@@ -1,0 +1,543 @@
+{
+ "run": "phoenix-phase-2-staging-44",
+ "mode": "script-audit",
+ "story": "story-122",
+ "entryPoints": [
+  "sya-harvester",
+  "antimatter-pool"
+ ],
+ "inputs": {
+  "sya-harvester": "/home/justin/code/audits/phoenix-phase-2-staging/reports/44/script-audits/sya-harvester/candidate-findings.json",
+  "antimatter-pool": "/home/justin/code/audits/phoenix-phase-2-staging/reports/44/script-audits/antimatter-pool/candidate-findings.json"
+ },
+ "idAssignment": "The sya-harvester candidates had no ids. They were assigned SYA-01..SYA-06 in file order.",
+ "counts": {
+  "input": 12,
+  "output": 11,
+  "merged": 1,
+  "droppedOutright": 0,
+  "movedToManualReview": 0
+ },
+ "findings": [
+  {
+   "id": "DEDUP-001",
+   "originalIds": [
+    "AP-01",
+    "AP-06"
+   ],
+   "title": "Step 0 (pair-absent) is enforced only in forge's local pass; once tx1 publicly reveals the seeder, an AM holder can pre-create the AM/sUSDS pair at an AM-cheap ratio, and seed() (amountBMin=0, F3) pours all 2,457.7 protocol-minted AM into it, where the attacker buys ~99.8% of it for 1e-6 sUSDS",
+   "severity": "medium",
+   "severityNote": "Working proposal Medium, borderline High. Fork-demonstrated theft of protocol value (~$2.3k at the seeded price; attacker +$1,320 realized / +$2,168 mark). Reachable only when a third party holds AM, i.e. Script A ran first. The runbook allows that order and Script A's audit makes it likely. Pre-A there are no AM holders, so the attack cannot happen.",
+   "contract": "src/periphery/AntimatterPoolSeeder.sol",
+   "function": "seed / _requireFullConsumption / _addLiquidity",
+   "lineStart": 179,
+   "lineEnd": 248,
+   "relatedLocations": [
+    "src/periphery/AntimatterPoolSeeder.sol:244 (addLiquidity amountAMin=amAmount, amountBMin=0)",
+    "src/periphery/AntimatterPoolSeeder.sol:217-234 (_requireFullConsumption only rejects AM-dear)",
+    "script/CutoverAntimatterPoolMainnet.s.sol:49-50, 258-271 (F3 premise; step 0 local-pass only)",
+    "docs/SyaAntimatterMainnetCutover.md:46-52, 63-64 (private RPC as mitigation; 'step 0 guarantees it')"
+   ],
+   "entryPoint": "antimatter-pool",
+   "rootCauseClass": "OffChainPreconditionNotEnforcedOnChain",
+   "category": "intent-mismatch",
+   "disclosedInStory": "partial",
+   "disclosureQuote": "story-113 L465: \"[low] F3 (carried over): router add for AM/sUSDS uses amountBMin = 0, so on a skewed AM-cheap pair AM is paired against less sUSDS (unused sUSDS returns to lpRecipient).\" story-122 L141: \"F3: the AM/sUSDS add uses amountBMin=0. That is acceptable because the pair is created fresh in the same transaction, guaranteed by step 0.\"",
+   "disclosureGap": "Both stories treat F3 as harmless: the unused sUSDS comes back, and step 0 is said to guarantee a fresh pair. Neither notes that (a) step 0 never runs on chain, and the broadcast has a 5-transaction gap between the public seeder CREATE and the seed; (b) the harm is not 'less sUSDS paired' but the protocol's AM sitting at a price the attacker chose, where the attacker buys it for nothing; (c) a private RPC does not close the gap, because tx1 is MINED publicly. Story-113 Decision 7 (L180) models only a donation ('A donor would give that AM to the LP holders'), not attacker-owned liquidity.",
+   "description": "CutoverAntimatterPoolMainnet checks `factory.getPair(AM,sUSDS)==0` at Step 0 during forge's local simulation. With `--broadcast --skip-simulation --slow`, the six transactions then land one per receipt. tx1 deploys the seeder at a nonce-predictable address with all immutables visible, and the seed is tx5. On chain, AntimatterPoolSeeder.seed() handles an existing pair like this: if both reserves are non-zero, `_requireFullConsumption` reverts only when the AM is DEAR (susdsRequired > susdsOut); otherwise `_addLiquidity` calls Router02.addLiquidity(AM, sUSDS, am, susds, amountAMin=am, amountBMin=0). For an AM-cheap pair the router takes every unit of AM and only `am * rS/rA` sUSDS, and the rest goes back to OWNER. Nothing on chain bounds the price at which the protocol's AM enters the market.",
+   "impact": "Fork at 26303964 (test_r44_02/03), post-Script-A world (a real staker claims, the attacker holds 1 AM). After tx1-4 land, the attacker createPair()s and mints LP with 1 AM : 1e-12 sUSDS. tx5 succeeds: it adds 2,457.703 AM and 2.46e-9 sUSDS, and returns 2,077.157 sUSDS to OWNER. tx6 (revoke) still lands. The attacker swaps 1e-6 sUSDS for 2,452.655 AM, annihilates them with 2,452.65 USDC into 4,905.31 phUSD, and sells into phUSD/sUSDS for 3,384.96 sUSDS. That is a realized gain of +$1,320, or +$2,168 holding the phUSD at spot. The protocol's new LP claims 6.05 AM plus 1e-6 sUSDS instead of 2,457.70 AM plus 2,077.16 sUSDS. Protocol loss: the 2,457.70 phUSD of POL burned, whose AM replacement went to the attacker (about $2,315 at the seeded price). The tax-neutral 'POL conversion' becomes a transfer to the attacker. The in-script post-conditions (all AM in the pair, OWNER holds LP) are not checked on chain and would hold anyway. The verifier passes, since it checks reserves > 0 and OWNER LP > 0 only.",
+   "evidence": "side-effects.json adversarialRuns.midBroadcastFrontRun_amCheap_postA; logs/forktest-run44-antimatter.log (test_r44_02, test_r44_03); preA_world shows the vector needs AM held outside the protocol",
+   "recommendation": "Enforce the precondition in the seed transaction itself. Pass an expected-fresh flag, or `minSUSDSPaired`, to seed(). The script would supply `susdsOut*(1-0.1%)` computed from the same pro-rata quote, or `require(amSusdsPair() == address(0))` when a fresh pair is intended, so that an AM-cheap pair makes tx5 revert (fail-loud) instead of leaking. Until then, run Script B strictly BEFORE Script A, while no third party can hold AM. Correct the runbook: a private RPC does not cover the tx1-to-tx5 window. [merged from AP-06] State in the runbook that the private RPC protects only the seed tx's mempool exposure. Require B-before-A, or the on-chain guard from AP-01.",
+   "mergedFrom": [
+    {
+     "sourceId": "AP-06",
+     "entryPoint": "antimatter-pool",
+     "sourceSeverity": "low",
+     "sourceRootCauseClass": "MitigationMisdescribed",
+     "sourceTitle": "Runbook and script NatSpec present a private RPC as the R1/F3 mitigation, but tx1 (seeder CREATE) is mined publicly 4 transactions before the seed under --slow",
+     "sourceLocation": "docs/SyaAntimatterMainnetCutover.md:46-64 (Script B section L46-52, L63-64)",
+     "sourceDescription": "Flashbots Protect keeps pending transactions out of the public mempool. It does not hide mined ones. Under --slow, forge waits for each receipt, so the seeder deploy, rescue, approve and grant are each visible on chain (at least 4 blocks) before the seed is signed.",
+     "sourceImpact": "The documented mitigation gives a false sense of safety for the AP-01/AP-03 window. On its own this is documentation, but it is the reason the operator would accept the A-before-B order.",
+     "sourceEvidence": "side-effects.json executed.broadcastModeOnAnvil.txs (6 sequential receipts); entry-manifest broadcast flags",
+     "reason": "Same root cause and same window as AP-01: the on-chain seed does not enforce the pair-absent precondition across the tx1->tx5 public window. AP-06 is the documentation facet of that window (the runbook names a private RPC as the mitigation). AP-01 already lists it as disclosureGap (c) and its recommendation already says 'Correct the runbook: a private RPC does not cover the tx1-to-tx5 window'. Fixing AP-01 (an on-chain guard, or B-before-A) removes the need for the AP-06 mitigation. The script-auditor flagged the fold itself (antimatter-pool manual-review item 1). Severity is unchanged: the survivor keeps AP-01's proposed Medium. AP-06's Low is recorded here and is not applied to the survivor. AP-06's description, impact and location are preserved above. The runbook text (docs/SyaAntimatterMainnetCutover.md L46-52, L63-64) was already in AP-01.relatedLocations."
+    }
+   ],
+   "relatedFindings": [
+    {
+     "id": "DEDUP-007",
+     "originalId": "SYA-01",
+     "entryPoint": "sya-harvester",
+     "relation": "enabling condition (A-before-B lets AM circulate); different root cause and separate fix (runbook ordering vs on-chain seed guard) - NOT merged"
+    },
+    {
+     "id": "DEDUP-003",
+     "originalId": "AP-03",
+     "relation": "same attacker-created-pair window; AP-03 is the AM-dear variant exploiting the resume gate"
+    }
+   ],
+   "recommendationSources": {
+    "AP-01": "Enforce the precondition in the seed transaction itself. Pass an expected-fresh flag, or `minSUSDSPaired`, to seed(). The script would supply `susdsOut*(1-0.1%)` computed from the same pro-rata quote, or `require(amSusdsPair() == address(0))` when a fresh pair is intended, so that an AM-cheap pair makes tx5 revert (fail-loud) instead of leaking. Until then, run Script B strictly BEFORE Script A, while no third party can hold AM. Correct the runbook: a private RPC does not cover the tx1-to-tx5 window.",
+    "AP-06": "State in the runbook that the private RPC protects only the seed tx's mempool exposure. Require B-before-A, or the on-chain guard from AP-01."
+   },
+   "dedupNote": "Survivor of AP-01 + AP-06. The severity question (Medium vs borderline High) is deferred to the severity-classifier, per antimatter-pool manual-review item 3."
+  },
+  {
+   "id": "DEDUP-002",
+   "originalIds": [
+    "AP-02"
+   ],
+   "title": "The 'always-run' minter revoke does not run when the seed failed and the AM/sUSDS pair exists: Step 0 aborts first, leaving the seeder an approved Antimatter minter",
+   "severity": "low",
+   "contract": "script/CutoverAntimatterPoolMainnet.s.sol",
+   "function": "run (Step 0 L258-271 vs Step 8 L404-413)",
+   "lineStart": 258,
+   "lineEnd": 413,
+   "entryPoint": "antimatter-pool",
+   "rootCauseClass": "GuardOrderingSkipsCleanup",
+   "category": "intent-mismatch",
+   "disclosedInStory": false,
+   "description": "Story-122 L132 says 'The revoke (step 8) must always run, even on resume', and runbook L94 says 'B's minter revoke runs on every run.' If tx5 reverts after tx4 (setApprovedMinter(seeder,true)) has landed, --slow stops and tx6 is never sent. On re-run, Step 0 sees the existing pair. In the AM-dear front-run the attacker owns that pair and OWNER holds none of its LP, so the require reverts before Step 8 is reached. Every resume aborts the same way, and the grant stays in place indefinitely.",
+   "impact": "Demonstrated (test_r44_04): after the AM-dear front-run makes tx5 revert AntimatterNotFullyConsumed, resume reverts at Step 0 and isApprovedMinter(seeder) stays true. Exploitability is nil today, because the seeder's only mint path is the onlyOwner seed() (test_r44_01). The harm is a stale privileged grant that the script's guard and runbook say cannot exist, so the owner must notice it and revoke by hand. A competent owner would be surprised (Law 3 footgun).",
+   "evidence": "side-effects.json adversarialRuns.frontRun_amDear_postA; resumeMatrix row 'tx4 + tx5 REVERTED with foreign pair'",
+   "recommendation": "Run the revoke before any abort. If a recorded seeder `isApprovedMinter`, revoke it first (or inside the Step-0 failure branch), then abort. Also state in the runbook that a tx5 revert requires a manual `setApprovedMinter(seeder,false)`.",
+   "mergedFrom": [],
+   "relatedFindings": [
+    {
+     "id": "DEDUP-003",
+     "originalId": "AP-03",
+     "relation": "same Step-0 resume branch; AP-02 = foreign pair with no OWNER LP aborts before the revoke; AP-03 = foreign pair with dust OWNER LP passes the gate. Different failure (skipped cleanup vs false completion), different fix (revoke-before-abort vs chain-anchored resume) - NOT merged"
+    }
+   ]
+  },
+  {
+   "id": "DEDUP-003",
+   "originalIds": [
+    "AP-03"
+   ],
+   "title": "[DISCLOSED, strengthened] An attacker can induce the seed failure and then spoof a resume to 'completed': with dust LP sent to OWNER, the resume skips the seed, the local-pass record says seeded=true, the patcher FILLs the attacker's pair and :verify passes",
+   "severity": "medium",
+   "severityNote": "Story-122 already labels this [medium]. That stands, on fork evidence that is stronger than the story's. No protocol funds are lost (the rescued slice stays on OWNER). The harm is a false-green pipeline that writes the attacker's pair into the book for Script C. It needs post-A AM.",
+   "contract": "script/CutoverAntimatterPoolMainnet.s.sol",
+   "function": "run (Step 0 resume branch L262-268)",
+   "lineStart": 262,
+   "lineEnd": 268,
+   "entryPoint": "antimatter-pool",
+   "rootCauseClass": "WeakResumeGate",
+   "category": "unintended-side-effect",
+   "disclosedInStory": true,
+   "disclosureQuote": "story-122 Auto-Completed: \"[medium] Script B step-0 resume branch is weaker than a fresh run: accepts any existing AM/sUSDS pair if the recorded seeder has code and OWNER holds any LP of it ... Crashed broadcast + griefer dust LP could make resume \\\"complete\\\" without seeding.\"",
+   "disclosureGap": "The story says this needs a mid-broadcast crash plus active griefing, reduced by a private RPC. In fact the attacker can CAUSE the crash: an AM-dear pair created after tx1 makes tx5 revert, and the private RPC does not help (see AP-01). The story also did not note that the patcher and verifier then accept the state. The forge local pass already wrote deploymentStatus 'completed', seeded=true and simulated amMinted/liquidity to the progress file, so the patcher's 'completed && seeded' gate and the verifier's internal-consistency check both pass.",
+   "description": "Step 0's resume branch accepts an existing pair if `p.seeder` has code and `IERC20(existing).balanceOf(OWNER) > 0`. It does not check `p.seeded` against the chain, compare against a recorded pair, or check any LP share.",
+   "impact": "Fork (test_r44_04): after the AM-dear front-run and the tx5 revert, the attacker sends 1 wei of its LP to OWNER. The resume sends only the revoke and writes 'completed'. The 2,258.927 LP slice stays unconverted on OWNER, and the cutover mints no AM. VerifyAntimatterPoolCutover PASSES. The patcher (scratch copy of the book) FILLs AntimatterSusdsPair = 0xb6da… (the attacker's pair). The tax ledger would record a conversion that never happened. Script C would then wire UniswapHelper's AM routes to an attacker-priced pair.",
+   "evidence": "side-effects.json adversarialRuns.frontRun_amDear_postA; logs/patcher-spoof.log; logs/artifacts/progress.spoof-after-dustLP.json",
+   "recommendation": "On resume, require chain evidence of THIS seed. Record the seed tx hash, or check `IERC20(existing).balanceOf(OWNER) >= p.liquidity` and `amReserve >= p.amMinted`, with OWNER's share of totalSupply above 99%. Never treat a progress record written in the local pass as proof that a transaction landed.",
+   "mergedFrom": [],
+   "relatedFindings": [
+    {
+     "id": "DEDUP-006",
+     "originalId": "SYA-06",
+     "entryPoint": "sya-harvester",
+     "relation": "shared contributing factor: progress record written in forge local pass (same disclosed story-122 item). NOT merged, see the dedup-log"
+    },
+    {
+     "id": "DEDUP-004",
+     "originalId": "AP-04",
+     "relation": "AP-04 verifier gap is why the spoof verifies green; separate fix"
+    }
+   ]
+  },
+  {
+   "id": "DEDUP-004",
+   "originalIds": [
+    "AP-04"
+   ],
+   "title": "[DISCLOSED] VerifyAntimatterPoolCutover anchors no recorded figure to chain state: reserves > 0 and OWNER LP > 0 are the only live seed checks, so a never-seeded, foreign-priced pair verifies",
+   "severity": "low",
+   "contract": "script/VerifyAntimatterPoolCutover.s.sol",
+   "function": "run",
+   "lineStart": 54,
+   "lineEnd": 85,
+   "entryPoint": "antimatter-pool",
+   "rootCauseClass": "VerifierRecordNotChainAnchored",
+   "category": "intent-mismatch",
+   "disclosedInStory": true,
+   "disclosureQuote": "story-122 Auto-Completed [low]: \"Script B's verifier cross-checks recorded seed figures but not against chain receipts, and only logs the UniPoolerV2 LP decrement rather than asserting it.\"",
+   "description": "The story's end-state checks (L135-140: phUSD burned == AM minted, pair AM reserve == AM minted, pooler LP − slice, OWNER holds the LP) reach the verifier only as checks on the record's internal consistency. Live checks never compare the pair's AM reserve or OWNER's LP share with the record, and never check the price.",
+   "impact": "Demonstrated: the verifier passes on the AP-03 spoof, and on the AP-01 drained pool (OWNER LP > 0, reserves > 0). It cannot detect a pair created by someone else, wrong reserves, or a missing seed. It does catch an unrevoked minter (verifier L60-63).",
+   "evidence": "test_r44_04 (verify passes on never-seeded state); side-effects.json postconditionResults",
+   "recommendation": "Assert at least: OWNER's AM/sUSDS LP / totalSupply ≥ 99% (drift only from later third-party adds, which the verifier can bound), AM supply ≥ recorded amMinted, and a sanity band for pair price vs the phUSD/sUSDS price. Or read the seed tx receipt's Seeded event from broadcast/run-latest.json.",
+   "mergedFrom": []
+  },
+  {
+   "id": "DEDUP-005",
+   "originalIds": [
+    "AP-05"
+   ],
+   "title": "1 wei of any of five tokens sent to the nonce-predictable seeder address blocks Script B at Step 9 (pre-deploy), or fails :verify permanently (post-deploy), because _requireSeederEmpty demands zero balances while the seeder itself tolerates pre-existing ones",
+   "severity": "low",
+   "contract": "script/CutoverAntimatterPoolMainnet.s.sol",
+   "function": "_requireSeederEmpty (L156-163; called at Step 9 L426 and by the verifier L59)",
+   "lineStart": 156,
+   "lineEnd": 163,
+   "entryPoint": "antimatter-pool",
+   "rootCauseClass": "GriefableAbsoluteBalanceCheck",
+   "category": "drift",
+   "disclosedInStory": false,
+   "description": "The seeder's own `_requireUnchanged` compares before/after balances, so it tolerates tokens sent out of band (NatSpec L272-273: '...which rescueERC20 recovers'). The script and verifier instead require absolute zero balances of phUSD, AM, sUSDS, phUSD/sUSDS LP and AM/sUSDS LP. The seeder address is CREATE(OWNER, nonce), which is public: 0xdb70…09BE at nonce 1791.",
+   "impact": "test_r44_09: 1 wei sUSDS sent to 0xdb70… before the run makes the preview/local pass revert 'end state: seeder holds sUSDS'. Nothing is broadcast, so the behaviour is fail-loud and safe, but B cannot run until the owner burns a nonce. test_r44_10: 1 wei sent after a completed run makes :verify revert until OWNER calls seeder.rescueERC20, which neither the script nor the runbook mentions. The cost to the griefer is negligible. Funds are never at risk.",
+   "evidence": "side-effects.json adversarialRuns.dustToSeeder",
+   "recommendation": "Compare seeder balances to their pre-seed values (as the contract does), or treat dust below a threshold as a warning. Document seeder.rescueERC20 as the remedy in the runbook.",
+   "mergedFrom": []
+  },
+  {
+   "id": "DEDUP-006",
+   "originalIds": [
+    "SYA-06"
+   ],
+   "title": "[DISCLOSED] Progress file written in forge's local pass can record claimEnabled:true / completed for a broadcast that crashed, and ClaimUnblockState trusts it",
+   "severity": "low",
+   "contract": "script/helpers/ClaimUnblockState.sol",
+   "function": "progressRecordsClaimEnabled",
+   "lineStart": 37,
+   "lineEnd": 46,
+   "entryPoint": "sya-harvester",
+   "rootCauseClass": "LocalPassProgressWrite",
+   "category": "drift",
+   "description": "Confirmed on anvil: progress.sya-harvester.1.json was written ('Progress file written') before 'ONCHAIN EXECUTION COMPLETE'. The truth table is otherwise correct, and no further logic error was found in ClaimUnblockState, _doneClaimStillDisabled, or the verifier Phase 7 branch.",
+   "impact": "This matters only when claimEnabled is already true on chain. It is mitigated by chain-state resume gates, the no-code abort, and the zero-exit-only patcher.",
+   "evidence": "logs/anvil-broadcast.log ordering; cluster-analysis.json rank 1",
+   "recommendation": "Write the final progress record from a post-broadcast step that reads receipts (e.g. extend the patcher to confirm run-latest.json receipts with status 1 for all 5 txs before FILL), or have ClaimUnblockState additionally require code at the recorded harvester.",
+   "disclosedInStory": true,
+   "storyQuote": "Progress files are written during forge's local pass, so the \"resume\" writes add little. ... A broadcast that crashes partway therefore leaves a progress file that says `completed` / `claimEnabled: true` / `seeded: true` with simulated values.",
+   "verification": "fork-reproduced",
+   "mergedFrom": [],
+   "relatedFindings": [
+    {
+     "id": "DEDUP-003",
+     "originalId": "AP-03",
+     "entryPoint": "antimatter-pool",
+     "relation": "same disclosed story-122 item (local-pass progress writes). In AP-03 it is one factor under a different root cause (WeakResumeGate), so NOT merged"
+    }
+   ],
+   "dedupNote": "Kept separate from AP-03. The rootCauseClass LocalPassProgressWrite is shared, but each script has its own progress file and its own consumer (ClaimUnblockState vs the Script B Step-0 resume/patcher), and each needs its own fix. See the dedup-log."
+  },
+  {
+   "id": "DEDUP-007",
+   "originalIds": [
+    "SYA-01"
+   ],
+   "title": "Script A opens StableStakerV2.claim before Script B creates the AM/sUSDS market, putting ~205 AM in third-party hands that can pre-create or pre-price the pair and permanently trip Script B's R1 abort; runbook calls A and B order-independent",
+   "severity": "low",
+   "contract": "script/DeploySyaHarvesterMainnet.s.sol",
+   "function": "run (Step 6 setClaimEnabled) / docs/SyaAntimatterMainnetCutover.md Order §1",
+   "lineStart": 459,
+   "lineEnd": 470,
+   "entryPoint": "sya-harvester",
+   "rootCauseClass": "ClusterOrderingHazard",
+   "category": "cluster-interaction",
+   "description": "The runbook (docs/SyaAntimatterMainnetCutover.md L15) and story-122 L16 say A and B may run in either order because they touch disjoint state. Storage is disjoint, but A's last tx flips StableStakerV2.claimEnabled, which makes claim() mint raw Antimatter. At block 26303964 Antimatter.totalSupply()==0 and 32 staker/pool positions hold 205.42 AM of pendingReward. Once AM is in circulation, any holder has both the motive (list AM) and the means (AM + sUSDS) to create and seed UniswapV2 AM/sUSDS at a price of their choosing. Script B's step-0 guard (CutoverAntimatterPoolMainnet.s.sol L265) aborts if the pair exists, so B cannot run until a new story writes a seed-into-existing-pair path, which carries the price-manipulation risk that step 0 exists to avoid.",
+   "impact": "Script B is blocked (fail-safe, no loss of funds); the protocol-owned AM/sUSDS liquidity cutover (and Script C, which requires B) is delayed or must be redesigned around a pair whose initial price a third party set. R1 griefing (createPair needs no AM) pre-exists; A-first widens it from deliberate griefers to ordinary AM holders.",
+   "evidence": "side-effects.json orderingRuns.AthenClaimThenPairThenB: on anvil after A, 0xd57e..7c66 claim(DOLA) minted 25.4768 AM (supply 0 -> 25.48), createPair(AM,sUSDS) succeeded, Script B preview exit 1 'Step 0: the AM/sUSDS pair ALREADY EXISTS ... ABORT (griefing risk R1, story 113)'. Both orders succeed when nobody else acts (A-then-B and B-then-A both exit 0). Law-3 footgun: an owner reading 'disjoint state' would not expect enabling claims to endanger B.",
+   "recommendation": "Change the runbook order to B (through a private RPC, as already recommended) BEFORE A. Alternatively, send B's seed and A's setClaimEnabled in the same private bundle. If A must go first, accept that B may need a seed-into-existing-pair fallback and plan it before broadcasting A. Update story-122 L16 and runbook §Order to drop the 'disjoint state' rationale.",
+   "disclosedInStory": false,
+   "verification": "fork-demonstrated (anvil @26303964)",
+   "mergedFrom": [],
+   "relatedFindings": [
+    {
+     "id": "DEDUP-001",
+     "originalIds": [
+      "AP-01",
+      "AP-06"
+     ],
+     "entryPoint": "antimatter-pool",
+     "relation": "this ordering hazard is the enabling condition for AP-01/02/03"
+    },
+    {
+     "id": "DEDUP-002",
+     "originalId": "AP-02",
+     "entryPoint": "antimatter-pool"
+    },
+    {
+     "id": "DEDUP-003",
+     "originalId": "AP-03",
+     "entryPoint": "antimatter-pool"
+    }
+   ],
+   "dedupNote": "Not merged into AP-01. The root cause differs: here it is runbook/story ordering in script A (setClaimEnabled before B), there it is an on-chain-unenforced precondition in AntimatterPoolSeeder/Script B. The fixes are independent: either fix leaves the other defect live (with the guard alone, B is still griefable/blocked via R1; with B-first ordering alone, the seeder still has no on-chain bound). The proposed severities also differ (Low vs Medium)."
+  },
+  {
+   "id": "DEDUP-008",
+   "originalIds": [
+    "SYA-02"
+   ],
+   "title": "DOLA route sells through a near-empty DOLA/FRAXBP metapool (~4,982 DOLA; base pool holds only ~184.9k USDC); 100k DOLA returns 8,998.58 USDC, and the 1,000-unit dry run cannot see this",
+   "severity": "low",
+   "contract": "script/DeploySyaHarvesterMainnet.s.sol",
+   "function": "dolaRoute",
+   "lineStart": 161,
+   "lineEnd": 167,
+   "entryPoint": "sya-harvester",
+   "rootCauseClass": "ThinLiquidityRouteConfig",
+   "category": "drift",
+   "description": "The DOLA payload (story-122 L95, copied from lib/sya-harvester/test/fork/MainnetRoutes.sol, which was discovered at block 26,261,000) uses exchange_underlying on 0xE571..884d. At 26303964 that pool holds 4,982.26 DOLA and 8,919.26 FRAXBP LP, and FRAXBP 0xDcEF..41A2 holds 1,799,188 FRAX against only 184,870 USDC. The script's floor (97% of par at DRY_RUN_UNITS=1,000) passes (994.04 USDC), but the route's capacity is about 5k DOLA. SYAHarvester sells with minOut 0 on every hop and has a single aggregate minEthOut (sya-harvester Q-04). A pool this thin can be moved very cheaply around a harvest.",
+   "impact": "There is no loss of protocol funds: PhlimboV3 receives a fixed USDC claim, and the harvester caller bears slippage and MEV. However, once DOLA yield per harvest grows past a few thousand dollars, harvests that include the DOLA strategy become unprofitable or revert Unprofitable. The SYA→PhlimboV3 USDC flow then stalls unless callers exempt the DOLA strategy, which leaves the DOLA yield unharvested. The story-052 checks and the dry run validate correctness but not depth, so this config risk is invisible to the script's own guards.",
+   "evidence": "side-effects.json routeDepth: DOLA->USDC 10->9.950744, 1000->994.039768, 100000->8998.581324 (test_run44_bidirectional_sizes FAIL at 100k by design); USDe route 100000->99464.83 (healthy).",
+   "recommendation": "Survey deeper DOLA venues (e.g. Curve NG DOLA/crvUSD, DOLA/sUSDS, DOLA/USDC pools) on a fork and pick the route that maximises output at the expected per-harvest DOLA size. Add a dry-run leg at that upper-bound size (or a reserve-depth floor) to the script's preflight. Document a monitoring threshold for re-pointing via setRoute. Story-122 should record why this pool was chosen (Law 2: the story text specified it, so amend the story rather than silently diverging).",
+   "disclosedInStory": false,
+   "verification": "fork-measured",
+   "mergedFrom": [],
+   "relatedFindings": [
+    {
+     "ledger": "sya-harvester Q-04",
+     "fp": "dd56134239f8",
+     "relation": "referenced, not refiled; thin pool amplifies the aggregate-minEthOut issue"
+    }
+   ]
+  },
+  {
+   "id": "DEDUP-009",
+   "originalIds": [
+    "SYA-03"
+   ],
+   "title": "Reverse dry-run leg is measured on a pool already moved by the forward leg in the same snapshot, so its balance-delta floor is not an independent check of current pool state",
+   "severity": "low",
+   "contract": "script/DeploySyaHarvesterMainnet.s.sol",
+   "function": "_dryRunBothWays",
+   "lineStart": 510,
+   "lineEnd": 539,
+   "entryPoint": "sya-harvester",
+   "rootCauseClass": "WeakDryRunIsolation",
+   "category": "intent-mismatch",
+   "description": "_dryRunBothWays takes a single vm.snapshotState(), runs tokenIn→USDC, then runs USDC→tokenIn on the reversed route against the post-forward pool, and only then reverts. On the DOLA route the forward 1,000 DOLA is about 20% of the metapool's DOLA balance, so the reverse leg is subsidised by the imbalance the forward leg created. The script logged 1005.003 DOLA; the same reverse swap from the untouched pool gives 1002.515 DOLA. This still proves the pool indices (the human's actual concern). But the reverse 97% floor is measuring a round trip, not the live reverse route.",
+   "impact": "QA. No wrong payload can pass because of this: a wrong-index or gapped reverse route would still fail. The reverse output figure recorded in story-122's preview evidence overstates the live reverse quote by about 0.25% on DOLA.",
+   "evidence": "side-effects.json preconditionResults (dry run 1000 USDC->DOLA note); test_run44_reverseIndependent_1000 PASS: USDC->DOLA 1002514964587012398095 vs script 1005003257603299609885.",
+   "recommendation": "Revert to the snapshot (or take a fresh one) between the forward and reverse legs, so each direction is measured against the live pool state the broadcast will meet.",
+   "disclosedInStory": false,
+   "verification": "fork-measured",
+   "proposedBucket": "QA",
+   "mergedFrom": [],
+   "relatedFindings": [
+    {
+     "id": "DEDUP-008",
+     "originalId": "SYA-02",
+     "relation": "the same thin DOLA pool explains the round-trip subsidy; different defect (dry-run isolation) - NOT merged"
+    }
+   ]
+  },
+  {
+   "id": "DEDUP-010",
+   "originalIds": [
+    "SYA-04"
+   ],
+   "title": "Fixed 0.3 gwei legacy price with no basefee check: a stalled mid-sequence tx makes the runbook's 'Re-run :broadcast' re-sign the same pending nonce at the same price",
+   "severity": "low",
+   "contract": "package.json",
+   "function": "sya-harvester:broadcast",
+   "lineStart": 94,
+   "lineEnd": 94,
+   "entryPoint": "sya-harvester",
+   "rootCauseClass": "OperationalGasPriceNoReplacementPath",
+   "category": "drift",
+   "description": "The broadcast key fixes --legacy --with-gas-price ${SYA_HARVESTER_GAS_PRICE_WEI:-300000000}. At the fork block basefee is 0.1486 gwei (2.0x headroom), and nothing checks basefee before signing 5 sequential Ledger transactions with --slow. If basefee crosses 0.3 gwei mid-sequence, the pending tx stalls and forge exits non-zero, so the patcher and :verify do not run. The runbook (L91-93) says to re-run :broadcast. That repeats the default price and re-signs the stuck nonce, which nodes reject (replacement underpriced) until the operator raises the env var by 10% or more. The progress file already says completed/claimEnabled:true from the local pass (disclosed).",
+   "impact": "Operational only: a delay and operator confusion. Funds are not at risk, and the resume gates prevent double-configuration. Budget is ample: A uses 0.000982 ETH of 0.007282 and A+B uses 0.002383, completing at legacy prices up to 1.479 gwei (A) or 0.655 gwei (A then B).",
+   "evidence": "side-effects.json gas block (anvil receipts @26303964). The stuck-tx path is reasoned, not fork-demonstrated, because anvil auto-mines.",
+   "recommendation": "In the runbook, check basefee before broadcasting and set SYA_HARVESTER_GAS_PRICE_WEI to at least 2× basefee. On a stalled tx, re-run with at least +10% price so it replaces the same nonce. Or add a preflight require(block.basefee < gasPrice) in broadcast mode (vm.envUint read).",
+   "disclosedInStory": false,
+   "verification": "unverified (reasoned)",
+   "proposedBucket": "QA",
+   "mergedFrom": []
+  },
+  {
+   "id": "DEDUP-011",
+   "originalIds": [
+    "SYA-05"
+   ],
+   "title": "[DISCLOSED] Story-122 checklist item 'stable-staker-v2-cutover:verify still passes against current mainnet' is ticked but false; the verifier aborts at Phase 6b before reaching the story-122 Phase 7 claimEnabled edit",
+   "severity": "low",
+   "contract": "script/VerifyStableStakerV2Cutover.s.sol",
+   "function": "run (Phase 6b OWNER DOLA residual; Phase 7 L466-470)",
+   "lineStart": 466,
+   "lineEnd": 470,
+   "entryPoint": "sya-harvester",
+   "rootCauseClass": "TickedButFalseChecklist",
+   "category": "intent-mismatch",
+   "description": "Re-found on the anvil post-A state: the verifier fails with 'verify: Phase6b: OWNER DOLA residual - OWNER holds 88138771830498 DOLA, expected its pre-execution balance 0'. As a result, the state-aware claimEnabled assertion at L466-470 is never exercised end to end against live state, before or after Script A.",
+   "impact": "The verifier is red on mainnet regardless of A. The story-122 knock-on edit is verified only by unit-level ClaimUnblockState tests.",
+   "evidence": "logs/ssv2-cutover-verify-postA.log",
+   "recommendation": "The human decides on the OWNER DOLA residual check, for example by relaxing it to an explicit dust tolerance or recording the dust's provenance. After that, re-run stable-staker-v2-cutover:verify on the post-A state so the Phase 7 claimEnabled branch gets end-to-end coverage. Amend the story checklist tick.",
+   "disclosedInStory": true,
+   "storyQuote": "Checklist item \"`stable-staker-v2-cutover:verify` still passes against current mainnet\" is ticked but not literally true: verifier fails at Phase 6b because OWNER holds ~0.000088 DOLA (88138771830498 wei)",
+   "verification": "fork-reproduced",
+   "mergedFrom": []
+  }
+ ],
+ "inputDisposition": [
+  {
+   "inputId": "SYA-01",
+   "disposition": "kept",
+   "outputId": "DEDUP-007"
+  },
+  {
+   "inputId": "SYA-02",
+   "disposition": "kept",
+   "outputId": "DEDUP-008"
+  },
+  {
+   "inputId": "SYA-03",
+   "disposition": "kept",
+   "outputId": "DEDUP-009"
+  },
+  {
+   "inputId": "SYA-04",
+   "disposition": "kept",
+   "outputId": "DEDUP-010"
+  },
+  {
+   "inputId": "SYA-05",
+   "disposition": "kept",
+   "outputId": "DEDUP-011"
+  },
+  {
+   "inputId": "SYA-06",
+   "disposition": "kept",
+   "outputId": "DEDUP-006"
+  },
+  {
+   "inputId": "AP-01",
+   "disposition": "kept (survivor)",
+   "outputId": "DEDUP-001"
+  },
+  {
+   "inputId": "AP-02",
+   "disposition": "kept",
+   "outputId": "DEDUP-002"
+  },
+  {
+   "inputId": "AP-03",
+   "disposition": "kept",
+   "outputId": "DEDUP-003"
+  },
+  {
+   "inputId": "AP-04",
+   "disposition": "kept",
+   "outputId": "DEDUP-004"
+  },
+  {
+   "inputId": "AP-05",
+   "disposition": "kept",
+   "outputId": "DEDUP-005"
+  },
+  {
+   "inputId": "AP-06",
+   "disposition": "merged",
+   "outputId": "DEDUP-001"
+  }
+ ],
+ "manualReviewCarried": {
+  "sya-harvester": [
+   {
+    "item": "ClaimWithdrawStableStaker.s.sol L105 require(!claimEnabled) contradicts DeployMocks L1554 setClaimEnabled(true); anvil-only, pre-dates story 122 (story 116). No mainnet effect.",
+    "proposed": "informational / not filed"
+   },
+   {
+    "item": "story-121 test_bookKey_isZeroPlaceholder failure (disclosed in story-122 Review issue 2) was NOT re-run in run 44 (full suite not executed, WSL2 load); neither re-found nor refuted.",
+    "proposed": "carry"
+   },
+   {
+    "item": "Concurrent A/B runs sharing OWNER nonce: local-pass progress address could name the other script's contract; _checkImmutables reverts (safe abort). Operator-sequencing only.",
+    "proposed": "not filed"
+   }
+  ],
+  "antimatter-pool": [
+   {
+    "item": "AP-06 may be folded into AP-01 at dedup: same root window, documentation only. Kept separate so it stays visible.",
+    "proposed": "dedup decision"
+   },
+   {
+    "item": "Seeded AM price (0.8452 sUSDS, about $0.942) is above annihilate parity (2*P_phUSD - 1, about $0.884). Holders get more by selling AM into the protocol pool than by annihilating ($23.24 vs $21.85 per 25 AM), so the protocol's LP absorbs claimant selling at a price above what AM redeems for. Intended per story-113 L113 ('AM/sUSDS opens at the existing phUSD/sUSDS market price, not at a $1 peg'). No arbitrage loop exists (test_r44_07: -$14.71).",
+    "proposed": "informational, not filed (intended design, cited)"
+   },
+   {
+    "item": "AP-01 severity: Medium vs High. Theft is fork-proven without hypotheticals once AM circulates, and the runbook explicitly permits A-before-B. The value at stake is bounded at about $2.3k (the 10% slice).",
+    "proposed": "severity-classifier decision"
+   },
+   {
+    "item": "Antimatter, UniPoolerV2 deployed bytecode is not Etherscan-verified (closure manifest 'unresolved'). Fork behaviour matched the nested-pin source in every path exercised.",
+    "proposed": "carry"
+   },
+   {
+    "item": "Operator deleting the progress file mid-sequence (not instructed for any landed state) would re-size and rescue a second 10% slice to OWNER. No AM double-mint, because the exact-amount approval blocks it. Operator-error only.",
+    "proposed": "not filed"
+   },
+   {
+    "item": "Script C (uniswap-helper) was not executed against the AP-03 spoofed book; the downstream claim (C wires to the attacker's pair) is inferred from C's documented precondition (story-122 L161).",
+    "proposed": "verify in the uniswap-helper script audit if run"
+   }
+  ]
+ },
+ "referencedNotRefiled": {
+  "sya-harvester": [
+   {
+    "label": "L-02",
+    "fp": "464b94269170",
+    "status": "open",
+    "relevance": "live: harvest at fork pays ~$8.23 ETH vs 18.32 USDS NFT cost -> no rational third-party harvests yet"
+   },
+   {
+    "label": "Q-04",
+    "fp": "dd56134239f8",
+    "status": "open",
+    "relevance": "single aggregate minEthOut; amplified for DOLA by thin pool (see run-44 DOLA-depth finding)"
+   },
+   {
+    "label": "Q-05",
+    "fp": "bec3cacbc1ef",
+    "status": "open",
+    "relevance": "USDe route via crvUSD as specified by story-122; route performs 99.46% at 100k"
+   },
+   {
+    "label": "L-01",
+    "fp": "d7744b9d2400",
+    "status": "open",
+    "relevance": "1-wei DOLA and 1-wei USDe donations did NOT brick harvest at 26303964 on live pools (test_run44_dustDonation_*); evidence for sya-harvester ledger note, no status change proposed here"
+   },
+   {
+    "label": "L-05",
+    "fp": "3dc300229056",
+    "status": "open (QA by owner)",
+    "relevance": "script-level checker rejects swap_type 9 and >8; shipped payloads use 1 and 2"
+   },
+   {
+    "label": "M-01",
+    "fp": "004d4547d93b",
+    "status": "fixed",
+    "relevance": "pin 6b862aa setRoute contiguity confirmed live: stored routes pass; gapped payload delivers crvUSD on real router (story fork test)"
+   },
+   {
+    "label": "L-03",
+    "fp": "4994fe853f91",
+    "status": "open",
+    "relevance": "unchanged by deployment"
+   }
+  ],
+  "antimatter-pool": [
+   {
+    "entryPoint": "sya-harvester",
+    "finding": "pps44-L-am-ordering (Low, cluster-interaction)",
+    "relevance": "A-before-B lets AM circulate before B; it is the enabling condition for AP-01/02/03. Not re-filed."
+   },
+   {
+    "project": "antimatter",
+    "label": "M-02",
+    "fp": "64807f2b1456",
+    "status": "wont-fix",
+    "relevance": "unbacked AM-half phUSD mint is accepted design; AP-01 uses it only as the realization path"
+   }
+  ]
+ },
+ "notes": [
+  "No severity was changed. Every severity shown is the scanner proposal.",
+  "The ledger was not touched.",
+  "No finding was quality-filtered, so this run has no dedup-originated manual-review.json entries. The per-entry-point manual-review items are carried through above, unchanged."
+ ]
+}

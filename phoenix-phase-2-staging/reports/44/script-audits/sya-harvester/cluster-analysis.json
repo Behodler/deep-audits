@@ -1,0 +1,61 @@
+{
+ "entryPoint": "sya-harvester",
+ "forkBlock": 26303964,
+ "siblings": [
+  {
+   "rank": 1,
+   "script": "CutoverStableStakerV2Mainnet + VerifyStableStakerV2Cutover (+ ClaimUnblockState)",
+   "relation": "predecessor",
+   "analysis": "_doneClaimStillDisabled() = !claimEnabled || ClaimUnblockState.recorded(). Truth table correct: false-on-chain always passes; true-on-chain passes only if progress .claimEnabled==true or book SYAHarvester non-zero. Progress files are git-tracked (server/deployments/progress.*.json in git ls-files), so the record travels with the repo. Only weakness found = progress written in forge's local pass (disclosed, story-122 Review issue 3a / Auto-Completed [low]); it only matters when claimEnabled is already true on chain. No new logic error.",
+   "empirical": "On anvil post-A the cutover verifier aborts at Phase 6b (OWNER DOLA residual 88138771830498 wei) BEFORE reaching Phase 7, so the story-122 Phase 7 edit is never exercised end-to-end on live state.",
+   "disclosedInStory": true,
+   "quote": "It fails, at **Phase 6b**: `OWNER DOLA residual - OWNER holds 88138771830498 DOLA, expected its pre-execution balance 0`. This is **pre-existing and unrelated** to story 122."
+  },
+  {
+   "rank": 2,
+   "script": "CutoverAntimatterPoolMainnet (Script B)",
+   "relation": "sibling-config (runbook: 'A and B, in either order ... They touch disjoint state')",
+   "analysis": "Storage-disjoint: confirmed (A-then-B and B-then-A both succeed on anvil). NOT economically disjoint: A's tx5 opens StableStakerV2.claim, turning ~205.42 AM pending (32 staker/pool pairs) into mintable raw AM while Antimatter.totalSupply()==0 and no AM market exists. Any claimer can then createPair(AM,sUSDS) and/or seed it at an arbitrary ratio; B's step-0 R1 guard then aborts permanently. Demonstrated: claim (25.4768 AM) -> createPair -> B preview exit 1 with the exact R1 abort string. createPair needs no AM, so R1 griefing pre-exists; A-first adds an organic (non-griefer) actor class with motive (a holder wanting to trade AM) and the ability to set the initial price.",
+   "finding": "pps44-L-am-ordering"
+  },
+  {
+   "rank": 3,
+   "script": "DeployUniswapHelperMainnet (Script C)",
+   "relation": "successor",
+   "analysis": "No interaction with A's state beyond shared OWNER nonce/balance. After A+B the OWNER still holds 0.004899 ETH on the fork for C."
+  },
+  {
+   "rank": 4,
+   "script": "ClaimPhlimboUsdcToEth",
+   "relation": "downstream-consumer",
+   "analysis": "Funded only when someone harvests. At the fork block a harvest pays the caller 0.003666 ETH (~$8.23 at the V4 pool price 2246.39 USDC/ETH) and burns an index-4 claim NFT whose mint price is 18.3177 USDS: a rational third party loses ~$10 per harvest today, so the SYA->PhlimboV3 USDC flow the harvester exists for will not start organically until SYA yield accrues further. This is sya-harvester ledger L-02 (464b94269170, open) - referenced, not re-filed."
+  },
+  {
+   "rank": 5,
+   "script": "ClaimWithdrawStableStaker (anvil only)",
+   "relation": "sibling-config",
+   "analysis": "require(!staker.claimEnabled()) at L105 while DeployMocks.s.sol L1554 already sets claimEnabled(true) (story 116 / DeployMocks 11.13). Stale local assertion pre-dating story 122; no mainnet effect. Parked as manual-review (no finding).",
+   "manualReview": true
+  },
+  {
+   "rank": 6,
+   "script": "DeploySyaHarvesterSepolia",
+   "relation": "sibling-config",
+   "analysis": "Mock stack; not a rehearsal (per audit memory). No interaction."
+  }
+ ],
+ "claimEnableKnockOn": {
+  "whatOpens": "StableStakerV2.claim(token) (L426-439): mints Antimatter = unclaimedReward + pending to msg.sender. Whenever not paused; no PoolState gate.",
+  "who": "32 staker/pool positions across USDe, DOLA, USDC pools (incl. OWNER). Largest: 0xd57e..7c66 (~25.91 AM USDe, 25.47 DOLA, 16.85 USDC), 0x43bd..c239 (48.40 USDe + 16.69 USDC), 0x186c..a77f (21.11 + 20.85).",
+  "amount": "sum pendingReward = 205.417479 AM at block 26303964 (pendingReward view; unclaimedReward backlog may add more)",
+  "fundingSource": "Freshly minted Antimatter (StableStakerV2 is an approved AM minter). NOT funded by SYA, the harvester or PhlimboV3. The harvester/claim-enable bundling in Script A is a grouping decision (story Concerns L199), not an economic dependency.",
+  "backed": "Same backing as autoAnnihilate excess/terminal-migration mints already live; StableStakerV2 NatSpec (L70-78) says 'Nothing in this contract's safety argument may depend on antimatter being unobtainable while it is false'. No new solvency exposure from the flag itself.",
+  "orderingHarvesterVsClaim": "No hazard: the claim path does not depend on the harvester; in-script, setClaimEnabled is the last tx after read-back + smoke, and --slow stops on a failed tx so it cannot land before the harvester config. If B runs first, A is unaffected (verified on anvil).",
+  "orderingAvsB": "See rank 2 - A-before-B raises the chance B's R1 guard aborts."
+ },
+ "operational": {
+  "gas": "see side-effects.json gas block: A alone 0.000982 ETH, A+B 0.002383 ETH of 0.007282 available. Completion ceilings 1.479 gwei (A), 0.655 gwei (A then B).",
+  "midSequence": "Fixed legacy 0.3 gwei vs fork basefee 0.1486 gwei (2.0x headroom; ~6 consecutive full blocks of +12.5% erase it). A stalled tx leaves forge non-zero (no patcher), progress already says completed/claimEnabled:true from the local pass (disclosed). Re-running ':broadcast' at the SAME default price re-signs the pending nonce at the same price -> node rejects (replacement underpriced / already known) until SYA_HARVESTER_GAS_PRICE_WEI is raised >=10%. The runbook's 'Re-run :broadcast' advice omits this. Reasoned, not fork-demonstrated (anvil auto-mines).",
+  "resumeCorrectness": "Gates are chain-state and byte-exact (routes compared by keccak of path/swapParams/pools; pool key exact; claimEnabled read). Partially-set routes cannot exist (each setRoute is one atomic tx). Resume with a different-nonce address: progress address = local-pass prediction; if a different contract sits there (e.g. B's seeder if both scripts raced on one nonce) _checkImmutables reverts (poolManager() missing) -> safe abort. No-code address -> abort with delete instruction. Verified by story fork tests (resume, no-code abort) on 26303500."
+ }
+}
