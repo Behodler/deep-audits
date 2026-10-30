@@ -1,0 +1,110 @@
+{
+  "project": "reflax-yield-vault",
+  "run": "reflax-yield-vault-18",
+  "scanTimestamp": "2026-10-28T01:10:00Z",
+  "scanType": "economic",
+  "tier": 2,
+  "mode": "regression",
+  "baseline": "cdd07434a62ae4e1b158eef97dbfef3f2f47d6d9",
+  "head": "4788ed41747b923165745af748a078bfb534ba20",
+  "branch": "master",
+  "contractsScanned": 7,
+  "highMediumCandidates": 0,
+  "rpc": "RPC_MAINNET live (block 26286995). No alert.",
+  "probes": {
+    "files": ["/home/justin/code/audits/reflax-yield-vault/work/test/econ-run18/OverDeliveryConservation.t.sol"],
+    "note": "AUDIT-AUTHORED. Never file it as upstream code. Run with the run-context --skip set. 3/3 PASS (fuzz 256 runs).",
+    "results": {
+      "test_premiumOverDeliveryIsFundedByAmmNotCoClients": "PASS. At a 5% AMM premium A is debited 10,000e18 and delivered 10,495.5e18. Co-client B's NAV backing goes 19,990.0e18 -> 20,006.7e18 (UP). Protocol surplus 100.0032e18 -> 100.0032e18 (unchanged).",
+      "test_premiumOverDeliveryWithSurplus": "PASS. Same result with yield accrued. Surplus +1 wei.",
+      "testFuzz_conservation": "PASS. Premium 1.00-1.10, yield 0-2%: co-client backing and protocol surplus never decrease."
+    },
+    "spotReproduced": "work/test/symbolic/DominanceRun17Grounding.t.sol at work HEAD 4788ed4: 7/7 PASS (3 fuzz x 50,000 runs plus tripwires)."
+  },
+  "onChainFacts": {
+    "block": 26286995,
+    "StableStakerV2": "0xA6d3fc83C91B8319D219cEB12B46e3dfF064B58F. LIVE, paused()=false, owner 0xCad1..D0B6. Deployed by phStaging2 CutoverStableStakerV2Mainnet (broadcast/.../1/run-latest.json, 21/21 receipts status 1). The bytecode carries autoAnnihilate, phUSDMintAvailable and the story-028 7-field AutoAnnihilated event topic 0x6a0242..24eb. 20 AutoAnnihilated logs since block 26,000,000. claimEnabled=false, so autoAnnihilate is the reward path. phUSDMintAvailable()=true.",
+    "V1": "0xbce8ABC0...079A is retired. Its phUSD minter role was revoked (setMinter(V1,false) in the broadcast). It remains an authorized client of the USDe and USDC strategies with principal 0.",
+    "wiring": {
+      "DOLA": "0x981c7BE1...B7EE ERC4626YieldStrategy over sDOLA 0xb45a...7305. previewRedeem == convertToAssets (exact). Recipient = V2.",
+      "USDC": "0xaFDf8DeA...AB83 ERC4626YieldStrategy over autoUSD 0xa756...0D35. previewRedeem is 1.38 bps below convertToAssets (16,356.04 vs 16,358.30 USDC). autoUSD idle is 707.5 USDC against the 16,358 USDC position. Recipient = V2.",
+      "USDe": "0xaC2e5936...7f95 ERC4626MarketYieldStrategy, slippageToleranceBps=30, adapter 0x2D02...D6f. setAsideBufferRecipient() REVERTS on this deployment, so it runs pre-story-047 code (per-client buffer; skimSurplus(address,address) is present). Clients: OLD PhusdStableMinter 0x435B...77E5 3,749.62 USDe (revoked minter, buf 25), V2 2,684.40 (buf 25), new minter 0x9485...E60C 43.65 (buf 0), V1 0 (buf 25). td 6,477.66."
+    },
+    "autoAnnihilateAvailable": "true for DOLA, USDC and USDe. All three pools are Active (state 0)."
+  },
+  "findings": [
+    {
+      "id": "ECON-001",
+      "title": "Premise change: StableStakerV2 (with the story-028 phUSD exit top-up) is LIVE on mainnet and V1 is retired. Run-17's 'V1 wired, not V2' premise is VOID, and three carried triggers have now fired.",
+      "contract": "src/AYieldStrategy.sol",
+      "function": "_withdrawInternal (consumer: StableStakerV2.autoAnnihilate / _routeExit)",
+      "location": "src/AYieldStrategy.sol:732-752; src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:158-180; stable-staker/src/src/StableStakerV2.sol:518-596, :1309-1329",
+      "rootCauseClass": "PREMISE-CHANGE-V2-LIVE",
+      "type": "deployment-state / triage-gate",
+      "description": "On chain (see onChainFacts), V2 is the live client of all three strategies and runs story-028 bytecode. Each autoAnnihilate requests netWanted from the strategy, measures the delta, and MINTS phUSD for (target - delivered). Consequences for carried items: (a) L-23 e6088a0ec55e has a documented trigger, 'Under V2 the premise is VOID ... => MEDIUM'. That trigger has FIRED. My probe REFUTES the harm mechanism, though. The market _disposeShares sells convertToShares(amount), which is the NAV-equivalent of the debited principal (floored). Remaining backing per principal is therefore (V - NAV(sold))/(D - amount) >= V/D whenever V >= D, and V2's underwater guard blocks the V < D case on the voluntary path. The over-delivery comes from the AMM counterparty, not from co-clients or the skim surplus (probe: co-client backing rises, surplus unchanged). Under V2 an over-delivery mints no phUSD, because minted = target - delivered and delivered is capped at the target. V2 forwards the excess to the caller (:584-588), so it is the caller's own market gain. On mainnet a sUSDe premium over NAV is also arbitraged away by a permissionless sUSDe.deposit. Recommendation: severity-classifier re-weighs L-23 with this evidence. My suggestion is that it stays Low (or drops to QA). It should NOT escalate. (b) WATCH-17-03 is moot. stable-staker 87b34c0 [story-027] bumped lib/reflax-yield-vault to 25276b8 and stripped the preview sizing, so the preview findings (L-18..L-21, L-24, L-26, QA-10, QA-11, INFO-01, L-20, L-22) are fixed-by-removal and cannot re-arm. (c) MR-17-05 dominance is now MORE load-bearing: a cap-bind on the guarded path would become a minted phUSD shortfall, not just a false quote. Both invariants hold at HEAD. p <= D: every principal write is paired, at AYieldStrategy.sol:679/680, :711/712, :748/749, ERC4626YieldStrategy.sol:197/198 and ERC4626MarketYieldStrategy.sol:234/235; the invariant is documented at :48. a <= p: the cap is at :740-743, and the only _disposeShares call site is :745, after the cap. Line refs moved by -33 after the story-051 deletion, but the logic is byte-identical. DominanceRun17Grounding 7/7 PASS at 4788ed4. (d) Deployed-vs-HEAD divergence: the live USDe strategy predates story-047, so findings rated on HEAD's global-recipient behaviour (L-15, F-04) apply only to the USDC and DOLA strategies. The revoked OLD minter still holds 58% (3,749.6 USDe) of the commingled USDe position.",
+      "assumptions": ["sUSDe AMM premium over NAV is bounded by mint-arbitrage (sUSDe.deposit is permissionless and instant)", "V2 bytecode == stable-staker cf8de27 (event topic and selectors match; byte-level diff not performed)"],
+      "suggestedSeverity": "informational (triage-gate)",
+      "ledgerMatch": null,
+      "relatedLedger": ["e6088a0ec55e L-23 (trigger fired, mechanism refuted)", "d9bd595066ef L-27 (cross-repo, now live)", "adfdab346337 L-15 (live only on USDC/DOLA)", "52f9b84a54ec F-03"],
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-002",
+      "title": "Owner footgun: slippageToleranceBps is now the only bound on StableStakerV2's freshly-minted phUSD top-up for USDe exits, but the vault setter is uncapped up to MAX_BPS and its NatSpec is silent on this",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "setSlippageTolerance",
+      "location": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:83-93 (setter, accepts _bps == MAX_BPS); :166-171 (_disposeShares minOut); consumer stable-staker/src/src/StableStakerV2.sol:494-499, :641-648",
+      "rootCauseClass": "SLIPPAGE-BOUND-IS-DOWNSTREAM-MINT-CAP",
+      "type": "cross-contract owner-footgun",
+      "description": "story-028's NatSpec (StableStakerV2.sol:494-499) accepts that the top-up is extractable: 'A caller who sandwiches their own exit ... keeps the sandwich profit AND is still paid the frictionless figure. It is bounded by the strategy's own slippageToleranceBps'. That makes this vault parameter a phUSD-supply control. At bps B, each USDe autoAnnihilate can mint up to roughly B x netWanted of unbacked phUSD, and a self-sandwich can capture the part above the natural NAV-to-pool gap (live gap about 6.3 bps: router get_dy 6,475.75 vs NAV about 6,479.8 for 5,162 sUSDe). At B = MAX_BPS, minOut = 0 (:167) and the bound vanishes. The footgun: when the sUSDe discount widens past B, every exit reverts (L-01 persistent variant), and the documented remedy, which CODE-001 also recommends, is to raise B. A competent owner editing a VAULT parameter to unbrick withdrawals would not expect to be raising the ceiling on phUSD that any autoAnnihilate caller can extract. The vault's NatSpec and CLAUDE.md never mention it. This is DISTINCT from the M-02 d7f6c2dfd580 / M-01-run12 FP framings (not re-raised): there the self-sandwich was zero-sum for the exiter, while here the payer is phUSD supply, through a consumer that went live after those triages.",
+      "assumptions": ["V2 live with USDe autoAnnihilate available (verified on chain)", "Per-call extraction is capped by the caller's min(owed reward, principal), via netWanted (StableStakerV2.sol:536-540), so it is reward-bounded, not stake-bounded", "At B=30 the self-sandwich is unprofitable at live scale: headroom about 24 bps on a reward-bounded netWanted, against a manipulation cost of about 101 sUSDe for a 250k dump (CODE-001 fork data)"],
+      "suggestedSeverity": "low",
+      "severityRationale": "Owner-configuration-dependent and reward-bounded per call. The design is accepted in stable-staker at tight B. Surfaced per Law 3 as a non-obvious consequence of a vault-side knob. Would rise toward Medium only if B were raised well above the natural gap while large reward balances are outstanding.",
+      "recommendation": "Document in setSlippageTolerance NatSpec and vault CLAUDE.md that B bounds downstream minted phUSD per exit. Cap B well below MAX_BPS (this also closes L-01). Runbook: when exits revert because the discount widened, prefer pausing autoAnnihilate on the stable-staker side (or a short-lived bump with claimEnabled flipped) over a standing high B.",
+      "ledgerMatch": "6460e35331df",
+      "reconcile": "Consequence update on L-01 (same function, same missing-cap root). Annotate L-01; do not mint a new fingerprint unless triage prefers to separate the downstream-mint consequence.",
+      "relatedLedger": ["6460e35331df L-01", "d7f6c2dfd580 M-02 FP (not re-raised; distinct payer)", "CODE-001 (its remedy is this footgun's trigger)"],
+      "confidence": "high"
+    },
+    {
+      "id": "ECON-003",
+      "title": "Cross-repo intent mismatch: story-028 bounds the extractable phUSD top-up by 'the strategy's own slippageToleranceBps', but the live DOLA and USDC strategies are ERC4626YieldStrategy, which has no exit floor at all",
+      "contract": "src/concreteYieldStrategies/ERC4626YieldStrategy.sol",
+      "function": "_disposeShares",
+      "location": "src/concreteYieldStrategies/ERC4626YieldStrategy.sol:126-140 (vault.redeem with no min-assets, return discarded); consumer stable-staker/src/src/StableStakerV2.sol:494-499, :574-580",
+      "rootCauseClass": "NO-EXIT-FLOOR-UNBOUNDED-DOWNSTREAM-MINT",
+      "type": "cross-contract intent mismatch",
+      "description": "V2 mints phUSD for (target - delivered) on every autoAnnihilate. Its stated safety bound is the strategy's slippage floor, and only the market strategy has one. For the direct strategy, delivered is whatever vault.redeem returns. sDOLA (DOLA pool): measured previewRedeem == convertToAssets, so the gap is rounding only (convertToShares floors, about 1 wei per call). This is effectively bounded and harmless. autoUSD (USDC pool, Tokemak autopool): there is a static 1.38 bps discount (measured), which V2 now mints as phUSD on every USDC autoAnnihilate. autoUSD idle (707.5 USDC) is far below the strategy position (16,358 USDC), so any exit above idle pulls from destination vaults. If that pull is depressible by a same-tx manipulation of destination pools, V2 mints the gap with NO vault-side bound. That part is UNVERIFIED: no Tokemak source is local and no fork manipulation probe was run. The upper bound per call is the reward-bounded netWanted.",
+      "assumptions": ["Tokemak autopool redeem delivers below convertToAssets when pulling from destinations, and may be manipulable (unverified)", "Extraction per call <= netWanted = min(owed reward, principal)"],
+      "suggestedSeverity": "low",
+      "severityRationale": "The natural discount minted (1.38 bps) is accepted design (exit slippage shifted to the protocol). The manipulable leg is unverified and reward-bounded. Medium trigger: a fork probe shows autoUSD redeem delivery can be depressed by more than about 10 bps at a manipulation cost below the extracted top-up.",
+      "recommendation": "Vault side: add an optional delivery floor to ERC4626YieldStrategy._disposeShares (measure the redeem return against convertToAssets x (1 - tolerance), revert below it). That also closes L-29. Stable-staker side (route): correct the story-028 rationale, which claims a bound that does not exist for direct strategies, and consider a per-call top-up cap.",
+      "ledgerMatch": null,
+      "relatedLedger": ["704404968a8f L-29 (same function; return discarded; distinct root: absence of a floor vs absence of measurement)", "c50c08f9ee58 ECON-A (fee-blind credit)", "d9bd595066ef L-27"],
+      "routeTo": "stable-staker (story-028 rationale)",
+      "confidence": "medium"
+    },
+    {
+      "id": "ECON-004",
+      "title": "Story-051 / story-052 economic intent check: no protection was removed and no economic behaviour of the USDe<->sUSDe strategy changed",
+      "contract": "src/interfaces/IYieldStrategy.sol",
+      "function": "previewExitFor (deleted) / CurveAMMAdapter.setRoute",
+      "location": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:158-180 (unchanged); src/AMMAdapters/CurveAMMAdapter.sol:96-143",
+      "rootCauseClass": "INTENT-CHECK-NO-DEFECT",
+      "type": "intent-verification",
+      "description": "Story-051 says: 'stable-staker will instead request the amount it wants, measure the balance delta it actually receives, and cover the shortfall by minting phUSD itself ... Nothing replaces previewExitFor.' The preview was a sizing aid that never enforced anything; run-17 L-22 showed its floor was not honoured. Every enforced protection survives: the minOut at execution (:166-171), the principal cap (:740-743) and the underwater guard dominance (ECON-001c). The consumer (stable-staker 87b34c0/cf8de27) implements exactly the story's replacement, and that is live. The economic effect of the redesign, exit slippage moved onto phUSD supply, is captured in ECON-002 and ECON-003, not here. Story-052 does not change the live USDe strategy's behaviour: the live adapter 0x2D02 predates the validator and its two stored routes are contiguous (CODE-002, not duplicated). For new deployments the validator only rejects malformed routes, valid route pricing is unaffected, and swap() is byte-unchanged (L-12 CODE-004). L-12 coupling: the strategy forwards the router's return. CODE-004 showed return == delta on the live router, so no strategy <-> adapter <-> pool value leak exists under T-1.",
+      "assumptions": ["T-1 genuine immutable Router NG"],
+      "suggestedSeverity": "informational",
+      "ledgerMatch": null,
+      "relatedLedger": ["7a66fe7d5a96 L-22 (obsolete)", "6e771a84e82d L-12", "CODE-002", "CODE-004"],
+      "confidence": "high"
+    }
+  ],
+  "notRaised": [
+    "Self-sandwich of USDe autoAnnihilate at B=30: explicitly accepted by story-028 and bounded. Folded into ECON-002 as the footgun on B, not filed separately.",
+    "skimSurplus MEV: onlyAuthorizedWithdrawer, and minOut is NAV-anchored. The revert-grief is CODE-001. The surplus (NAV-measured) is unchanged by exits (probe), so there is no cross-client skim leak. Over/under-payment to the pot is opportunity cost by premise.",
+    "Deficit-state last-withdrawer (M-03 merged): the V2 guarded path blocks it. Minter cushion socialization is by design.",
+    "Underwater-buffer branch of _routeExit being used by autoAnnihilate despite story-028's claim 'never spends a unit of it': stable-staker lane, already L-27 d9bd595066ef."
+  ],
+  "errors": []
+}

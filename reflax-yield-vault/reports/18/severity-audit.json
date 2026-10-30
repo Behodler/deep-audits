@@ -1,0 +1,87 @@
+{
+  "severityAudit": {
+    "run": "reflax-yield-vault-18",
+    "commit": "4788ed41747b923165745af748a078bfb534ba20",
+    "timestamp": "2026-10-28T00:00:00Z",
+    "agent": "severity-auditor",
+    "readOnly": "ledger.json, findings/ and submissions/ not modified. Only this file was written. The fork probe ran on an ephemeral anvil fork (port 8599, block ~26288088) and has since been torn down. Nothing was written to work/.",
+    "overallVerdict": {
+      "high": "0. Agree. No finding has an unprivileged, hypothesis-free asset-loss path.",
+      "medium": "DISAGREE with 0. L-30 should be Medium (borderline, flag for human triage). The finding's impact statement ('revert or mis-deliver, recoverable by overwrite') is understated for the deposit direction: an independent fork probe shows a gapped deposit route on the live adapter SILENTLY SUCCEEDS at the live B = 30 and permanently strands the deposit as crvUSD in the strategy. The strategy has no rescue path for it.",
+      "everythingElse": "Agree with the classifier's severities for L-31, L-32, QA-13, QA-14, L-28, L-23 and the L-01 annotation, with the wording corrections noted below."
+    },
+    "findings": [
+      {
+        "findingId": "L-30", "fingerprint": "d5a0f7dc1f9d",
+        "claimedSeverity": "low", "assessedSeverity": "medium", "agreement": false, "confidence": "medium",
+        "flagForHuman": true,
+        "analysis": {
+          "assetRisk": "Permanent loss of every USDe deposit made while a gapped USDe->sUSDe route is stored on 0x2D02. The loss is socialised across the commingled position, so it reaches V2 stakers as under-backed principal and Antimatter/phUSD dilution.",
+          "attackPath": "Owner footgun, not an attacker path. (1) A non-malicious owner calls setRoute(USDe, sUSDe, [USDe, P1, crvUSD, 0, sUSDe, ...]) on the live adapter. This is the sya-harvester M-01 shape: a dropped pool slot. The legacy validator accepts it. (2) Router NG stops at the gap and transfers crvUSD to the strategy (receiver = msg.sender). It returns the crvUSD amount. (3) ERC4626MarketYieldStrategy._acquireShares checks that returned amount against minOut = convertToShares(creditedPrincipal). That minOut is denominated in sUSDe SHARES, about 0.8x the USDe amount, so a ~1:1 crvUSD amount clears it easily even at B = 30. No zero floor is needed. (4) principal is credited and sharesReceived > 0 passes. The strategy never measures its sUSDe balance.",
+          "forkEvidence": "anvil fork of mainnet at block ~26288088. Owner 0xCad1...D0B6 set the gapped forward route on 0x2D02 (status 1). V2 0xA6d3...B58F deposited 1000 USDe into 0xaC2e...7f95 (status 1). Result: getTotalShares UNCHANGED at 5162.338e18. crvUSD held by the strategy went 0 -> 1001.0035e18. V2 principalOf rose 2684.40e18 -> 3681.40e18, and V2 totalBalanceOf rose 2685.33e18 -> 3191.47e18, so V2 is now booked about 490 USDe above its backing and the strategy is below par. Reverse direction: with a gapped sUSDe->USDe route ([sUSDe, P2, crvUSD, 0, USDe]), withdraw REVERTS with 'ERC20: transfer amount exceeds balance' because the strategy holds 0 idle USDe. That direction is availability-only, as the finding says.",
+          "recoverability": "NOT recoverable for the deposit direction. The live strategy's selectors include none of sweep/rescueTokens/rescueERC20/recoverERC20/rescue. emergencyWithdraw (0x5312ea8e) transfers only vault shares (ERC4626MarketYieldStrategy.sol:191-200). Overwriting the route stops further loss but cannot recover crvUSD already stranded. The loss is also silent: the Deposited event emits sharesReceived = the crvUSD amount, which looks plausible.",
+          "secondOrder": "The stranding creates V < D with no sUSDe NAV decline. That (a) trips V2's _isUnderwater guard, blocking voluntary V2 withdraw/autoAnnihilate on the USDe pool, and (b) satisfies the L-32 and L-28 precondition through an owner action rather than an external NAV event.",
+          "conditions": "Requires a future owner setRoute on 0x2D02 with a gapped payload. No gapped route is stored today: there are 2 RouteSet events, both contiguous. src/CLAUDE.md:258 warns that the live adapter predates the check. That lowers the likelihood of the mistake, but not the surprise of the consequence. A competent owner who mis-authors a route expects fail-loud reverts (HEAD behaviour, and the withdraw direction here), not silent acceptance of deposits.",
+          "impact": "High impact (permanent loss of user deposits, silent) x Low likelihood (owner config action, not yet taken) = Medium on the matrix. This matches the sya-harvester M-01 strand class, rated borderline Medium."
+        },
+        "disagreementReason": "The classifier rated L-30 on an impact of 'temporary availability loss, recoverable by overwrite'. The code-scanner's 'no stranding from any accepted route under live conditions' holds only for the HEAD validator. On the live adapter, stranding is reachable at the live slippage setting, because the 18-decimal intermediate (crvUSD) satisfies a share-denominated minOut. With the impact corrected to permanent and silent, Medium is defensible. Low is also defensible because the precondition is an owner action that has not been taken. Per the symmetry rule, keep the higher severity and flag the choice for the human.",
+        "requiredBeforeSubmission": "A coded Foundry fork PoC in work/ reproducing the cast sequence above: impersonate the owner, setRoute gapped, impersonate V2, deposit, assert getTotalShares unchanged and crvUSD stranded. Correct the impact and attackPath text to separate the deposit direction (silent permanent strand) from the withdraw direction (revert). If the human keeps Low, the corrected impact must still be recorded, and the escalation trigger 'stored route fails S1-S4' should be read as already High-impact.",
+        "reproduction": "cast send 0x2D024e0d03Fb6Ead4F8E7Ba1EBECF6db0E755D6f 'setRoute(address,address,address[11],uint256[5][5],address[5])' USDe sUSDe '[USDe,0xF55B0f6F2Da5ffDDb104b58a60F2862745960442,crvUSD,0,sUSDe,0,0,0,0,0,0]' '[[0,1,1,10,2],[0,1,1,10,2],[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]]' '[0,0,0,0,0]' --from <owner, unlocked>; then from V2: USDe.approve(strategy), strategy.deposit(USDe, 1000e18, V2)."
+      },
+      {
+        "findingId": "L-31", "fingerprint": "b9203a0da756",
+        "claimedSeverity": "low", "assessedSeverity": "low", "agreement": true, "confidence": "medium",
+        "analysis": {
+          "assetRisk": "Proven: a static 1.38 bps autoUSD redeem discount, minted as unbacked phUSD on every USDC autoAnnihilate. That is real dilution because V2 emits Antimatter, but it is dust (~$2 per full exit) and reward-bounded.",
+          "attackPath": "The manipulation leg is unverified (no Tokemak source, no fork probe). It cannot support Medium and should be removed from attackPath into escalationTrigger, as validity-review says.",
+          "impact": "Dust today."
+        },
+        "notes": "Keep Low rather than QA. The Law-2 premise failure is genuine and lives on a live pool: story-028 assumes a rounding-scale top-up for direct strategies, and autoUSD delivers a non-rounding shortfall with no floor. Restore the elided 'through an AMM-backed strategy' quote. The existing Medium trigger (a >10 bps same-tx depressible gap, cheaper than the extractable reward, OR a direct-strategy target with a gap >10 bps) is correctly specified. Borderline Low/Medium only once the fork probe is run. Do not downgrade."
+      },
+      {
+        "findingId": "L-32", "fingerprint": "0ab8a6afdb0a",
+        "claimedSeverity": "low", "assessedSeverity": "low", "agreement": true, "confidence": "medium",
+        "analysis": {
+          "assetRisk": "Redistribution of an already-realised commingled loss (up to the minter's ~58% share) onto V2. No new loss is created.",
+          "attackPath": "Corrected precondition: V < D needs an sUSDe NAV decline (never observed historically), a prior emergencyWithdraw, or a stranding event. It cannot come from an AMM discount, because valuation uses convertToAssets and deposits are haircut. That precondition and the owner action are both required. NEW: the L-30 fork probe shows a third, owner-caused way to reach V < D, through a gapped deposit route. The two compound, but each remains an owner action.",
+          "conditions": "External NAV loss (attacker-uncontrolled) plus an owner withdrawAsOwner of the revoked minter while below par.",
+          "impact": "Shifts who bears a loss. It does not enlarge it."
+        },
+        "notes": "Low is correct. Fix attackPath step 1 before promoting the finding from draft. Note the L-30 linkage. The safe-config guidance (prefer pro-rata totalWithdrawal; exit the minter only at or above par) is correct. Not Medium: two independent preconditions, one of them historically unrealised."
+      },
+      {
+        "findingId": "QA-13", "fingerprint": "e98a15eb098b",
+        "claimedSeverity": "qa", "assessedSeverity": "qa", "agreement": true, "confidence": "high",
+        "analysis": {"assetRisk": "None.", "attackPath": "Transient, atomic, unprofitable revert of a retriable tx (~$127 per grief). Morpho flashloan availability lowers capital needs but adds no profit.", "impact": "Liveness nuisance only."},
+        "notes": "Not Low or Medium. Dropping it is also defensible given the owner's M-02 precedent. Under Law 1, prefer folding it into the L-01 annotation as an informational line, because the load-bearing content is that griefing pressures the owner to raise B. It should not be silently dropped. The escalation trigger (consumption of a one-shot or time-bounded resource) is the right one."
+      },
+      {
+        "findingId": "QA-14", "fingerprint": "46109c7be1f6",
+        "claimedSeverity": "qa", "assessedSeverity": "qa", "agreement": true, "confidence": "high",
+        "analysis": {"assetRisk": "None. Router NG rejects swap_type outside 1..8, so the swap reverts in both directions.", "attackPath": "Owner config error that fails loudly and is recoverable by overwrite.", "impact": "Availability window only."},
+        "notes": "Consistent with the owner's sya-harvester L-05 QA rating. Unlike the L-30 gap shape, an out-of-range swap_type reverts in the router and cannot strand funds, so the L-30 upgrade does not carry over here."
+      },
+      {
+        "findingId": "L-28", "fingerprint": "38c9b2bae75f",
+        "claimedSeverity": "low", "assessedSeverity": "low", "agreement": true, "confidence": "medium",
+        "notes": "Incorrect state signalling: a silent 'executed' when shares are zero. The asset loss is the precondition loss, not one that L-28 causes. Re-weigh note: the L-30 strand is a new owner-caused route to booked principal against missing shares, but it does not route V2 claims through totalWithdrawal. Low stands, and the existing triggers are adequate."
+      },
+      {
+        "findingId": "L-23", "fingerprint": "e6088a0ec55e",
+        "claimedSeverity": "low", "assessedSeverity": "low", "agreement": true, "confidence": "medium",
+        "notes": "The probe refutes harm: the over-delivery is funded by the AMM counterparty, and co-client backing rises. QA is defensible, but keep Low (no downgrade without human sign-off). Agree with retiring the 'V2 => MEDIUM' trigger in favour of the I4/I9-breach triggers."
+      },
+      {
+        "findingId": "L-01-annotation", "fingerprint": "6460e35331df",
+        "claimedSeverity": "low", "assessedSeverity": "low", "agreement": true, "confidence": "medium",
+        "flagForHuman": true,
+        "notes": "Borderline Low/Medium, correctly flagged. Today B = 30 (verified on-chain), and extraction at that setting is unprofitable and reward-bounded, so Medium requires an owner action not yet taken. Agree with validity-review: drop the B = MAX_BPS sub-claim as an obvious misconfig (Law 3) and centre the footgun on 'B doubles as V2's phUSD mint bound'. The Medium trigger (B > ~100 bps with material owed reward) is concrete and monitorable through SlippageToleranceSet events."
+      },
+      {
+        "findingId": "F-06", "fingerprint": "7ef86352a3dd",
+        "claimedSeverity": "informational", "assessedSeverity": "informational", "agreement": true, "confidence": "high",
+        "notes": "Not asked, but checked against L-30. The doc sentence is accurate at HEAD, so there is no current deviation. Agree with folding it into L-30 as a hardening nit (enumerate AMMRoutes.json keys)."
+      }
+    ]
+  }
+}

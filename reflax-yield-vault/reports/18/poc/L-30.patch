@@ -1,0 +1,356 @@
+diff --git a/test/poc-run18-L30-LiveAdapterGappedRouteStrand.t.sol b/test/poc-run18-L30-LiveAdapterGappedRouteStrand.t.sol
+new file mode 100644
+index 0000000..a1cce04
+--- /dev/null
++++ b/test/poc-run18-L30-LiveAdapterGappedRouteStrand.t.sol
+@@ -0,0 +1,350 @@
++// SPDX-License-Identifier: MIT
++// AUDIT-AUTHORED PoC (reflax-yield-vault run 18, finding L-30 / ryv18l30,
++// fp d5a0f7dc1f9df28b04c28b7179e230bc9cb42ac02d013a760db384251769ad9c). Not upstream code.
++pragma solidity ^0.8.13;
++
++import "forge-std/Test.sol";
++import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
++import "@openzeppelin/contracts/interfaces/IERC4626.sol";
++import "../src/AMMAdapters/CurveAMMAdapter.sol";
++
++/// @dev Minimal view of the LIVE strategy 0xaC2e...7f95 (deployed bytecode, which predates HEAD
++///      in places, e.g. it has no setSetAsideBufferRecipient). Only selectors present on-chain are used.
++interface ILiveMarketStrategy {
++    function deposit(address token, uint256 amount, address recipient) external returns (uint256);
++    function withdraw(address token, uint256 amount, address recipient) external;
++    function emergencyWithdraw(uint256 amount) external;
++    function principalOf(address token, address account) external view returns (uint256);
++    function totalBalanceOf(address token, address account) external view returns (uint256);
++    function getTotalDeposited(address token) external view returns (uint256);
++    function getTotalShares() external view returns (uint256);
++    function getAuthorizedClients() external view returns (address[] memory);
++    function ammAdapter() external view returns (address);
++    function vault() external view returns (address);
++    function slippageToleranceBps() external view returns (uint256);
++    function owner() external view returns (address);
++}
++
++interface ILiveAdapter {
++    function owner() external view returns (address);
++    function router() external view returns (address);
++    function setRoute(
++        address tokenIn,
++        address tokenOut,
++        address[11] calldata path,
++        uint256[5][5] calldata swapParams,
++        address[5] calldata pools
++    ) external;
++    function getRoute(address tokenIn, address tokenOut)
++        external
++        view
++        returns (address[11] memory, uint256[5][5] memory, address[5] memory, bool);
++}
++
++/// @title L-30 PoC: live CurveAMMAdapter predates the story-052 contiguity validator; a gapped
++///        USDe->sUSDe route is accepted and SILENTLY strands deposits as crvUSD in the live strategy.
++/// @dev   Vulnerable (deployed) code: legacy CurveAMMAdapter.setRoute (== cdd0743, "last non-zero entry
++///        == tokenOut" check only). HEAD fix: src/AMMAdapters/CurveAMMAdapter.sol#L96-L143.
++///        Strategy hook: src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol#L118-L137 (_acquireShares).
++///
++///        WHY THE SLIPPAGE FLOOR DOES NOT CATCH IT
++///        _acquireShares sets minOut = vault.convertToShares(amount * (1 - B)). That floor is denominated
++///        in sUSDe SHARES (1 sUSDe ~= 1.2 USDe, so minOut ~= 0.83 x amount). Router NG stops at the first
++///        empty pool slot (path[3] == 0), delivers path[2] = crvUSD to receiver = strategy, and checks
++///        min_dy against the crvUSD amount it produced (~1.0 x amount). It returns that number, which the
++///        strategy treats as "sharesReceived". A ~1:1 stablecoin amount always clears a 0.83x share floor,
++///        so the guard passes at the live B = 30 bps, sharesReceived > 0 passes, and principal is booked.
++///        The strategy never measures its own sUSDe balance delta, so nothing notices.
++contract L30PoCTest is Test {
++    // ---- live mainnet addresses ----
++    address constant ADAPTER = 0x2D024e0d03Fb6Ead4F8E7Ba1EBECF6db0E755D6f;
++    address constant STRATEGY = 0xaC2e5936Eca286eC364d4D5Bcca33145fBe57f95; // YieldStrategyUSDe
++    address constant V2 = 0xA6d3fc83C91B8319D219cEB12B46e3dfF064B58F; // StableStakerV2 (authorized client)
++    address constant ROUTER = 0x16C6521Dff6baB339122a0FE25a9116693265353; // Curve Router NG
++    address constant USDE = 0x4c9EDD5852cd905f086C759E8383e09bff1E68B3;
++    address constant SUSDE = 0x9D39A5DE30e57443BfF2A8307A4256c8797A3497;
++    address constant CRVUSD = 0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E;
++    address constant POOL_USDE_CRVUSD = 0xF55B0f6F2Da5ffDDb104b58a60F2862745960442;
++    address constant POOL_CRVUSD_SUSDE = 0x57064F49Ad7123C92560882a45518374ad982e85;
++
++    uint256 constant FORK_BLOCK = 26288088;
++    uint256 constant AMOUNT = 1000e18;
++
++    ILiveMarketStrategy ys = ILiveMarketStrategy(STRATEGY);
++    ILiveAdapter adapter = ILiveAdapter(ADAPTER);
++    address owner_;
++
++    function setUp() public {
++        vm.createSelectFork(vm.envString("RPC_MAINNET"), FORK_BLOCK);
++        owner_ = adapter.owner();
++        // Bind the PoC to the real deployment so it cannot pass against the wrong contracts.
++        assertEq(owner_, 0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6, "adapter owner");
++        assertEq(ys.ammAdapter(), ADAPTER, "strategy is immutably bound to the live adapter");
++        assertEq(ys.vault(), SUSDE, "strategy vault");
++        assertEq(ys.slippageToleranceBps(), 30, "live B = 30 bps");
++        assertEq(adapter.router(), ROUTER, "router");
++        bool v2Authorized;
++        address[] memory clients = ys.getAuthorizedClients();
++        for (uint256 i; i < clients.length; i++) if (clients[i] == V2) v2Authorized = true;
++        assertTrue(v2Authorized, "V2 is an authorized client");
++    }
++
++    // ------------------------------------------------------------------ payloads
++
++    /// Gapped forward route (sya-harvester M-01 shape): pool slot path[3] dropped.
++    function _gappedForward() internal pure returns (address[11] memory p, uint256[5][5] memory sp, address[5] memory pools) {
++        p[0] = USDE;
++        p[1] = POOL_USDE_CRVUSD;
++        p[2] = CRVUSD;
++        p[3] = address(0); // <- the gap: Router NG stops here and delivers crvUSD
++        p[4] = SUSDE;
++        sp[0] = [uint256(0), 1, 1, 10, 2];
++        sp[1] = [uint256(0), 1, 1, 10, 2];
++    }
++
++    /// Gapped reverse route: [sUSDe, P2, crvUSD, 0, USDe].
++    function _gappedReverse() internal pure returns (address[11] memory p, uint256[5][5] memory sp, address[5] memory pools) {
++        p[0] = SUSDE;
++        p[1] = POOL_CRVUSD_SUSDE;
++        p[2] = CRVUSD;
++        p[3] = address(0);
++        p[4] = USDE;
++        sp[0] = [uint256(1), 0, 1, 10, 2];
++        sp[1] = [uint256(1), 0, 1, 10, 2];
++    }
++
++    function _setGappedForwardOnLive() internal {
++        (address[11] memory p, uint256[5][5] memory sp, address[5] memory pools) = _gappedForward();
++        vm.prank(owner_);
++        adapter.setRoute(USDE, SUSDE, p, sp, pools);
++    }
++
++    function _v2Deposit(uint256 amount) internal {
++        deal(USDE, V2, IERC20(USDE).balanceOf(V2) + amount);
++        vm.startPrank(V2);
++        IERC20(USDE).approve(STRATEGY, amount);
++        ys.deposit(USDE, amount, V2);
++        vm.stopPrank();
++    }
++
++    function _positionValue() internal view returns (uint256) {
++        return IERC4626(SUSDE).convertToAssets(ys.getTotalShares());
++    }
++
++    // ------------------------------------------------------------------ (1)+(2) validator gap
++
++    /// (1) The live adapter ACCEPTS the gapped payload and stores it; (2) a fresh HEAD adapter
++    ///     rejects the byte-identical payload with InvalidRouteGap(4).
++    function test_L30_liveAcceptsGappedRoute_headRejects() public {
++        (address[11] memory p, uint256[5][5] memory sp, address[5] memory pools) = _gappedForward();
++
++        vm.prank(owner_);
++        adapter.setRoute(USDE, SUSDE, p, sp, pools); // does not revert
++        (address[11] memory stored,,, bool configured) = adapter.getRoute(USDE, SUSDE);
++        assertTrue(configured, "live adapter stored the route");
++        assertEq(stored[3], address(0), "stored route has the gap");
++        assertEq(stored[4], SUSDE, "stored route 'ends' at sUSDe only after the gap");
++
++        CurveAMMAdapter head = new CurveAMMAdapter(address(this), ROUTER);
++        vm.expectRevert(abi.encodeWithSelector(CurveAMMAdapter.InvalidRouteGap.selector, uint256(4)));
++        head.setRoute(USDE, SUSDE, p, sp, pools);
++
++        (p, sp, pools) = _gappedReverse();
++        vm.expectRevert(abi.encodeWithSelector(CurveAMMAdapter.InvalidRouteGap.selector, uint256(4)));
++        head.setRoute(SUSDE, USDE, p, sp, pools);
++    }
++
++    // ------------------------------------------------------------------ (3)+(4) silent strand
++
++    struct Snap {
++        uint256 shares; // strategy sUSDe balance
++        uint256 crv; // strategy crvUSD balance
++        uint256 pos; // convertToAssets(shares)
++        uint256 td; // totalDeposited(USDe)
++        uint256 prin; // principalOf(V2)
++        uint256 tb; // totalBalanceOf(V2)
++        uint256 others; // sum of co-client totalBalanceOf
++    }
++
++    function _snap() internal view returns (Snap memory x) {
++        x.shares = ys.getTotalShares();
++        x.crv = IERC20(CRVUSD).balanceOf(STRATEGY);
++        x.pos = _positionValue();
++        x.td = ys.getTotalDeposited(USDE);
++        x.prin = ys.principalOf(USDE, V2);
++        x.tb = ys.totalBalanceOf(USDE, V2);
++        x.others = _sumClientBalances() - x.tb;
++    }
++
++    function test_L30_gappedDepositSilentlyStrandsCrvUSD() public {
++        _setGappedForwardOnLive();
++        uint256 minOutShares = IERC4626(SUSDE).convertToShares(AMOUNT * (10000 - 30) / 10000);
++        Snap memory b4 = _snap();
++
++        // (3) V2 deposit succeeds.
++        _v2Deposit(AMOUNT);
++        Snap memory af = _snap();
++
++        uint256 crvGained = af.crv - b4.crv;
++        uint256 prinGain = af.prin - b4.prin;
++        uint256 tbGain = af.tb - b4.tb;
++
++        emit log_named_decimal_uint("sUSDe shares before", b4.shares, 18);
++        emit log_named_decimal_uint("sUSDe shares after ", af.shares, 18);
++        emit log_named_decimal_uint("crvUSD stranded in strategy", crvGained, 18);
++        emit log_named_decimal_uint("minOut floor (sUSDe shares)", minOutShares, 18);
++        emit log_named_decimal_uint("V2 principal before", b4.prin, 18);
++        emit log_named_decimal_uint("V2 principal after ", af.prin, 18);
++        emit log_named_decimal_uint("V2 totalBalanceOf before", b4.tb, 18);
++        emit log_named_decimal_uint("V2 totalBalanceOf after ", af.tb, 18);
++        emit log_named_decimal_uint("V2 under-backing created (principal gain - backing gain)", prinGain - tbGain, 18);
++        emit log_named_decimal_uint("co-client balances before", b4.others, 18);
++        emit log_named_decimal_uint("co-client balances after ", af.others, 18);
++        emit log_named_decimal_uint("strategy totalDeposited before", b4.td, 18);
++        emit log_named_decimal_uint("strategy totalDeposited after ", af.td, 18);
++        emit log_named_decimal_uint("strategy positionValue before", b4.pos, 18);
++        emit log_named_decimal_uint("strategy positionValue after ", af.pos, 18);
++        emit log_named_decimal_uint("strategy deficit after (totalDeposited - positionValue)", af.td - af.pos, 18);
++
++        // (4) No sUSDe acquired at all; the deposit sits as crvUSD.
++        assertEq(af.shares, b4.shares, "sUSDe share balance UNCHANGED");
++        assertEq(af.pos, b4.pos, "position value unchanged");
++        assertGt(crvGained, AMOUNT * 99 / 100, "~1000 crvUSD now held by strategy");
++        // The share-denominated floor is cleared by the crvUSD amount (why slippage does not catch it).
++        assertGt(crvGained, minOutShares, "crvUSD output clears share-denominated minOut");
++        // Principal booked in full at the haircut.
++        assertEq(prinGain, AMOUNT * (10000 - 30) / 10000, "V2 credited 997 USDe principal");
++        assertEq(af.td - b4.td, prinGain, "totalDeposited booked the credit");
++        // Backing: the credit is spread over UNCHANGED shares, so V2's backing gain is pure dilution of the
++        // co-clients, and V2 ends up short of its new principal.
++        assertLt(tbGain, prinGain * 60 / 100, "V2 backing rose by far less than principal");
++        assertApproxEqAbs(af.others + af.tb, af.pos, 10, "sum of client balances == unchanged position");
++        assertLt(af.others, b4.others, "co-clients diluted (loss socialised)");
++        assertApproxEqAbs(b4.others - af.others, tbGain, 10, "V2 backing gain == co-client dilution");
++        assertLt(af.tb, af.prin, "V2 totalBalanceOf < principalOf (under-backed)");
++        // Strategy went from ~par to a deficit of ~the whole credit.
++        assertGt(af.td, af.pos + 990e18, "strategy deficit >= ~990 USDe");
++    }
++
++    // ------------------------------------------------------------------ (5) no recovery path
++
++    function test_L30_strandedCrvUSDHasNoExitPath() public {
++        _setGappedForwardOnLive();
++        _v2Deposit(AMOUNT);
++        uint256 stranded = IERC20(CRVUSD).balanceOf(STRATEGY);
++        assertGt(stranded, AMOUNT * 99 / 100);
++
++        // (a) Live bytecode carries no generic rescue/sweep selector (scan PUSH4 operands).
++        bytes memory code = STRATEGY.code;
++        bytes4[6] memory rescue = [
++            bytes4(keccak256("sweep(address)")),
++            bytes4(keccak256("rescueERC20(address,uint256)")),
++            bytes4(keccak256("rescueTokens(address,uint256)")),
++            bytes4(keccak256("recoverERC20(address,uint256)")),
++            bytes4(keccak256("rescue(address,uint256)")),
++            bytes4(keccak256("rescueToken(address,address,uint256)"))
++        ];
++        for (uint256 r; r < rescue.length; r++) {
++            assertFalse(_hasPush4(code, rescue[r]), "unexpected rescue selector in live bytecode");
++        }
++        // Enumerated live selectors (cast selectors, block 26288109): deposit, withdraw, depositAsOwner,
++        // withdrawAsOwner, totalWithdrawal, skimSurplus, emergencyWithdraw, relinquishPrincipal(AsOwner),
++        // setClient, setWithdrawer, setSetAsideBuffer, setSlippageTolerance, setPauser, pause, unpause,
++        // transferOwnership, renounceOwnership + views. Every token-moving one transfers only USDe
++        // (underlying) or sUSDe (vault). None references an arbitrary token.
++
++        // (b) The strategy has never approved crvUSD to anyone the adapter path could use.
++        assertEq(IERC20(CRVUSD).allowance(STRATEGY, ADAPTER), 0, "no crvUSD allowance to adapter");
++        assertEq(IERC20(CRVUSD).allowance(STRATEGY, ROUTER), 0, "no crvUSD allowance to router");
++
++        // (c) Owner remediation attempt 1: overwrite the route with the original contiguous one, then
++        //     withdraw. Future deposits are fixed, the crvUSD is not touched.
++        address[11] memory p;
++        p[0] = USDE; p[1] = POOL_USDE_CRVUSD; p[2] = CRVUSD; p[3] = POOL_CRVUSD_SUSDE; p[4] = SUSDE;
++        uint256[5][5] memory sp;
++        sp[0] = [uint256(0), 1, 1, 10, 2];
++        sp[1] = [uint256(0), 1, 1, 10, 2];
++        address[5] memory pools;
++        vm.prank(owner_);
++        adapter.setRoute(USDE, SUSDE, p, sp, pools);
++        vm.prank(V2);
++        ys.withdraw(USDE, 100e18, V2);
++        assertEq(IERC20(CRVUSD).balanceOf(STRATEGY), stranded, "crvUSD still stranded after route repair + withdraw");
++
++        // (d) Owner remediation attempt 2: emergencyWithdraw moves only vault shares.
++        uint256 ownerCrvBefore = IERC20(CRVUSD).balanceOf(owner_);
++        uint256 ownerSharesBefore = IERC20(SUSDE).balanceOf(owner_);
++        uint256 ysShares = ys.getTotalShares();
++        vm.prank(owner_);
++        ys.emergencyWithdraw(type(uint256).max);
++        assertEq(ys.getTotalShares(), 0, "all sUSDe shares moved out");
++        assertEq(IERC20(SUSDE).balanceOf(owner_) - ownerSharesBefore, ysShares, "owner got the shares");
++        assertEq(IERC20(CRVUSD).balanceOf(owner_), ownerCrvBefore, "owner received no crvUSD");
++        assertEq(IERC20(CRVUSD).balanceOf(STRATEGY), stranded, "crvUSD still stranded after emergencyWithdraw");
++        emit log_named_decimal_uint("crvUSD permanently stranded", stranded, 18);
++    }
++
++    // ------------------------------------------------------------------ (6) control
++
++    function test_L30_control_contiguousRouteAcquiresShares() public {
++        (address[11] memory stored,,,) = adapter.getRoute(USDE, SUSDE);
++        assertEq(stored[3], POOL_CRVUSD_SUSDE, "live stored route is contiguous");
++
++        uint256 sharesBefore = ys.getTotalShares();
++        uint256 crvBefore = IERC20(CRVUSD).balanceOf(STRATEGY);
++        uint256 posBefore = _positionValue();
++        uint256 prinBefore = ys.principalOf(USDE, V2);
++        _v2Deposit(AMOUNT);
++        uint256 sharesGain = ys.getTotalShares() - sharesBefore;
++        uint256 posGain = _positionValue() - posBefore;
++        uint256 prinGain = ys.principalOf(USDE, V2) - prinBefore;
++        emit log_named_decimal_uint("control: sUSDe shares acquired", sharesGain, 18);
++        emit log_named_decimal_uint("control: position value gain", posGain, 18);
++        emit log_named_decimal_uint("control: principal credited", prinGain, 18);
++
++        assertGe(sharesGain, IERC4626(SUSDE).convertToShares(prinGain), "shares >= minOut");
++        assertGe(posGain + 1, prinGain, "fair value of shares acquired >= credited principal");
++        assertEq(IERC20(CRVUSD).balanceOf(STRATEGY), crvBefore, "no crvUSD left behind");
++    }
++
++    // ------------------------------------------------------------------ (7) withdraw direction
++
++    function test_L30_gappedWithdrawRouteReverts() public {
++        (address[11] memory p, uint256[5][5] memory sp, address[5] memory pools) = _gappedReverse();
++        vm.prank(owner_);
++        adapter.setRoute(SUSDE, USDE, p, sp, pools); // accepted by the live adapter
++
++        assertEq(IERC20(USDE).balanceOf(STRATEGY), 0, "strategy holds no idle USDe");
++        uint256 sharesBefore = ys.getTotalShares();
++        // Router delivers crvUSD to the strategy; the strategy then tries to forward `underlyingReceived`
++        // USDe it does not hold -> USDe's OZ-4 ERC20 revert. Availability-only (atomic revert).
++        // NOTE: if the strategy ever held idle USDe >= the payout, this would instead succeed and strand
++        // the sold value as crvUSD too.
++        vm.prank(V2);
++        vm.expectRevert(bytes("ERC20: transfer amount exceeds balance"));
++        ys.withdraw(USDE, 100e18, V2);
++        assertEq(ys.getTotalShares(), sharesBefore, "atomic: no shares lost");
++    }
++
++    // ------------------------------------------------------------------ helpers
++
++    function _sumClientBalances() internal view returns (uint256 sum) {
++        address[] memory clients = ys.getAuthorizedClients();
++        for (uint256 i; i < clients.length; i++) sum += ys.totalBalanceOf(USDE, clients[i]);
++    }
++
++    function _hasPush4(bytes memory code, bytes4 sel) internal pure returns (bool) {
++        for (uint256 i; i + 4 < code.length; i++) {
++            uint8 op = uint8(code[i]);
++            if (op == 0x63) {
++                if (code[i + 1] == sel[0] && code[i + 2] == sel[1] && code[i + 3] == sel[2] && code[i + 4] == sel[3]) {
++                    return true;
++                }
++                i += 4;
++            } else if (op >= 0x60 && op <= 0x7f) {
++                i += op - 0x5f;
++            }
++        }
++        return false;
++    }
++}

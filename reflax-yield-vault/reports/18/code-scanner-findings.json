@@ -1,0 +1,132 @@
+{
+  "project": "reflax-yield-vault",
+  "run": "reflax-yield-vault-18",
+  "scanTimestamp": "2026-10-28T00:30:00Z",
+  "scanType": "code",
+  "tier": 2,
+  "mode": "regression",
+  "baseline": "cdd07434a62ae4e1b158eef97dbfef3f2f47d6d9",
+  "head": "4788ed41747b923165745af748a078bfb534ba20",
+  "branch": "master",
+  "contractsScanned": 7,
+  "highMediumCandidates": 0,
+  "probes": {
+    "files": [
+      "/home/justin/code/audits/reflax-yield-vault/work/test/scan-run18/LiveAdapterFork.t.sol",
+      "/home/justin/code/audits/reflax-yield-vault/work/test/scan-run18/AcceptedMismatchRoute.t.sol"
+    ],
+    "note": "AUDIT-AUTHORED, never file as upstream code. Mainnet fork at block ~26286952 via repo-root .envrc RPC_MAINNET (liveness probe OK). 4/4 PASS with the run-context --skip set.",
+    "results": {
+      "test_liveReturnEqualsDeliveredDelta": "PASS: returned 1254628994504263931916 == delta 1254628994504263931916; adapter holds 0 sUSDe/USDe",
+      "test_frontRunDumpRevertsExitAndCost": "PASS: dumps of 10k/50k/100k sUSDe -> victim exit succeeds; 250k -> REVERTS at round-trip cost ~101 sUSDe; 500k -> reverts, cost ~9,286 sUSDe; 1M -> reverts, cost ~129,588 sUSDe",
+      "test_mismatchRevertsWithStrategyFloor": "PASS: validator-accepted mismatched route reverts at strategy floor",
+      "test_mismatchAtZeroFloorStrandsCoinJInRouter": "PASS: reverts 'Received nothing' even at minOut 0 (router holds no USDe dust), nothing stranded"
+    }
+  },
+  "findings": [
+    {
+      "id": "CODE-001",
+      "title": "NAV-anchored exit floor lets an unprivileged actor cheaply revert a pending exit, skim, or migration by front-running with a Curve pool dump (transient griefing)",
+      "contract": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol",
+      "function": "_disposeShares / _totalWithdraw / _skimSurplus",
+      "location": "src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:166-174, :223-231, :275-281",
+      "line": 168,
+      "lineStart": 158,
+      "lineEnd": 180,
+      "rootCauseClass": "SLIPPAGE-GUARD-FRONTRUN-REVERT-GRIEF",
+      "type": "call-sequence / griefing-dos",
+      "description": "minOut = convertToAssets(shares)*(1-bps) is anchored to sUSDe NAV. The AMM exit price sits below NAV, so the margin under the guard is thin: live headroom is ~23.8 bps under the 30 bps tolerance (router get_dy for the strategy's 5,162 sUSDe = 6,475.75 USDe vs floor 6,460.34). A public-mempool exit can be sandwiched: dump sUSDe into the crvUSD/sUSDe pool, let the victim exit revert on the router's _expected check, then buy back. Fork probe: a 250k-sUSDe dump reverts a strategy-shaped exit for a round-trip cost of ~101 sUSDe (~$127). The capital must be held across the bundle, not flash-loaned. The same lever applies to skimSurplus and the Phase-2 totalWithdrawal execution. MR-003 donation variant: moving sUSDe NAV by the 24 bps headroom means donating ~0.24% of totalAssets (1.19e27 wei, ~1.19B USDe), ~$2.8M given away to every sUSDe holder. Not credible. DISTINCT from M-02 d7f6c2dfd580 / M-01-run12 fdda8f53151a, which are value-leak sandwich framings already judged false-positive: here the guard WORKS and no value is extracted, the impact is a revert. DISTINCT from L-22 7a66fe7d5a96, whose premise was the deleted quote. Persistent DoS only arises from the natural NAV-vs-pool lag under default/low bps, which is L-01 6460e35331df's root cause and owner-recoverable via setSlippageTolerance.",
+      "suggestedSeverity": "qa",
+      "severityRationale": "Transient and per-transaction. The attacker profits nothing and pays per grief. Victims retry, or the owner and clients use a private mempool. This is inherent to any slippage-guarded swap, and C4 treats it as QA/invalid. Kept visible per Law 1, not as H/M.",
+      "ledgerMatch": null,
+      "relatedLedger": ["6460e35331df (L-01, persistent variant)", "d7f6c2dfd580 (M-02 FP, do not re-raise)", "fdda8f53151a (M-01-run12 FP)", "7a66fe7d5a96 (L-22, obsolete premise)"],
+      "evidence": "work/test/scan-run18/LiveAdapterFork.t.sol::test_frontRunDumpRevertsExitAndCost (PASS, logs above); live cast reads: YS 0xaC2e…7f95 slippageToleranceBps=30, ammAdapter=0x2D02…D6f, sUSDe balance 5162338809433880584046.",
+      "recommendation": "Operational: send exits, skims and totalWithdrawal Phase-2 through a private relay. Optionally document that a revert at the floor is expected protection, not a fault.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-002",
+      "title": "Operational hazard: the live mainnet CurveAMMAdapter 0x2D02…D6f runs the pre-story-052 setRoute; HEAD's contiguity guarantee does not apply to the deployed adapter the live USDe strategy is bound to",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "function": "setRoute",
+      "location": "src/AMMAdapters/CurveAMMAdapter.sol:96-143 (HEAD validator, absent on-chain); src/concreteYieldStrategies/ERC4626MarketYieldStrategy.sol:34 (immutable ammAdapter)",
+      "line": 96,
+      "lineStart": 96,
+      "lineEnd": 143,
+      "rootCauseClass": "DEPLOYED-BYTECODE-PREDATES-VALIDATOR",
+      "type": "owner-footgun / deployment-state",
+      "description": "YieldStrategyUSDe 0xaC2e5936Eca286eC364d4D5Bcca33145fBe57f95 holds ammAdapter = 0x2D024e0d03Fb6Ead4F8E7Ba1EBECF6db0E755D6f (immutable, so it cannot be repointed). That adapter is a non-proxy deployment of the old code, so any owner setRoute there still accepts the M-01 gapped shape. VERIFIED CURRENT STATE IS SAFE. (1) The full RouteSet history from deploy (OwnershipTransferred at block 25283688) contains exactly two events: USDe->sUSDe at block 25283690 and sUSDe->USDe at block 25283691. (2) Both stored routes (getRoute) are contiguous 2-hop routes that pass every HEAD check. (3) Their i/j indices match pool coins: F55B… coins [USDe, crvUSD]; 5706… coins [crvUSD, sUSDe]. (4) Self-pairs are not configured. CALL-SITE ENUMERATION (phoenix-phase-2-staging @ d0060cb, full grep): the only first-party CurveAMMAdapter.setRoute callers are script/archives/MigrateStableStakerMainnet.s.sol:454,464 and script/archives/interactions/governance/DeployUSDeMarketYieldStrategy.s.sol:143,165. Both are archived, neither is wired in package.json, and both payloads are contiguous and equal src/AMMRoutes.json. script/helpers/SyaHarvesterLocalConfig.sol:68 targets SYAHarvester, not this adapter. DeployMocks*.s.sol use MockMarketAMMAdapter (UI mock). No pending or committed script pushes a gapped route. The archived script's NatSpec at MigrateStableStakerMainnet.s.sol:441-442 still describes the old 'last non-zero == tokenOut' check, which is accurate for the live adapter and would mislead nobody reading it. Footgun test: an owner who reads HEAD source and the story-052 closure could assume contiguity is enforced on mainnet. The vault CLAUDE.md documents the divergence, which lowers the surprise.",
+      "suggestedSeverity": "low",
+      "severityRationale": "No live harm and no pending trigger. If realised (a gapped reverse route on mainnet) the impact is exit reverts or crvUSD delivered to the strategy. That is Medium-shaped but depends on a future owner misconfig, so it is an operational hazard per Law 3.",
+      "ledgerMatch": null,
+      "relatedLedger": ["b28e77daefb3 (L-07, code-level half; this is the deployment-state half)"],
+      "evidence": "cast call getRoute both directions; cast logs RouteSet / OwnershipTransferred on 0x2D02…D6f; pool coins(0/1); YS.ammAdapter(). Greps listed in description.",
+      "recommendation": "Before any mainnet setRoute on 0x2D02…D6f, validate the payload off-chain against the HEAD rule (e.g. by dry-running HEAD CurveAMMAdapter.setRoute on a fork), or redeploy adapter + strategy. Record this in the phStaging2 runbook.",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-003",
+      "title": "Validator-accepted route whose path token disagrees with pool coin j: fails loudly on live Router NG (no stranding); residual of L-07 / T-3",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "function": "setRoute / swap",
+      "location": "src/AMMAdapters/CurveAMMAdapter.sol:120-127 (no i/j<->path check), :192",
+      "line": 124,
+      "lineStart": 120,
+      "lineEnd": 134,
+      "rootCauseClass": "ROUTE-TOKEN-COIN-INDEX-UNVALIDATED",
+      "type": "cross-contract route semantics",
+      "description": "Focus-1 answer. HEAD pins structure, path[0]==tokenIn and path[2k]==tokenOut, so Router NG's delivered token is always tokenOut, and a structurally valid route cannot mis-deliver a wrong token to the strategy. A wrong i/j still passes setRoute (probe: [sUSDe, crvUSD/sUSDe pool, USDe] with i=1, j=0 is accepted). On the live router the swap reverts 'Received nothing', even at minOut 0, because the pool emits crvUSD while the router measures its USDe balance. With the strategy floor it also reverts. Stranding needs two conditions together: slippageToleranceBps == MAX_BPS (minOut 0) and the router holding output-token dust. Neither holds live. Cyclic routes (A->..->A->..->B) are accepted and only cost extra fees. swap_type >= 10 is LOCAL-002 (profiler). tokenIn == tokenOut is LOCAL-001. Outcome: no stranded or mis-delivered output from any accepted route under live conditions. The strategy-level effect of a bad route is a recoverable revert of deposit/withdraw/skim until the owner overwrites the route.",
+      "suggestedSeverity": "qa",
+      "ledgerMatch": "b28e77daefb3",
+      "reconcile": "L-07 partially fixed: the zero-gap half is closed by story-052; the tokenIn==tokenOut and off-chain i/j halves remain. Do not mint a new fingerprint.",
+      "evidence": "work/test/scan-run18/AcceptedMismatchRoute.t.sol (2/2 PASS; revert data = Error('Received nothing')).",
+      "confidence": "high"
+    },
+    {
+      "id": "CODE-004",
+      "title": "L-12 coupling re-checked: live Router NG return equals the delivered balance delta; strategies forwarding the returned amount are correct under T-1",
+      "contract": "src/AMMAdapters/CurveAMMAdapter.sol",
+      "function": "swap",
+      "location": "src/AMMAdapters/CurveAMMAdapter.sol:192; consumers ERC4626MarketYieldStrategy.sol:174-177, :231-238, :281-286",
+      "line": 192,
+      "rootCauseClass": "TRUSTED-ROUTER-RETURN-NO-DELTA",
+      "type": "return-value propagation",
+      "description": "Hand-off H-B. On fork, swap() via the live adapter returned exactly the USDe delta at msg.sender, and the adapter retained 0 of both tokens. Router NG prices each hop by its own balanceOf(output_token), so a donation to the router only over-delivers to the next swapper, which the strategy forwards harmlessly. No divergence path exists while T-1 (genuine immutable Router NG) holds. L-12 stays open as defense-in-depth. Unchanged by story-052.",
+      "suggestedSeverity": "low",
+      "ledgerMatch": "6e771a84e82d",
+      "reconcile": "still-present, unchanged code; do not re-file",
+      "evidence": "work/test/scan-run18/LiveAdapterFork.t.sol::test_liveReturnEqualsDeliveredDelta (PASS).",
+      "confidence": "high"
+    }
+  ],
+  "reconciliation": {
+    "story051ConsumerCheck": {
+      "result": "NO code consumer of the removed previewExitFor (selector 0xb14664d3) remains anywhere",
+      "method": "grep -rIn 'previewExitFor' over every /home/justin/code/audits/*/src (9 repos, all file types, untruncated). Non-lib hits are documentation only: stable-staker/src/CLAUDE.md:194,598. The one nested hit is the same CLAUDE.md under phoenix-phase-2-staging/src/lib/stable-staker. Selector 0xb14664d3: zero hits. reflax-yield-vault/src (tests included): zero hits for previewExitFor|_exitFloor.",
+      "pins": "stable-staker/src lib/reflax-yield-vault @ 25276b8 (the revert itself; CLAUDE.md:596-600 states that all direct IYieldStrategy implementers must match exactly). phoenix-phase-2-staging/src lib/vault @ 25276b8. No sibling implementer declares previewExitFor ... override, so nothing fails to compile.",
+      "offChain": "No JS/TS/JSON reference in any sibling src. UI repos outside ~/code/audits were not scanned."
+    },
+    "fixedByRemovalCandidates": {
+      "verified": true,
+      "entries": ["5351fd4d3f8c L-18", "302656e23443 L-19", "6f57473e6b01 L-20 (_exitFloor)", "833f7f6c728a L-21", "6476515055d8 L-24", "63fa9e3e62bf L-26", "e868f28953a9 QA-10", "b5b58717f3b1 QA-11", "25d53af10717 INFO-01"],
+      "note": "Targets deleted. Propose fixed (by removal); a human applies it."
+    },
+    "L22": {
+      "fingerprint": "7a66fe7d5a96",
+      "verdict": "obsolete / fixed-by-removal proposal",
+      "reason": "rootCauseClass QUOTE-EXECUTE-GAP-FLOOR-REDERIVED needs a published quote, and none exists. _disposeShares (:158-180) is byte-unchanged; its residual behaviour (minOut from live NAV at execution) is not a distinct live defect. The value-leak framing is M-02 FP. The revert-griefing framing is CODE-001 (QA). The persistent-revert framing is L-01."
+    },
+    "survivingUntouched": ["e6088a0ec55e L-23", "10f4bd34e9cf L-25", "d9bd595066ef L-27", "38c9b2bae75f L-28", "704404968a8f L-29", "1b33361313ce QA-12", "3ab43381ffaf L-01-run11 (CEI, SA-003/PATTERN-005)"]
+  },
+  "reentrancyChecklist": {
+    "classicSingleFn": "cleared: every mutating strategy entry point is nonReentrant (profile, verified); emergencyWithdraw is onlyOwner and touches no accounting (L-03-run11)",
+    "crossContract": "cleared: strategy->adapter->RouterNG->Curve stable-ng pools; tokens USDe/sUSDe/crvUSD are plain ERC20 with no transfer hooks, so no attacker-controlled frame exists in the chain",
+    "crossFunction": "cleared: contract-wide OZ ReentrancyGuard is shared by all siblings; no callback path. CEI order at _totalWithdraw:231-235 stays L-01-run11",
+    "readOnly": "cleared: totalBalanceOf/principalOf/_positionValue read vault.convertToAssets and stored principal; during swap there is no inbound callback to an integrator, so no window is observable",
+    "erc721Hook": "n/a: no _safeMint/safeTransferFrom",
+    "erc1155Hook": "n/a",
+    "erc777": "n/a: underlying and vault are non-777; ETH sentinel routes are not used (strategy tokens are ERC20; the router would raw_call the receiver only for an ETH output)"
+  },
+  "accessControlChains": "cleared: adapter.swap is permissionless but pulls only from msg.sender; strategies grant exact-amount allowances via safeIncreaseAllowance that each swap consumes in full (profile :142/:171/:228/:277, adapter :186), leaving no residual allowance for a third party; router allowance is forceApprove(amountIn) and is consumed by the router's transferFrom.",
+  "errors": []
+}
